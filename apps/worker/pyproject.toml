@@ -1,0 +1,15 @@
+[project]
+name = "reup-douyin-worker"
+version = "0.0.0"
+description = "Python background worker for reup-douyin."
+requires-python = ">=3.12"
+dependencies = [
+  "pydantic-settings>=2.0,<3.0",
+  "psycopg[binary]>=3.2,<4.0",
+  "redis>=5.0,<6.0",
+  "SQLAlchemy>=2.0,<3.0"
+]
+
+[tool.reup-douyin]
+status = "worker-skeleton"
+runtime = "python-worker"

@@ -49,13 +49,18 @@ import { resolveHybridCollectBatchLimits } from "./hybridCollectBatchLimits.js";
 import { recoverTailGapCollectQueue, discoverMissingAwemeIdsViaTailReconcileSources } from "./hybridTailGapQueueRecovery.js";
 import { runtimeSupportsHybridTailGapDiscovery } from "./hybridTailGapTabRuntime.js";
 import {
+  filterExactTailGapActionableTargets,
   HYBRID_EXACT_GAP_RECOVERY_CAP,
   isHybridTailGapCollect,
   queueMatchesExactGapAwemeIds,
   reopenTailGapQueueItemForCollect,
   resolveExactBackendGapAwemeIds,
   resolveHybridCollectTailGapHint,
-  resolveHybridOperatorVisibleTailGap
+  resolveHybridOperatorCollectBacklog,
+  resolveHybridExactTailGapCandidate,
+  resolveHybridOperatorVisibleTailGap,
+  selectExactTailGapCollectTargets,
+  shouldExactTailGapPreSkipFail
 } from "./hybridBackendGapAwemeIds.js";
 import {
   buildHybridRunnerFossilPreflightBlockedPatch,
@@ -14484,6 +14489,22 @@ export function resolveHybridProfileCollectRemaining(
   const snapRemaining = snap?.status === "applied"
     ? Math.max(0, snap.new ?? 0) + Math.max(0, snap.need_retry ?? 0)
     : Math.max(0, snap?.new ?? 0);
+  const operatorBacklog = Math.max(
+    snapRemaining,
+    resolveHybridOperatorCollectBacklog(state)
+  );
+
+  if (operatorBacklog > HYBRID_EXACT_GAP_RECOVERY_CAP) {
+    if (snap?.status === "applied" && snapRemaining > 0) return snapRemaining;
+    if (operatorBacklog > 0) return operatorBacklog;
+    return Math.max(
+      actionableCount,
+      state.harvest.pending,
+      typeof state.harvest.planned_total === "number" && typeof snap?.already_collected === "number"
+        ? Math.max(0, state.harvest.planned_total - snap.already_collected)
+        : 0
+    );
+  }
 
   if (isHybridTailGapCollect(scannedGap)) {
     return scannedGap;
@@ -14537,6 +14558,9 @@ async function resolveLiveHybridTailGapAuthority(
   const summaryGap = resolveCaptureInboxSummaryCollectGap(scannedTotalFromState, summary);
   const scanAuthorityGap = Math.max(0, scannedTotalFromState - summary.captured);
   const visibleGap = resolveHybridOperatorVisibleTailGap(next) ?? 0;
+  if (resolveHybridOperatorCollectBacklog(next) > HYBRID_EXACT_GAP_RECOVERY_CAP) {
+    return { state: next, tailGapRemaining: null };
+  }
   const alignedGap = [summaryGap, scanAuthorityGap, visibleGap].find((gap) => isHybridTailGapCollect(gap)) ?? 0;
   if (!isHybridTailGapCollect(alignedGap)) {
     return { state: next, tailGapRemaining: null };
@@ -15206,6 +15230,38 @@ async function pauseHybridOnAuthLossIfNeeded(
  */
 export const HYBRID_DETAIL_HYDRATION_MAX_PER_RUN = 50;
 
+/** Max stub-only (no flush-ready metrics) targets hydrated per collect click. */
+export const HYBRID_STUB_ONLY_HYDRATION_BATCH_CAP = 50;
+
+function buildMinimalExactTailGapQueueItem(awemeId: string, index: number): WholeProfileHarvestQueueItem {
+  return reopenTailGapQueueItemForCollect({
+    index: index + 1,
+    aweme_id: awemeId,
+    capture_status: "new" as const,
+    status: "needs_metadata" as const,
+    attempts: 0,
+    checkpoint_sequence: null,
+    extraction_result: null,
+    last_error: null,
+    capture_inbox_item_id: null,
+    source_url: `https://www.douyin.com/video/${awemeId}`,
+    profile_card_evidence: { aweme_id: awemeId }
+  } satisfies WholeProfileHarvestQueueItem);
+}
+
+function selectExactTailGapActionableTargetsFromState(
+  state: WholeProfileHarvestState,
+  exactGapIds: readonly string[],
+  limit: number
+): WholeProfileHarvestQueueItem[] {
+  return selectExactTailGapCollectTargets(
+    state.harvest.queue,
+    exactGapIds,
+    phase22C4IsActionableTarget,
+    buildMinimalExactTailGapQueueItem
+  ).slice(0, Math.max(0, limit));
+}
+
 /** Absolute ceiling aligned with hybrid write batch cap. */
 export const HYBRID_DETAIL_HYDRATION_ABSOLUTE_CAP = 500;
 
@@ -15414,6 +15470,8 @@ export function evaluateHybridMetricsMissBatchAbortGate(args: {
   networkCacheByAwemeId: Map<string, unknown>;
   passiveByAwemeId: Map<string, Record<string, unknown>>;
   recovery: HybridPreLoopHydrationRecoverySummary;
+  /** When true, defer batch abort to the interleaved loop's per-item lazy detail hydration. */
+  per_item_lazy_recovery_available?: boolean;
 }): { should_abort: boolean; message: string; flush_ready_count: number; stub_only_count: number } {
   const total = args.actionableTargets.length;
   if (total <= 0) {
@@ -15431,6 +15489,9 @@ export function evaluateHybridMetricsMissBatchAbortGate(args: {
   const recoveryAttempted = args.recovery.detail_hydration_available
     && (args.recovery.detail_attempted > 0 || args.recovery.profile_post_attempted);
   if (!recoveryAttempted) {
+    return { should_abort: false, message: "", flush_ready_count: 0, stub_only_count: total };
+  }
+  if (args.per_item_lazy_recovery_available) {
     return { should_abort: false, message: "", flush_ready_count: 0, stub_only_count: total };
   }
   return {
@@ -16153,15 +16214,33 @@ export async function runBatchCollectHybridNetworkCacheMode(
       hybrid_runner_pre_skip_scan_limit: preSkipScanLimit,
       hybrid_backend_gap_missing_ids: exactTailPrep.exactGapIds.join(",")
     });
-    const exactGapSet = new Set(
-      exactTailPrep.exactGapIds
-        .map((id) => normalizeAwemeIdForBackendCapturedSet(id))
-        .filter((id): id is string => Boolean(id))
+    if (exactTailPrep.exactGapIds.length > 0) {
+      const queueAwemeIds = state.harvest.queue.map((item) => item.aweme_id);
+      const gapActionableBefore = filterExactTailGapActionableTargets(
+        state.harvest.queue,
+        exactTailPrep.exactGapIds,
+        phase22C4IsActionableTarget
+      );
+      if (
+        !queueMatchesExactGapAwemeIds(queueAwemeIds, exactTailPrep.exactGapIds)
+        || gapActionableBefore.length === 0
+      ) {
+        const gapState = await rebuildStateWithBackendGapCollectQueue(
+          state,
+          exactTailPrep.exactGapIds,
+          now()
+        );
+        if (gapState) {
+          state = gapState;
+          await writeWholeProfileHarvestState(runtime.storage, state).catch(() => undefined);
+        }
+      }
+    }
+    actionableTargets = selectExactTailGapActionableTargetsFromState(
+      state,
+      exactTailPrep.exactGapIds,
+      backendCollectRemaining
     );
-    actionableTargets = collectScopedHarvestQueue.filter((item) => {
-      const normalized = normalizeAwemeIdForBackendCapturedSet(item.aweme_id);
-      return normalized != null && exactGapSet.has(normalized) && phase22C4IsActionableTarget(item);
-    }).slice(0, backendCollectRemaining);
     await markProbeStep("step_2c_verify_done", {
       hybrid_runner_pre_skip_api_ok: "yes",
       hybrid_runner_pre_skip_api_error: "none",
@@ -16302,6 +16381,9 @@ export async function runBatchCollectHybridNetworkCacheMode(
     const normalized = normalizeAwemeIdForBackendCapturedSet(target.aweme_id);
     return !normalized || !preSkipMatchedCollectedSet.has(normalized);
   });
+  if (metricsReadyTargets.length === 0 && actionableTargets.length > 0) {
+    actionableTargets = actionableTargets.slice(0, Math.min(writeBatchLimit, HYBRID_STUB_ONLY_HYDRATION_BATCH_CAP));
+  }
 
   if (actionableTargets.length === 0) {
     const remainingAfterVerify = resolveHybridProfileCollectRemaining(state, 0);
@@ -16375,7 +16457,7 @@ export async function runBatchCollectHybridNetworkCacheMode(
     preSkipPending = 0;
   }
 
-  if (actionableTargets.length > 0) {
+  if (actionableTargets.length > 0 && !hybridExactTailGapActive) {
     const postSelectVerify = await verifyHybridProfileCapturedAwemeIds(
       runtime,
       state.profile_url ?? state.source_url ?? null,
@@ -16449,7 +16531,29 @@ export async function runBatchCollectHybridNetworkCacheMode(
     const needsTailRecovery = isTailGap && (
       harvestQueueActionableCount(state) === 0 || staleOversizedQueue
     );
-    if (needsTailRecovery) {
+    if (
+      hybridExactTailGapActive
+      && exactTailPrep.exactGapIds.length > 0
+      && preSkipPending === 0
+    ) {
+      const gapState = await rebuildStateWithBackendGapCollectQueue(
+        state,
+        exactTailPrep.exactGapIds,
+        now()
+      );
+      if (gapState) {
+        state = gapState;
+        actionableTargets = selectExactTailGapActionableTargetsFromState(
+          state,
+          exactTailPrep.exactGapIds,
+          backendCollectRemaining
+        );
+        preSkipPending = actionableTargets.length;
+        if (preSkipPending > 0) {
+          await writeWholeProfileHarvestState(runtime.storage, state).catch(() => undefined);
+        }
+      }
+    } else if (needsTailRecovery) {
       if (staleOversizedQueue) {
         state = {
           ...state,
@@ -16584,7 +16688,14 @@ export async function runBatchCollectHybridNetworkCacheMode(
       && preSkipAlreadyCollected === 0
       && authority.remaining > 0
       && harvestQueueActionableCount(state) === 0;
+    const exactTailGapPreSkipFail = shouldExactTailGapPreSkipFail({
+      hybridExactTailGapActive,
+      exactGapIds: exactTailPrep.exactGapIds,
+      preSkipPending,
+      profileRemaining: profileStillRemaining
+    });
     const preSkipFalseComplete = inflatedFalseComplete
+      || exactTailGapPreSkipFail
       || (
         preSkipPending === 0
         && profileStillRemaining > 0
@@ -16834,6 +16945,19 @@ export async function runBatchCollectHybridNetworkCacheMode(
   };
 
   // FOSSIL diagnostics: accumulator approach — collect all pre-loop diagnostics
+  let repositoryEvidenceEnrichedFlushReady = 0;
+  if (actionableTargets.length > 0) {
+    const flushReadyBeforeRepository = actionableTargets.filter((target) =>
+      evidenceIsHybridFlushReady(target.profile_card_evidence)
+    ).length;
+    actionableTargets = await enrichHarvestTargetsFromProfileRepository(state, actionableTargets);
+    repositoryEvidenceEnrichedFlushReady = Math.max(
+      0,
+      actionableTargets.filter((target) => evidenceIsHybridFlushReady(target.profile_card_evidence)).length
+        - flushReadyBeforeRepository
+    );
+  }
+
   // into a single object, then write atomically once before the loop. This
   // eliminates the race condition where concurrent hybridFossilUpdate calls
   // (each doing async get->set) can roll each other back.
@@ -16864,7 +16988,8 @@ export async function runBatchCollectHybridNetworkCacheMode(
       : null),
     hybrid_tail_gap_live_remaining: (state.debug.last_response_summary && typeof state.debug.last_response_summary === "object"
       ? (state.debug.last_response_summary as Record<string, unknown>).hybrid_tail_gap_live_remaining
-      : null)
+      : null),
+    hybrid_runner_repository_evidence_enriched_flush_ready: repositoryEvidenceEnrichedFlushReady
   };
 
   // Phase 4.4f: interleaved hydrate + flush — each finalized chunk is saved before
@@ -16925,18 +17050,83 @@ export async function runBatchCollectHybridNetworkCacheMode(
   for (const arr of [probeRec.network_profile_post_targets, probeRec.network_favorite_targets, probeRec.network_other_aweme_targets]) { if (Array.isArray(arr)) for (const t of arr as Array<{ aweme_id?: string }>) { if (typeof t.aweme_id === "string") passiveByAwemeId.set(t.aweme_id, t as Record<string, unknown>); } }
   await markProbeStep("step_5_passive_read_done", { hybrid_runner_passive_target_count: passiveByAwemeId.size });
 
-  // Tail recovery: per-video detail fetch first (direct video URLs), then profile-post
-  // pagination only for targets still missing metrics. Detail-first avoids paging
-  // through dozens of profile-post pages from the newest videos before reaching tail batch 3.
+  // Tail recovery: profile-post pagination first when the whole batch lacks flush-ready
+  // metrics (bulk hydrate); otherwise detail-first for mixed batches.
   const detailHydrationAvailable = typeof runtime.hydrateDetailEvidenceFromTab === "function";
   const profilePostHydrationAvailable = tabId !== null
     && Boolean(collectProfileUrl)
     && typeof runtime.fetchProfilePostPageFromTab === "function";
+  const stubOnlyBatch = actionableTargets.length > 0
+    && countHybridFlushReadyActionableTargets(actionableTargets, networkCacheByAwemeId, passiveByAwemeId) === 0;
   let preLoopProfilePostHydrationPages = 0;
   let preLoopProfilePostHydrationRecovered = 0;
   let preLoopDetailRecovery: Awaited<ReturnType<typeof recoverPendingTargetsViaDetailHydration>> | null = null;
   let preLoopDetailHydrationAttempted = 0;
-  preLoopFossilPatch.hybrid_runner_loop_phase = "detail_hydration";
+  let preLoopProfilePostHydrationRan = false;
+  preLoopFossilPatch.hybrid_runner_stub_only_batch = stubOnlyBatch ? "yes" : "no";
+  const runPreLoopProfilePostTailHydration = async (): Promise<void> => {
+    if (preLoopProfilePostHydrationRan) return;
+    const profilePostTargets = actionableTargets.filter((target) =>
+      !isHybridTargetFlushReadyAfterCaches(target, networkCacheByAwemeId, passiveByAwemeId)
+    );
+    if (!profilePostHydrationAvailable || profilePostTargets.length === 0) return;
+    preLoopProfilePostHydrationRan = true;
+    preLoopFossilPatch.hybrid_runner_loop_phase = "profile_post_tail";
+    const profileUrlForPost = collectProfileUrl!;
+    const scannedTotal = state.post_scan_counter_snapshot?.scanned_total ?? state.profile_scan.target_details.length;
+    const profilePostPageBudget = resolveHybridProfilePostTailPageBudgetForPending(
+      profilePostTargets.length,
+      scannedTotal
+    );
+    const profilePostTimeoutMs = resolveHybridProfilePostTailTimeoutMs(profilePostPageBudget);
+    preLoopFossilPatch.hybrid_runner_profile_post_tail_page_budget = profilePostPageBudget;
+    preLoopFossilPatch.hybrid_runner_profile_post_tail_timeout_ms = profilePostTimeoutMs;
+    const profilePostTabId = tabId!;
+    const fetchProfilePostPage = runtime.fetchProfilePostPageFromTab!;
+    await markProbeStep("step_5c_profile_post_tail_start", {
+      hybrid_runner_profile_post_tail_pending: profilePostTargets.length,
+      hybrid_runner_profile_post_tail_page_budget: profilePostPageBudget
+    });
+    const profilePostRecovery = await withTimeoutFallback(
+      recoverPendingTargetsViaProfilePostPagination({
+        targets: profilePostTargets,
+        profileUrl: profileUrlForPost,
+        networkCacheByAwemeId,
+        passiveByAwemeId,
+        maxPages: profilePostPageBudget,
+        capturedAt: now(),
+        fetchPage: (cursor, pageIndex) => fetchProfilePostPage(profilePostTabId, profileUrlForPost, cursor, pageIndex)
+      }).catch(() => null),
+      profilePostTimeoutMs,
+      () => null
+    );
+    if (profilePostRecovery) {
+      preLoopProfilePostHydrationPages = profilePostRecovery.pages_fetched;
+      preLoopProfilePostHydrationRecovered = profilePostRecovery.recovered.length;
+      preLoopFossilPatch.hybrid_runner_profile_post_tail_pending = profilePostRecovery.pending_before.length;
+      preLoopFossilPatch.hybrid_runner_profile_post_tail_pages = profilePostRecovery.pages_fetched;
+      preLoopFossilPatch.hybrid_runner_profile_post_tail_matched = profilePostRecovery.targets_matched;
+      preLoopFossilPatch.hybrid_runner_profile_post_tail_recovered = profilePostRecovery.recovered.length;
+      preLoopFossilPatch.hybrid_runner_profile_post_tail_stop_reason = profilePostRecovery.stop_reason;
+      if (profilePostRecovery.recovered.length > 0) {
+        const hydratedAt = now();
+        state = applyDetailHydratedEvidenceToHarvestState({
+          state,
+          recoveredAwemeIds: profilePostRecovery.recovered,
+          networkCacheByAwemeId,
+          passiveByAwemeId,
+          at: hydratedAt
+        });
+        await persistDetailHydratedEvidenceToRepository(state, profilePostRecovery.recovered, hydratedAt);
+        await writeWholeProfileHarvestState(runtime.storage, state).catch(() => undefined);
+      }
+    }
+    await markProbeStep("step_5d_profile_post_tail_done", {
+      hybrid_runner_profile_post_tail_recovered: preLoopProfilePostHydrationRecovered,
+      hybrid_runner_profile_post_tail_pages: preLoopProfilePostHydrationPages
+    });
+  };
+  preLoopFossilPatch.hybrid_runner_loop_phase = stubOnlyBatch ? "profile_post_tail" : "detail_hydration";
   if (tabId !== null && collectProfileUrl && typeof runtime.readDomTailReconcileProbeFromTab === "function") {
     const scrollProbe = await withTimeoutFallback(
       runtime.readDomTailReconcileProbeFromTab(tabId, collectProfileUrl, {
@@ -16967,6 +17157,9 @@ export async function runBatchCollectHybridNetworkCacheMode(
         }
       }
     }
+  }
+  if (stubOnlyBatch) {
+    await runPreLoopProfilePostTailHydration();
   }
   if (tabId !== null && detailHydrationAvailable && actionableTargets.length > 0) {
     let detailTabId = tabId;
@@ -17036,68 +17229,11 @@ export async function runBatchCollectHybridNetworkCacheMode(
     });
   }
 
-  const profilePostTargets = actionableTargets.filter((target) =>
-    !isHybridTargetFlushReadyAfterCaches(target, networkCacheByAwemeId, passiveByAwemeId)
-  );
-  if (
-    profilePostHydrationAvailable
-    && profilePostTargets.length > 0
-  ) {
-    preLoopFossilPatch.hybrid_runner_loop_phase = "profile_post_tail";
-    const profileUrlForPost = collectProfileUrl!;
-    const scannedTotal = state.post_scan_counter_snapshot?.scanned_total ?? state.profile_scan.target_details.length;
-    const profilePostPageBudget = resolveHybridProfilePostTailPageBudgetForPending(
-      profilePostTargets.length,
-      scannedTotal
-    );
-    const profilePostTimeoutMs = resolveHybridProfilePostTailTimeoutMs(profilePostPageBudget);
-    preLoopFossilPatch.hybrid_runner_profile_post_tail_page_budget = profilePostPageBudget;
-    preLoopFossilPatch.hybrid_runner_profile_post_tail_timeout_ms = profilePostTimeoutMs;
-    const profilePostTabId = tabId!;
-    const fetchProfilePostPage = runtime.fetchProfilePostPageFromTab!;
-    await markProbeStep("step_5c_profile_post_tail_start", {
-      hybrid_runner_profile_post_tail_pending: profilePostTargets.length,
-      hybrid_runner_profile_post_tail_page_budget: profilePostPageBudget
-    });
-    const profilePostRecovery = await withTimeoutFallback(
-      recoverPendingTargetsViaProfilePostPagination({
-        targets: profilePostTargets,
-        profileUrl: profileUrlForPost,
-        networkCacheByAwemeId,
-        passiveByAwemeId,
-        maxPages: profilePostPageBudget,
-        capturedAt: now(),
-        fetchPage: (cursor, pageIndex) => fetchProfilePostPage(profilePostTabId, profileUrlForPost, cursor, pageIndex)
-      }).catch(() => null),
-      profilePostTimeoutMs,
-      () => null
-    );
-    if (profilePostRecovery) {
-      preLoopProfilePostHydrationPages = profilePostRecovery.pages_fetched;
-      preLoopProfilePostHydrationRecovered = profilePostRecovery.recovered.length;
-      preLoopFossilPatch.hybrid_runner_profile_post_tail_pending = profilePostRecovery.pending_before.length;
-      preLoopFossilPatch.hybrid_runner_profile_post_tail_pages = profilePostRecovery.pages_fetched;
-      preLoopFossilPatch.hybrid_runner_profile_post_tail_matched = profilePostRecovery.targets_matched;
-      preLoopFossilPatch.hybrid_runner_profile_post_tail_recovered = profilePostRecovery.recovered.length;
-      preLoopFossilPatch.hybrid_runner_profile_post_tail_stop_reason = profilePostRecovery.stop_reason;
-      if (profilePostRecovery.recovered.length > 0) {
-        const hydratedAt = now();
-        state = applyDetailHydratedEvidenceToHarvestState({
-          state,
-          recoveredAwemeIds: profilePostRecovery.recovered,
-          networkCacheByAwemeId,
-          passiveByAwemeId,
-          at: hydratedAt
-        });
-        await persistDetailHydratedEvidenceToRepository(state, profilePostRecovery.recovered, hydratedAt);
-        await writeWholeProfileHarvestState(runtime.storage, state).catch(() => undefined);
-      }
-    }
-    await markProbeStep("step_5d_profile_post_tail_done", {
-      hybrid_runner_profile_post_tail_recovered: preLoopProfilePostHydrationRecovered,
-      hybrid_runner_profile_post_tail_pages: preLoopProfilePostHydrationPages
-    });
+  if (!stubOnlyBatch) {
+    await runPreLoopProfilePostTailHydration();
   }
+
+  actionableTargets = syncActionableTargetsEvidenceFromHarvestState(state, actionableTargets);
 
   const metricsMissGate = evaluateHybridMetricsMissBatchAbortGate({
     actionableTargets,
@@ -17108,9 +17244,10 @@ export async function runBatchCollectHybridNetworkCacheMode(
       detail_recovered: preLoopDetailRecovery?.recovered.length ?? 0,
       detail_fetched: preLoopDetailRecovery?.fetched_count ?? 0,
       profile_post_recovered: preLoopProfilePostHydrationRecovered,
-      profile_post_attempted: profilePostHydrationAvailable && profilePostTargets.length > 0,
+      profile_post_attempted: preLoopProfilePostHydrationRan,
       detail_hydration_available: tabId !== null && detailHydrationAvailable
-    }
+    },
+    per_item_lazy_recovery_available: tabId !== null && detailHydrationAvailable
   });
   const postHydrationFlushReady = actionableTargets.filter((target) =>
     isHybridTargetFlushReadyAfterCaches(target, networkCacheByAwemeId, passiveByAwemeId)
@@ -18392,20 +18529,106 @@ async function loadRepositoryEvidenceForAwemeIds(
     "extracted",
     "backend_verified"
   ];
+  const recordEvidence = (record: ProfileTargetRecord): Record<string, unknown> | null => {
+    const queueEvidence = record.queue_item?.profile_card_evidence;
+    const detailEvidence = record.target_detail?.profile_card_evidence;
+    const primary = queueEvidence && typeof queueEvidence === "object" && Object.keys(queueEvidence).length > 0
+      ? queueEvidence as Record<string, unknown>
+      : null;
+    const secondary = detailEvidence && typeof detailEvidence === "object" && Object.keys(detailEvidence).length > 0
+      ? detailEvidence as Record<string, unknown>
+      : null;
+    if (primary && secondary) {
+      return buildHybridProfileCardEvidence(primary, [secondary]);
+    }
+    return primary ?? secondary;
+  };
   try {
-    const window = await repository.getProfileTargetsByStatus(profileIdentifier, statuses, 1000, 0);
-    for (const record of window.records) {
-      const normalized = normalizeAwemeIdForBackendCapturedSet(record.aweme_id);
-      if (!normalized || !wanted.has(normalized)) continue;
-      const evidence = record.queue_item?.profile_card_evidence;
-      if (evidence && typeof evidence === "object") {
-        evidenceById.set(normalized, evidence as Record<string, unknown>);
+    const totalWindow = await repository.countProfileTargets(profileIdentifier, statuses);
+    const total = totalWindow.total;
+    if (total <= 0) return evidenceById;
+    const pageSize = LARGE_PROFILE_QUEUE_PREVIEW_WINDOW_SIZE;
+    for (let offset = 0; offset < total && evidenceById.size < wanted.size; offset += pageSize) {
+      const window = await repository.getProfileTargetsByStatus(profileIdentifier, statuses, pageSize, offset);
+      for (const record of window.records) {
+        const normalized = normalizeAwemeIdForBackendCapturedSet(record.aweme_id);
+        if (!normalized || !wanted.has(normalized) || evidenceById.has(normalized)) continue;
+        const evidence = recordEvidence(record);
+        if (evidence) evidenceById.set(normalized, evidence);
       }
+      if (window.records.length === 0) break;
     }
   } catch {
     // non-fatal
   }
   return evidenceById;
+}
+
+export async function enrichHarvestTargetsFromProfileRepository<
+  T extends { aweme_id: string; profile_card_evidence?: Record<string, unknown> | null }
+>(state: WholeProfileHarvestState, targets: readonly T[]): Promise<T[]> {
+  if (targets.length === 0) return [...targets];
+  const evidenceById = await loadRepositoryEvidenceForAwemeIds(state, targets.map((target) => target.aweme_id));
+  const detailEvidenceById = new Map<string, Record<string, unknown>>();
+  for (const detail of state.profile_scan.target_details) {
+    const normalized = normalizeAwemeIdForBackendCapturedSet(detail.aweme_id);
+    if (!normalized || detailEvidenceById.has(normalized)) continue;
+    if (detail.profile_card_evidence && typeof detail.profile_card_evidence === "object") {
+      detailEvidenceById.set(normalized, detail.profile_card_evidence as Record<string, unknown>);
+    }
+  }
+  if (evidenceById.size === 0 && detailEvidenceById.size === 0) return [...targets];
+  return targets.map((target) => {
+    const normalized = normalizeAwemeIdForBackendCapturedSet(target.aweme_id);
+    const repositoryEvidence = normalized ? evidenceById.get(normalized) : undefined;
+    const scanDetailEvidence = normalized ? detailEvidenceById.get(normalized) : undefined;
+    if (!repositoryEvidence && !scanDetailEvidence) return target;
+    const merged = buildHybridProfileCardEvidence(
+      target.profile_card_evidence && typeof target.profile_card_evidence === "object"
+        ? target.profile_card_evidence as Record<string, unknown>
+        : null,
+      [repositoryEvidence, scanDetailEvidence].filter((evidence): evidence is Record<string, unknown> => Boolean(evidence))
+    );
+    return { ...target, profile_card_evidence: merged };
+  });
+}
+
+export function syncActionableTargetsEvidenceFromHarvestState<
+  T extends { aweme_id: string; profile_card_evidence?: Record<string, unknown> | null }
+>(state: WholeProfileHarvestState, targets: readonly T[]): T[] {
+  if (targets.length === 0) return [...targets];
+  const queueById = new Map<string, WholeProfileHarvestQueueItem>();
+  for (const item of state.harvest.queue) {
+    const normalized = normalizeAwemeIdForBackendCapturedSet(item.aweme_id);
+    if (normalized) queueById.set(normalized, item);
+  }
+  const detailEvidenceById = new Map<string, Record<string, unknown>>();
+  for (const detail of state.profile_scan.target_details) {
+    const normalized = normalizeAwemeIdForBackendCapturedSet(detail.aweme_id);
+    if (!normalized || detailEvidenceById.has(normalized)) continue;
+    if (detail.profile_card_evidence && typeof detail.profile_card_evidence === "object") {
+      detailEvidenceById.set(normalized, detail.profile_card_evidence as Record<string, unknown>);
+    }
+  }
+  return targets.map((target) => {
+    const normalized = normalizeAwemeIdForBackendCapturedSet(target.aweme_id);
+    const queueItem = normalized ? queueById.get(normalized) : undefined;
+    const scanDetailEvidence = normalized ? detailEvidenceById.get(normalized) : undefined;
+    const baseEvidence = queueItem?.profile_card_evidence && typeof queueItem.profile_card_evidence === "object"
+      ? queueItem.profile_card_evidence as Record<string, unknown>
+      : target.profile_card_evidence && typeof target.profile_card_evidence === "object"
+        ? target.profile_card_evidence as Record<string, unknown>
+        : null;
+    if (!scanDetailEvidence) {
+      return queueItem?.profile_card_evidence
+        ? { ...target, profile_card_evidence: queueItem.profile_card_evidence }
+        : target;
+    }
+    return {
+      ...target,
+      profile_card_evidence: buildHybridProfileCardEvidence(baseEvidence, [scanDetailEvidence])
+    };
+  });
 }
 
 async function rebuildStateWithBackendGapCollectQueue(
@@ -18486,20 +18709,49 @@ async function rebuildStateWithBackendGapCollectQueue(
       return classificationEvidence;
     })();
     return { ...item, profile_card_evidence: evidence };
-  }).map((item) => (
+  });
+  const reopened = queue.map((item) => (
     missingIds.length <= HYBRID_EXACT_GAP_RECOVERY_CAP
       ? reopenTailGapQueueItemForCollect(item)
       : item
-  )).filter((item) => phase22C4IsActionableTarget(item));
-  if (queue.length === 0) return null;
+  ));
+  const finalizedQueue = missingIds.length <= HYBRID_EXACT_GAP_RECOVERY_CAP
+    ? (() => {
+      const byId = new Map(
+        reopened.map((item) => {
+          const normalized = normalizeAwemeIdForBackendCapturedSet(item.aweme_id);
+          return normalized ? [normalized, item] as const : null;
+        }).filter((entry): entry is readonly [string, typeof reopened[number]] => entry != null)
+      );
+      return missingIds.map((awemeId, index) => {
+        const normalized = normalizeAwemeIdForBackendCapturedSet(awemeId);
+        const existing = normalized ? byId.get(normalized) : undefined;
+        if (existing) return reopenTailGapQueueItemForCollect({ ...existing, index: index + 1 });
+        return reopenTailGapQueueItemForCollect({
+          index: index + 1,
+          aweme_id: awemeId,
+          capture_status: "new" as const,
+          status: "needs_metadata" as const,
+          attempts: 0,
+          checkpoint_sequence: null,
+          extraction_result: null,
+          last_error: null,
+          capture_inbox_item_id: null,
+          source_url: `https://www.douyin.com/video/${awemeId}`,
+          profile_card_evidence: { aweme_id: awemeId }
+        } satisfies WholeProfileHarvestQueueItem);
+      });
+    })()
+    : reopened.filter((item) => phase22C4IsActionableTarget(item));
+  if (finalizedQueue.length === 0) return null;
   return reconcileHarvestQueueForStartCollecting(refreshHarvestPreview({
     ...state,
     harvest: {
       ...state.harvest,
-      queue,
-      queue_preview: buildCollectQueuePreviewFromQueue(queue, state.profile_scan.target_details),
-      planned_total: queue.length,
-      pending: queue.length,
+      queue: finalizedQueue,
+      queue_preview: buildCollectQueuePreviewFromQueue(finalizedQueue, state.profile_scan.target_details),
+      planned_total: finalizedQueue.length,
+      pending: finalizedQueue.length,
       current_index: 0,
       updated_at: at
     },
@@ -18510,7 +18762,7 @@ async function rebuildStateWithBackendGapCollectQueue(
           ? state.debug.last_response_summary as Record<string, unknown>
           : {}),
         hybrid_collect_queue_rebuilt: "backend_gap_diff",
-        hybrid_tail_queue_count: queue.length,
+        hybrid_tail_queue_count: finalizedQueue.length,
         hybrid_backend_gap_missing_ids: missingIds
       }
     },

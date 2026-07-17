@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "Reup Douyin Current Tab Capture",
+  "version": "0.1.0",
+  "description": "Detects and captures the current visible Douyin tab into the local reup-douyin backend without exporting cookies or credentials.",
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Douyin Capture"
+  },
+  "permissions": ["storage", "activeTab", "scripting", "debugger"],
+  "host_permissions": ["https://www.douyin.com/*", "https://douyin.com/*", "https://*.douyin.com/*", "https://*.iesdouyin.com/*", "http://127.0.0.1:8000/*", "http://localhost:8000/*", "http://127.0.0.1:7584/*", "http://localhost:7584/*", "http://127.0.0.1/*", "http://localhost/*"],
+  "web_accessible_resources": [
+    {
+      "resources": ["pageNetworkHook.js"],
+      "matches": ["https://www.douyin.com/*", "https://*.douyin.com/*", "https://*.iesdouyin.com/*"]
+    }
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.douyin.com/*", "https://douyin.com/*", "https://*.douyin.com/*", "https://*.iesdouyin.com/*", "http://127.0.0.1/*", "http://localhost/*"],
+      "js": ["contentScript.js"],
+      "run_at": "document_start"
+    }
+  ]
+}

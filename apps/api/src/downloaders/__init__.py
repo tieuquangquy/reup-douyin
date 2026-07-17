@@ -1,0 +1,2 @@
+"""Asset downloader boundaries."""
+

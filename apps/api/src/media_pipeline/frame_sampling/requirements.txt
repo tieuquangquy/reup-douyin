@@ -1,0 +1,5 @@
+# Phase 1 frame sampling — tối ưu cold-start trên Alpine/Cloud Run.
+# Module chỉ dùng Python standard library (pathlib, subprocess, urllib, http.server).
+# Cố ý để trống: không kéo FastAPI / Paddle / SQLAlchemy vào image sampling.
+#
+# Khi Phase sau cần thêm thư viện, ghi từng dòng package==version bên dưới.

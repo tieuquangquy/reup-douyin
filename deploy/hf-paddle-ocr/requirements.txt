@@ -1,0 +1,10 @@
+# Dependencies cho HF Spaces PaddleOCR API
+# STRICT: dùng opencv-python-headless (không dùng opencv-python đầy đủ UI)
+fastapi
+uvicorn
+paddleocr
+paddlepaddle
+python-multipart
+opencv-python-headless
+numpy
+Pillow

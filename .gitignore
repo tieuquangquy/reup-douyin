@@ -1,0 +1,62 @@
+# Dependencies
+node_modules/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+cookies*.json
+
+# Build outputs
+.next/
+dist/
+build/
+coverage/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.tsbuildinfo
+apps/**/release/
+*.zip
+
+# Local data / runtime
+data/
+storage/
+exports/
+tmp/
+.tmp/
+.douyin_profiles/
+.dev/
+apps/**/data/
+apps/**/tmp/
+apps/**/.tmp/
+
+# Agent / editor junk
+.cursor/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Scratch / one-off scripts at repo root
+_*.ps1
+_*.txt
+_*.js
+_*.ts
+_*.json
+tmp_*.py
+tmp_*.js
+fix-hybrid.js
+'caption'
+'like_count'
+'share_count'
+apps/api/'comment_count'
+apps/api/'{extraction_diagnostics}'

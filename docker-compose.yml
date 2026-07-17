@@ -1,0 +1,140 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-reup_douyin}
+      POSTGRES_USER: ${POSTGRES_USER:-reup_douyin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-in-production}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - reup_internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    expose:
+      - "5432"
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    networks:
+      - reup_internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    expose:
+      - "6379"
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      API_AUTH_REQUIRED: ${API_AUTH_REQUIRED:-true}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?JWT_SECRET_KEY is required}
+      JWT_ISSUER: ${JWT_ISSUER:-reup-douyin}
+      JWT_AUDIENCE: ${JWT_AUDIENCE:-reup-douyin-web}
+      JWT_WEB_AUDIENCE: ${JWT_WEB_AUDIENCE:-reup-douyin-web}
+      JWT_API_AUDIENCE: ${JWT_API_AUDIENCE:-reup-douyin-api}
+      JWT_OPS_AUDIENCE: ${JWT_OPS_AUDIENCE:-reup-douyin-ops}
+      AUTH_ACCESS_TOKEN_TTL_MINUTES: ${AUTH_ACCESS_TOKEN_TTL_MINUTES:-30}
+      AUTH_API_UI_ACCESS_TOKEN_TTL_MINUTES: ${AUTH_API_UI_ACCESS_TOKEN_TTL_MINUTES:-15}
+      AUTH_OPS_ACCESS_TOKEN_TTL_MINUTES: ${AUTH_OPS_ACCESS_TOKEN_TTL_MINUTES:-30}
+      AUTH_REFRESH_TOKEN_TTL_DAYS: ${AUTH_REFRESH_TOKEN_TTL_DAYS:-14}
+      AUTH_REGISTRATION_ENABLED: ${AUTH_REGISTRATION_ENABLED:-true}
+      AUTH_RATE_LIMIT_MAX_ATTEMPTS: ${AUTH_RATE_LIMIT_MAX_ATTEMPTS:-10}
+      AUTH_RATE_LIMIT_WINDOW_SECONDS: ${AUTH_RATE_LIMIT_WINDOW_SECONDS:-300}
+      AUTH_INVITE_TTL_DAYS: ${AUTH_INVITE_TTL_DAYS:-7}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-reup_douyin}:${POSTGRES_PASSWORD:-change-me-in-production}@postgres:5432/${POSTGRES_DB:-reup_douyin}
+      REDIS_URL: redis://redis:6379/0
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:?CORS_ALLOWED_ORIGINS is required}
+      LOCAL_STORAGE_ROOT: /app/data/storage
+      DOUYIN_SECRET_ENCRYPTION_KEY_REF: ${DOUYIN_SECRET_ENCRYPTION_KEY_REF:?DOUYIN_SECRET_ENCRYPTION_KEY_REF is required}
+      DOUYIN_ENABLE_LEGACY_DEBUG_SURFACES: "false"
+      DOUYIN_ENABLE_LEGACY_HTTP_FALLBACK: "false"
+      DOUYIN_ALLOW_LEGACY_HTTP_FALLBACK_FOR_INTAKE: "false"
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - api_storage:/app/data/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - reup_internal
+    expose:
+      - "8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('127.0.0.1', 8000), 5); s.close()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  worker:
+    build:
+      context: .
+      dockerfile: apps/worker/Dockerfile
+    restart: unless-stopped
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-reup_douyin}:${POSTGRES_PASSWORD:-change-me-in-production}@postgres:5432/${POSTGRES_DB:-reup_douyin}
+      REDIS_URL: redis://redis:6379/0
+      WORKER_ID: ${WORKER_ID:-worker-1}
+      WORKER_POLL_INTERVAL_SECONDS: ${WORKER_POLL_INTERVAL_SECONDS:-5}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - api_storage:/app/apps/api/data/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - reup_internal
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args:
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-/api}
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-/api}
+      API_UPSTREAM_URL: http://api:8000
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - reup_internal
+      - reup_public
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+networks:
+  reup_internal:
+    internal: true
+  reup_public:
+
+volumes:
+  postgres_data:
+  redis_data:
+  api_storage:

@@ -1,0 +1,69 @@
+{
+  "fixture_version": "ALPHA_DEMO_FIXTURE_V1",
+  "workspace": {
+    "slug": "local",
+    "name": "Local Workspace"
+  },
+  "source_profile": {
+    "source_platform": "DOUYIN",
+    "source_profile_external_id": "demo-douyin-food",
+    "profile_url": "https://www.douyin.com/user/demo-douyin-food",
+    "display_name": "Demo Douyin Food",
+    "handle": "demo_food"
+  },
+  "source_videos": [
+    {
+      "external_id": "demo-video-ingested",
+      "status": "DISCOVERED",
+      "caption": "Street snack preparation with quick cuts",
+      "duration_seconds": 28,
+      "metrics": { "view_count": 12000, "like_count": 900, "comment_count": 45, "share_count": 88 },
+      "path": "ingested_only"
+    },
+    {
+      "external_id": "demo-video-candidate-hot",
+      "status": "FILTERED_IN",
+      "caption": "Fast noodle trick with strong hook",
+      "duration_seconds": 34,
+      "metrics": { "view_count": 240000, "like_count": 26000, "comment_count": 900, "share_count": 2200 },
+      "candidate": { "score": 88.5, "score_label": "hot", "status": "SHORTLISTED" },
+      "path": "candidate_high_score"
+    },
+    {
+      "external_id": "demo-video-rendered",
+      "status": "READY_FINAL_REVIEW",
+      "caption": "Kitchen tool demo with translated narration",
+      "duration_seconds": 42,
+      "metrics": { "view_count": 88000, "like_count": 7600, "comment_count": 320, "share_count": 740 },
+      "candidate": { "score": 78.0, "score_label": "usable", "status": "APPROVED" },
+      "publish_draft": { "target_platform": "FACEBOOK_REELS", "status": "READY" },
+      "path": "rendered_final"
+    },
+    {
+      "external_id": "demo-video-risk",
+      "status": "READY_FINAL_REVIEW",
+      "caption": "Product clip with dense text and watermark",
+      "duration_seconds": 31,
+      "metadata_json": { "has_heavy_watermark": true, "text_density": "high", "processing_complexity": "high" },
+      "metrics": { "view_count": 55000, "like_count": 3100, "comment_count": 120, "share_count": 200 },
+      "risk_flags": [
+        { "flag_type": "WATERMARK_RISK", "severity": "HIGH", "title": "Heavy watermark signal" },
+        { "flag_type": "OCR_DENSITY_RISK", "severity": "MEDIUM", "title": "High text density" }
+      ],
+      "path": "warning_path"
+    },
+    {
+      "external_id": "demo-video-publish-ready",
+      "status": "PUBLISH_READY",
+      "caption": "Final localized food clip ready for publish draft",
+      "duration_seconds": 39,
+      "metrics": { "view_count": 132000, "like_count": 11800, "comment_count": 510, "share_count": 980 },
+      "publish_draft": { "target_platform": "FACEBOOK_REELS", "status": "PUBLISHED" },
+      "path": "publish_ready"
+    }
+  ],
+  "job_cases": [
+    { "job_type": "CRAWL_PROFILE", "status": "COMPLETED" },
+    { "job_type": "RENDER_FINAL", "status": "FAILED", "error_code": "export_failed" }
+  ]
+}

@@ -1,0 +1,44 @@
+{
+  "profile": {
+    "sec_uid": "MS4wLjABAAAAfixture-sec-uid",
+    "display_name": "Fixture Creator",
+    "nickname": "Fixture Creator",
+    "unique_id": "fixture_creator",
+    "follower_count": 12345
+  },
+  "videos": [
+    {
+      "aweme_id": "7420000000000000001",
+      "desc": "First fixture video #food",
+      "create_time": 1710000000,
+      "duration": 12345,
+      "share_url": "https://www.douyin.com/video/7420000000000000001",
+      "cover_url": "https://example.test/cover-1.jpg",
+      "cha_list": [{"cha_name": "food"}],
+      "statistics": {
+        "play_count": 1000,
+        "digg_count": 120,
+        "comment_count": 8,
+        "share_count": 3,
+        "collect_count": 5
+      }
+    },
+    {
+      "aweme_id": "7420000000000000002",
+      "desc": "Second fixture video #travel",
+      "create_time": 1710000600,
+      "duration": 8000,
+      "share_url": "https://www.douyin.com/video/7420000000000000002",
+      "cover_url": "https://example.test/cover-2.jpg",
+      "hashtags": ["travel"],
+      "statistics": {
+        "play_count": 2000,
+        "digg_count": 240,
+        "comment_count": 16,
+        "share_count": 6,
+        "collect_count": 10
+      }
+    }
+  ]
+}
+

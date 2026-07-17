@@ -1,0 +1,34 @@
+{
+  "name": "reup-douyin",
+  "private": true,
+  "packageManager": "npm@11.11.0",
+  "workspaces": [
+    "apps/web",
+    "apps/extension-douyin-capture",
+    "packages/shared",
+    "packages/config"
+  ],
+  "scripts": {
+    "dev": "powershell -ExecutionPolicy Bypass -File scripts/dev-start.ps1",
+    "dev:fresh": "npm run clean:next && npm run dev",
+    "dev:web:fresh": "npm run clean:next && npm --workspace @reup-douyin/web run dev",
+    "dev:stop": "powershell -ExecutionPolicy Bypass -File scripts/dev-stop.ps1",
+    "db:migrate": "powershell -ExecutionPolicy Bypass -File scripts/dev-migrate.ps1",
+    "dev:seed": "powershell -ExecutionPolicy Bypass -File scripts/seed-demo.ps1",
+    "dev:reseed": "powershell -ExecutionPolicy Bypass -File scripts/dev-reseed.ps1",
+    "doctor": "powershell -ExecutionPolicy Bypass -File scripts/dev-doctor.ps1",
+    "playwright:install": "powershell -ExecutionPolicy Bypass -File scripts/install-playwright-runtime.ps1",
+    "smoke": "powershell -ExecutionPolicy Bypass -File scripts/smoke-check.ps1",
+    "test": "powershell -ExecutionPolicy Bypass -File scripts/smoke-check.ps1",
+    "typecheck": "npm --workspace @reup-douyin/web run typecheck",
+    "clean:next": "node scripts/clean-next-cache.mjs",
+    "build:fresh": "npm run clean:next && npm run web:build",
+    "web:build": "npm --workspace @reup-douyin/web run build",
+    "extension:build": "npm --workspace @reup-douyin/extension-douyin-capture run build",
+    "extension:package": "npm --workspace @reup-douyin/extension-douyin-capture run package",
+    "extension:test": "npm --workspace @reup-douyin/extension-douyin-capture run test",
+    "extension:test:guardrails": "node scripts/check-extension-test-assertions.mjs --mode=soft",
+    "extension:test:guardrails:warn": "node scripts/check-extension-test-assertions.mjs --mode=warn",
+    "extension:test:guardrails:strict": "node scripts/check-extension-test-assertions.mjs --mode=strict"
+  }
+}

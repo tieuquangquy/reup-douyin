@@ -1,0 +1,8 @@
+# Build context = frame_sampling (docker build -t frame-extractor .)
+Dockerfile
+.dockerignore
+**/__pycache__/
+**/*.py[cod]
+**/*.md
+**/.env
+**/.env.*

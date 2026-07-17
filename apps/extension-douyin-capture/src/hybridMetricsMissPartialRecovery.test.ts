@@ -38,3 +38,23 @@ test("gate aborts when recovery reported progress but zero targets are flush-rea
   assert.equal(gate.should_abort, true);
   assert.equal(gate.flush_ready_count, 0);
 });
+
+test("gate defers batch abort when per-item lazy detail hydration is still available", () => {
+  const targets = [thinTarget("7000000000000000001"), thinTarget("7000000000000000002")];
+  const gate = evaluateHybridMetricsMissBatchAbortGate({
+    actionableTargets: targets,
+    networkCacheByAwemeId: new Map(),
+    passiveByAwemeId: new Map(),
+    per_item_lazy_recovery_available: true,
+    recovery: {
+      detail_attempted: 2,
+      detail_recovered: 0,
+      detail_fetched: 0,
+      profile_post_recovered: 0,
+      profile_post_attempted: true,
+      detail_hydration_available: true
+    }
+  });
+  assert.equal(gate.should_abort, false);
+  assert.equal(gate.stub_only_count, 2);
+});

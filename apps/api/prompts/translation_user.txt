@@ -1,0 +1,9 @@
+# Paste your full Chinese→Vietnamese dialogue translation system prompt below.
+# Lines that are empty or start with # are ignored when deciding if this file is "set".
+# If this file has no real prompt lines, the app uses built-in literal_safe / natural_viral prompts.
+#
+# Example (delete these comments and write your rules):
+# You are a professional Douyin dubbing translator ZH→VI.
+# Keep meaning faithful. Speak naturally for voice-over.
+# Return ONLY the Vietnamese line.
+

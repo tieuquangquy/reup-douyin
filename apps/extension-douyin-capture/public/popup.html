@@ -1,0 +1,499 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Douyin Profile Scanner</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <!-- 21D-0 POPUP ROOT CONFIRMED: manifest.json default_popup renders this file. -->
+    <main id="scannerControlPanelRoot" class="scanner-shell scp-shell" aria-label="Douyin scanner control panel">
+      <header class="scanner-hero scp-topbar">
+        <div class="scanner-hero-top scp-hero-top">
+          <div>
+            <div id="scannerHeroTitle" class="scanner-title scp-title">Douyin Scanner</div>
+            <div class="scanner-subtitle scp-subtitle">Collect profile videos for Capture Inbox</div>
+          </div>
+          <div class="scp-header-status-wrap">
+            <div id="scannerHeaderStatus" class="scanner-count-badge scp-count-badge">Ready</div>
+            <div id="scannerHeaderProgress" class="scp-header-progress" hidden>
+              <div class="scp-header-progress-meta">
+                <span id="scannerHeaderProgressFraction">0/0</span>
+                <span id="scannerHeaderProgressPercent">(0%)</span>
+              </div>
+              <div id="scannerHeaderProgressTrack" class="scp-header-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                <div id="scannerHeaderProgressBar" class="scp-header-progress-bar"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <section class="scanner-health-inline scp-health-row" aria-label="Scanner health">
+          <span id="scannerChipTab" class="scanner-chip scanner-chip-success">Profile</span>
+          <span id="scannerChipApi" class="scanner-chip scanner-chip-neutral">API not checked</span>
+          <span id="scannerChipCalibration" class="scanner-chip scanner-chip-warning">Cal needed</span>
+          <span id="scannerChipSafety" class="scanner-chip scanner-chip-success">Safe</span>
+        </section>
+      </header>
+
+      <section id="scannerProfileContextBanner" class="scanner-profile-context-banner scp-profile-context-banner" hidden aria-live="polite">
+        <div class="scanner-profile-context-banner__copy">
+          <strong id="scannerProfileContextBannerTitle">Different profile</strong>
+          <p id="scannerProfileContextBannerMessage"></p>
+        </div>
+        <div class="scanner-profile-context-banner__actions">
+          <button id="scannerProfileContextPreviousInboxButton" class="scanner-secondary-button scanner-secondary-button-neutral" type="button" hidden>Open previous Capture Inbox</button>
+        </div>
+      </section>
+
+      <section class="scanner-main-grid scp-main-grid">
+        <div class="scanner-primary-card scp-action-block" aria-live="polite">
+          <div class="scanner-eyebrow scp-eyebrow">Next action</div>
+          <h1 id="scannerPrimaryActionTitle">Scan Profile</h1>
+          <p id="scannerPrimaryActionReason">Scan this Douyin profile and build a collection plan.</p>
+          <section id="scannerAlert" class="scanner-alert scp-alert" hidden aria-live="polite">
+            <strong id="scannerAlertTitle"></strong>
+            <span id="scannerAlertMessage"></span>
+          </section>
+          <button id="scannerPrimaryActionButton" class="scanner-primary-button" type="button">Scan Profile</button>
+        </div>
+
+        <div id="scannerEmptyState" class="scanner-empty-state scanner-hint" aria-live="polite">Scan a profile to build the collection plan.</div>
+        <div id="scannerStatsGrid" class="scanner-stats-grid scp-counters-block" aria-label="Scanner counters" hidden>
+          <div class="scanner-stat scp-counter"><span>New</span><strong>0</strong></div>
+          <div class="scanner-stat scp-counter"><span>Incomplete</span><strong>0</strong></div>
+          <div class="scanner-stat scp-counter"><span>Already collected</span><strong>0</strong></div>
+          <div class="scanner-stat scp-counter"><span>Queue</span><strong>0</strong></div>
+        </div>
+        <section id="scannerOvercollectionReviewPanel" class="scanner-overcollection-panel scp-overcollection-review" hidden aria-label="Extra API videos review">
+          <h2 id="scannerOvercollectionReviewTitle" class="scanner-overcollection-panel__title">Extra API videos</h2>
+          <p id="scannerOvercollectionReviewSummary" class="scanner-overcollection-panel__summary"></p>
+          <ul id="scannerOvercollectionReviewList" class="scanner-overcollection-panel__list"></ul>
+          <div class="scanner-overcollection-panel__actions">
+            <button id="scannerOvercollectionProceedButton" class="scanner-primary-button" type="button" hidden>Start Collecting</button>
+            <button id="scannerOvercollectionRescanButton" class="scanner-secondary-button scanner-secondary-button-neutral" type="button" hidden>Rescan Profile</button>
+            <button id="scannerOvercollectionCopyForensicButton" class="scanner-secondary-button scanner-secondary-button-neutral" type="button">Copy technical log</button>
+          </div>
+        </section>
+      </section>
+
+      <section id="scannerSettingsSection" class="scanner-settings-compact scp-settings-bar" data-settings-expanded="false" aria-label="Scanner settings">
+        <div class="scanner-settings-summary">
+          <div>
+            <strong>Collection settings</strong>
+            <span id="scannerSettingsSummaryValue">New + incomplete · Next 10 · Safe</span>
+          </div>
+          <button id="scannerSettingsEditButton" class="scanner-settings-edit" type="button" aria-controls="scannerSettingsFields">Edit</button>
+        </div>
+        <div id="scannerSettingsFields" class="scanner-settings-fields" hidden>
+          <label>
+            <span>Mode</span>
+            <select id="wholeProfileHarvestMode">
+              <option value="new_and_incomplete">New + Incomplete</option>
+              <option value="new_only">New Only</option>
+              <option value="refresh_all">Refresh All</option>
+            </select>
+          </label>
+          <label>
+            <span>Batch</span>
+            <select id="wholeProfileHarvestBatch">
+              <option value="next_5">Next 5</option>
+              <option value="next_10">Next 10</option>
+              <option value="next_20">Next 20</option>
+              <option value="all_remaining">All Remaining</option>
+            </select>
+          </label>
+          <label>
+            <span>Speed</span>
+            <select id="wholeProfileHarvestSpeed">
+              <option value="safe">Safe</option>
+              <option value="normal">Normal</option>
+              <option value="fast">Fast</option>
+            </select>
+          </label>
+        </div>
+      </section>
+
+      <footer class="scanner-bottom-dock scp-bottom-bar">
+        <button id="scannerOpenCaptureInboxButton" class="scanner-secondary-button scanner-secondary-button-blue" type="button">Capture Inbox</button>
+        <button id="scannerOpenAdvancedButton" class="scanner-secondary-button scanner-secondary-button-neutral" type="button">Advanced</button>
+        <!-- 22A-3 ACTIVE SCANNER PAUSE BUTTON -->
+        <!-- 22A-4 ACTIVE SCANNER RESUME BUTTON -->
+        <button id="scannerPauseResumeButton" class="scanner-secondary-button scanner-secondary-button-neutral" type="button" hidden>Pause</button>
+        <!-- 22A-2 ACTIVE SCANNER RESET BUTTON -->
+        <button id="scannerResetButton" class="scanner-reset-button scanner-danger-ghost" type="button">Reset</button>
+      </footer>
+      <div id="scannerBatchToast" class="scp-batch-toast" hidden aria-live="polite"></div>
+    </main>
+
+    <!-- Conditional Panels -->
+    <section id="deckPanelResults" class="deck-panel" data-panel="results" hidden>
+      <div class="deck-panel__header">
+        <h2>Results Dashboard</h2>
+        <button id="deckPanelResultsClose" class="deck-panel__close" type="button" aria-label="Close results">×</button>
+      </div>
+      <div class="deck-panel__body">
+        <section class="panel dh-card" data-feature="results-dashboard">
+          <div class="section-heading-row">
+            <div>
+              <h2>Save to Capture Inbox</h2>
+              <p class="helper">Save collected video metadata, then open Capture Inbox for review.</p>
+            </div>
+          </div>
+          <section id="wholeProfileBackendFlowSection" class="backend-flow backend-flow--results">
+            <div class="section-heading-row section-heading-row--compact">
+              <div>
+                <h3>Save Flow</h3>
+                <p class="helper">Scan session, save data, and save steps.</p>
+              </div>
+            </div>
+            <div id="wholeProfileBackendNextAction" class="backend-flow__next-action"></div>
+            <div id="wholeProfileBackendFlowRows" class="backend-flow__rows">
+              <div class="backend-flow__row">
+                <div class="backend-flow__copy">
+                  <div class="backend-flow__heading"><span class="status-chip" id="backendFlowSessionStatus"></span><span>Scan session</span></div>
+                  <p class="helper" id="backendFlowSessionSummary"></p>
+                  <p class="helper helper--warning" id="backendFlowSessionReason"></p>
+                </div>
+              </div>
+              <div class="backend-flow__row">
+                <div class="backend-flow__copy">
+                  <div class="backend-flow__heading"><span class="status-chip" id="backendFlowPayloadStatus"></span><span>Save data</span></div>
+                  <p class="helper" id="backendFlowPayloadSummary"></p>
+                  <p class="helper helper--warning" id="backendFlowPayloadReason"></p>
+                </div>
+              </div>
+              <div class="backend-flow__row">
+                <div class="backend-flow__copy">
+                  <div class="backend-flow__heading"><span class="status-chip" id="backendFlowFlushOneStatus"></span><span>Save 1 Video</span></div>
+                  <p class="helper" id="backendFlowFlushOneSummary"></p>
+                  <p class="helper helper--warning" id="backendFlowFlushOneReason"></p>
+                </div>
+              </div>
+              <div class="backend-flow__row">
+                <div class="backend-flow__copy">
+                  <div class="backend-flow__heading"><span class="status-chip" id="backendFlowFlushBatchStatus"></span><span>Save to Capture Inbox</span></div>
+                  <p class="helper" id="backendFlowFlushBatchSummary"></p>
+                  <p class="helper helper--warning" id="backendFlowFlushBatchReason"></p>
+                </div>
+              </div>
+            </div>
+          </section>
+          <p id="wholeProfileCaptureInboxCta" class="helper helper--success" hidden></p>
+        </section>
+        <details id="wholeProfileQueuePreviewPanel" class="compact-list-section" hidden>
+          <summary>Queue Preview</summary>
+          <div id="wholeProfileQueuePreviewRows" class="compact-table"></div>
+          <p id="wholeProfileQueuePreviewMore" class="helper"></p>
+        </details>
+        <section id="wholeProfileExtractionResultsSection" class="compact-list-section" hidden>
+          <div class="compact-list-section__header">
+            <div><h3>Extraction Results</h3><p class="helper" id="wholeProfileExtractionResultsLabel"></p></div>
+          </div>
+          <div id="wholeProfileExtractionResultsRows" class="compact-table"></div>
+          <p id="wholeProfileExtractionResultsMore" class="helper"></p>
+        </section>
+        <section id="wholeProfileBackendResultsSection" class="compact-list-section" hidden>
+          <div class="compact-list-section__header">
+            <div><h3>Recent Save Results</h3><p class="helper" id="wholeProfileBackendResultsLabel"></p></div>
+          </div>
+          <div id="wholeProfileBackendResultsRows" class="compact-table"></div>
+          <p id="wholeProfileBackendResultsMore" class="helper"></p>
+        </section>
+      </div>
+    </section>
+
+    <section id="deckPanelAdvanced" class="deck-panel" data-panel="advanced" hidden>
+      <div class="deck-panel__header">
+        <h2>Advanced Details</h2>
+        <button id="deckPanelAdvancedClose" class="deck-panel__close" type="button" aria-label="Close advanced">×</button>
+      </div>
+      <div class="deck-panel__body">
+        <section class="panel dh-card" data-feature="advanced-connection">
+          <div class="section-heading-row">
+            <div><h2>Connection</h2><p class="helper">Backend URL and tab reconnect.</p></div>
+          </div>
+          <div class="compact-api-row">
+            <label class="field compact-api-row__field">
+              <span class="field__label">API Base URL</span>
+              <input id="apiBaseUrl" type="text" placeholder="http://127.0.0.1:8000" />
+            </label>
+            <label class="field compact-api-row__field">
+              <span class="field__label">Web App Origin</span>
+              <input id="webAppOrigin" type="text" placeholder="http://localhost:3000" />
+            </label>
+            <button id="reconnectDouyinButton" class="secondary" type="button">Reconnect Douyin Tab</button>
+            <button id="openResultsDashboardButton" class="ghost" type="button">Results Dashboard (legacy)</button>
+          </div>
+        </section>
+        <section class="panel dh-card" data-feature="advanced-harvest-options">
+          <div class="section-heading-row">
+            <div><h2>Scan Options</h2><p class="helper">Main-screen controls stay compact while safety toggles and details remain here.</p></div>
+          </div>
+          <div class="compact-api-row">
+            <label class="field compact-api-row__field">
+              <span class="field__label">Selected plan</span>
+              <input id="wholeProfileHarvestPlanSummary" type="text" value="Mode, batch, and speed are controlled from the main screen." readonly />
+            </label>
+            <label class="field compact-api-row__field">
+              <span class="field__label">Safety</span>
+              <span class="toggle-chip">
+                <input id="wholeProfileHarvestUnattendedSafeMode" type="checkbox" />
+                <span>Unattended safe mode</span>
+              </span>
+            </label>
+            <label class="field compact-api-row__field">
+              <span class="toggle-chip">
+                <input id="hybridNetworkCacheModeEnabled" type="checkbox" />
+                <span>Enable Hybrid Network Cache Collection (no modal)</span>
+              </span>
+            </label>
+          </div>
+        </section>
+        <section class="panel panel--compact dh-card" data-feature="calibration-details">
+          <div class="actions">
+            <button id="startCalibrationButton" type="button">Start Calibration</button>
+            <button id="clearCalibrationButton" class="ghost" type="button">Clear</button>
+            <button id="showCalibrationButton" class="ghost" type="button">Show</button>
+          </div>
+        </section>
+        <details id="wholeProfileProgressDetails" class="panel progress-details dh-card">
+          <summary>Progress + Diagnostics</summary>
+          <div id="wholeProfileProgressSummary" class="summary"></div>
+          <div id="wholeProfileProgressStepList" class="step-list"></div>
+          <p id="wholeProfileProgressHint" class="helper"></p>
+          <details id="wholeProfileBackendDetails" class="backend-details">
+            <summary>Payload and save details</summary>
+            <div id="wholeProfileBackendDetailsContent" class="summary"></div>
+            <button id="copyBackendErrorDetailsButton" class="ghost" type="button" hidden>Copy Backend Error Details</button>
+            <pre id="backendErrorDetailsPreview" class="debug-json-preview" hidden></pre>
+          </details>
+        </details>
+        <details id="scanProgressFreezeLogPanel" class="operator-guide operator-guide--compact dh-card">
+          <summary>Scan Progress Freeze Log</summary>
+          <p class="helper">Copy this compact JSON after a Scan Profile test to debug final counts, progress rendering, and API pagination without private IDs or full URLs.</p>
+          <div class="actions">
+            <button id="copyScanProgressFreezeLogButton" class="ghost" type="button">Copy Scan Freeze Log</button>
+            <button id="copyOvercollectionForensicJsonButton" class="ghost" type="button">Copy Forensic JSON</button>
+            <button id="downloadOvercollectionDebugJsonButton" class="ghost" type="button">Download Overcollection Debug JSON</button>
+          </div>
+          <pre id="overcollectionForensicJsonPreview" class="debug-json-preview"></pre>
+          <pre id="scanProgressFreezeLogPreview" class="debug-json-preview"></pre>
+        </details>
+        <details id="wholeProfileTroubleshootingPanel" class="operator-guide operator-guide--compact dh-card">
+          <summary>Troubleshooting</summary>
+          <ul class="operator-guide__list">
+            <li>Reconnect the Douyin tab if the scanner loses page context.</li>
+            <li>Re-run calibration if metric probes stop matching the expected points.</li>
+            <li>Use Results Dashboard for queue and save inspection before resetting.</li>
+          </ul>
+        </details>
+        <details id="wholeProfileSafetyTipsPanel" class="operator-guide operator-guide--compact dh-card">
+          <summary>Safety tips</summary>
+          <ul class="operator-guide__list">
+            <li>Pause or resume when Douyin prompts for a security check.</li>
+            <li>Use Safe speed for long unattended runs.</li>
+            <li>Keep Capture Inbox review separate from scan execution.</li>
+          </ul>
+        </details>
+        <details class="panel maintenance dh-card" id="advancedDiagnostics" aria-labelledby="maintenanceTitle">
+          <summary id="maintenanceTitle">Maintenance + Debug</summary>
+          <div class="actions maintenance__actions">
+            <button id="copyWholeProfileDebugJsonButton" class="ghost" type="button">Copy Debug JSON</button>
+            <button id="resetWholeProfileHarvestStateButton" class="danger" type="button">Reset Scanner State</button>
+            <button id="clearLegacyStateButton" class="ghost" type="button">Clear Legacy State</button>
+          </div>
+          <section class="panel">
+            <h3>Collecting comparison test</h3>
+            <p class="helper">Run a bounded validation-only dry-run before scaling Collecting. This checks required-field coverage, modal fallback rate, and anti-bot safety without backend writes or production collect state mutation.</p>
+            <div class="actions">
+              <label class="helper" for="modalWholeProfileSampleSize">Sample size</label>
+              <select id="modalWholeProfileSampleSize" aria-label="Collecting comparison sample size">
+                <option value="5" selected>5 videos comparison</option>
+                <option value="10">10 videos comparison</option>
+                <option value="25">Run Hybrid Validation Dry Run (25) - no backend writes</option>
+                <option value="50">Run Hybrid Validation Dry Run (50) - no backend writes</option>
+              </select>
+              <button id="runModalWholeProfileTestButton" class="secondary" type="button">Run Collecting Comparison Test / Dry Run</button>
+              <button id="resetModalWholeProfileTestButton" class="ghost" type="button">Clear Comparison Test</button>
+            </div>
+            <section class="panel">
+              <h4>Hybrid-only validation</h4>
+              <p class="helper">Validation only: no modal baseline, modal fallback only if required fields are missing, no backend writes, and no production collect state mutation.</p>
+              <div class="actions">
+                <button id="runHybridOnlyModalFallbackDryRun25Button" class="secondary" type="button">Run Hybrid-Only Dry Run (25)</button>
+                <button id="runHybridOnlyModalFallbackDryRun50Button" class="secondary" type="button">Run Hybrid-Only Dry Run (50)</button>
+                <button id="runBackendShadowEstimatedViews3Button" class="secondary" type="button">Run Backend Shadow Test with Estimated Views (3)</button>
+                <button id="runBackendShadowEstimatedViews5Button" class="ghost" type="button">Run Backend Shadow Test with Estimated Views (5)</button>
+                <label class="toggle-chip" title="Internal beta guard; default off">
+                  <input id="hybridEstimatedViewsCollectBetaEnabled" type="checkbox" />
+                  <span>Enable Hybrid Estimated Views Collect Beta</span>
+                </label>
+                <button id="runGuardedHybridCollectBeta3Button" class="danger" type="button">Run Guarded Hybrid Collect Beta (3)</button>
+                <button id="runGuardedHybridCollectBeta5Button" class="danger" type="button">Run Guarded Hybrid Collect Beta (5)</button>
+                <button id="postVerifyGuardedHybridCollectBetaButton" class="secondary" type="button">Post-Verify Guarded Hybrid Beta</button>
+                <label class="toggle-chip"><input id="hybridEstimatedViewsStartCollectingPilotEnabled" type="checkbox" /><span>Enable Hybrid Estimated Views Start Collecting Pilot</span></label>
+                <button id="runGuardedHybridStartCollectingPilot5Button" class="danger" type="button">Run Guarded Hybrid Start Collecting Pilot (5)</button>
+                <button id="runGuardedHybridStartCollectingPilot10Button" class="danger" type="button">Run Guarded Hybrid Start Collecting Pilot (10)</button>
+                <button id="runGuardedHybridStartCollectingPilot50Button" class="danger" type="button">Run Guarded Hybrid Start Collecting Pilot (50)</button>
+                <button id="postVerifyGuardedHybridStartCollectingPilotButton" class="secondary" type="button">Run Guarded Hybrid Start Collecting Pilot Post-Verify</button>
+                <label class="toggle-chip"><input id="hybridStartCollectingPilotQueueCompletionEnabled" type="checkbox" /><span>Enable Pilot Queue Completion</span></label>
+                <button id="runGuardedHybridStartCollectingQueueCompletionPilotButton" class="danger" type="button">Complete Verified Pilot Queue Items</button>
+                <button id="postVerifyGuardedHybridStartCollectingQueueCompletionPilotButton" class="secondary" type="button">Run Queue Completion Pilot Post-Verify</button>
+                <label class="toggle-chip"><input id="hybridStartCollectingPilot50QueueCompletionEnabled" type="checkbox" /><span>Enable Pilot 50 Queue Completion</span></label>
+                <button id="runGuardedHybridStartCollectingQueueCompletionPilot50Button" class="danger" type="button">Complete Verified Pilot 50 Queue Items</button>
+                <button id="postVerifyGuardedHybridStartCollectingQueueCompletionPilot50Button" class="secondary" type="button">Run Queue Completion Pilot 50 Post-Verify</button>
+                <button id="exportCompactGuardedPipelineStatusButton" class="ghost" type="button">Export Compact Guarded Pipeline Status</button>
+                <button id="copyCompactGuardedPipelineStatusButton" class="ghost" type="button">Copy Compact Guarded Pipeline Status</button>
+                <button id="exportPerBatchMilestoneAuthorityDiagnosticButton" class="ghost" type="button">Export Per-Batch Milestone Authority Diagnostic</button>
+                <button id="copyPerBatchMilestoneAuthorityDiagnosticButton" class="ghost" type="button">Copy Per-Batch Milestone Authority Diagnostic</button>
+                <button id="runFullQueueCompletionDryRunButton" class="ghost" type="button">Run Full Queue Completion Dry-Run</button>
+                <button id="copyFullQueueCompletionDryRunButton" class="ghost" type="button">Copy Full Queue Completion Dry-Run</button>
+                <label class="toggle-chip"><input id="fullQueueCompletionEnabled" type="checkbox" /><span>Enable Full Queue Completion</span></label>
+                <button id="runFullQueueCompletionButton" class="danger" type="button">Run Full Queue Completion</button>
+                <button id="copyFullQueueCompletionLatestButton" class="ghost" type="button">Copy Full Queue Completion Latest</button>
+                <button id="resetFullQueueCompletionProgressButton" class="ghost" type="button">Reset Full Queue Completion Progress</button>
+                <button id="exportGuardedPipelineStorageInventoryButton" class="ghost" type="button">Export Guarded Pipeline Storage Inventory</button>
+                <button id="copyGuardedPipelineStorageInventoryButton" class="ghost" type="button">Copy Guarded Pipeline Storage Inventory</button>
+                <button id="exportBackendShadowRowEvidenceButton" class="ghost" type="button">Export Backend Shadow Row Evidence</button>
+                <button id="copyBackendShadowRowEvidenceButton" class="ghost" type="button">Copy Backend Shadow Row Evidence</button>
+                <button id="exportBetaProductionRowEvidenceButton" class="ghost" type="button">Export Beta Production Row Evidence</button>
+                <button id="copyBetaProductionRowEvidenceButton" class="ghost" type="button">Copy Beta Production Row Evidence</button>
+                <button id="exportGuardedHybridCollectBetaBackendEvidenceDumpButton" class="ghost" type="button">Export Beta Backend Evidence Dump</button>
+                <button id="copyGuardedHybridCollectBetaBackendEvidenceDumpButton" class="ghost" type="button">Copy Beta Backend Evidence Dump</button>
+                <button id="exportGuardedHybridPilot50BackendEvidenceDumpButton" class="ghost" type="button">Export Pilot 50 Backend Evidence Dump</button>
+                <button id="copyGuardedHybridPilot50BackendEvidenceDumpButton" class="ghost" type="button">Copy Pilot 50 Backend Evidence Dump</button>
+                <button id="runGuardedPipelineToPilot50Button" class="danger" type="button">Run Guarded Pipeline To Pilot 50</button>
+              </div>
+              <p class="helper"><strong>Feature flag:</strong> hybridEstimatedViewsCollectBetaEnabled · <strong>Current value:</strong> local extension setting, default false · <strong>Staged batch limit:</strong> 3 / 5, max 5. Warning: beta writes to the production backend only after all guards pass.</p>
+              <p class="helper"><strong>Pilot feature flag:</strong> hybridEstimatedViewsStartCollectingPilotEnabled · <strong>Current value:</strong> local extension setting, default false · <strong>Pilot batch limit:</strong> exactly 5, 10, or 50; Pilot 10 and Pilot 50 require Pilot 5 post-verify pass. Pilot does not replace normal Start Collecting and queue completion is deferred.</p>
+              <p class="helper"><strong>Queue completion pilot flag:</strong> hybridStartCollectingPilotQueueCompletionEnabled · <strong>Current value:</strong> local extension setting, default false · Completes only exact aweme ID intersections from the latest passed Pilot 10 post-verify source; no backend write and no normal Start Collecting route.</p>
+              <p class="helper"><strong>Pilot 50 queue completion flag:</strong> hybridStartCollectingPilot50QueueCompletionEnabled · <strong>Current value:</strong> local extension setting, default false · Completes only exact aweme ID intersections from the latest passed Pilot 50 post-verify artifact; no backend write, no collect_job mutation, and no full queue completion.</p>
+              <p class="helper"><strong>Compact guarded pipeline:</strong> export emits only counts, verdicts, blockers, source IDs, artifact availability, safety booleans, and the exact next action. The runner skips already-passed artifacts and stops on the first blocker.</p>
+              <p class="helper"><strong>Per-batch milestone authority diagnostic:</strong> read-only export showing, per pilot batch size (10 and 50), which milestone alias/artifact resolved and why. Milestone authority is additive and batch-scoped, so a later batch (Pilot 50) never overwrites or invalidates an already-passed earlier batch (Pilot 10, Queue Completion 10). It emits resolution source, ignored shared-alias reasons, milestone blockers, and the highest passed milestone; it does not rerun stages or mutate storage.</p>
+              <p class="helper"><strong>Full queue completion dry-run:</strong> read-only pre-flight before enabling full queue completion. It does NOT enable full_queue_completion, performs no backend writes, and does not mutate the queue or collect_job. Coverage is now SCALE-INDEPENDENT: a live chunked backend verify against /douyin-extension/capture-inbox/items/verify drives backend_backed_count / queue_total at any N (50, 126, 1000, ...). Pilot 50 post-verify is kept only as a one-time mechanism-validation precondition, not the coverage authority. Items not yet backend-backed remain pending and are listed under not_backend_backed_pending_aweme_ids_sample. The dry-run reports exact_aweme_id_only match accounting, the Pilot 50 gap (informational), and a go/no-go readiness verdict with blockers.</p>
+              <p class="helper"><strong>Full queue completion executor flag:</strong> fullQueueCompletionEnabled · <strong>Current value:</strong> local extension setting, default false · The executor runs only when explicitly enabled by the operator. It does NOT collect missing videos. It only MARKS already-backend-backed pending queue items as status=backend_verified, capture_status=complete using exact_aweme_id_only matching against the LIVE backend, in resumable chunks of 500. Re-running never double-marks; items without a live backend record stay pending; on 401/auth_required it pauses safely and resumes after re-auth.</p>
+              <p class="helper"><strong>Guarded pipeline storage inventory:</strong> read-only diagnostic across local/session/sync storage keys. It emits key existence, top-level keys, compact IDs, batch fields, verdict/status fields, item counts, blocker counts, and timestamp presence only; it does not run guarded stages or mutate production state.</p>
+              <p class="helper"><strong>Backend shadow row evidence:</strong> read-only local artifact export from the latest backend shadow artifact. It emits accepted/rejected counts plus the first 5 sanitized rows with outgoing payload title/raw Likes evidence, no raw IDs, no thumbnails, no backend calls, no production beta, and no storage mutation.</p>
+              <p class="helper"><strong>Beta production row evidence:</strong> read-only local artifact export from the latest guarded beta production artifact. It emits sanitized first 5 title/raw Likes payload and read-back fields, no raw IDs, no thumbnails, no backend calls, no beta rerun, no Pilot action, and no storage mutation.</p>
+              <p class="helper"><strong>Pilot 50 backend evidence dump:</strong> read-only authenticated backend read for the 50 verified Pilot 50 aweme_ids against the current backend. It issues scoped (by capture_session_id) and unscoped (aweme_id only) verify lookups and emits per-id found yes/no with present fields, scoped_found_count / required, and a verdict of backend_backed vs artifact_only so you can tell whether Pilot 50 is backend-backed right now or passing only from stored artifacts. No writes, no pipeline rerun, no pilot auto-rerun, no full queue completion, and no estimated_views change.</p>
+            </section>
+            <p id="modalWholeProfileTestDisabledReason" class="helper" aria-live="polite"></p>
+            <div id="modalWholeProfileTestPanel" aria-live="polite"></div>
+            <section id="modalWholeProfileComparisonPanel" class="panel">
+              <h4>Collecting Comparison Log</h4>
+              <p class="helper">Copy the compact Hybrid-Only Dry Run Decision Summary for LLM review, or copy the full detailed comparison log when row-level diagnostics are needed.</p>
+              <p id="modalWholeProfileComparisonPlaceholder" class="helper">Run the comparison test to generate a log.</p>
+              <div class="actions">
+                <button id="copyModalWholeProfileDecisionSummaryButton" class="ghost" type="button">Copy Hybrid-Only Dry Run Decision Summary</button>
+                <button id="copyModalWholeProfileComparisonButton" class="ghost" type="button">Copy Full Collecting Comparison Log</button>
+              </div>
+              <h5>Hybrid-Only Dry Run Decision Summary</h5>
+              <pre id="modalWholeProfileDecisionSummaryPreview" class="debug-json-preview"></pre>
+              <h5>Backend Shadow Test Estimated Views Summary</h5>
+              <pre id="modalWholeProfileBackendShadowSummaryPreview" class="debug-json-preview">BACKEND_SHADOW_TEST_ESTIMATED_VIEWS_SUMMARY not run yet.</pre>
+              <h5>Hybrid Collect Beta Prerequisites</h5>
+              <pre id="hybridCollectBetaPrerequisitesPreview" class="debug-json-preview">HYBRID_COLLECT_BETA_PREREQUISITES not evaluated yet.</pre>
+              <h5>Guarded Hybrid Collect Beta Summary</h5>
+              <pre id="guardedHybridCollectBetaSummaryPreview" class="debug-json-preview">GUARDED_HYBRID_COLLECT_BETA_SUMMARY not run yet.</pre>
+              <h5>Guarded Hybrid Collect Beta Post-Verify Summary</h5>
+              <pre id="guardedHybridCollectBetaPostVerifySummaryPreview" class="debug-json-preview">GUARDED_HYBRID_COLLECT_BETA_POST_VERIFY_SUMMARY not run yet.</pre>
+              <h5>Guarded Hybrid Start Collecting Pilot Summary</h5>
+              <pre id="guardedHybridStartCollectingPilotSummaryPreview" class="debug-json-preview">GUARDED_HYBRID_START_COLLECTING_PILOT_SUMMARY not run yet.</pre>
+              <h5>Guarded Hybrid Start Collecting Pilot Post-Verify Summary</h5>
+              <pre id="guardedHybridStartCollectingPilotPostVerifySummaryPreview" class="debug-json-preview">GUARDED_HYBRID_START_COLLECTING_PILOT_POST_VERIFY_SUMMARY not run yet.</pre>
+              <h5>Guarded Hybrid Start Collecting Queue Completion Pilot Summary</h5>
+              <pre id="guardedHybridStartCollectingQueueCompletionPilotSummaryPreview" class="debug-json-preview">GUARDED_HYBRID_START_COLLECTING_QUEUE_COMPLETION_PILOT_SUMMARY not run yet.</pre>
+              <h5>Guarded Hybrid Start Collecting Queue Completion Pilot Post-Verify Summary</h5>
+              <pre id="guardedHybridStartCollectingQueueCompletionPilotPostVerifySummaryPreview" class="debug-json-preview">GUARDED_HYBRID_START_COLLECTING_QUEUE_COMPLETION_PILOT_POST_VERIFY_SUMMARY not run yet.</pre>
+              <h5>Guarded Hybrid Start Collecting Queue Completion Pilot 50 Summary</h5>
+              <pre id="guardedHybridStartCollectingQueueCompletionPilot50SummaryPreview" class="debug-json-preview">GUARDED_HYBRID_START_COLLECTING_QUEUE_COMPLETION_PILOT_50_SUMMARY not run yet.</pre>
+              <h5>Guarded Hybrid Start Collecting Queue Completion Pilot 50 Post-Verify Summary</h5>
+              <pre id="guardedHybridStartCollectingQueueCompletionPilot50PostVerifySummaryPreview" class="debug-json-preview">GUARDED_HYBRID_START_COLLECTING_QUEUE_COMPLETION_PILOT_50_POST_VERIFY_SUMMARY not run yet.</pre>
+              <h5>Compact Guarded Pipeline Status</h5>
+              <pre id="compactGuardedPipelineStatusPreview" class="debug-json-preview">COMPACT_GUARDED_PIPELINE_STATUS not exported yet.</pre>
+              <h5>Per-Batch Milestone Authority Diagnostic</h5>
+              <pre id="perBatchMilestoneAuthorityDiagnosticPreview" class="debug-json-preview">PER_BATCH_MILESTONE_AUTHORITY_DIAGNOSTIC not exported yet.</pre>
+              <h5>Full Queue Completion Dry-Run</h5>
+              <pre id="fullQueueCompletionDryRunPreview" class="debug-json-preview">FULL_QUEUE_COMPLETION_DRY_RUN not run yet.</pre>
+              <h5>Full Queue Completion Latest</h5>
+              <pre id="fullQueueCompletionLatestPreview" class="debug-json-preview">FULL_QUEUE_COMPLETION_LATEST not run yet.</pre>
+              <h5>Guarded Pipeline Storage Inventory</h5>
+              <pre id="guardedPipelineStorageInventoryPreview" class="debug-json-preview">GUARDED_PIPELINE_STORAGE_INVENTORY not exported yet.</pre>
+              <h5>Backend Shadow Row Evidence</h5>
+              <pre id="backendShadowRowEvidencePreview" class="debug-json-preview">BACKEND_SHADOW_ROW_EVIDENCE not exported yet.</pre>
+              <h5>Beta Production Row Evidence</h5>
+              <pre id="betaProductionRowEvidencePreview" class="debug-json-preview">BETA_PRODUCTION_ROW_EVIDENCE not exported yet.</pre>
+              <h5>Beta Backend Evidence Dump</h5>
+              <pre id="guardedHybridCollectBetaBackendEvidenceDumpPreview" class="debug-json-preview">GUARDED_HYBRID_COLLECT_BETA_BACKEND_EVIDENCE_DUMP not exported yet.</pre>
+              <h5>Pilot 50 Backend Evidence Dump</h5>
+              <pre id="guardedHybridPilot50BackendEvidenceDumpPreview" class="debug-json-preview">GUARDED_HYBRID_PILOT_50_BACKEND_EVIDENCE_DUMP not exported yet.</pre>
+              <h5>Full Collecting Comparison Log</h5>
+              <pre id="modalWholeProfileComparisonPreview" class="debug-json-preview"></pre>
+            </section>
+          </section>
+        </details>
+        <details class="panel hybrid-test-log dh-card" id="hybridRuntimeTestLogSection">
+          <summary>Hybrid Runtime Test Log</summary>
+          <p class="helper">Diagnostic fields populated after Hybrid collection runs. Click Refresh to re-read from storage.</p>
+          <div class="actions">
+            <button id="refreshHybridTestLogButton" class="ghost" type="button">Refresh</button>
+            <button id="copyHybridTestLogButton" class="ghost" type="button">Copy All</button>
+          </div>
+          <div id="hybridTestLogFields" class="hybrid-test-log-fields">
+            <p class="helper">No data available yet. Run a Hybrid collection to populate diagnostics.</p>
+          </div>
+          <p id="hybridTestLogToast" class="helper helper--success" hidden>Copied!</p>
+        </details>
+      </div>
+    </section>
+
+    <section id="scannerResetModal" class="scanner-reset-modal" aria-labelledby="scannerResetModalTitle" aria-describedby="scannerResetModalSubtitle" role="dialog" aria-modal="true" hidden>
+      <div id="scannerResetModalBackdrop" class="scanner-reset-modal__backdrop" data-reset-modal-close="backdrop"></div>
+      <div class="scanner-reset-modal__sheet" tabindex="-1">
+        <div id="scannerResetActionSheet" class="scanner-reset-modal__view">
+          <header class="scanner-reset-modal__header">
+            <div>
+              <h2 id="scannerResetModalTitle">Reset scanner</h2>
+              <p id="scannerResetModalSubtitle">Backend Capture Inbox data stays safe.</p>
+            </div>
+          </header>
+          <div id="scannerResetSuggestion" class="scanner-reset-modal__suggestion" hidden>To collect another user, use Switch profile.</div>
+          <p id="scannerResetInlineError" class="scanner-reset-modal__error" role="alert" hidden>Reset failed. Check Advanced diagnostics.</p>
+          <div class="scanner-reset-modal__options" aria-label="Reset actions">
+            <button id="scannerResetCurrentRunButton" class="scanner-reset-action-row" type="button" data-reset-mode="current_run" aria-label="Fix stuck run. Clear locks only. Keeps profile, queue, session.">
+              <span class="scanner-reset-action-row__icon" aria-hidden="true">R</span>
+              <span class="scanner-reset-action-row__copy"><span class="scanner-reset-action-row__title">Fix stuck run</span><span class="scanner-reset-action-row__subtitle">Clear locks only</span><span class="scanner-reset-action-row__meta">Keeps profile, queue, session</span></span>
+              <span class="scanner-reset-action-row__badges"><span class="scanner-reset-action-row__recommended" data-recommended-badge hidden>Recommended</span><span class="scanner-reset-action-row__badge scanner-reset-action-row__badge--safe">Safe</span></span>
+            </button>
+            <button id="scannerResetRescanProfileButton" class="scanner-reset-action-row" type="button" data-reset-mode="current_profile_rescan" aria-label="Refresh profile. Scan this profile again. Skips collected videos.">
+              <span class="scanner-reset-action-row__icon" aria-hidden="true">U</span>
+              <span class="scanner-reset-action-row__copy"><span class="scanner-reset-action-row__title">Refresh profile</span><span class="scanner-reset-action-row__subtitle">Scan this profile again</span><span class="scanner-reset-action-row__meta">Skips collected videos</span></span>
+              <span class="scanner-reset-action-row__badges"><span class="scanner-reset-action-row__recommended" data-recommended-badge hidden>Recommended</span><span class="scanner-reset-action-row__badge scanner-reset-action-row__badge--update">Update</span></span>
+            </button>
+            <button id="scannerResetNewProfileButton" class="scanner-reset-action-row" type="button" data-reset-mode="new_profile" aria-label="Switch profile. Prepare for another user. Clears local queue/session.">
+              <span class="scanner-reset-action-row__icon" aria-hidden="true">S</span>
+              <span class="scanner-reset-action-row__copy"><span class="scanner-reset-action-row__title">Switch profile</span><span class="scanner-reset-action-row__subtitle">Prepare for another user</span><span class="scanner-reset-action-row__meta">Clears local queue/session</span></span>
+              <span class="scanner-reset-action-row__badges"><span class="scanner-reset-action-row__recommended" data-recommended-badge hidden>Recommended</span><span class="scanner-reset-action-row__badge scanner-reset-action-row__badge--new">New</span></span>
+            </button>
+          </div>
+        </div>
+        <div id="scannerResetConfirmSwitchView" class="scanner-reset-modal__confirm" hidden>
+          <h2 id="scannerResetConfirmTitle">Switch profile?</h2>
+          <p>Local queue/session for this profile will be cleared. Backend data will not be deleted.</p>
+          <div class="scanner-reset-modal__confirm-actions">
+            <button id="scannerResetConfirmCancelButton" class="scanner-secondary-button scanner-secondary-button-neutral" type="button">Cancel</button>
+            <button id="scannerResetConfirmSwitchButton" class="scanner-reset-confirm-primary" type="button">Switch profile</button>
+          </div>
+        </div>
+        <footer class="scanner-reset-modal__footer">
+          <p>No backend sessions or items will be deleted.</p>
+          <button id="scannerResetCancelButton" class="scanner-secondary-button scanner-secondary-button-neutral" type="button">Cancel</button>
+        </footer>
+      </div>
+    </section>
+
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

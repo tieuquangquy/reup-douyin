@@ -1,0 +1,2 @@
+"""Worker step handler registration."""
+

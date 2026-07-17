@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+auto_deploy.py
+auto_deploy.sh
+auto_deploy.last.log
+README.md
+README_DEPLOY.md
+.gcloudignore
+.dockerignore
+.git/

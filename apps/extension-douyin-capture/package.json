@@ -1,0 +1,17 @@
+{
+  "name": "@reup-douyin/extension-douyin-capture",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/clean-dist.mjs && node scripts/generate-build-identity.mjs && tsc -p tsconfig.build.json && node scripts/bundle-content-script.mjs && node scripts/copy-static.mjs && node scripts/dist-module-resolution-check.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "package": "npm run build && node scripts/package-release.mjs",
+    "test": "tsx src/douyinEngagementZeroSentinels.test.ts && tsx src/extractor.test.ts && tsx src/extractor.identity.test.ts && tsx src/networkCache.test.ts && tsx src/networkProbe.test.ts && tsx src/detailHydration.test.ts && tsx src/cdpAweme.test.ts && tsx src/modalHarvest.test.ts && tsx src/modalStart.test.ts && tsx src/modalWholeProfileTest.test.ts && tsx src/background.test.ts && tsx src/popupActions.test.ts && tsx src/popupWorkflow.test.ts && tsx src/popupSmartWorkflow.test.ts && tsx src/popupProgress.test.ts && tsx src/popupTransport.test.ts && tsx src/extensionReset.test.ts && tsx src/harvestRuntimeV2.test.ts && tsx src/extensionBackendClient.test.ts && tsx src/phase18aPopupCleanup.test.ts && tsx src/wholeProfileHarvest.calibration.test.ts && tsx src/wholeProfileHarvest.readiness.test.ts && tsx src/wholeProfileHarvest.collectJobGuard.test.ts && tsx src/wholeProfileHarvest.collectJobRestart.test.ts && tsx src/wholeProfileHarvest.hybridRunnerIdempotency.test.ts && tsx src/wholeProfileHarvest.writeSerialization.test.ts && tsx src/wholeProfileHarvest.viewModel.test.ts && tsx src/wholeProfileHarvest.backendFlow.test.ts && tsx src/wholeProfileHarvest.profileTargetRepository.test.ts && tsx src/wholeProfileHarvest.profileContext.test.ts && tsx src/wholeProfileHarvest.queueResults.test.ts && tsx src/wholeProfileHarvest.tabs.test.ts && tsx src/wholeProfileHarvest.wording.test.ts && tsx src/wholeProfileHarvest.hardening.test.ts && tsx src/wholeProfileHarvest.test.ts && tsx src/wholeProfileHarvest.hybridAuthPause.test.ts && tsx src/wholeProfileHarvest.appBackendAuth.test.ts && tsx src/collectLiveProgress.test.ts && tsx src/hybridMetricsMiss.test.ts && tsx src/hybridMetricsMissBatchAbort.test.ts && tsx src/hybridStaleQueueRecovery.test.ts && tsx src/profileScanTotalAuthority.test.ts && tsx src/backendCollectAuthority.test.ts && tsx src/wholeProfileHarvest.operatorRegression.test.ts && tsx src/hybridGapFabrication.test.ts && tsx src/hybridUnreachableTailGap.test.ts && tsx src/hybridUnreachableTailGapViewModel.test.ts && tsx src/hybridTailGapQueueRecovery.test.ts && tsx src/activeProfilePresentation.test.ts && tsx src/scanPresentationPhase.test.ts && tsx src/scanProgressPresentation.test.ts && tsx src/scanAuthorityDiagnostics.test.ts && tsx src/scannerPanelTiles.test.ts && tsx src/profileTargetEvidenceMerge.test.ts && tsx src/collectDetailHydrationFallback.test.ts && tsx src/captureInboxNavigation.test.ts && tsx src/ui20B1CommandCenterShell.test.ts && npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "esbuild": "^0.25.4",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

@@ -1,0 +1,142 @@
+node:internal/modules/run_main:107
+    triggerUncaughtException(
+    ^
+
+AssertionError [ERR_ASSERTION]: dry-run must NOT use the legacy scale-dependent gap or out-of-set blockers; those are now informational fields only
+    at <anonymous> (c:\Users\PC\Desktop\reup_douyin\apps\extension-douyin-capture\src\popupWorkflow.test.ts:1260:8)
+    at ModuleJob.run (node:internal/modules/esm/module_job:430:25)
+    at async onImport.tracePromise.__proto__ (node:internal/modules/esm/loader:661:26)
+    at async asyncRunEntryPointWithESMLoader (node:internal/modules/run_main:101:5) {
+  generatedMessage: false,
+  code: 'ERR_ASSERTION',
+  actual: 'async function buildFullQueueCompletionDryRunSummary(): Promise<Record<string, unknown>> {\r\n' +
+    '  const generatedAt = new Date().toISOString();\r\n' +
+    '  // One-time mechanism-validation precondition (informational only; NOT the coverage authority).\r\n' +
+    '  const postVerifySource = await readGuardedHybridStartCollectingPilot50PostVerifySource();\r\n' +
+    '  const verifiedAwemeIds = guardedHybridUniqueStrings(postVerifySource.verifiedAwemeIds);\r\n' +
+    '  const verifiedIdSet = new Set(verifiedAwemeIds);\r\n' +
+    '  const pilot50PostVerifyPassed = postVerifySource.blockers.length === 0 && verifiedAwemeIds.length === 50;\r\n' +
+    '  // Read-only snapshot of the full local queue and collect_job. We re-read after computation to prove no mutation.\r\n' +
+    '  const stateBefore = await readWholeProfileHarvestState(chrome.storage.local, generatedAt);\r\n' +
+    '  const runnerLock = deriveAuthoritativeRunnerLock(stateBefore);\r\n' +
+    '  const collectJobSafetyBefore = guardedHybridQueueCompletionCollectJobSafetySnapshot(stateBefore);\r\n' +
+    '  const queue: WholeProfileHarvestQueueItem[] = Array.isArray(stateBefore.harvest?.queue) ? stateBefore.harvest.queue : [];\r\n' +
+    '  const totalQueueItems = queue.length;\r\n' +
+    '  const completeItems = queue.filter(guardedHybridQueueCompletionItemIsComplete);\r\n' +
+    '  const pendingItems = queue.filter((item) => !guardedHybridQueueCompletionItemIsComplete(item));\r\n' +
+    '  const pendingCount = guardedHybridQueueCompletionPendingCount(queue);\r\n' +
+    '  // Resolve the capture_session_id used for the SCOPED live verify. Falls back to unscoped when absent.\r\n' +
+    '  const productionSource = await readGuardedHybridStartCollectingPilotLatestProductionSource();\r\n' +
+    '  const captureSessionIdResolved =\r\n' +
+    '    (productionSource?.capture_session_id && typeof productionSource.capture_session_id === "string" ? productionSource.capture_session_id : null)\r\n' +
+    '    ?? (typeof stateBefore.capture_session_id === "string" && stateBefore.capture_session_id ? stateBefore.capture_session_id : null)\r\n' +
+    '    ?? (typeof stateBefore.harvest?.backend?.capture_session?.session_id === "string" && stateBefore.harvest.backend.capture_session.session_id ? stateBefore.harvest.backend.capture_session.session_id : null);\r\n' +
+    '  // Coverage authority (SCALE-INDEPENDENT): live chunked backend verify across the FULL local queue.\r\n' +
+    '  const queueAwemeIds = guardedHybridUniqueStrings(queue.map((item) => item.aweme_id));\r\n' +
+    '  const pendingAwemeIds = guardedHybridUniqueStrings(pendingItems.map((item) => item.aweme_id));\r\n' +
+    '  const liveVerify = await liveBackendVerifyAwemeIds(queueAwemeIds, captureSessionIdResolved);\r\n' +
+    '  const backendBackedSet = new Set(liveVerify.found_aweme_ids);\r\n' +
+    '  const backendBackedCount = liveVerify.found_count;\r\n' +
+    '  const queueTotal = queueAwemeIds.length;\r\n' +
+    '  const pendingBackendBacked = pendingAwemeIds.filter((id) => backendBackedSet.has(id));\r\n' +
+    '  const pendingNotBackendBacked = pendingAwemeIds.filter((id) => !backendBackedSet.has(id));\r\n' +
+    '  // Exact-match classification of the full queue against the verified Pilot 50 set (informational at scale).\r\n' +
+    '  const pendingMatchingVerified = pendingItems.filter((item) => verifiedIdSet.has(item.aweme_id));\r\n' +
+    '  const pendingNotMatchingVerified = pendingItems.filter((item) => !verifiedIdSet.has(item.aweme_id));\r\n' +
+    '  const queueItemsOutsideVerifiedSet = queue.filter((item) => !verifiedIdSet.has(item.aweme_id)).map((item) => item.aweme_id);\r\n' +
+    '  const uniqueOutsideVerifiedIds = guardedHybridUniqueStrings(queueItemsOutsideVerifiedSet);\r\n' +
+    '  const pendingOutsideVerifiedIds = guardedHybridUniqueStrings(pendingNotMatchingVerified.map((item) => item.aweme_id));\r\n' +
+    '  const OUTSIDE_SET_SAMPLE_CAP = 50;\r\n' +
+    '  // Per-id Pilot 50 gap detail (informational at scale; NOT a readiness blocker).\r\n' +
+    '  const queueByAwemeId = new Map(queue.map((item) => [item.aweme_id, item] as const));\r\n' +
+    '  const verifiedCompleteNow = verifiedAwemeIds.filter((awemeId) => {\r\n' +
+    '    const item = queueByAwemeId.get(awemeId);\r\n' +
+    '    return item != null && guardedHybridQueueCompletionItemIsComplete(item);\r\n' +
+    '  });\r\n' +
+    '  const verifiedGapAwemeIds = verifiedAwemeIds.filter((awemeId) => !verifiedCompleteNow.includes(awemeId));\r\n' +
+    '  const TERMINAL_FAILURE_STATUSES = ["failed", "failed_permanent", "duplicate", "skipped"];\r\n' +
+    '  const verifiedGapDetail = verifiedGapAwemeIds.map((awemeId) => {\r\n' +
+    '    const item = queueByAwemeId.get(awemeId) ?? null;\r\n' +
+    '    if (item == null) {\r\n' +
+    '      return { aweme_id: awemeId, reason: "no_exact_local_queue_match", reason_category: "no_exact_backend_match", item_status: null, item_capture_status: null };\r\n' +
+    '    }\r\n' +
+    '    if (TERMINAL_FAILURE_STATUSES.includes(item.status)) {\r\n' +
+    '      return { aweme_id: awemeId, reason: `item_terminal_status_${item.status}`, reason_category: "other", item_status: item.status, item_capture_status: item.capture_status ?? null };\r\n' +
+    '    }\r\n' +
+    '    return { aweme_id: awemeId, reason: "in_queue_pending_not_completed", reason_category: "other", item_status: item.status, item_capture_status: item.capture_status ?? null };\r\n' +
+    '  });\r\n' +
+    '  const gapNoExactMatchCount = verifiedGapDetail.filter((row) => row.reason_category === "no_exact_backend_match").length;\r\n' +
+    '  const gapOtherCount = verifiedGapDetail.filter((row) => row.reason_category === "other").length;\r\n' +
+    '  const storedPilot50Completion = await chrome.storage.local.get(HYBRID_START_COLLECTING_QUEUE_COMPLETION_PILOT_50_LATEST_STORAGE_KEY);\r\n' +
+    '  const pilot50CompletionArtifact = (storedPilot50Completion[HYBRID_START_COLLECTING_QUEUE_COMPLETION_PILOT_50_LATEST_STORAGE_KEY] as Record<string, unknown> | undefined) ?? null;\r\n' +
+    '  const pilot50CompletionResult = (pilot50CompletionArtifact?.completion_result as Record<string, unknown> | undefined) ?? {};\r\n' +
+    '  const pilot50MarkedCompleteCount = Number(pilot50CompletionResult.queue_items_marked_complete_count ?? 0);\r\n' +
+    '  const pilot50AlreadyCompleteCount = Array.isArray(pilot50CompletionResult.queue_items_already_complete_aweme_ids) ? pilot50CompletionResult.queue_items_already_complete_aweme_ids.length : 0;\r\n' +
+    '  // Re-read state to prove nothing was mutated by this dry-run.\r\n' +
+    '  const stateAfter = await readWholeProfileHarvestState(chrome.storage.local, new Date().toISOString());\r\n' +
+    '  const collectJobSafetyAfter = guardedHybridQueueCompletionCollectJobSafetySnapshot(stateAfter);\r\n' +
+    '  const collectJobMutated = collectJobSafetyBefore.fingerprint === collectJobSafetyAfter.fingerprint ? "no" : "yes";\r\n' +
+    '  const queueAfter: WholeProfileHarvestQueueItem[] = Array.isArray(stateAfter.harvest?.queue) ? stateAfter.harvest.queue : [];\r\n' +
+    '  const queueMutated = queueAfter.length === totalQueueItems && queueAfter.filter(guardedHybridQueueCompletionItemIsComplete).length === completeItems.length ? "no" : "yes";\r\n' +
+    '  // SCALE-INDEPENDENT readiness: GO when foundational invariants hold, mechanism validated once, and live verify\r\n' +
+    '  // completed cleanly. Backend-backed coverage count is REPORTED, not gated. Items not yet backend-backed remain\r\n' +
+    '  // pending and are listed in not_backend_backed_pending_aweme_ids_sample. The legacy scale-dependent gates\r\n' +
+    '  // (pilot_50_queue_completion_gap_unresolved_40_of_50 and full_queue_contains_pending_items_outside_verified_\r\n' +
+    '  // pilot_50_set_exact_match_cannot_complete) are surfaced ONLY as informational fields below and are no longer\r\n' +
+    '  // readiness blockers.\r\n' +
+    '  const readinessBlockers = [\r\n' +
+    '    pilot50PostVerifyPassed ? null : "pilot_50_post_verify_milestone_not_passed_mechanism_validation",\r\n' +
+    '    stateBefore.collect_job?.state === "running" || runnerLock.active ? "active_collect_job_running" : null,\r\n' +
+    '    stateBefore.workflow.action_lock === "scan_profile" ? "scan_action_lock_active" : null,\r\n' +
+    '    collectJobMutated === "no" ? null : "collect_job_mutated_during_dry_run",\r\n' +
+    '    queueMutated === "no" ? null : "queue_mutated_during_dry_run",\r\n' +
+    '    liveVerify.auth_required ? "auth_required_complete_authentication_and_re_run_dry_run" : null,\r\n' +
+    '    !liveVerify.completed && !liveVerify.auth_required ? "live_backend_verify_errored_re_run_dry_run" : null\r\n' +
+    '  ].filter((value): value is string => Boolean(value));\r\n' +
+    '  const readinessVerdict = readinessBlockers.length === 0 ? "go_enable_full_queue_completion" : "no_go_keep_full_queue_completion_disabled";\r\n' +
+    '  const NOT_BACKED_PENDING_SAMPLE_CAP = FULL_QUEUE_COMPLETION_NOT_BACKED_SAMPLE_CAP;\r\n' +
+    '  const summary = {\r\n' +
+    '    summary_title: "FULL_QUEUE_COMPLETION_DRY_RUN",\r\n' +
+    '    generated_at: generatedAt,\r\n' +
+    '    build: popupRuntimeVersionDiagnostics(),\r\n' +
+    '    read_only: true,\r\n' +
+    '    production_state_mutation: "none",\r\n' +
+    '    backend_write_attempted: "no",\r\n' +
+    '    pipeline_stages_rerun: "none",\r\n' +
+    '    pilots_auto_rerun: "no",\r\n' +
+    '    match_strategy: "exact_aweme_id_only",\r\n' +
+    '    verified_authority: {\r\n' +
+    '      source: "live_backend_verify_against_capture_inbox_items_verify_endpoint",\r\n' +
+    '      mechanism_validation_source: "latest_passed_pilot_50_post_verify_artifact",\r\n' +
+    '      pilot_50_post_verify_passed: pilot50PostVerifyPassed,\r\n' +
+    '      verified_aweme_id_count: verifiedAwemeIds.length,\r\n' +
+    '      pilot_50_post_verify_blockers: compactStringArray(postVerifySource.blockers, 16),\r\n' +
+    '      coverage_authority: "live_backend_verify",\r\n' +
+    '      coverage_is_scale_independent: true\r\n' +
+    '    },\r\n' +
+    '    // SCALE-INDEPENDENT live backend verify result. This is the COVERAGE authority for any N.\r\n' +
+    '    live_backend_verify: {\r\n' +
+    '      endpoint: liveVerify.endpoint,\r\n' +
+    '      chunk_size: liveVerify.chunk_size,\r\n' +
+    '      chunk_count: liveVerify.chunk_count,\r\n' +
+    '      capture_session_id_scoped: liveVerify.scoped,\r\n' +
+    '      capture_session_id: liveVerify.capture_session_id,\r\n' +
+    '      total_input_count: liveVerify.total_input_count,\r\n' +
+    '      found_count: liveVerify.found_count,\r\n' +
+    '      not_found_count: liveVerify.not_found_count,\r\n' +
+    '      auth_required: liveVerify.auth_required,\r\n' +
+    '      completed: liveVerify.completed,\r\n' +
+    '      errors: compactStringArray(liveVerify.errors, 8)\r\n' +
+    '    },\r\n' +
+    '    // Backend-backed coverage. Reported, NOT gated. queue_total / backend_backed_count drive the scale-independent\r\n' +
+    '    // verdict by enabling the executor to mark only backend-backed items complete; the rest stay pending.\r\n' +
+    '    backend_backed_coverage: {\r\n' +
+    '      queue_total: queueTotal,\r\n' +
+    '      backend_backed_count: backendBackedCount,\r\n' +
+    '      backend_backed'... 4841 more characters,
+  expected: /pilot_50_queue_completion_gap_unresolved_40_of_50|full_queue_contains_pending_items_outside_verified_pilot_50_set_exact_match_cannot_complete/,
+  operator: 'doesNotMatch',
+  diff: 'simple'
+}
+
+Node.js v24.14.1
