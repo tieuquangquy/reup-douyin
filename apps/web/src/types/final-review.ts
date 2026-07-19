@@ -20,6 +20,7 @@ export type RenderOutput = {
   audio_strategy: string | null;
   render_version: string | null;
   created_by_job_id: string | null;
+  size_bytes: number | null;
   warning_summary_json: Record<string, unknown> | null;
   render_settings_json: Record<string, unknown> | null;
   metadata_json: Record<string, unknown> | null;
@@ -49,6 +50,7 @@ export type MediaAssetManifestEntry = {
   mime_type?: string | null;
   size_bytes?: number | null;
   checksum_sha256?: string | null;
+  created_by_job_id?: string | null;
   source_url?: string | null;
   metadata_json?: Record<string, unknown> | null;
 };

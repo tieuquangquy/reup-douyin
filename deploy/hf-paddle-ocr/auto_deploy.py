@@ -3,7 +3,8 @@
 Auto-deploy PaddleOCR API to Google Cloud Run, then wire Phase 2 OCR_ENDPOINT_URL.
 
 Reads deploy flags from README_DEPLOY.md (same directory), runs:
-  gcloud run deploy ... --memory 2Gi --min-instances 0 --allow-unauthenticated --port 8080
+  gcloud run deploy ... --memory 8Gi --cpu 4 --concurrency 2
+  --min-instances 0|1 --max-instances 3 --allow-unauthenticated --port 8080
 
 After success:
   1) Extract service URL (describe --format=value(status.url) + regex fallback)
@@ -11,6 +12,7 @@ After success:
 
 Usage (from repo root or this folder):
   python auto_deploy.py
+  python auto_deploy.py --warm      # batch session: min-instances 1
   python auto_deploy.py --dry-run   # print command + .env update only
 
 Requires: gcloud authenticated + project selected (see README_DEPLOY.md).
@@ -33,7 +35,7 @@ ENV_PATH = REPO_ROOT / ".env"
 OCR_ENV_KEY = "OCR_ENDPOINT_URL"
 
 DEFAULT_SERVICE = "paddle-ocr-api"
-DEFAULT_REGION = "us-central1"
+DEFAULT_REGION = "asia-southeast1"
 
 RUN_APP_URL_RE = re.compile(
     r"https://[a-z0-9][a-z0-9\-]*\.a\.run\.app",
@@ -108,8 +110,9 @@ def parse_deploy_defaults_from_readme(readme: Path) -> dict[str, str]:
     defaults = {
         "service": DEFAULT_SERVICE,
         "region": DEFAULT_REGION,
-        "memory": "4Gi",
-        "cpu": "1",
+        "memory": "8Gi",
+        "cpu": "4",
+        "concurrency": "2",
         "min_instances": "0",
         "max_instances": "3",
         "port": "8080",
@@ -131,6 +134,7 @@ def parse_deploy_defaults_from_readme(readme: Path) -> dict[str, str]:
         ("region", r"--region\s+(\S+)"),
         ("memory", r"--memory\s+(\S+)"),
         ("cpu", r"--cpu\s+(\S+)"),
+        ("concurrency", r"--concurrency\s+(\S+)"),
         ("min_instances", r"--min-instances\s+(\S+)"),
         ("max_instances", r"--max-instances\s+(\S+)"),
         ("port", r"--port\s+(\S+)"),
@@ -158,6 +162,8 @@ def build_deploy_command(cfg: dict[str, str], *, source_dir: Path) -> list[str]:
         cfg["memory"],
         "--cpu",
         cfg["cpu"],
+        "--concurrency",
+        cfg.get("concurrency", "2"),
         "--min-instances",
         cfg["min_instances"],
         "--max-instances",
@@ -228,6 +234,22 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Only describe existing service URL and update .env",
     )
+    parser.add_argument(
+        "--warm",
+        action="store_true",
+        help="Batch/session profile: --min-instances 1 (avoid cold start between Analyze OCR jobs)",
+    )
+    parser.add_argument(
+        "--concurrency",
+        default=None,
+        help="Override Cloud Run --concurrency (default from README: 2)",
+    )
+    parser.add_argument(
+        "--min-instances",
+        default=None,
+        dest="min_instances",
+        help="Override --min-instances (default 0; --warm forces 1)",
+    )
     args = parser.parse_args(argv)
 
     cfg = parse_deploy_defaults_from_readme(README_DEPLOY)
@@ -235,6 +257,12 @@ def main(argv: list[str] | None = None) -> int:
         cfg["service"] = args.service
     if args.region:
         cfg["region"] = args.region
+    if args.concurrency:
+        cfg["concurrency"] = str(args.concurrency).strip()
+    if args.min_instances is not None:
+        cfg["min_instances"] = str(args.min_instances).strip()
+    if args.warm:
+        cfg["min_instances"] = "1"
     # Env overrides (CI / local)
     cfg["service"] = os.environ.get("OCR_CLOUD_RUN_SERVICE", cfg["service"])
     cfg["region"] = os.environ.get("OCR_CLOUD_RUN_REGION", cfg["region"])
@@ -245,6 +273,16 @@ def main(argv: list[str] | None = None) -> int:
     print(f"source:  {SCRIPT_DIR}")
     print(f"env:     {ENV_PATH}")
     print(f"command: {' '.join(deploy_cmd)}")
+    if cfg.get("min_instances") == "1":
+        print(
+            "note:    warm/batch profile (min-instances=1). "
+            "Redeploy without --warm when the session ends to save idle cost."
+        )
+    else:
+        print(
+            "note:    scale-to-zero (min-instances=0). "
+            "For Analyze OCR batch sessions use: python auto_deploy.py --warm"
+        )
 
     if args.dry_run:
         sample = f"https://{cfg['service']}-xxxxx-xx.a.run.app/predict"

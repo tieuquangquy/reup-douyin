@@ -286,7 +286,7 @@ export function OpsTranslationAiPage() {
       : null;
 
   return (
-    <main className="ops-page ops-page--settings">
+    <main className="ops-page ops-page--settings ops-ai-page is-compact">
       <OpsTranslationSettingsTabs />
 
       {error ? <div className="inline-error">{error}</div> : null}
@@ -294,7 +294,7 @@ export function OpsTranslationAiPage() {
       <OpsPanel
         title={t("opsTranslationAi.panelTitle")}
         actions={
-          <div className="ops-header-actions">
+          <div className="ops-header-actions ops-ai-toolbar" role="group" aria-label={t("opsTranslationAi.panelTitle")}>
             {savedMessage ? <span className="ops-connection-status is-ok">{t("opsTranslationAi.saved")}</span> : null}
             {testResult?.ok ? (
               <span className="ops-connection-status is-ok">
@@ -304,40 +304,50 @@ export function OpsTranslationAiPage() {
                 })}
               </span>
             ) : null}
-            <button type="button" onClick={() => void load()} disabled={saving || testing}>
-              {t("common.refresh")}
-            </button>
-            <button type="button" onClick={() => void onTest()} disabled={saving || testing}>
-              {testing ? t("opsTranslationAi.testing") : t("opsTranslationAi.test")}
-            </button>
-            <button type="button" className="primary" onClick={() => void onSave()} disabled={saving || testing}>
-              {saving ? t("opsTranslationAi.saving") : t("opsTranslationAi.save")}
-            </button>
+            <div className="ops-ai-toolbar__group">
+              <button
+                type="button"
+                className="ops-ai-toolbar__refresh"
+                onClick={() => void load()}
+                disabled={saving || testing}
+                aria-label={t("common.refresh")}
+                title={t("common.refresh")}
+              >
+                <span aria-hidden="true">↻</span>
+              </button>
+              <button type="button" onClick={() => void onTest()} disabled={saving || testing}>
+                {testing ? t("opsTranslationAi.testing") : t("opsTranslationAi.test")}
+              </button>
+              <button type="button" className="primary" onClick={() => void onSave()} disabled={saving || testing}>
+                {saving ? t("opsTranslationAi.saving") : t("opsTranslationAi.save")}
+              </button>
+            </div>
+          </div>
+        }
+        meta={
+          <div className="ops-ai-meta">
+            <div className="ops-ai-status" aria-label={t("opsTranslationAi.statusLabel")}>
+              <span className={`ops-ai-chip ${meta.source === "workspace_db" ? "is-active" : "is-muted"}`}>
+                {meta.source === "workspace_db" ? t("opsTranslationAi.sourceDbShort") : t("opsTranslationAi.sourceEnvShort")}
+              </span>
+              <span className={`ops-ai-chip ${meta.apiKeySet ? "is-ok" : "is-muted"}`}>
+                {meta.apiKeySet ? `${t("opsTranslationAi.keySet")}: ${meta.apiKeyMasked}` : t("opsTranslationAi.keyUnset")}
+              </span>
+              <span className="ops-ai-chip is-muted">{form.provider}</span>
+              <label className="ops-ai-toggle ops-ai-toggle--flush" title={t("opsTranslationAi.disableHint")}>
+                <input
+                  type="checkbox"
+                  checked={form.enabled}
+                  onChange={(event) => setForm({ ...form, enabled: event.target.checked })}
+                />
+                <span>
+                  <strong>{t("opsTranslationAi.enabled")}</strong>
+                </span>
+              </label>
+            </div>
           </div>
         }
       >
-        <p className="ops-muted">
-          {t("opsTranslationAi.hint")}{" "}
-          <code>
-            {meta.source === "workspace_db" ? t("opsTranslationAi.sourceDb") : t("opsTranslationAi.sourceEnv")}
-          </code>
-          {meta.apiKeySet ? (
-            <>
-              {" "}
-              · {t("opsTranslationAi.keySet")}: <code>{meta.apiKeyMasked}</code>
-            </>
-          ) : (
-            <> · {t("opsTranslationAi.keyUnset")}</>
-          )}
-        </p>
-
-        {savedMessage ? (
-          <div className="ops-field-alert is-success" role="status">
-            <strong>{t("opsTranslationAi.saved")}</strong>
-            <span>{t("opsTranslationAi.savedHint")}</span>
-          </div>
-        ) : null}
-
         {testFailure ? (
           <div className="ops-field-alert is-error" role="alert" title={testResult?.detail || undefined}>
             <strong>
@@ -350,82 +360,96 @@ export function OpsTranslationAiPage() {
           </div>
         ) : null}
 
-        <div className="ops-form-grid">
-          <label className="ops-form-field-inline">
-            <input
-              type="checkbox"
-              checked={form.enabled}
-              onChange={(event) => setForm({ ...form, enabled: event.target.checked })}
-            />
-            <span>{t("opsTranslationAi.enabled")}</span>
-          </label>
-
-          <div className="ops-form-field">
-            <label htmlFor="translation-ai-provider">{t("opsTranslationAi.provider")}</label>
-            <select
-              id="translation-ai-provider"
-              value={form.provider}
-              onChange={(event) => onProviderChange(event.target.value)}
-            >
-              <option value="auto">auto</option>
-              <option value="gemini">gemini</option>
-              <option value="openai_compatible">openai_compatible</option>
-              <option value="ollama">ollama</option>
-              <option value="placeholder">placeholder</option>
-            </select>
-          </div>
-
-          {showsBaseUrl(form.provider) ? (
+        <section className="ops-ai-section">
+          <header className="ops-ai-section__head">
+            <h3>{t("opsTranslationAi.sectionConnection")}</h3>
+          </header>
+          <div className="ops-ai-grid">
             <div className="ops-form-field">
-              <label htmlFor="translation-ai-base-url">{t("opsTranslationAi.baseUrl")}</label>
+              <label htmlFor="translation-ai-provider">{t("opsTranslationAi.provider")}</label>
+              <select
+                id="translation-ai-provider"
+                value={form.provider}
+                onChange={(event) => onProviderChange(event.target.value)}
+              >
+                <option value="auto">auto</option>
+                <option value="gemini">gemini</option>
+                <option value="openai_compatible">openai_compatible</option>
+                <option value="ollama">ollama</option>
+                <option value="placeholder">placeholder</option>
+              </select>
+            </div>
+            <div className="ops-form-field">
+              <label htmlFor="translation-ai-timeout">{t("opsTranslationAi.timeout")}</label>
               <input
-                id="translation-ai-base-url"
-                name="translation-ai-base-url"
-                type="text"
-                inputMode="url"
-                value={form.baseUrl}
-                onChange={(event) => setForm({ ...form, baseUrl: event.target.value })}
-                placeholder={
-                  form.provider === "ollama" ? "http://127.0.0.1:11434" : "https://api.openai.com/v1"
-                }
-                autoComplete="off"
-                spellCheck={false}
+                id="translation-ai-timeout"
+                type="number"
+                min={1}
+                max={600}
+                value={form.timeoutSeconds}
+                onChange={(event) => setForm({ ...form, timeoutSeconds: event.target.value })}
               />
             </div>
-          ) : null}
-
-          {showsApiKey(form.provider) ? (
-            <div className="ops-form-field">
-              <label htmlFor="translation-ai-api-key">{t("opsTranslationAi.apiKey")}</label>
-              <input
-                id="translation-ai-api-key"
-                name="translation-ai-api-key"
-                type="password"
-                value={form.apiKeyInput}
-                onChange={(event) => setForm({ ...form, apiKeyInput: event.target.value, clearApiKey: false })}
-                placeholder={
-                  meta.apiKeySet ? t("opsTranslationAi.apiKeyKeepPlaceholder") : t("opsTranslationAi.apiKeyPlaceholder")
-                }
-                autoComplete="new-password"
-                spellCheck={false}
-              />
-              <label className="ops-form-field-inline">
+            {showsBaseUrl(form.provider) ? (
+              <div className="ops-form-field ops-ai-span-2">
+                <label htmlFor="translation-ai-base-url">{t("opsTranslationAi.baseUrl")}</label>
                 <input
-                  type="checkbox"
-                  checked={form.clearApiKey}
-                  onChange={(event) =>
-                    setForm({
-                      ...form,
-                      clearApiKey: event.target.checked,
-                      apiKeyInput: event.target.checked ? "" : form.apiKeyInput
-                    })
+                  id="translation-ai-base-url"
+                  name="translation-ai-base-url"
+                  type="text"
+                  inputMode="url"
+                  value={form.baseUrl}
+                  onChange={(event) => setForm({ ...form, baseUrl: event.target.value })}
+                  placeholder={
+                    form.provider === "ollama" ? "http://127.0.0.1:11434" : "https://api.openai.com/v1"
                   }
+                  autoComplete="off"
+                  spellCheck={false}
                 />
-                <span>{t("opsTranslationAi.clearApiKey")}</span>
-              </label>
-            </div>
-          ) : null}
+              </div>
+            ) : null}
+            {showsApiKey(form.provider) ? (
+              <>
+                <div className="ops-form-field ops-ai-span-2">
+                  <label htmlFor="translation-ai-api-key">{t("opsTranslationAi.apiKey")}</label>
+                  <input
+                    id="translation-ai-api-key"
+                    name="translation-ai-api-key"
+                    type="password"
+                    value={form.apiKeyInput}
+                    onChange={(event) => setForm({ ...form, apiKeyInput: event.target.value, clearApiKey: false })}
+                    placeholder={
+                      meta.apiKeySet
+                        ? t("opsTranslationAi.apiKeyKeepPlaceholder")
+                        : t("opsTranslationAi.apiKeyPlaceholder")
+                    }
+                    autoComplete="new-password"
+                    spellCheck={false}
+                  />
+                </div>
+                <label className="ops-form-field-inline ops-ai-span-2">
+                  <input
+                    type="checkbox"
+                    checked={form.clearApiKey}
+                    onChange={(event) =>
+                      setForm({
+                        ...form,
+                        clearApiKey: event.target.checked,
+                        apiKeyInput: event.target.checked ? "" : form.apiKeyInput
+                      })
+                    }
+                  />
+                  <span>{t("opsTranslationAi.clearApiKey")}</span>
+                </label>
+              </>
+            ) : null}
+          </div>
+        </section>
 
+        <section className="ops-ai-section">
+          <header className="ops-ai-section__head">
+            <h3>{t("opsTranslationAi.sectionModelFallback")}</h3>
+          </header>
           {showModel ? (
             <div className="ops-form-field">
               <label htmlFor="translation-ai-model">{t("opsTranslationAi.model")}</label>
@@ -474,46 +498,32 @@ export function OpsTranslationAiPage() {
           ) : (
             <p className="ops-muted">{t("opsTranslationAi.modelGateHint")}</p>
           )}
-
-          <div className="ops-form-field">
-            <label htmlFor="translation-ai-timeout">{t("opsTranslationAi.timeout")}</label>
-            <input
-              id="translation-ai-timeout"
-              type="number"
-              min={1}
-              max={600}
-              value={form.timeoutSeconds}
-              onChange={(event) => setForm({ ...form, timeoutSeconds: event.target.value })}
-            />
+          <div className="ops-ai-grid">
+            <div className="ops-form-field">
+              <label htmlFor="translation-ai-fallback">{t("opsTranslationAi.fallbackProvider")}</label>
+              <select
+                id="translation-ai-fallback"
+                value={form.fallbackProvider}
+                onChange={(event) => setForm({ ...form, fallbackProvider: event.target.value })}
+              >
+                <option value="none">none</option>
+                <option value="ollama">ollama</option>
+                <option value="gemini">gemini</option>
+                <option value="openai_compatible">openai_compatible</option>
+              </select>
+            </div>
+            <div className="ops-form-field">
+              <label htmlFor="translation-ai-fallback-model">{t("opsTranslationAi.fallbackModel")}</label>
+              <input
+                id="translation-ai-fallback-model"
+                value={form.fallbackModel}
+                onChange={(event) => setForm({ ...form, fallbackModel: event.target.value })}
+                autoComplete="off"
+                spellCheck={false}
+              />
+            </div>
           </div>
-
-          <div className="ops-form-field">
-            <label htmlFor="translation-ai-fallback">{t("opsTranslationAi.fallbackProvider")}</label>
-            <select
-              id="translation-ai-fallback"
-              value={form.fallbackProvider}
-              onChange={(event) => setForm({ ...form, fallbackProvider: event.target.value })}
-            >
-              <option value="none">none</option>
-              <option value="ollama">ollama</option>
-              <option value="gemini">gemini</option>
-              <option value="openai_compatible">openai_compatible</option>
-            </select>
-          </div>
-
-          <div className="ops-form-field">
-            <label htmlFor="translation-ai-fallback-model">{t("opsTranslationAi.fallbackModel")}</label>
-            <input
-              id="translation-ai-fallback-model"
-              value={form.fallbackModel}
-              onChange={(event) => setForm({ ...form, fallbackModel: event.target.value })}
-              autoComplete="off"
-              spellCheck={false}
-            />
-          </div>
-        </div>
-
-        <p className="ops-muted">{t("opsTranslationAi.disableHint")}</p>
+        </section>
       </OpsPanel>
     </main>
   );

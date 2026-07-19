@@ -13,8 +13,12 @@ assert.match(componentSource, /fetchTranslationAi/, "UI must load Translation AI
 assert.match(componentSource, /saveTranslationAi/, "UI must save Translation AI via API");
 assert.match(componentSource, /testTranslationAi/, "UI must support Test connection");
 assert.match(componentSource, /formatConnectionTestSummary/, "Successful test must use compact summary formatter");
-assert.match(componentSource, /ops-connection-status is-ok/, "Successful test renders compact chip only");
-assert.match(componentSource, /ops-field-alert is-success/, "Save success must use compact field alert, not page banner");
+assert.match(componentSource, /ops-connection-status is-ok/, "Successful test/save renders compact toolbar chip only");
+assert.doesNotMatch(
+  componentSource,
+  /savedMessage \? \([\s\S]*ops-field-alert is-success/,
+  "Save success must not use a second field alert under the panel"
+);
 assert.doesNotMatch(
   componentSource,
   /inline-success[\s\S]*savedMessage|savedMessage[\s\S]*inline-success/,
@@ -93,13 +97,13 @@ assert.match(apiSource, /\/ops\/translation-ai/, "API helper must hit translatio
 assert.match(navSource, /nav\.translationSettings/, "Ops nav must use shared Translation settings label");
 assert.match(
   navSource,
-  /sectionRiskTools[\s\S]*?translationSettings[\s\S]*?riskGates/,
-  "Risk & Tools must expose one Translation settings entry before Risk Gates"
+  /sectionAiSettings[\s\S]*?translationSettings[\s\S]*?captionAiSettings[\s\S]*?ttsSettings/,
+  "AI Settings must list Translation, Caption, and TTS together"
 );
 assert.doesNotMatch(
   navSource,
-  /sectionRiskTools[\s\S]*?translationAi[\s\S]*?translationPrompt/,
-  "Risk & Tools must not list Translation AI and Translation prompt as separate sidebar items"
+  /sectionAiSettings[\s\S]*?translationAi[\s\S]*?translationPrompt/,
+  "AI Settings must not list Translation AI and Translation prompt as separate sidebar items"
 );
 assert.match(navSource, /activePatterns: \["\/ops\/translation-ai", "\/ops\/translation-prompt"\]/, "Sidebar item active on both translation settings routes");
 assert.doesNotMatch(navSource, /export const topbarQuickActions/, "Topbar quick-nav actions must stay removed");

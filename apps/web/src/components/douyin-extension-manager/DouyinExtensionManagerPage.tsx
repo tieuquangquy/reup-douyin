@@ -19,7 +19,6 @@ import type {
   DouyinExtensionPageType
 } from "../../types/douyin-extension-manager";
 import { OpsConsoleShell } from "../app-shell/OpsConsoleShell";
-import { PageShell } from "../app-shell/PageShell";
 
 const EXTENSION_SETUP_PATH = "/setup/douyin-extension";
 const EXTENSION_SETUP_HREF = `${loginPathForSurface("operator")}?next=${encodeURIComponent(EXTENSION_SETUP_PATH)}`;
@@ -144,14 +143,10 @@ export function DouyinExtensionManagerPage() {
 
   return (
     <OpsConsoleShell
+      actions={<button disabled={working === "status"} onClick={() => void checkConnection()} type="button">{working === "status" ? "Checking..." : "Check connection"}</button>}
       description="Detect, capture, and troubleshoot the Douyin browser extension. Install lives in Operator Studio Setup."
       title="Douyin Extension Manager"
     >
-      <PageShell
-        actions={<button disabled={working === "status"} onClick={() => void checkConnection()} type="button">{working === "status" ? "Checking..." : "Check connection"}</button>}
-        description="Ops tooling for connection health, capture diagnostics, and manual backend tests. Use Operator Studio Extension Setup to install or reload the browser extension."
-        title="Douyin Extension Manager"
-      >
         {error ? <section className="operator-panel intake-status danger"><strong>Manager error:</strong> {error}</section> : null}
         <div className="intake-layout">
           <div className="intake-form">
@@ -172,7 +167,6 @@ export function DouyinExtensionManagerPage() {
             <HistorySection history={history} />
           </aside>
         </div>
-      </PageShell>
     </OpsConsoleShell>
   );
 }

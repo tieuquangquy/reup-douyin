@@ -60,6 +60,55 @@ class JobRunner:
         self.handlers = handlers or StepHandlerRegistry()
         self.service = JobService(db)
 
+    def release_orphaned_locks(self, worker_id: str) -> int:
+        """
+        Requeue RUNNING jobs still locked by this worker after a crash/restart.
+
+        claim_next only picks QUEUED/RETRYABLE — without this, a mid-step crash leaves
+        the job stuck in Ops as Running forever while the worker idles.
+        """
+        stmt = (
+            select(Job)
+            .where(Job.status == JobStatus.RUNNING)
+            .where(Job.locked_by == worker_id)
+            .options(selectinload(Job.steps))
+        )
+        jobs = list(self.db.scalars(stmt).all())
+        if not jobs:
+            return 0
+        for job in jobs:
+            for step in job.steps or []:
+                if step.status == JobStepStatus.RUNNING:
+                    self.service.transition_step(
+                        step,
+                        JobStepStatus.FAILED,
+                        progress_percent=0,
+                        error_code="WORKER_ORPHANED",
+                        error_message=(
+                            "Worker restarted or crashed while this step was RUNNING; "
+                            "job requeued automatically."
+                        ),
+                    )
+            self.service.transition_job(
+                job,
+                JobStatus.RETRYABLE,
+                error_code="WORKER_ORPHANED",
+                error_message=(
+                    "Worker restarted or crashed while job was RUNNING; "
+                    "requeued for another attempt."
+                ),
+            )
+            job.locked_by = None
+            job.locked_at = None
+            job.scheduled_at = None
+            self.service.refresh_progress(job)
+            logger.warning(
+                "job_orphan_lock_released",
+                extra={"job_id": str(job.id), "worker_id": worker_id},
+            )
+        self.db.commit()
+        return len(jobs)
+
     def claim_next_job(self, worker_id: str) -> Job | None:
         now = datetime.now(UTC)
         stmt = (
@@ -127,7 +176,20 @@ class JobRunner:
                 self.db.commit()
 
             logger.info("job_step_start", extra={"job_id": str(job.id), "step_key": step.step_key})
-            result = self.handlers.get(job.job_type, step.step_key).handle(job, step)
+            try:
+                result = self.handlers.get(job.job_type, step.step_key).handle(job, step)
+            except Exception as exc:
+                logger.exception(
+                    "job_step_unhandled_error",
+                    extra={"job_id": str(job.id), "step_key": step.step_key},
+                )
+                result = StepHandlerResult(
+                    status=JobStepStatus.FAILED,
+                    progress_percent=0,
+                    error_code="STEP_UNHANDLED_ERROR",
+                    error_message=f"{type(exc).__name__}: {exc}"[:500],
+                    output_json={"step_key": step.step_key},
+                )
 
             if result.status == JobStepStatus.WAITING_FOR_INPUT:
                 self.service.transition_step(step, JobStepStatus.WAITING_FOR_INPUT, progress_percent=result.progress_percent)
@@ -468,6 +530,7 @@ class JobRunner:
                                 "detection_count": ocr_summary.detection_count,
                                 "hardsub_event_count": ocr_summary.hardsub_event_count,
                                 "cleaned_video_asset_id": ocr_summary.cleaned_video_asset_id,
+                                "clean_produced": ocr_summary.clean_produced,
                                 "warnings": ocr_summary.warnings,
                             }
                         )
@@ -477,6 +540,18 @@ class JobRunner:
                             progress_percent=0,
                             error_code=exc.code,
                             error_message=exc.message,
+                            output_json={"source_video_id": str(source_video_id)},
+                        )
+                    except Exception as exc:
+                        logger.exception(
+                            "job_step_unhandled_error",
+                            extra={"job_id": str(job.id), "step_key": step.step_key},
+                        )
+                        result = StepHandlerResult(
+                            status=JobStepStatus.FAILED,
+                            progress_percent=0,
+                            error_code="STEP_UNHANDLED_ERROR",
+                            error_message=f"{type(exc).__name__}: {exc}"[:500],
                             output_json={"source_video_id": str(source_video_id)},
                         )
 

@@ -35,6 +35,13 @@ export const operatorNavSections: NavSection[] = [
         href: "/",
         description: "nav.homeDesc",
         status: "available"
+      },
+      {
+        label: "nav.pipelineDashboard",
+        href: "/ops/pipeline",
+        description: "nav.pipelineDashboardDesc",
+        status: "available",
+        activePatterns: ["/ops/pipeline"]
       }
     ]
   },
@@ -144,12 +151,6 @@ export const opsNavSections: NavSection[] = [
         label: "nav.opsHome",
         href: "/ops",
         description: "nav.opsHomeDesc",
-        status: "available"
-      },
-      {
-        label: "nav.pipelineDashboard",
-        href: "/ops/pipeline",
-        description: "nav.pipelineDashboardDesc",
         status: "available"
       },
       {
@@ -329,7 +330,10 @@ const breadcrumbRules: Array<{ patterns: string[]; crumbs: BreadcrumbItem[] }> =
     crumbs: [{ label: "nav.home", href: "/" }, { label: "nav.optimization" }]
   },
   { patterns: ["/ops"], crumbs: [{ label: "nav.opsConsole" }] },
-  { patterns: ["/ops/pipeline"], crumbs: [{ label: "nav.opsConsole", href: "/ops" }, { label: "nav.pipelineDashboard" }] },
+  {
+    patterns: ["/ops/pipeline"],
+    crumbs: [{ label: "nav.home", href: "/" }, { label: "nav.pipelineDashboard" }]
+  },
   { patterns: ["/ops/health"], crumbs: [{ label: "nav.opsConsole", href: "/ops" }, { label: "nav.systemHealth" }] },
   {
     patterns: ["/ops/jobs"],
@@ -435,7 +439,9 @@ export function extractSourceVideoIdFromPath(pathname: string): string | null {
 }
 
 export function getSourceVideoNavHref(target: NonNullable<NavItem["sourceVideoTarget"]>, sourceVideoId: string): string {
-  return `/source-videos/${encodeURIComponent(sourceVideoId)}/${target}`;
+  const id = encodeURIComponent(sourceVideoId);
+  if (target === "transcript-editor") return `/production/transcript-editor/${id}`;
+  return `/production/final-review/${id}`;
 }
 
 export function resolveNavItemHref(item: NavItem, sourceVideoId: string | null): string {

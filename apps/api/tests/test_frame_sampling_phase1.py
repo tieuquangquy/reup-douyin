@@ -37,12 +37,15 @@ class ExtractVideoFramesTests(unittest.TestCase):
             out = root / "frames"
 
             def fake_run(cmd, **_kwargs):
+                out.mkdir(parents=True, exist_ok=True)
+                if "thumbnail.jpg" in str(cmd[-1]):
+                    Path(cmd[-1]).write_bytes(b"jpg")
+                    return type("Completed", (), {"returncode": 0, "stderr": "", "stdout": ""})()
                 # Ensure STRICT fps filter is present and not a full dump.
                 self.assertIn("-vf", cmd)
                 vf = cmd[cmd.index("-vf") + 1]
                 self.assertIn(vf, ("fps=1", "fps=2"))
                 self.assertNotIn("select=", vf)
-                out.mkdir(parents=True, exist_ok=True)
                 for i in range(1, 4):
                     (out / f"frame_{i:06d}.jpg").write_bytes(b"jpg")
                 return type("Completed", (), {"returncode": 0, "stderr": "", "stdout": ""})()
@@ -51,9 +54,13 @@ class ExtractVideoFramesTests(unittest.TestCase):
                 with patch("src.media_pipeline.frame_sampling.ffmpeg_engine.subprocess.run", side_effect=fake_run):
                     frames = extract_video_frames(video, out, sample_fps=1)
 
-            self.assertEqual(len(frames), 3)
+            self.assertEqual(len(frames), 4)  # thumbnail + 3 samples
             self.assertTrue(all(p.is_file() for p in frames))
-            self.assertEqual([p.name for p in frames], ["frame_000001.jpg", "frame_000002.jpg", "frame_000003.jpg"])
+            self.assertEqual(frames[0].name, "thumbnail.jpg")
+            self.assertEqual(
+                [p.name for p in frames[1:]],
+                ["frame_000001.jpg", "frame_000002.jpg", "frame_000003.jpg"],
+            )
 
     def test_job_returns_paths_for_local_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -64,6 +71,9 @@ class ExtractVideoFramesTests(unittest.TestCase):
 
             def fake_run(cmd, **_kwargs):
                 out.mkdir(parents=True, exist_ok=True)
+                if "thumbnail.jpg" in str(cmd[-1]):
+                    Path(cmd[-1]).write_bytes(b"jpg")
+                    return type("Completed", (), {"returncode": 0, "stderr": "", "stdout": ""})()
                 (out / "frame_000001.jpg").write_bytes(b"jpg")
                 return type("Completed", (), {"returncode": 0, "stderr": "", "stdout": ""})()
 
@@ -78,9 +88,11 @@ class ExtractVideoFramesTests(unittest.TestCase):
                     )
 
             self.assertEqual(result.sample_fps, 2)
-            self.assertEqual(result.frame_count, 1)
-            self.assertEqual(len(result.frame_paths), 1)
+            self.assertEqual(result.frame_count, 2)  # thumbnail + 1 sample
+            self.assertEqual(len(result.frame_paths), 2)
+            self.assertEqual(Path(result.frame_paths[0]).name, "thumbnail.jpg")
             self.assertTrue(Path(result.frame_paths[0]).is_file())
+            self.assertTrue(Path(result.frame_paths[1]).is_file())
 
 
 class SampleFpsTypeTests(unittest.TestCase):

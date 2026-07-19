@@ -55,7 +55,7 @@ class OcrFilteringPipelineTests(unittest.TestCase):
             provider = MockOcrProvider(
                 boxes_by_stem={
                     "frame_000001": [
-                        DetectedTextBox(0.1, 0.2, 0.2, 0.05, "TOP", 0.9),
+                        DetectedTextBox(0.1, 0.05, 0.2, 0.04, "TOP", 0.9),
                         DetectedTextBox(0.1, 0.8, 0.7, 0.1, "BOTTOM_A", 0.95),
                     ],
                     "frame_000002": [
@@ -74,7 +74,7 @@ class OcrFilteringPipelineTests(unittest.TestCase):
             self.assertEqual(len(payload["frames"]), 2)
             self.assertEqual(payload["frames"][0]["frame_id"], "frame_000001")
             self.assertEqual(payload["frames"][0]["time_ms"], 0)
-            self.assertEqual([b["text"] for b in payload["frames"][0]["boxes"]], ["BOTTOM_A"])
+            self.assertEqual([b["text"] for b in payload["frames"][0]["boxes"]], ["TOP", "BOTTOM_A"])
             self.assertEqual(payload["frames"][1]["time_ms"], 1000)
             self.assertEqual([b["text"] for b in payload["frames"][1]["boxes"]], ["BOTTOM_B"])
             # Normalized xywh present

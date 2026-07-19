@@ -138,7 +138,8 @@ class RenderService:
                     "id": str(output_asset.id),
                     "storage_key": output_asset.storage_key,
                     "mime_type": output_asset.mime_type,
-                    "asset_type": output_asset.asset_type,
+                    "asset_type": str(getattr(output_asset.asset_type, "value", output_asset.asset_type)),
+                    "size_bytes": output_asset.size_bytes,
                 },
                 render_profile=profile,
                 input_probe=source_probe,
@@ -164,7 +165,19 @@ class RenderService:
             render_output.video_codec = profile.video_codec
             render_output.audio_codec = profile.audio_codec
             render_output.warning_summary_json = {"warnings": merged_warnings}
-            render_output.metadata_json = {"render_manifest_asset_id": str(manifest_asset.id), "render_log_asset_id": str(log_asset.id), "manifest": manifest}
+            render_meta = {
+                "render_manifest_asset_id": str(manifest_asset.id),
+                "render_log_asset_id": str(log_asset.id),
+                "manifest": manifest,
+            }
+            if job_id is not None:
+                render_meta["created_by_job_id"] = str(job_id)
+            else:
+                logger.warning(
+                    "render_completed_without_job_id",
+                    extra={"render_output_id": str(render_output.id), "source_video_id": str(source_video.id)},
+                )
+            render_output.metadata_json = render_meta
             render_output.finished_at = datetime.now(UTC)
             source_video.status = SourceVideoStatus.READY_FINAL_REVIEW
             self.db.commit()
@@ -187,19 +200,20 @@ class RenderService:
         )
 
     def list_renders(self, source_video_id: UUID) -> list[RenderOutput]:
-        return list(
-            self.db.scalars(
+        return [
+            self._hydrate_render_display_fields(render)
+            for render in self.db.scalars(
                 select(RenderOutput)
                 .where(RenderOutput.source_video_id == source_video_id)
                 .order_by(RenderOutput.created_at.desc())
             )
-        )
+        ]
 
     def get_render(self, render_id: UUID) -> RenderOutput:
         render = self.db.get(RenderOutput, render_id)
         if render is None:
             raise RenderPipelineError(RenderPipelineErrorCode.MISSING_RENDER_PREP_MANIFEST, "Render output not found")
-        return render
+        return self._hydrate_render_display_fields(render)
 
     def approve_render(self, render_id: UUID) -> RenderOutput:
         render = self.get_render(render_id)
@@ -232,12 +246,225 @@ class RenderService:
         return render
 
     def latest_render(self, source_video_id: UUID) -> RenderOutput | None:
-        return self.db.scalar(
+        render = self.db.scalar(
             select(RenderOutput)
             .where(RenderOutput.source_video_id == source_video_id)
             .order_by(RenderOutput.created_at.desc())
             .limit(1)
         )
+        return self._hydrate_render_display_fields(render) if render else None
+
+    def to_render_response(self, render: RenderOutput) -> "RenderOutputResponse":
+        from src.schemas.renders import RenderOutputResponse
+
+        hydrated = self._hydrate_render_display_fields(render)
+        payload = RenderOutputResponse.model_validate(hydrated)
+        return payload.model_copy(update={"size_bytes": self._resolve_size_bytes(hydrated)})
+
+    def _hydrate_render_display_fields(self, render: RenderOutput) -> RenderOutput:
+        """Backfill probe fields, size metadata, and job id for Final Review Info."""
+        asset = render.media_asset
+        if asset is None and render.media_asset_id is not None:
+            asset = self.db.get(MediaAsset, render.media_asset_id)
+
+        storage_key = asset.storage_key if asset is not None else None
+        probe = None
+        needs_probe = (
+            render.width is None
+            or render.height is None
+            or render.fps is None
+            or render.duration_seconds is None
+            or self._resolve_size_bytes(render, asset=asset) is None
+        )
+        if needs_probe and storage_key:
+            try:
+                probe = self.probe_service.probe(storage_key)
+            except RenderPipelineError:
+                probe = None
+
+        changed = False
+        if probe is not None:
+            if render.width is None and probe.width is not None:
+                render.width = probe.width
+                changed = True
+            if render.height is None and probe.height is not None:
+                render.height = probe.height
+                changed = True
+            if render.fps is None and probe.fps is not None:
+                render.fps = probe.fps
+                changed = True
+            if render.duration_seconds is None and probe.duration_seconds is not None:
+                render.duration_seconds = probe.duration_seconds
+                changed = True
+            if render.video_codec is None and probe.video_codec:
+                render.video_codec = probe.video_codec
+                changed = True
+            if render.audio_codec is None and probe.audio_codec:
+                render.audio_codec = probe.audio_codec
+                changed = True
+
+        if render.duration_seconds is None:
+            source = self.db.get(SourceVideo, render.source_video_id)
+            if source is not None and source.duration_seconds:
+                render.duration_seconds = float(source.duration_seconds)
+                changed = True
+
+        size_bytes = self._resolve_size_bytes(render, asset=asset, probe=probe)
+        meta = dict(render.metadata_json or {})
+        nested = dict(meta.get("manifest") or {})
+        nested_output = dict(nested.get("output") or {})
+        if size_bytes is not None:
+            if meta.get("size_bytes") != size_bytes:
+                meta["size_bytes"] = size_bytes
+                changed = True
+            if nested_output.get("size_bytes") != size_bytes:
+                nested_output["size_bytes"] = size_bytes
+                nested["output"] = nested_output
+                changed = True
+
+        if render.created_by_job_id is None:
+            recovered = self._recover_job_id(render, asset=asset, manifest=nested)
+            if recovered is not None:
+                render.created_by_job_id = recovered
+                nested["job_id"] = str(recovered)
+                meta["created_by_job_id"] = str(recovered)
+                changed = True
+            else:
+                display_job = self._display_job_id_hint(meta=meta, asset=asset, manifest=nested)
+                if display_job:
+                    if nested.get("job_id") != display_job:
+                        nested["job_id"] = display_job
+                        changed = True
+                    if meta.get("created_by_job_id") != display_job:
+                        meta["created_by_job_id"] = display_job
+                        changed = True
+        else:
+            job_s = str(render.created_by_job_id)
+            if nested.get("job_id") != job_s:
+                nested["job_id"] = job_s
+                changed = True
+            if meta.get("created_by_job_id") != job_s:
+                meta["created_by_job_id"] = job_s
+                changed = True
+
+        if nested:
+            meta["manifest"] = nested
+        if meta != (render.metadata_json or {}):
+            render.metadata_json = meta
+            changed = True
+
+        if changed:
+            self.db.commit()
+            self.db.refresh(render)
+            logger.info(
+                "render_display_fields_hydrated",
+                extra={
+                    "render_id": str(render.id),
+                    "width": render.width,
+                    "height": render.height,
+                    "fps": render.fps,
+                    "duration_seconds": render.duration_seconds,
+                    "size_bytes": size_bytes,
+                    "created_by_job_id": str(render.created_by_job_id) if render.created_by_job_id else None,
+                },
+            )
+        return render
+
+    def _resolve_size_bytes(
+        self,
+        render: RenderOutput,
+        *,
+        asset: MediaAsset | None = None,
+        probe=None,
+    ) -> int | None:
+        meta = render.metadata_json or {}
+        nested = meta.get("manifest") if isinstance(meta.get("manifest"), dict) else {}
+        nested_output = nested.get("output") if isinstance(nested.get("output"), dict) else {}
+        for candidate in (
+            meta.get("size_bytes"),
+            nested_output.get("size_bytes"),
+            getattr(asset, "size_bytes", None) if asset is not None else None,
+            (probe.raw or {}).get("size_bytes") if probe is not None else None,
+        ):
+            try:
+                value = int(candidate)  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                return value
+        if asset is None and render.media_asset_id is not None:
+            loaded = self.db.get(MediaAsset, render.media_asset_id)
+            if loaded is not None and loaded.size_bytes and loaded.size_bytes > 0:
+                return int(loaded.size_bytes)
+        return None
+
+    def _recover_job_id(
+        self,
+        render: RenderOutput,
+        *,
+        asset: MediaAsset | None,
+        manifest: dict,
+    ) -> UUID | None:
+        from src.enums import JobType
+        from src.models.jobs import Job, JobStep
+
+        linked = self.db.scalar(
+            select(Job)
+            .where(Job.render_output_id == render.id)
+            .order_by(Job.created_at.desc())
+            .limit(1)
+        )
+        if linked is not None:
+            return linked.id
+
+        candidates: list[str] = []
+        if isinstance(manifest.get("job_id"), str) and manifest["job_id"].strip():
+            candidates.append(manifest["job_id"].strip())
+        if asset is not None and asset.created_by_job_id is not None:
+            candidates.append(str(asset.created_by_job_id))
+
+        for raw in candidates:
+            try:
+                job_id = UUID(raw)
+            except (TypeError, ValueError):
+                continue
+            if self.db.get(Job, job_id) is not None:
+                return job_id
+
+        steps = list(
+            self.db.scalars(
+                select(JobStep)
+                .join(Job, Job.id == JobStep.job_id)
+                .where(
+                    Job.source_video_id == render.source_video_id,
+                    Job.job_type == JobType.RENDER_FINAL,
+                )
+                .order_by(Job.created_at.desc())
+            )
+        )
+        render_id = str(render.id)
+        for step in steps:
+            payload = step.output_json or step.result_json or {}
+            if isinstance(payload, dict) and str(payload.get("render_output_id") or "") == render_id:
+                return step.job_id
+        return None
+
+    def _display_job_id_hint(
+        self,
+        *,
+        meta: dict,
+        asset: MediaAsset | None,
+        manifest: dict,
+    ) -> str | None:
+        """Display-only job id that survives FK clear / deleted job rows."""
+        for candidate in (
+            meta.get("created_by_job_id"),
+            manifest.get("job_id"),
+            str(asset.created_by_job_id) if asset is not None and asset.created_by_job_id is not None else None,
+        ):
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+        return None
 
     def _load_source_video(self, source_video_id: UUID) -> SourceVideo:
         source_video = self.db.scalar(

@@ -25,7 +25,13 @@ gcloud services enable run.googleapis.com cloudbuild.googleapis.com artifactregi
 Script đọc flags từ file này, chạy `gcloud run deploy`, extract URL, ghi repo-root `.env`:
 
 ```bash
-# Từ repo root (Windows / Linux):
+# Từ repo root (Windows / Linux) — profile tiết kiệm (min-instances 0):
+python deploy/hf-paddle-ocr/auto_deploy.py
+
+# Session Analyze OCR hàng loạt — giữ 1 instance ấm (tránh cold start):
+python deploy/hf-paddle-ocr/auto_deploy.py --warm
+
+# Hết session batch — hạ lại scale-to-zero:
 python deploy/hf-paddle-ocr/auto_deploy.py
 
 # Dry-run (không gọi gcloud):
@@ -46,10 +52,11 @@ cd deploy/hf-paddle-ocr
 
 gcloud run deploy paddle-ocr-api \
   --source . \
-  --region us-central1 \
+  --region asia-southeast1 \
   --platform managed \
-  --memory 4Gi \
-  --cpu 1 \
+  --memory 8Gi \
+  --cpu 4 \
+  --concurrency 2 \
   --min-instances 0 \
   --max-instances 3 \
   --allow-unauthenticated \
@@ -57,14 +64,40 @@ gcloud run deploy paddle-ocr-api \
   --timeout 300
 ```
 
+### Profile batch (giữ ấm)
+
+Khi chạy nhiều job `ANALYZE_OCR` liên tiếp, dùng `--min-instances 1` (hoặc `auto_deploy.py --warm`):
+
+```bash
+gcloud run deploy paddle-ocr-api \
+  --source . \
+  --region asia-southeast1 \
+  --platform managed \
+  --memory 8Gi \
+  --cpu 4 \
+  --concurrency 2 \
+  --min-instances 1 \
+  --max-instances 3 \
+  --allow-unauthenticated \
+  --port 8080 \
+  --timeout 300
+```
+
+Hết session → redeploy với `--min-instances 0` để tiết kiệm idle.
+
 ### Giải thích flags quan trọng
 
 | Flag | Ý nghĩa |
 |------|---------|
+| `--region asia-southeast1` | Singapore — gần VN hơn `us-central1` (RTT thấp hơn; chất lượng OCR không đổi) |
 | `--source .` | Cloud Build build image từ Dockerfile thư mục hiện tại |
-| `--memory 4Gi` | 4GB RAM — tránh OOM khi load PaddleOCR / PP-OCR models |
+| `--memory 8Gi` | 8GB RAM — PaddleOCR + JPEG ≤1280px dense UI; tránh OOM khi batch |
+| `--cpu 4` | 4 vCPU — đủ cho 1–2 predict nặng/instance |
+| `--concurrency 2` | Tối đa **2 request đồng thời / instance** (Paddle CPU-bound; mặc định Cloud Run ~80 sẽ xếp hàng → timeout client) |
+| `--min-instances 0` | Scale to Zero — tiết kiệm idle; cold start lần đầu chậm |
+| `--min-instances 1` | **Batch session:** giữ instance ấm — tránh ~30–90s cold/retry giữa các video |
+| `--max-instances 3` | Trần scale-out (chi phí Phase 1) |
 | `--allow-unauthenticated` | Public URL, không cần identity token |
-| `--min-instances 0` | Scale to Zero — tiết kiệm chi phí khi idle (client retry 503) |
 | `--port 8080` | Khớp `EXPOSE` / `CMD` trong Dockerfile |
 | `--timeout 300` | Request timeout 300s — cold start + download model + OCR |
 
@@ -82,8 +115,8 @@ on `/predict`. The image sets `FLAGS_use_mkldnn=0` (and related) and `app.py` pa
 changing `app.py` / `Dockerfile`.
 
 **Cold start:** do **not** preload Paddle on container startup (blocks readiness → client
-`503`). Model loads on first `/predict`. API client uses long HTTP timeout (300s) and
-retries 503 with multi-second backoff (`RetryingOcrProvider`).
+`503`). Model loads on first `/predict`. API client warmups `/health` + predict, timeout
+120s/request, retries 502/503/504 (tenacity).
 
 ## Kiểm tra
 
@@ -101,9 +134,17 @@ curl -X POST "https://YOUR_SERVICE_URL/predict" -F "file=@frame.jpg"
 OCR_ENDPOINT_URL=https://YOUR_SERVICE_URL/predict
 ```
 
+Client Phase 2 (tối ưu hiện tại):
+
+- Full-frame OCR + preprocess local: max edge **1280px**, JPEG **q80** (BytesIO)
+- `asyncio.Semaphore(3)` hardcap — khớp `--concurrency 2` + scale-out nhẹ
+- `ClientTimeout(total=120)` + tenacity retry (timeout / 502 / 503 / 504)
+- Optional: `OCR_PREPROCESS_MAX_EDGE=720` (nhanh hơn) hoặc `960` (nhẹ hơn mặc định)
+
 ## Ghi chú chi phí / throughput batch
 
 - Cold start lần đầu sau idle có thể chậm (download/load model).
-- `--min-instances 0` tiết kiệm idle; client retry 502/503/504 (15s × 3).
-- **Khi chạy Analyze OCR hàng loạt (SLL):** tạm thời redeploy `--min-instances 1` để giữ instance ấm — tránh ~1 phút/frame vì cold/retry. Hết session hạ lại `--min-instances 0`.
-- Client Phase 2 mặc định: crop bottom band + `OCR_HTTP_CONCURRENCY=4` + probe stride 2 (early-exit khi không thấy hard-sub).
+- **Idle / tiết kiệm:** `--min-instances 0` + client retry.
+- **Analyze OCR hàng loạt:** `python deploy/hf-paddle-ocr/auto_deploy.py --warm` (`--min-instances 1`, memory **8Gi**). Hết session: deploy lại không `--warm`.
+- Đừng tăng Cloud Run concurrency cao; tăng `max-instances` nếu cần throughput (và chấp nhận $$).
+- Phase sau (ngoài scope): GPU Cloud Run, LaMa inpaint, hoặc queue job (HTTP dài → async).

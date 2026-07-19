@@ -236,7 +236,13 @@ assert.ok(isNavItemActive(findNavItem("nav.reupQueue", undefined, "operator"), "
 assert.ok(isNavItemActive(findNavItem("nav.exportPackages", undefined, "operator"), "/publishing/export-packages/package-1"), "Export Packages must be active on detail route");
 assert.ok(isNavItemActive(findNavItem("nav.publishHandoffs", undefined, "operator"), "/publishing/publish-handoffs/handoff-1"), "Publish Handoffs must be active on detail route");
 assert.ok(isNavItemActive(findNavItem("nav.opsHome", undefined, "ops"), "/ops"), "Ops home must be active");
-assert.ok(isNavItemActive(findNavItem("nav.pipelineDashboard", undefined, "ops"), "/ops/pipeline"), "Pipeline Dashboard must be active");
+assert.ok(isNavItemActive(findNavItem("nav.pipelineDashboard", undefined, "operator"), "/ops/pipeline"), "Pipeline Dashboard must be active on Operator Studio");
+assert.equal(
+  opsNavSections.some((section) => section.items.some((item) => item.label === "nav.pipelineDashboard")),
+  false,
+  "Pipeline Dashboard must leave Ops Console sidebar"
+);
+assert.ok(operatorLabels().includes("nav.pipelineDashboard"), "Pipeline Dashboard must appear on Operator Studio");
 assert.ok(isNavItemActive(findNavItem("nav.users", undefined, "ops"), "/ops/users"), "Users must be active on Ops");
 assert.ok(isNavItemActive(findNavItem("nav.transcriptEditor", undefined, "operator"), "/production/transcript-editor/source-1"), "Transcript editor must highlight");
 assert.ok(isNavItemActive(findNavItem("nav.finalReview", undefined, "operator"), "/production/final-review/source-1"), "Final review must highlight");
@@ -257,11 +263,16 @@ assert.equal(
 
 const transcriptItem = findNavItem("nav.transcriptEditor", undefined, "operator");
 const finalReviewItem = findNavItem("nav.finalReview", undefined, "operator");
-assert.equal(resolveNavItemHref(transcriptItem, "source-1"), "/source-videos/source-1/transcript-editor");
-assert.equal(resolveNavItemHref(finalReviewItem, "source-1"), "/source-videos/source-1/final-review");
+assert.equal(resolveNavItemHref(transcriptItem, "source-1"), "/production/transcript-editor/source-1");
+assert.equal(resolveNavItemHref(finalReviewItem, "source-1"), "/production/final-review/source-1");
 assert.notEqual(resolveNavItemHref(transcriptItem, "source-1"), resolveNavItemHref(finalReviewItem, "source-1"));
 assert.equal(resolveNavItemHref(transcriptItem, null), "/selection/review-board");
 assert.equal(resolveNavItemHref(finalReviewItem, null), "/publishing/drafts");
+assert.doesNotMatch(
+  resolveNavItemHref(transcriptItem, "source-1"),
+  /\/source-videos\//,
+  "Transcript nav must open the production canonical path (avoid NEXT_REDIRECT overlay)"
+);
 assert.equal(resolveNavItemStatusLabel(transcriptItem, "source-1"), "nav.openCurrentVideo");
 assert.equal(resolveNavItemStatusLabel(finalReviewItem, "source-1"), "nav.openCurrentVideo");
 assert.equal(resolveNavItemStatusLabel(transcriptItem, null), "nav.selectVideo");
@@ -291,7 +302,7 @@ assert.deepEqual(getBreadcrumbs("/publishing/export-packages/package-1").map((it
 assert.deepEqual(getBreadcrumbs("/publishing/publish-handoffs").map((item) => item.label), ["nav.home", "nav.sectionPublishing", "nav.publishHandoffs"]);
 assert.deepEqual(getBreadcrumbs("/publishing/publish-handoffs/handoff-1").map((item) => item.label), ["nav.home", "nav.sectionPublishing", "nav.publishHandoff"]);
 assert.deepEqual(getBreadcrumbs("/ops/reconciliation").map((item) => item.label), ["nav.opsConsole", "nav.reconciliation"]);
-assert.deepEqual(getBreadcrumbs("/ops/pipeline").map((item) => item.label), ["nav.opsConsole", "nav.pipelineDashboard"]);
+assert.deepEqual(getBreadcrumbs("/ops/pipeline").map((item) => item.label), ["nav.home", "nav.pipelineDashboard"]);
 assert.deepEqual(getBreadcrumbs("/ops/users").map((item) => item.label), ["nav.opsConsole", "nav.sectionMonitor", "nav.users"]);
 assert.deepEqual(getBreadcrumbs("/ops/caption-ai").map((item) => item.label), ["nav.opsConsole", "nav.sectionAiSettings", "nav.captionAiSettings"]);
 

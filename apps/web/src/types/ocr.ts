@@ -28,4 +28,5 @@ export type OcrSummaryResponse = {
   cleaned_video_asset_id: string | null;
   ocr_events_asset_id: string | null;
   visual_approved: boolean;
+  clean_produced?: boolean;
 };

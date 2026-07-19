@@ -61,7 +61,7 @@ export function OpsCaptionPromptPage() {
   }
 
   return (
-    <main className="ops-page ops-page--settings">
+    <main className="ops-page ops-page--settings ops-ai-page is-compact">
       <OpsCaptionSettingsTabs />
 
       {error ? <div className="inline-error">{error}</div> : null}
@@ -80,27 +80,23 @@ export function OpsCaptionPromptPage() {
           </div>
         }
       >
-        <p className="ops-muted">
-          {t("opsCaptionPrompt.hint")}{" "}
-          <code>{source === "workspace_db" ? t("opsCaptionPrompt.sourceDb") : t("opsCaptionPrompt.sourceEmpty")}</code>
-        </p>
+        <div className="ops-ai-status" aria-label={t("opsCaptionPrompt.hint")}>
+          <span className={`ops-ai-chip ${source === "workspace_db" ? "is-active" : "is-muted"}`}>
+            {source === "workspace_db" ? t("opsCaptionPrompt.sourceDb") : t("opsCaptionPrompt.sourceEmpty")}
+          </span>
+        </div>
 
-        {savedMessage ? (
-          <div className="ops-field-alert is-success" role="status">
-            <strong>{t("opsCaptionPrompt.saved")}</strong>
-            <span>{t("opsCaptionPrompt.savedHint")}</span>
-          </div>
-        ) : null}
-
-        <textarea
-          className="ops-prompt-textarea"
-          rows={18}
-          value={prompt}
-          onChange={(event) => setPrompt(event.target.value)}
-          placeholder={t("opsCaptionPrompt.placeholder")}
-          spellCheck={false}
-        />
-        <p className="ops-muted">{t("opsCaptionPrompt.clearHint")}</p>
+        <div className="ops-ai-prompt-body">
+          <textarea
+            className="ops-prompt-textarea"
+            rows={18}
+            value={prompt}
+            onChange={(event) => setPrompt(event.target.value)}
+            placeholder={t("opsCaptionPrompt.placeholder")}
+            spellCheck={false}
+          />
+          <p className="ops-muted">{t("opsCaptionPrompt.clearHint")}</p>
+        </div>
       </OpsPanel>
     </main>
   );

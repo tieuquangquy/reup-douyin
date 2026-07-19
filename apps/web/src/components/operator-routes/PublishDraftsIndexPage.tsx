@@ -6,7 +6,7 @@ import { fetchPublishControlQueue } from "../../lib/api";
 import { humanizeStatus } from "../../lib/statusLabels";
 import type { PublishControlQueue, PublishQueueItem } from "../../types/publish-control";
 import { OperatorStudioShell } from "../app-shell/OperatorStudioShell";
-import { PageShell } from "../app-shell/PageShell";
+import { TopbarRefreshButton } from "../app-shell/TopbarRefreshButton";
 import { StatusBadge } from "../app-shell/StatusBadge";
 
 export function PublishDraftsIndexPage() {
@@ -38,7 +38,13 @@ export function PublishDraftsIndexPage() {
 
   return (
     <OperatorStudioShell
-      actions={<button type="button" onClick={() => void load()}>{t("publishDraftsIndex.refresh")}</button>}
+      actions={
+        <>
+          <TopbarRefreshButton busy={loading && Boolean(queue)} disabled={loading && !queue} onClick={() => void load()} />
+          <a href="/ops/publish-health">{t("nav.publishHealth")}</a>
+          <a href="/ops/publish-control">{t("publishDraftsIndex.openControl")}</a>
+        </>
+      }
       description={t("publishDraftsIndex.pageDesc")}
       title={t("publishDraftsIndex.pageTitle")}
     >
@@ -51,16 +57,7 @@ export function PublishDraftsIndexPage() {
         </div>
       ) : null}
       {queue ? (
-        <PageShell
-          actions={
-            <>
-              <a href="/ops/publish-health">{t("nav.publishHealth")}</a>
-              <a href="/ops/publish-control">{t("publishDraftsIndex.openControl")}</a>
-            </>
-          }
-          description={t("publishDraftsIndex.indexDesc")}
-          title={t("publishDraftsIndex.indexTitle")}
-        >
+        <>
           {error ? <div className="inline-error">{error}</div> : null}
           <div className="operator-quick-grid">
             {drafts.length === 0 ? (
@@ -73,7 +70,7 @@ export function PublishDraftsIndexPage() {
               <DraftCard draft={draft} key={draft.publish_draft_id} />
             ))}
           </div>
-        </PageShell>
+        </>
       ) : null}
     </OperatorStudioShell>
   );

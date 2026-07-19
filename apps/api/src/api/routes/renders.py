@@ -18,6 +18,10 @@ def get_render_service(db: Session = Depends(get_db_session)) -> RenderService:
     return RenderService(db)
 
 
+def _render_response(service: RenderService, render) -> RenderOutputResponse:
+    return service.to_render_response(render)
+
+
 @router.post("/renders", response_model=RenderCreateResponse, status_code=status.HTTP_201_CREATED)
 def create_render_job(request: RenderCreateRequest, service: RenderService = Depends(get_render_service)) -> RenderCreateResponse:
     try:
@@ -33,14 +37,14 @@ def create_render_job(request: RenderCreateRequest, service: RenderService = Dep
 def list_source_video_renders(source_video_id: UUID, service: RenderService = Depends(get_render_service)) -> RenderListResponse:
     return RenderListResponse(
         source_video_id=source_video_id,
-        renders=[RenderOutputResponse.model_validate(render) for render in service.list_renders(source_video_id)],
+        renders=[_render_response(service, render) for render in service.list_renders(source_video_id)],
     )
 
 
 @router.get("/renders/{render_id}", response_model=RenderOutputResponse)
 def get_render(render_id: UUID, service: RenderService = Depends(get_render_service)) -> RenderOutputResponse:
     try:
-        return RenderOutputResponse.model_validate(service.get_render(render_id))
+        return _render_response(service, service.get_render(render_id))
     except RenderPipelineError as exc:
         raise _render_http_error(exc) from exc
 
@@ -48,7 +52,7 @@ def get_render(render_id: UUID, service: RenderService = Depends(get_render_serv
 @router.post("/renders/{render_id}/approve", response_model=RenderOutputResponse)
 def approve_render(render_id: UUID, service: RenderService = Depends(get_render_service)) -> RenderOutputResponse:
     try:
-        return RenderOutputResponse.model_validate(service.approve_render(render_id))
+        return _render_response(service, service.approve_render(render_id))
     except RenderPipelineError as exc:
         raise _render_http_error(exc) from exc
 
@@ -56,7 +60,7 @@ def approve_render(render_id: UUID, service: RenderService = Depends(get_render_
 @router.post("/renders/{render_id}/mark-publish-ready", response_model=RenderOutputResponse)
 def mark_render_publish_ready(render_id: UUID, service: RenderService = Depends(get_render_service)) -> RenderOutputResponse:
     try:
-        return RenderOutputResponse.model_validate(service.mark_publish_ready(render_id))
+        return _render_response(service, service.mark_publish_ready(render_id))
     except RenderPipelineError as exc:
         raise _render_http_error(exc) from exc
 
@@ -64,7 +68,7 @@ def mark_render_publish_ready(render_id: UUID, service: RenderService = Depends(
 @router.get("/source-videos/{source_video_id}/latest-render", response_model=RenderOutputResponse | None)
 def get_latest_source_video_render(source_video_id: UUID, service: RenderService = Depends(get_render_service)) -> RenderOutputResponse | None:
     render = service.latest_render(source_video_id)
-    return RenderOutputResponse.model_validate(render) if render else None
+    return _render_response(service, render) if render else None
 
 
 def _render_http_error(exc: RenderPipelineError) -> HTTPException:

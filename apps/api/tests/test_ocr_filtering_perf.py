@@ -54,7 +54,9 @@ class BandCropGeometryTests(unittest.TestCase):
 
 class OcrFilteringPerfPipelineTests(unittest.TestCase):
     def test_crop_before_ocr_remaps_provider_boxes_to_full_frame(self) -> None:
-        """Provider sees crop image; boxes are crop-normalized then remapped."""
+        """Provider sees overlay crop; boxes are crop-normalized then remapped."""
+        from src.media_pipeline.ocr_filtering.overlay_zones import OVERLAY_CROP_TOP
+
         band = 0.28
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -63,6 +65,7 @@ class OcrFilteringPerfPipelineTests(unittest.TestCase):
 
             provider = MagicMock()
             provider.provider_name = "mock_crop"
+            crop_h = int(round(200 * (1.0 - OVERLAY_CROP_TOP)))
 
             def _detect(path: Path) -> FrameOcrDetection:
                 # Crop path must differ from full frame and be shorter.
@@ -70,10 +73,10 @@ class OcrFilteringPerfPipelineTests(unittest.TestCase):
                 from PIL import Image
 
                 with Image.open(path) as img:
-                    self.assertEqual(img.size[1], 56)  # round(200 * 0.28)
+                    self.assertEqual(img.size[1], crop_h)
                 return FrameOcrDetection(
                     frame_width=100,
-                    frame_height=56,
+                    frame_height=crop_h,
                     boxes=[
                         DetectedTextBox(0.1, 0.5, 0.8, 0.2, "BOTTOM", 0.95),
                     ],
@@ -91,9 +94,9 @@ class OcrFilteringPerfPipelineTests(unittest.TestCase):
             )
             self.assertEqual(result.frame_count, 1)
             box = result.frames[0].boxes[0]
-            y0 = subtitle_band_top_normalized(band)
-            self.assertAlmostEqual(box.y, y0 + 0.5 * band, places=5)
-            self.assertAlmostEqual(box.height, 0.2 * band, places=5)
+            ratio = 1.0 - OVERLAY_CROP_TOP
+            self.assertAlmostEqual(box.y, OVERLAY_CROP_TOP + 0.5 * ratio, places=5)
+            self.assertAlmostEqual(box.height, 0.2 * ratio, places=5)
             self.assertEqual(result.frames[0].frame_width, 100)
             self.assertEqual(result.frames[0].frame_height, 200)
 

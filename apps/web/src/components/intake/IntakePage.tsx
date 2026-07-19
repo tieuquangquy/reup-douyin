@@ -42,7 +42,6 @@ import type {
 import type { DouyinAccount } from "../../types/douyin-accounts";
 import type { FilterPreset } from "../../types/review-board";
 import { OperatorStudioShell } from "../app-shell/OperatorStudioShell";
-import { PageShell } from "../app-shell/PageShell";
 
 const RECENT_INTAKE_STORAGE_KEY = "reup-douyin:last-intake-setup";
 const SHOW_LEGACY_DOUYIN_DEBUG_SURFACES = process.env.NEXT_PUBLIC_DOUYIN_ENABLE_LEGACY_DEBUG_SURFACES === "true";
@@ -482,7 +481,6 @@ export function IntakePage() {
       description={t("intake.description")}
       title={t("intake.title")}
     >
-      <PageShell description={t("intake.pageDescription")} title={t("intake.workflowTitle")}>
         <div className="intake-kicker" aria-label={t("intake.flowTitle")}>
           <span>{t("intake.stepPaste")}</span>
           <span>{t("intake.stepTune")}</span>
@@ -843,7 +841,6 @@ export function IntakePage() {
             <GuidancePanel />
           </aside>
         </div>
-      </PageShell>
     </OperatorStudioShell>
   );
 }

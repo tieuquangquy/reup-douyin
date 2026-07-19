@@ -20,7 +20,11 @@ from src.media_pipeline.frame_sampling.ffmpeg_engine import extract_video_frames
 from src.media_pipeline.ocr_filtering.pipeline import run_ocr_filtering
 from src.media_pipeline.ocr_filtering.providers import build_default_ocr_provider
 from src.media_pipeline.translator.service import translate_subtitles
-from src.media_pipeline.video_renderer.renderer import render_video_single_pass
+from src.media_pipeline.video_renderer.renderer import (
+    render_image_with_overlays,
+    render_video_single_pass,
+)
+from src.media_pipeline.video_renderer.overlays import overlays_from_ocr_payload
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +75,7 @@ def run_hardsub_phases_1_to_4(
     ffmpeg_binary: str = "ffmpeg",
     band_ratio: float | None = None,
     on_progress: ProgressCallback | None = None,
-    render_progress: bool = True,
+    render_progress: bool | Callable[[float | None, str], None] = True,
 ) -> HardsubE2EResult:
     """
     Run Phase 1–4 into ``output_path``. Always deletes temp frames unless ``keep_temp``.
@@ -151,6 +155,26 @@ def run_hardsub_phases_1_to_4(
         _progress("phase34_render", 75)
         logger.info("Phase 3+4: Single Render...")
         destination.parent.mkdir(parents=True, exist_ok=True)
+
+        attached_pic: Path | None = None
+        thumb_src = next((p for p in frame_paths if Path(p).name == "thumbnail.jpg"), None)
+        if thumb_src is not None and Path(thumb_src).is_file():
+            try:
+                overlays = overlays_from_ocr_payload(ocr_payload, vi_texts, hold_ms=500)
+                thumb_overlays = [seg for seg in overlays if int(seg.start_ms) == 0]
+                covered = temp_root / "thumbnail_covered.jpg"
+                render_image_with_overlays(
+                    thumb_src,
+                    covered,
+                    thumb_overlays,
+                    anti_seed=anti_seed,
+                    ffmpeg_binary=ffmpeg_binary,
+                )
+                if covered.is_file():
+                    attached_pic = covered
+            except Exception as exc:  # noqa: BLE001 — cover attach is best-effort
+                logger.warning("thumbnail_cover_failed error=%s", str(exc)[:200])
+
         rendered = render_video_single_pass(
             source,
             destination,
@@ -159,6 +183,7 @@ def run_hardsub_phases_1_to_4(
             anti_seed=anti_seed,
             ffmpeg_binary=ffmpeg_binary,
             progress=render_progress,
+            attached_pic=attached_pic,
         )
         logger.info("Phase 3+4 done: %s", rendered)
         _progress("phases_complete", 95)

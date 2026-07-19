@@ -16,7 +16,7 @@ from src.media_pipeline.translator.service import translate_subtitles
 
 
 class NormalizeTests(unittest.TestCase):
-    def test_flatten_phase2_payload_joins_boxes(self) -> None:
+    def test_flatten_phase2_payload_one_key_per_box(self) -> None:
         payload = {
             "frames": [
                 {
@@ -27,7 +27,11 @@ class NormalizeTests(unittest.TestCase):
             ]
         }
         flat = flatten_ocr_chinese(payload)
-        self.assertEqual(flat["0"], "你好 世界")
+        self.assertEqual(flat["0#0"], "你好")
+        self.assertEqual(flat["0#1"], "世界")
+        self.assertEqual(flat["1000#0"], "硬字幕")
+        # Convenience alias for first box on a timestamp.
+        self.assertEqual(flat["0"], "你好")
         self.assertEqual(flat["1000"], "硬字幕")
 
     def test_flatten_keeps_timestamp_map(self) -> None:

@@ -30,6 +30,10 @@ class DetectedTextBox:
     def center_y(self) -> float:
         return self.y + (self.height / 2.0)
 
+    @property
+    def center_x(self) -> float:
+        return self.x + (self.width / 2.0)
+
 
 @dataclass(frozen=True)
 class FrameOcrDetection:

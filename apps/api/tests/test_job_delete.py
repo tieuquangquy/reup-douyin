@@ -21,13 +21,31 @@ class JobDeleteTests(unittest.TestCase):
         db = MagicMock()
         service = JobService(db)
         service.get_job = MagicMock(return_value=job)
+        service._preserve_job_id_in_metadata = MagicMock()
 
         service.delete_job(job_id)
 
+        service._preserve_job_id_in_metadata.assert_called_once_with(job_id)
         self.assertGreaterEqual(db.execute.call_count, 1)
         db.delete.assert_any_call(step)
         db.delete.assert_any_call(job)
         db.commit.assert_called_once()
+
+    def test_preserve_job_id_stamps_render_metadata(self) -> None:
+        job_id = uuid4()
+        render = SimpleNamespace(
+            metadata_json={"manifest": {"render_version": "RENDER_PIPELINE_V1_RUN_1"}},
+        )
+        db = MagicMock()
+        db.scalars.return_value = [render]
+        service = JobService(db)
+
+        service._preserve_job_id_in_metadata(job_id)
+
+        self.assertEqual(render.metadata_json["created_by_job_id"], str(job_id))
+        self.assertEqual(render.metadata_json["manifest"]["job_id"], str(job_id))
+        db.flush.assert_called_once()
+        db.scalars.assert_called_once()
 
     def test_delete_job_not_found(self) -> None:
         db = MagicMock()

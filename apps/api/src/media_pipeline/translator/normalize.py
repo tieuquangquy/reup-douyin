@@ -1,29 +1,29 @@
-"""Normalize Phase 2 OCR payloads into {timestamp_str: chinese_text}."""
+"""Normalize Phase 2 OCR payloads into {timestamp_str: chinese_text}.
+
+Each OCR box with Chinese (CJK) becomes its own key ``{time_ms}#{box_index}``
+so Caption AI and render can cover+burn VI **per label**. Latin/VI-only boxes
+(e.g. existing Vietnamese hard-subs, dates) are skipped.
+"""
 
 from __future__ import annotations
 
 from typing import Any, Mapping
 
+from src.media_pipeline.ocr_filtering.script_filter import contains_cjk
 from src.media_pipeline.translator.errors import TranslatorError, TranslatorErrorCode
 
 
-def _join_box_texts(boxes: list[Any]) -> str:
-    parts: list[str] = []
-    for box in boxes:
-        if isinstance(box, Mapping):
-            text = str(box.get("text") or "").strip()
-        else:
-            text = str(box or "").strip()
-        if text:
-            parts.append(text)
-    return " ".join(parts)
+def _box_text(box: Any) -> str:
+    if isinstance(box, Mapping):
+        return str(box.get("text") or "").strip()
+    return str(box or "").strip()
 
 
 def flatten_ocr_chinese(ocr_data: Mapping[Any, Any] | list[Any]) -> dict[str, str]:
     """
     Accept either:
     - flat map: {0: "你好", "1000": "世界"}
-    - Phase 2 `to_dict()` / frames list with boxes[].text
+    - Phase 2 `to_dict()` / frames list with boxes[].text → per-box CJK keys
     """
     if isinstance(ocr_data, list):
         frames = ocr_data
@@ -31,10 +31,21 @@ def flatten_ocr_chinese(ocr_data: Mapping[Any, Any] | list[Any]) -> dict[str, st
         for frame in frames:
             if not isinstance(frame, Mapping):
                 continue
-            time_ms = frame.get("time_ms", 0)
-            text = _join_box_texts(list(frame.get("boxes") or []))
-            if text:
-                flat[str(int(time_ms))] = text
+            time_ms = int(frame.get("time_ms", 0) or 0)
+            raw_boxes = [b for b in list(frame.get("boxes") or []) if isinstance(b, Mapping)]
+            if not raw_boxes:
+                continue
+            box_index = 0
+            for box in raw_boxes:
+                text = _box_text(box)
+                if not text or not contains_cjk(text):
+                    continue
+                key = f"{time_ms}#{box_index}"
+                flat[key] = text
+                # Convenience alias for first CJK box on this timestamp.
+                if box_index == 0 and str(time_ms) not in flat:
+                    flat[str(time_ms)] = text
+                box_index += 1
         if not flat:
             raise TranslatorError(
                 TranslatorErrorCode.EMPTY_INPUT,
@@ -50,11 +61,19 @@ def flatten_ocr_chinese(ocr_data: Mapping[Any, Any] | list[Any]) -> dict[str, st
         if key in {"provider", "frame_count", "warnings", "frames"}:
             continue
         if isinstance(value, Mapping) and "boxes" in value:
-            text = _join_box_texts(list(value.get("boxes") or []))
+            texts = [
+                _box_text(b)
+                for b in list(value.get("boxes") or [])
+                if contains_cjk(_box_text(b))
+            ]
+            texts = [t for t in texts if t]
+            text = " ".join(texts)
             time_key = value.get("time_ms", key)
         else:
             text = str(value or "").strip()
             time_key = key
+            if text and not contains_cjk(text):
+                continue
         if not text:
             continue
         flat[str(time_key)] = text
@@ -62,6 +81,6 @@ def flatten_ocr_chinese(ocr_data: Mapping[Any, Any] | list[Any]) -> dict[str, st
     if not flat:
         raise TranslatorError(
             TranslatorErrorCode.EMPTY_INPUT,
-            "ocr_data is empty — nothing to translate",
+            "No Chinese text to translate",
         )
     return flat

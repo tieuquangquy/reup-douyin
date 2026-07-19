@@ -12,7 +12,12 @@ assert.match(componentSource, /fetchTranslationPrompt/, "UI must load prompt via
 assert.doesNotMatch(componentSource, /OpsPageHeader/, "Must not duplicate Topbar title with OpsPageHeader");
 assert.match(componentSource, /OpsTranslationSettingsTabs/, "Must expose sibling tabs to Translation AI");
 assert.match(componentSource, /OpsPanel[\s\S]*actions=\{/, "Save actions belong on the panel, not a second header");
-assert.match(componentSource, /ops-field-alert is-success/, "Save success must use compact field alert, not page banner");
+assert.match(componentSource, /ops-ai-page is-compact/, "Prompt page must use compact AI settings density");
+assert.doesNotMatch(
+  componentSource,
+  /savedMessage \? \([\s\S]*ops-field-alert is-success/,
+  "Save success must not duplicate a field-alert when toolbar chip is present"
+);
 assert.match(componentSource, /ops-connection-status is-ok/, "Save success must show compact chip near Save");
 assert.doesNotMatch(
   componentSource,

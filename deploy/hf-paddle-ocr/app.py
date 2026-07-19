@@ -60,8 +60,39 @@ def get_ocr_engine():
         ) from exc
 
     configure_paddle_cpu_safe_runtime()
+    # High-res / small-glyph UI: raise det side + lower DB thresholds.
     # enable_mkldnn=False is required on Paddle 3.3.x (PIR↔oneDNN crash).
+    # Prefer operator-requested det_* knobs; fall back if this PaddleOCR build
+    # rejects unknown kwargs (3.x vs 2.x).
     init_attempts = [
+        {
+            "lang": "ch",
+            "use_angle_cls": True,
+            "det_limit_side_len": 1920,
+            "det_db_thresh": 0.3,
+            "det_db_box_thresh": 0.5,
+            "det_db_unclip_ratio": 1.6,
+            "enable_mkldnn": False,
+            "use_gpu": False,
+            "show_log": False,
+        },
+        {
+            "lang": "ch",
+            "use_angle_cls": True,
+            "det_limit_side_len": 1920,
+            "det_db_thresh": 0.3,
+            "det_db_box_thresh": 0.5,
+            "det_db_unclip_ratio": 1.6,
+            "enable_mkldnn": False,
+        },
+        {
+            "lang": "ch",
+            "use_angle_cls": True,
+            "det_limit_side_len": 1920,
+            "det_db_thresh": 0.3,
+            "det_db_box_thresh": 0.5,
+            "det_db_unclip_ratio": 1.6,
+        },
         {
             "lang": "ch",
             "use_textline_orientation": True,
@@ -109,6 +140,59 @@ def _normalize_quad(pts: Any) -> list[list[float]]:
     return points[:4]
 
 
+def _unwrap_page_payload(page: Any) -> Any:
+    """Normalize PaddleOCR 3.x Result / ``{'res': {...}}`` into a plain dict or classic page."""
+    page_obj = page
+
+    # Prefer .json — property (dict) or callable method.
+    if hasattr(page, "json"):
+        json_attr = getattr(page, "json")
+        try:
+            page_obj = json_attr() if callable(json_attr) else json_attr
+        except Exception:
+            page_obj = page
+
+    # Mapping-like Result without being a dict.
+    if page_obj is not None and hasattr(page_obj, "keys") and not isinstance(page_obj, (dict, list, tuple, str, bytes)):
+        try:
+            page_obj = dict(page_obj)
+        except Exception:
+            try:
+                page_obj = {k: page_obj[k] for k in page_obj.keys()}  # type: ignore[index]
+            except Exception:
+                pass
+
+    # PaddleX / PaddleOCR 3.x wraps fields under ``res``.
+    if isinstance(page_obj, dict) and "res" in page_obj and isinstance(page_obj.get("res"), dict):
+        nested = page_obj["res"]
+        if any(key in nested for key in ("dt_polys", "rec_texts", "rec_polys", "rec_scores")):
+            page_obj = nested
+
+    return page_obj
+
+
+def _as_sequence(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    # numpy arrays
+    if hasattr(value, "tolist"):
+        try:
+            converted = value.tolist()
+            if isinstance(converted, list):
+                return converted
+            return [converted]
+        except Exception:
+            pass
+    try:
+        return list(value)
+    except TypeError:
+        return [value]
+
+
 def parse_paddle_ocr_result(raw: Any) -> list[dict[str, Any]]:
     """
     Phân tích output PaddleOCR → mảng JSON:
@@ -117,6 +201,8 @@ def parse_paddle_ocr_result(raw: Any) -> list[dict[str, Any]]:
     Hỗ trợ:
     - Classic: [ [ [pts], (text, conf) ], ... ]
     - Dict / PaddleOCR 3.x: rec_texts + dt_polys / rec_scores
+    - Result objects with ``.json`` property (not only callable)
+    - Nested ``{"res": {...}}`` PaddleX envelope
     """
     items: list[dict[str, Any]] = []
     if raw is None:
@@ -135,34 +221,37 @@ def parse_paddle_ocr_result(raw: Any) -> list[dict[str, Any]]:
             pages = [raw]
 
     for page in pages:
-        page_obj = page
-        if hasattr(page, "json") and callable(getattr(page, "json", None)):
-            try:
-                page_obj = page.json
-            except Exception:
-                page_obj = page
+        page_obj = _unwrap_page_payload(page)
 
         # PaddleOCR 3.x page dict
         if isinstance(page_obj, dict) and (
             "dt_polys" in page_obj or "rec_texts" in page_obj or "rec_polys" in page_obj
         ):
-            polys = page_obj.get("dt_polys") or page_obj.get("rec_polys") or []
-            texts = page_obj.get("rec_texts") or page_obj.get("texts") or []
-            scores = page_obj.get("rec_scores") or page_obj.get("scores") or []
-            if isinstance(texts, str):
-                texts = [texts]
+            polys = _as_sequence(page_obj.get("dt_polys") or page_obj.get("rec_polys") or [])
+            texts = _as_sequence(page_obj.get("rec_texts") or page_obj.get("texts") or [])
+            scores = _as_sequence(page_obj.get("rec_scores") or page_obj.get("scores") or [])
             for idx, pts in enumerate(polys):
                 try:
-                    if not pts:
+                    if pts is None:
                         continue
                     poly = pts
+                    # numpy polygon → list
+                    if hasattr(pts, "tolist"):
+                        try:
+                            poly = pts.tolist()
+                        except Exception:
+                            poly = pts
                     if (
-                        isinstance(pts, (list, tuple))
-                        and pts
-                        and isinstance(pts[0], (list, tuple))
-                        and len(pts[0]) == 2
+                        isinstance(poly, (list, tuple))
+                        and poly
+                        and isinstance(poly[0], (list, tuple))
+                        and len(poly[0]) == 2
                     ):
-                        poly = pts
+                        pass
+                    elif isinstance(poly, (list, tuple)) and len(poly) >= 4:
+                        pass
+                    else:
+                        continue
                     text = str(texts[idx] if idx < len(texts) else "")
                     score = float(scores[idx] if idx < len(scores) else 0.0)
                     items.append(
@@ -189,6 +278,9 @@ def parse_paddle_ocr_result(raw: Any) -> list[dict[str, Any]]:
                 lines = page_obj
             elif isinstance(first, list):
                 lines = first
+        elif not isinstance(page_obj, list):
+            # Unknown non-list page — skip instead of iterating mapping keys as lines.
+            continue
 
         for line in lines or []:
             try:
@@ -224,7 +316,7 @@ def parse_paddle_ocr_result(raw: Any) -> list[dict[str, Any]]:
 app = FastAPI(
     title="HF PaddleOCR API",
     description="POST /predict — nhận ảnh, trả bbox + text + score (lang=ch).",
-    version="1.0.0",
+    version="1.0.1",
 )
 
 
@@ -271,6 +363,15 @@ async def predict(file: UploadFile = File(...)) -> JSONResponse:
                     raise
 
         items = parse_paddle_ocr_result(raw)
+        if not items:
+            logger.warning(
+                "predict_empty_parse",
+                extra={
+                    "raw_type": type(raw).__name__,
+                    "image_w": int(image.size[0]),
+                    "image_h": int(image.size[1]),
+                },
+            )
         return JSONResponse(content=items)
 
     except HTTPException:

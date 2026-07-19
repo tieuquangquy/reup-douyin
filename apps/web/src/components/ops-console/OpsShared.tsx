@@ -64,11 +64,24 @@ export function OpsMetricCard({ label, value, detail, tone = "muted" }: { label:
   );
 }
 
-export function OpsPanel({ title, children, actions }: { title: string; children: ReactNode; actions?: ReactNode }) {
+export function OpsPanel({
+  title,
+  children,
+  actions,
+  meta
+}: {
+  title: string;
+  children: ReactNode;
+  actions?: ReactNode;
+  meta?: ReactNode;
+}) {
   return (
     <section className="health-panel">
       <div className="ops-panel-heading">
-        <h2>{title}</h2>
+        <div className="ops-panel-heading__lead">
+          <h2>{title}</h2>
+          {meta ? <div className="ops-panel-heading__meta">{meta}</div> : null}
+        </div>
         {actions}
       </div>
       {children}

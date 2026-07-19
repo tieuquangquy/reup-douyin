@@ -99,6 +99,7 @@ class OcrServiceFullE2ETests(unittest.TestCase):
 
             run_e2e.assert_called_once()
             self.assertIsNotNone(result.cleaned_video_asset_id)
+            self.assertTrue(result.clean_produced)
             self.assertEqual(persisted_meta.get("clean_method"), CLEAN_METHOD_SINGLE_PASS)
             self.assertEqual(persisted_meta.get("caption_ai_source"), "workspace_db")
             events_call = persist_json.call_args
@@ -164,6 +165,7 @@ class OcrServiceFullE2ETests(unittest.TestCase):
         self.assertEqual(result.cleaned_video_asset_id, str(prior_cleaned.id))
         self.assertIn("clean_skipped_no_hardsub", result.warnings)
         self.assertIn("no_hardsub_detected", result.warnings)
+        self.assertFalse(result.clean_produced)
 
 
 if __name__ == "__main__":

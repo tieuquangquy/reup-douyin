@@ -43,6 +43,21 @@ assert.match(
   /\.transcript-bench-media\s+\.media-box\s*\{[^}]*min-height:\s*(?:2[2-9]\d|[3-9]\d{2})px/,
   "Bench media box must enforce a usable minimum video height"
 );
+assert.match(
+  cssSource,
+  /\.media-box\s*\{[^}]*overflow:\s*hidden/,
+  "Base media-box must clip intrinsic video size so it cannot cover the focus editor"
+);
+assert.match(
+  cssSource,
+  /\.media-box\s+video\s*\{[^}]*width:\s*100%[^}]*height:\s*100%|\.media-box\s+video\s*\{[^}]*height:\s*100%[^}]*width:\s*100%/,
+  "Base media-box video must fill the framed box (width/height 100%)"
+);
+assert.match(
+  cssSource,
+  /\.editor-command__rail a,\s*\.editor-command__rail button\s*\{[^}]*min-height:\s*0/,
+  "Command rail must override global button min-height so secondary actions stay compact"
+);
 
 assert.match(focusSource, /transcript-dual-pane/, "Focus editor must use ZH|VI dual pane");
 assert.match(focusSource, /source-textarea-primary/, "Focus editor must expose ZH primary field");

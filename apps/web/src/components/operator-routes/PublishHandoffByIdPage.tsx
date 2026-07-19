@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { fetchPublishHandoff } from "../../lib/api";
 import type { PublishHandoff } from "../../types/export-handoff";
 import { OperatorStudioShell } from "../app-shell/OperatorStudioShell";
-import { PageShell } from "../app-shell/PageShell";
+import { TopbarRefreshButton } from "../app-shell/TopbarRefreshButton";
 import { OpsDetailPanel, OpsDetailSection, OpsMetadataList, OpsStatePanel, OpsSummaryCards, statusTone, type OpsSummaryCardItem } from "../ops-console/OpsShared";
 
 export function PublishHandoffByIdPage({ handoffId }: { handoffId: string }) {
@@ -30,7 +30,14 @@ export function PublishHandoffByIdPage({ handoffId }: { handoffId: string }) {
 
   return (
     <OperatorStudioShell
-      actions={<button type="button" onClick={() => void load()}>Refresh</button>}
+      actions={
+        <>
+          <TopbarRefreshButton busy={loading && Boolean(handoff)} disabled={loading && !handoff} onClick={() => void load()} />
+          <a href="/publishing/publish-handoffs">All Publish Handoffs</a>
+          {handoff ? <a href={`/publishing/export-packages/${handoff.export_package_id}`}>Open Export Package</a> : null}
+          <a href="/selection/reup-queue">Reup Queue</a>
+        </>
+      }
       description="Inspect handoff payloads before manual downstream publishing. Publish Handoff records do not call platform APIs or auto-publish."
       title="Publish Handoff detail"
     >
@@ -44,17 +51,7 @@ export function PublishHandoffByIdPage({ handoffId }: { handoffId: string }) {
         />
       ) : null}
       {!loading && handoff ? (
-        <PageShell
-          actions={
-            <>
-              <a href="/publishing/publish-handoffs">All Publish Handoffs</a>
-              <a href={`/publishing/export-packages/${handoff.export_package_id}`}>Open Export Package</a>
-              <a href="/selection/reup-queue">Reup Queue</a>
-            </>
-          }
-          description="This record is a manual handoff artifact. It does not call platform APIs or auto-publish."
-          title={`Publish Handoff ${handoff.id.slice(0, 8)}`}
-        >
+        <>
           <OpsSummaryCards cards={summaryCardsForHandoff(handoff)} title="Handoff state summary" />
 
           <OpsDetailPanel title="Handoff detail panel">
@@ -88,7 +85,7 @@ export function PublishHandoffByIdPage({ handoffId }: { handoffId: string }) {
               <pre>{JSON.stringify(handoff.diagnostics_json ?? {}, null, 2)}</pre>
             </OpsDetailSection>
           </OpsDetailPanel>
-        </PageShell>
+        </>
       ) : null}
     </OperatorStudioShell>
   );

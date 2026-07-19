@@ -494,6 +494,10 @@ export type WorkspaceMember = {
   role: string;
   isActive: boolean;
   createdAt: string | null;
+  phone: string | null;
+  address: string | null;
+  notes: string | null;
+  lastSeenAt: string | null;
 };
 
 export type WorkspaceInvite = {
@@ -513,6 +517,10 @@ type WorkspaceMemberApi = {
   role: string;
   is_active: boolean;
   created_at?: string | null;
+  phone?: string | null;
+  address?: string | null;
+  notes?: string | null;
+  last_seen_at?: string | null;
 };
 
 type WorkspaceInviteApi = {
@@ -532,7 +540,11 @@ function mapWorkspaceMember(row: WorkspaceMemberApi): WorkspaceMember {
     displayName: row.display_name ?? null,
     role: row.role,
     isActive: row.is_active,
-    createdAt: row.created_at ?? null
+    createdAt: row.created_at ?? null,
+    phone: row.phone ?? null,
+    address: row.address ?? null,
+    notes: row.notes ?? null,
+    lastSeenAt: row.last_seen_at ?? null
   };
 }
 
@@ -610,20 +622,79 @@ export async function revokeWorkspaceInvite(inviteId: string): Promise<void> {
 
 export async function updateWorkspaceMember(
   operatorId: string,
-  patch: { role?: string; isActive?: boolean }
+  patch: {
+    role?: string;
+    isActive?: boolean;
+    displayName?: string | null;
+    phone?: string | null;
+    address?: string | null;
+    notes?: string | null;
+  }
 ): Promise<WorkspaceMember> {
+  const body: Record<string, unknown> = {};
+  if (patch.role !== undefined) body.role = patch.role;
+  if (patch.isActive !== undefined) body.is_active = patch.isActive;
+  if (patch.displayName !== undefined) body.display_name = patch.displayName;
+  if (patch.phone !== undefined) body.phone = patch.phone;
+  if (patch.address !== undefined) body.address = patch.address;
+  if (patch.notes !== undefined) body.notes = patch.notes;
   const response = await apiFetch(`${API_BASE_URL}/auth/workspace/members/${encodeURIComponent(operatorId)}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      role: patch.role,
-      is_active: patch.isActive
-    })
+    body: JSON.stringify(body)
   });
   if (!response.ok) {
     throw new Error(await formatApiError(response, "Failed to update member"));
   }
   return mapWorkspaceMember((await response.json()) as WorkspaceMemberApi);
+}
+
+export async function resetWorkspaceMemberPassword(
+  operatorId: string
+): Promise<{ operatorId: string; email: string; temporaryPassword: string }> {
+  const response = await apiFetch(
+    `${API_BASE_URL}/auth/workspace/members/${encodeURIComponent(operatorId)}/reset-password`,
+    { method: "POST" }
+  );
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to reset member password"));
+  }
+  const body = (await response.json()) as {
+    operator_id: string;
+    email: string;
+    temporary_password: string;
+  };
+  return {
+    operatorId: body.operator_id,
+    email: body.email,
+    temporaryPassword: body.temporary_password
+  };
+}
+
+export async function rotateWorkspaceInvite(
+  inviteId: string
+): Promise<{ inviteId: string; email: string; role: string; expiresAt: string; inviteToken: string }> {
+  const response = await apiFetch(
+    `${API_BASE_URL}/auth/workspace/invites/${encodeURIComponent(inviteId)}/rotate`,
+    { method: "POST" }
+  );
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to rotate invite link"));
+  }
+  const body = (await response.json()) as {
+    invite_id: string;
+    email: string;
+    role: string;
+    expires_at: string;
+    invite_token: string;
+  };
+  return {
+    inviteId: body.invite_id,
+    email: body.email,
+    role: body.role,
+    expiresAt: body.expires_at,
+    inviteToken: body.invite_token
+  };
 }
 
 export type CandidateListResult = {
@@ -1419,6 +1490,14 @@ export async function deleteJob(jobId: string): Promise<void> {
   }
 }
 
+export async function retryJob(jobId: string): Promise<Job> {
+  const response = await apiFetch(`${API_BASE_URL}/jobs/${jobId}/retry`, { method: "POST" });
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to retry job"));
+  }
+  return (await response.json()) as Job;
+}
+
 export async function fetchOperationalMetrics(): Promise<OperationalMetrics> {
   const response = await apiFetch(`${API_BASE_URL}/ops/metrics`, { cache: "no-store" });
   if (!response.ok) {
@@ -1790,7 +1869,7 @@ export async function previewTtsAiSpeech(payload: TtsAiPreviewPayload): Promise<
 }
 
 export async function fetchPipelineDashboard(): Promise<PipelineDashboardResponse> {
-  const response = await apiFetch(`${API_BASE_URL}/ops/pipeline-dashboard`, { cache: "no-store" });
+  const response = await apiFetch(`${API_BASE_URL}/pipeline-dashboard`, { cache: "no-store" });
   if (!response.ok) {
     throw new Error(await formatApiError(response, "Failed to load pipeline dashboard"));
   }

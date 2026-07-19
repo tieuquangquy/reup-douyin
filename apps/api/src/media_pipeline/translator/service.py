@@ -25,9 +25,11 @@ from src.media_pipeline.translator.resolve import resolve_translator_settings
 logger = logging.getLogger(__name__)
 
 USER_INSTRUCTION = (
-    "Dưới đây là JSON object: khóa = timestamp (ms hoặc id), giá trị = câu tiếng Trung. "
-    "Hãy dịch sang tiếng Việt và trả về ĐÚNG một JSON object với CÙNG các khóa, "
-    "giá trị là bản dịch tiếng Việt đã rút gọn cho phụ đề. "
+    "Dưới đây là JSON object: khóa = id ô chữ (ms#index), giá trị = nhãn/UI hoặc "
+    "phụ đề tiếng Trung trên khung hình. "
+    "Hãy dịch sang tiếng Việt RÚT GỌN để vừa đúng ô chữ (ưu tiên 1–4 từ). "
+    "Giữ nguyên số và đơn vị quen thuộc (g, kcal, %, ngày tháng). "
+    "Trả về ĐÚNG một JSON object với CÙNG các khóa, giá trị là tiếng Việt. "
     "Không thêm khóa khác, không markdown."
 )
 

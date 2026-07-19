@@ -16,10 +16,12 @@ assert.equal(sanitizeNextPath("//evil.example", "/"), "/");
 
 assert.equal(isOpsConsolePath("/ops"), true);
 assert.equal(isOpsConsolePath("/ops/jobs"), true);
+assert.equal(isOpsConsolePath("/ops/pipeline"), false);
 assert.equal(isOpsConsolePath("/ops/extensions/douyin"), true);
 assert.equal(isOpsConsolePath("/ops/extensions/douyin/capture-inbox"), false);
 assert.equal(isOpsConsolePath("/selection/review-board"), false);
 assert.equal(surfaceForPath("/ops/caption-ai"), "ops");
+assert.equal(surfaceForPath("/ops/pipeline"), "operator");
 assert.equal(surfaceForPath("/ops/extensions/douyin/capture-inbox"), "operator");
 assert.equal(loginPathForSurface("ops"), "/auth/ops/login");
 assert.equal(loginPathForSurface("operator"), "/auth/login");

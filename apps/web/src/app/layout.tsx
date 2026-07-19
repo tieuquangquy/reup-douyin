@@ -8,7 +8,7 @@ export const metadata: Metadata = rootMetadata;
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning>
       <head>
         {/* Preload Regular only — Medium/Bold stay full face but load on demand (~500KB less on critical path). */}
         <link
@@ -19,7 +19,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           crossOrigin="anonymous"
         />
       </head>
-      <body>
+      <body suppressHydrationWarning>
         <I18nProvider>
           <AuthProvider>{children}</AuthProvider>
         </I18nProvider>

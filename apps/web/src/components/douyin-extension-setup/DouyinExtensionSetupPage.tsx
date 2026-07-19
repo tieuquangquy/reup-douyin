@@ -5,7 +5,6 @@ import { checkDouyinExtensionStatus, fetchDouyinExtensionStatus, getDouyinExtens
 import { EXTENSION_BUILD_COMMAND, EXTENSION_DIST_PATH, resolveDouyinExtensionDownloadState } from "../../lib/douyinExtensionInstall";
 import type { DouyinExtensionStatusResponse } from "../../types/douyin-extension-setup";
 import { OperatorStudioShell } from "../app-shell/OperatorStudioShell";
-import { PageShell } from "../app-shell/PageShell";
 
 export function DouyinExtensionSetupPage() {
   const [status, setStatus] = useState<DouyinExtensionStatusResponse | null>(null);
@@ -46,14 +45,10 @@ export function DouyinExtensionSetupPage() {
 
   return (
     <OperatorStudioShell
+      actions={<button onClick={() => void checkConnection()} type="button" disabled={checking}>{checking ? "Checking..." : "Check extension connection"}</button>}
       description="Install, verify, and troubleshoot the local Douyin current-tab capture extension."
       title="Douyin Extension Setup"
     >
-      <PageShell
-        actions={<button onClick={() => void checkConnection()} type="button" disabled={checking}>{checking ? "Checking..." : "Check extension connection"}</button>}
-        description="Use this page to download the extension build, open browser extension settings, and verify backend connectivity. Browser installation is still manual."
-        title="Extension Setup"
-      >
         <div className="intake-layout">
           <div className="intake-form">
             <section className="operator-panel">
@@ -119,7 +114,6 @@ export function DouyinExtensionSetupPage() {
             </section>
           </aside>
         </div>
-      </PageShell>
     </OperatorStudioShell>
   );
 }

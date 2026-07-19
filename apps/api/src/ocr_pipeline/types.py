@@ -66,3 +66,4 @@ class OcrPipelineResult:
     cleaned_video_asset_id: str | None
     warnings: list[str] = field(default_factory=list)
     hardsub_events: list[HardSubEvent] = field(default_factory=list)
+    clean_produced: bool = False

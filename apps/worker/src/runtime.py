@@ -116,6 +116,20 @@ class LocalPollingWorker:
         logger.info("worker_started", extra={"worker_id": self.worker_id, "redis_enabled": self.broker is not None})
         if self.broker is not None:
             self.broker.ping()
+        try:
+            session_factory = get_session_factory()
+            with session_factory() as db:
+                released = JobRunner(db, handlers=self.handlers).release_orphaned_locks(self.worker_id)
+                if released:
+                    logger.warning(
+                        "worker_released_orphan_locks",
+                        extra={"worker_id": self.worker_id, "count": released},
+                    )
+        except Exception:
+            logger.exception(
+                "worker_release_orphan_locks_failed",
+                extra={"worker_id": self.worker_id},
+            )
         while not self._stop_requested:
             message = None
             if self.broker is not None:

@@ -6,7 +6,6 @@ import { useSearchParams } from "next/navigation";
 
 import { OperatorStudioShell } from "../app-shell/OperatorStudioShell";
 import { TopbarRefreshButton } from "../app-shell/TopbarRefreshButton";
-import { PageShell } from "../app-shell/PageShell";
 import {
   OpsConsolePage,
   OpsDetailPanel,
@@ -1187,14 +1186,10 @@ export function CaptureInboxPage() {
 
   return (
     <OperatorStudioShell
-      description="Stage Douyin captures, fix incomplete items, and promote ready work to Review Board."
+      actions={primaryActions}
+      description="Review captured Douyin items before sending them forward"
       title="Capture Inbox"
     >
-      <PageShell
-        actions={primaryActions}
-        description="Review captured Douyin items before sending them forward"
-        title="Capture Inbox"
-      >
         <OpsConsolePage>
           {error ? <section className="operator-panel intake-status danger"><strong>Capture Inbox error:</strong> {error}</section> : null}
           {promoteSuccess ? (
@@ -1314,7 +1309,6 @@ export function CaptureInboxPage() {
           </div>
           <BulkActionConfirmationDialog dialog={bulkActionDialog} onClose={closeBulkActionDialog} onConfirm={confirmBulkAction} working={working} />
         </OpsConsolePage>
-      </PageShell>
     </OperatorStudioShell>
   );
 }

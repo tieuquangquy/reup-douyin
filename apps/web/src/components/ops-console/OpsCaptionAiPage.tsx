@@ -286,7 +286,7 @@ export function OpsCaptionAiPage() {
       : null;
 
   return (
-    <main className="ops-page ops-page--settings">
+    <main className="ops-page ops-page--settings ops-ai-page is-compact">
       <OpsCaptionSettingsTabs />
 
       {error ? <div className="inline-error">{error}</div> : null}
@@ -294,7 +294,7 @@ export function OpsCaptionAiPage() {
       <OpsPanel
         title={t("opsCaptionAi.panelTitle")}
         actions={
-          <div className="ops-header-actions">
+          <div className="ops-header-actions ops-ai-toolbar" role="group" aria-label={t("opsCaptionAi.panelTitle")}>
             {savedMessage ? <span className="ops-connection-status is-ok">{t("opsCaptionAi.saved")}</span> : null}
             {testResult?.ok ? (
               <span className="ops-connection-status is-ok">
@@ -304,40 +304,50 @@ export function OpsCaptionAiPage() {
                 })}
               </span>
             ) : null}
-            <button type="button" onClick={() => void load()} disabled={saving || testing}>
-              {t("common.refresh")}
-            </button>
-            <button type="button" onClick={() => void onTest()} disabled={saving || testing}>
-              {testing ? t("opsCaptionAi.testing") : t("opsCaptionAi.test")}
-            </button>
-            <button type="button" className="primary" onClick={() => void onSave()} disabled={saving || testing}>
-              {saving ? t("opsCaptionAi.saving") : t("opsCaptionAi.save")}
-            </button>
+            <div className="ops-ai-toolbar__group">
+              <button
+                type="button"
+                className="ops-ai-toolbar__refresh"
+                onClick={() => void load()}
+                disabled={saving || testing}
+                aria-label={t("common.refresh")}
+                title={t("common.refresh")}
+              >
+                <span aria-hidden="true">↻</span>
+              </button>
+              <button type="button" onClick={() => void onTest()} disabled={saving || testing}>
+                {testing ? t("opsCaptionAi.testing") : t("opsCaptionAi.test")}
+              </button>
+              <button type="button" className="primary" onClick={() => void onSave()} disabled={saving || testing}>
+                {saving ? t("opsCaptionAi.saving") : t("opsCaptionAi.save")}
+              </button>
+            </div>
+          </div>
+        }
+        meta={
+          <div className="ops-ai-meta">
+            <div className="ops-ai-status" aria-label={t("opsCaptionAi.statusLabel")}>
+              <span className={`ops-ai-chip ${meta.source === "workspace_db" ? "is-active" : "is-muted"}`}>
+                {meta.source === "workspace_db" ? t("opsCaptionAi.sourceDbShort") : t("opsCaptionAi.sourceEnvShort")}
+              </span>
+              <span className={`ops-ai-chip ${meta.apiKeySet ? "is-ok" : "is-muted"}`}>
+                {meta.apiKeySet ? `${t("opsCaptionAi.keySet")}: ${meta.apiKeyMasked}` : t("opsCaptionAi.keyUnset")}
+              </span>
+              <span className="ops-ai-chip is-muted">{form.provider}</span>
+              <label className="ops-ai-toggle ops-ai-toggle--flush" title={t("opsCaptionAi.disableHint")}>
+                <input
+                  type="checkbox"
+                  checked={form.enabled}
+                  onChange={(event) => setForm({ ...form, enabled: event.target.checked })}
+                />
+                <span>
+                  <strong>{t("opsCaptionAi.enabled")}</strong>
+                </span>
+              </label>
+            </div>
           </div>
         }
       >
-        <p className="ops-muted">
-          {t("opsCaptionAi.hint")}{" "}
-          <code>
-            {meta.source === "workspace_db" ? t("opsCaptionAi.sourceDb") : t("opsCaptionAi.sourceEnv")}
-          </code>
-          {meta.apiKeySet ? (
-            <>
-              {" "}
-              · {t("opsCaptionAi.keySet")}: <code>{meta.apiKeyMasked}</code>
-            </>
-          ) : (
-            <> · {t("opsCaptionAi.keyUnset")}</>
-          )}
-        </p>
-
-        {savedMessage ? (
-          <div className="ops-field-alert is-success" role="status">
-            <strong>{t("opsCaptionAi.saved")}</strong>
-            <span>{t("opsCaptionAi.savedHint")}</span>
-          </div>
-        ) : null}
-
         {testFailure ? (
           <div className="ops-field-alert is-error" role="alert" title={testResult?.detail || undefined}>
             <strong>
@@ -350,82 +360,94 @@ export function OpsCaptionAiPage() {
           </div>
         ) : null}
 
-        <div className="ops-form-grid">
-          <label className="ops-form-field-inline">
-            <input
-              type="checkbox"
-              checked={form.enabled}
-              onChange={(event) => setForm({ ...form, enabled: event.target.checked })}
-            />
-            <span>{t("opsCaptionAi.enabled")}</span>
-          </label>
-
-          <div className="ops-form-field">
-            <label htmlFor="caption-ai-provider">{t("opsCaptionAi.provider")}</label>
-            <select
-              id="caption-ai-provider"
-              value={form.provider}
-              onChange={(event) => onProviderChange(event.target.value)}
-            >
-              <option value="auto">auto</option>
-              <option value="gemini">gemini</option>
-              <option value="openai_compatible">openai_compatible</option>
-              <option value="ollama">ollama</option>
-              <option value="placeholder">placeholder</option>
-            </select>
-          </div>
-
-          {showsBaseUrl(form.provider) ? (
+        <section className="ops-ai-section">
+          <header className="ops-ai-section__head">
+            <h3>{t("opsCaptionAi.sectionConnection")}</h3>
+          </header>
+          <div className="ops-ai-grid">
             <div className="ops-form-field">
-              <label htmlFor="caption-ai-base-url">{t("opsCaptionAi.baseUrl")}</label>
+              <label htmlFor="caption-ai-provider">{t("opsCaptionAi.provider")}</label>
+              <select
+                id="caption-ai-provider"
+                value={form.provider}
+                onChange={(event) => onProviderChange(event.target.value)}
+              >
+                <option value="auto">auto</option>
+                <option value="gemini">gemini</option>
+                <option value="openai_compatible">openai_compatible</option>
+                <option value="ollama">ollama</option>
+                <option value="placeholder">placeholder</option>
+              </select>
+            </div>
+            <div className="ops-form-field">
+              <label htmlFor="caption-ai-timeout">{t("opsCaptionAi.timeout")}</label>
               <input
-                id="caption-ai-base-url"
-                name="caption-ai-base-url"
-                type="text"
-                inputMode="url"
-                value={form.baseUrl}
-                onChange={(event) => setForm({ ...form, baseUrl: event.target.value })}
-                placeholder={
-                  form.provider === "ollama" ? "http://127.0.0.1:11434" : "https://api.openai.com/v1"
-                }
-                autoComplete="off"
-                spellCheck={false}
+                id="caption-ai-timeout"
+                type="number"
+                min={1}
+                max={600}
+                value={form.timeoutSeconds}
+                onChange={(event) => setForm({ ...form, timeoutSeconds: event.target.value })}
               />
             </div>
-          ) : null}
-
-          {showsApiKey(form.provider) ? (
-            <div className="ops-form-field">
-              <label htmlFor="caption-ai-api-key">{t("opsCaptionAi.apiKey")}</label>
-              <input
-                id="caption-ai-api-key"
-                name="caption-ai-api-key"
-                type="password"
-                value={form.apiKeyInput}
-                onChange={(event) => setForm({ ...form, apiKeyInput: event.target.value, clearApiKey: false })}
-                placeholder={
-                  meta.apiKeySet ? t("opsCaptionAi.apiKeyKeepPlaceholder") : t("opsCaptionAi.apiKeyPlaceholder")
-                }
-                autoComplete="new-password"
-                spellCheck={false}
-              />
-              <label className="ops-form-field-inline">
+            {showsBaseUrl(form.provider) ? (
+              <div className="ops-form-field ops-ai-span-2">
+                <label htmlFor="caption-ai-base-url">{t("opsCaptionAi.baseUrl")}</label>
                 <input
-                  type="checkbox"
-                  checked={form.clearApiKey}
-                  onChange={(event) =>
-                    setForm({
-                      ...form,
-                      clearApiKey: event.target.checked,
-                      apiKeyInput: event.target.checked ? "" : form.apiKeyInput
-                    })
+                  id="caption-ai-base-url"
+                  name="caption-ai-base-url"
+                  type="text"
+                  inputMode="url"
+                  value={form.baseUrl}
+                  onChange={(event) => setForm({ ...form, baseUrl: event.target.value })}
+                  placeholder={
+                    form.provider === "ollama" ? "http://127.0.0.1:11434" : "https://api.openai.com/v1"
                   }
+                  autoComplete="off"
+                  spellCheck={false}
                 />
-                <span>{t("opsCaptionAi.clearApiKey")}</span>
-              </label>
-            </div>
-          ) : null}
+              </div>
+            ) : null}
+            {showsApiKey(form.provider) ? (
+              <>
+                <div className="ops-form-field ops-ai-span-2">
+                  <label htmlFor="caption-ai-api-key">{t("opsCaptionAi.apiKey")}</label>
+                  <input
+                    id="caption-ai-api-key"
+                    name="caption-ai-api-key"
+                    type="password"
+                    value={form.apiKeyInput}
+                    onChange={(event) => setForm({ ...form, apiKeyInput: event.target.value, clearApiKey: false })}
+                    placeholder={
+                      meta.apiKeySet ? t("opsCaptionAi.apiKeyKeepPlaceholder") : t("opsCaptionAi.apiKeyPlaceholder")
+                    }
+                    autoComplete="new-password"
+                    spellCheck={false}
+                  />
+                </div>
+                <label className="ops-form-field-inline ops-ai-span-2">
+                  <input
+                    type="checkbox"
+                    checked={form.clearApiKey}
+                    onChange={(event) =>
+                      setForm({
+                        ...form,
+                        clearApiKey: event.target.checked,
+                        apiKeyInput: event.target.checked ? "" : form.apiKeyInput
+                      })
+                    }
+                  />
+                  <span>{t("opsCaptionAi.clearApiKey")}</span>
+                </label>
+              </>
+            ) : null}
+          </div>
+        </section>
 
+        <section className="ops-ai-section">
+          <header className="ops-ai-section__head">
+            <h3>{t("opsCaptionAi.sectionModelFallback")}</h3>
+          </header>
           {showModel ? (
             <div className="ops-form-field">
               <label htmlFor="caption-ai-model">{t("opsCaptionAi.model")}</label>
@@ -474,46 +496,32 @@ export function OpsCaptionAiPage() {
           ) : (
             <p className="ops-muted">{t("opsCaptionAi.modelGateHint")}</p>
           )}
-
-          <div className="ops-form-field">
-            <label htmlFor="caption-ai-timeout">{t("opsCaptionAi.timeout")}</label>
-            <input
-              id="caption-ai-timeout"
-              type="number"
-              min={1}
-              max={600}
-              value={form.timeoutSeconds}
-              onChange={(event) => setForm({ ...form, timeoutSeconds: event.target.value })}
-            />
+          <div className="ops-ai-grid">
+            <div className="ops-form-field">
+              <label htmlFor="caption-ai-fallback">{t("opsCaptionAi.fallbackProvider")}</label>
+              <select
+                id="caption-ai-fallback"
+                value={form.fallbackProvider}
+                onChange={(event) => setForm({ ...form, fallbackProvider: event.target.value })}
+              >
+                <option value="none">none</option>
+                <option value="ollama">ollama</option>
+                <option value="gemini">gemini</option>
+                <option value="openai_compatible">openai_compatible</option>
+              </select>
+            </div>
+            <div className="ops-form-field">
+              <label htmlFor="caption-ai-fallback-model">{t("opsCaptionAi.fallbackModel")}</label>
+              <input
+                id="caption-ai-fallback-model"
+                value={form.fallbackModel}
+                onChange={(event) => setForm({ ...form, fallbackModel: event.target.value })}
+                autoComplete="off"
+                spellCheck={false}
+              />
+            </div>
           </div>
-
-          <div className="ops-form-field">
-            <label htmlFor="caption-ai-fallback">{t("opsCaptionAi.fallbackProvider")}</label>
-            <select
-              id="caption-ai-fallback"
-              value={form.fallbackProvider}
-              onChange={(event) => setForm({ ...form, fallbackProvider: event.target.value })}
-            >
-              <option value="none">none</option>
-              <option value="ollama">ollama</option>
-              <option value="gemini">gemini</option>
-              <option value="openai_compatible">openai_compatible</option>
-            </select>
-          </div>
-
-          <div className="ops-form-field">
-            <label htmlFor="caption-ai-fallback-model">{t("opsCaptionAi.fallbackModel")}</label>
-            <input
-              id="caption-ai-fallback-model"
-              value={form.fallbackModel}
-              onChange={(event) => setForm({ ...form, fallbackModel: event.target.value })}
-              autoComplete="off"
-              spellCheck={false}
-            />
-          </div>
-        </div>
-
-        <p className="ops-muted">{t("opsCaptionAi.disableHint")}</p>
+        </section>
       </OpsPanel>
     </main>
   );

@@ -2,11 +2,12 @@
 # Thin wrapper — prefer Python on Windows; this works in Git Bash / WSL / Linux.
 #
 # Effective Cloud Run flags (from README_DEPLOY.md / auto_deploy.py):
-#   --memory 4Gi
+#   --memory 8Gi --cpu 4 --concurrency 2
 #   --timeout 300
-#   --min-instances 0
+#   --min-instances 0   (default / idle)
+#   --min-instances 1   (auto_deploy.py --warm — Analyze OCR batch session)
 #   --max-instances 3
-#   --cpu 1 --port 8080 --allow-unauthenticated
+#   --port 8080 --allow-unauthenticated
 #
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

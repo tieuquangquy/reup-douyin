@@ -10,8 +10,8 @@ import type {
   PipelineDashboardStage,
   PipelineDashboardStatus
 } from "../../types/operations";
-import { OpsConsoleShell } from "../app-shell/OpsConsoleShell";
-import { PageShell } from "../app-shell/PageShell";
+import { OperatorStudioShell } from "../app-shell/OperatorStudioShell";
+import { TopbarRefreshButton } from "../app-shell/TopbarRefreshButton";
 import {
   OpsActionRow,
   OpsDetailPanel,
@@ -69,33 +69,35 @@ export function PipelineDashboardPage() {
   );
 
   return (
-    <OpsConsoleShell
-      actions={<button type="button" onClick={() => void load()}>Refresh</button>}
-      description="End-to-end command view for Capture, Review, Reup Queue, Export Package, Publish Handoff, and Publish progress."
+    <OperatorStudioShell
+      actions={<TopbarRefreshButton busy={loading && Boolean(dashboard)} disabled={loading && !dashboard} onClick={() => void load()} />}
+      description="Track intake, review, production, and publish pipeline health."
       title="Pipeline Dashboard"
     >
-      {loading ? <OpsStatePanel detail="Aggregating pipeline health, backlog, blockers, and recent movement from canonical workflow tables." title="Loading pipeline dashboard" variant="loading" /> : null}
+      {loading ? (
+        <OpsStatePanel
+          detail="Aggregating pipeline health, backlog, blockers, and recent movement from canonical workflow tables."
+          title="Loading pipeline dashboard"
+          variant="loading"
+        />
+      ) : null}
       {!loading && error ? (
         <OpsStatePanel
-          action={<button type="button" onClick={() => void load()}>Retry</button>}
+          action={
+            <button type="button" onClick={() => void load()}>
+              Retry
+            </button>
+          }
           detail={error}
           title="Could not load pipeline dashboard"
           variant="error"
         />
       ) : null}
-      {!loading && !error && !dashboard ? <OpsStatePanel detail="No dashboard payload was returned by the API." title="Pipeline dashboard unavailable" variant="empty" /> : null}
+      {!loading && !error && !dashboard ? (
+        <OpsStatePanel detail="No dashboard payload was returned by the API." title="Pipeline dashboard unavailable" variant="empty" />
+      ) : null}
       {!loading && !error && dashboard ? (
-        <PageShell
-          actions={
-            <>
-              <a href={CANONICAL_PIPELINE_HREFS.capture}>Capture Inbox</a>
-              <a href={CANONICAL_PIPELINE_HREFS.reupQueue}>Reup Queue</a>
-              <a href={CANONICAL_PIPELINE_HREFS.publishHealth}>Publish Health</a>
-            </>
-          }
-          description={`${statusLabel(dashboard.overall_status)} · Generated ${formatDateTime(dashboard.generated_at)}`}
-          title="End-to-end workflow command center"
-        >
+        <div className="pipeline-dashboard">
           <OpsNextActionBanner
             actions={<OpsActionRow actions={nextActionLinks(dashboard)} />}
             description={dashboard.headline}
@@ -103,8 +105,14 @@ export function PipelineDashboardPage() {
             tone={toneForStatus(dashboard.overall_status)}
           />
 
+          <OpsSummaryCards
+            cards={summaryCards(dashboard.summary_metrics, dashboard.overall_status)}
+            hint="Live counts from the aggregation API."
+            title="Pipeline summary"
+          />
+
           <OpsWorkflowContext
-            currentStep="Canonical workflow boundary"
+            currentStep="Canonical workflow"
             metrics={[
               { label: "Overall status", value: statusLabel(dashboard.overall_status) },
               { label: "Attention items", value: dashboard.attention_items.length },
@@ -114,63 +122,69 @@ export function PipelineDashboardPage() {
             steps={WORKFLOW_STEPS}
           />
 
-          <OpsSummaryCards cards={summaryCards(dashboard.summary_metrics, dashboard.overall_status)} hint="These API-aggregated metrics summarize the full pipeline without browser-side database inference." title="Pipeline summary" />
-
           <OpsDetailPanel title="Stage-by-stage progress">
-            <div className="operator-quick-grid pipeline-stage-grid">
+            <div className="pipeline-stage-strip">
               {dashboard.stages.map((stage, index) => (
                 <StageCard index={index} key={stage.key} stage={stage} totalStages={dashboard.stages.length} />
               ))}
             </div>
           </OpsDetailPanel>
 
-          <div className="operator-quick-grid">
+          <div className="pipeline-split-panels">
             <AttentionPanel items={dashboard.attention_items} />
             <RecentActivityPanel items={dashboard.recent_activity} />
           </div>
 
           <OpsDetailPanel title="Quick actions and drill-downs">
-            <div className="operator-quick-grid">
+            <div className="pipeline-quick-link-grid">
               {dashboard.quick_links.map((link) => (
-                <OpsItemCard
-                  actions={[{ key: "open", label: "Open surface", href: link.href, tone: "primary" }]}
-                  key={link.href}
-                  metadata={[{ label: "Stage", value: link.stage_key ? stageKeyLabel(link.stage_key) : "General" }]}
-                  statusLabel="Canonical surface"
-                  statusTone="good"
-                  title={link.label}
-                >
-                  <p>{link.description}</p>
-                </OpsItemCard>
+                <a className="pipeline-quick-link" href={link.href} key={link.href}>
+                  <OpsItemCard
+                    metadata={[{ label: "Stage", value: link.stage_key ? stageKeyLabel(link.stage_key) : "General" }]}
+                    title={link.label}
+                  >
+                    <p>{link.description}</p>
+                  </OpsItemCard>
+                </a>
               ))}
             </div>
           </OpsDetailPanel>
-        </PageShell>
+        </div>
       ) : null}
-    </OpsConsoleShell>
+    </OperatorStudioShell>
   );
 }
 
 function StageCard({ index, stage, totalStages }: { index: number; stage: PipelineDashboardStage; totalStages: number }) {
   return (
-    <OpsItemCard
-      actions={[{ key: "open", label: `Open ${stage.label}`, href: stage.href, tone: "primary" }]}
-      metadata={[
-        { label: "Progress", value: `${index + 1} / ${totalStages}` },
-        { label: stage.primary_label, value: stage.primary_count },
-        { label: stage.secondary_label, value: stage.secondary_count },
-        { label: "Attention", value: stage.attention_count }
-      ]}
-      preview={<PipelineStepMarker index={index} status={stage.status} />}
-      statusLabel={statusLabel(stage.status)}
-      statusTone={toneForStatus(stage.status)}
-      title={stage.label}
-    >
-      <p>{stage.description}</p>
-      <OpsDetailSection description={stage.next_action} title="Next action">
-        {stage.metrics.length > 0 ? <OpsMetadataList items={stage.metrics.map((metric) => ({ label: metric.label, value: metric.detail ? `${metric.value} · ${metric.detail}` : metric.value }))} /> : <p className="muted">No additional stage metrics require attention.</p>}
-      </OpsDetailSection>
-    </OpsItemCard>
+    <div className={`pipeline-stage-card tone-${toneForStatus(stage.status)}`}>
+      <OpsItemCard
+        actions={[{ key: "open", label: "Open", href: stage.href, tone: "primary" }]}
+        metadata={[
+          { label: "Step", value: `${index + 1} / ${totalStages}` },
+          { label: stage.primary_label, value: stage.primary_count },
+          { label: stage.secondary_label, value: stage.secondary_count },
+          { label: "Attention", value: stage.attention_count }
+        ]}
+        preview={<PipelineStepMarker index={index} status={stage.status} />}
+        statusLabel={statusLabel(stage.status)}
+        statusTone={toneForStatus(stage.status)}
+        title={stage.label}
+      >
+        <p className="pipeline-stage-card__desc">{stage.description}</p>
+        <OpsDetailSection title="Next action">
+          <p className="pipeline-stage-card__next">{stage.next_action}</p>
+          {stage.metrics.length > 0 ? (
+            <OpsMetadataList
+              items={stage.metrics.map((metric) => ({
+                label: metric.label,
+                value: metric.detail ? `${metric.value} · ${metric.detail}` : metric.value
+              }))}
+            />
+          ) : null}
+        </OpsDetailSection>
+      </OpsItemCard>
+    </div>
   );
 }
 
@@ -181,25 +195,41 @@ function PipelineStepMarker({ index, status }: { index: number; status: Pipeline
 function AttentionPanel({ items }: { items: PipelineDashboardAttentionItem[] }) {
   return (
     <OpsDetailPanel title="Attention and blockers">
-      {items.length === 0 ? <OpsStatePanel detail="No blockers or operator attention items are currently reported by the aggregation endpoint." title="No attention needed" variant="success" /> : null}
-      {items.map((item) => (
-        <OpsItemCard
-          actions={[{ key: "open", label: "Open stage", href: item.href, tone: item.severity === "critical" ? "danger" : "primary" }]}
-          key={item.id}
-          metadata={[
-            { label: "Stage", value: stageKeyLabel(item.stage_key) },
-            { label: "Count", value: item.count }
-          ]}
-          statusLabel={severityLabel(item.severity)}
-          statusTone={toneForSeverity(item.severity)}
-          title={item.title}
-        >
-          <p>{item.detail}</p>
-          <OpsDetailSection title="Recommended action">
-            <p>{item.recommended_action}</p>
-          </OpsDetailSection>
-        </OpsItemCard>
-      ))}
+      {items.length === 0 ? (
+        <OpsStatePanel
+          detail="No blockers or attention items reported."
+          title="No attention needed"
+          variant="success"
+        />
+      ) : null}
+      <div className="pipeline-list">
+        {items.map((item) => (
+          <div className={`pipeline-list-row tone-${toneForSeverity(item.severity)}`} key={item.id}>
+            <OpsItemCard
+              actions={[
+                {
+                  key: "open",
+                  label: "Open",
+                  href: item.href,
+                  tone: item.severity === "critical" ? "danger" : "primary"
+                }
+              ]}
+              metadata={[
+                { label: "Stage", value: stageKeyLabel(item.stage_key) },
+                { label: "Count", value: item.count }
+              ]}
+              statusLabel={severityLabel(item.severity)}
+              statusTone={toneForSeverity(item.severity)}
+              title={item.title}
+            >
+              <p>{item.detail}</p>
+              <OpsDetailSection title="Recommended action">
+                <p>{item.recommended_action}</p>
+              </OpsDetailSection>
+            </OpsItemCard>
+          </div>
+        ))}
+      </div>
     </OpsDetailPanel>
   );
 }
@@ -207,22 +237,31 @@ function AttentionPanel({ items }: { items: PipelineDashboardAttentionItem[] }) 
 function RecentActivityPanel({ items }: { items: PipelineDashboardActivityItem[] }) {
   return (
     <OpsDetailPanel title="Recent activity">
-      {items.length === 0 ? <OpsStatePanel detail="No recent stage updates were found. Start with Capture Inbox when new source content is ready." title="No recent activity" variant="empty" /> : null}
-      {items.map((item) => (
-        <OpsItemCard
-          actions={[{ key: "open", label: "Open related surface", href: item.href, tone: "primary" }]}
-          key={item.id}
-          metadata={[
-            { label: "Stage", value: stageKeyLabel(item.stage_key) },
-            { label: "Updated", value: formatDateTime(item.occurred_at) }
-          ]}
-          statusLabel="Activity"
-          statusTone="muted"
-          title={item.title}
-        >
-          <p>{item.detail}</p>
-        </OpsItemCard>
-      ))}
+      {items.length === 0 ? (
+        <OpsStatePanel
+          detail="No recent stage updates. Start with Capture Inbox when new content is ready."
+          title="No recent activity"
+          variant="empty"
+        />
+      ) : null}
+      <div className="pipeline-list">
+        {items.map((item) => (
+          <div className="pipeline-list-row" key={item.id}>
+            <OpsItemCard
+              actions={[{ key: "open", label: "Open", href: item.href, tone: "primary" }]}
+              metadata={[
+                { label: "Stage", value: stageKeyLabel(item.stage_key) },
+                { label: "Updated", value: formatDateTime(item.occurred_at) }
+              ]}
+              statusLabel="Activity"
+              statusTone="muted"
+              title={item.title}
+            >
+              <p>{item.detail}</p>
+            </OpsItemCard>
+          </div>
+        ))}
+      </div>
     </OpsDetailPanel>
   );
 }
@@ -243,9 +282,14 @@ function nextActionLinks(dashboard: PipelineDashboardResponse): OpsItemAction[] 
   const target = firstCritical ?? firstAttention;
   if (target) {
     return [
-        { key: "attention", label: "Open top attention item", href: target.href, tone: target.severity === "critical" ? "danger" : "primary" },
-        { key: "review", label: "Review Board", href: CANONICAL_PIPELINE_HREFS.review },
-        { key: "publish", label: "Publish progress", href: CANONICAL_PIPELINE_HREFS.publishHealth }
+      {
+        key: "attention",
+        label: "Open top attention item",
+        href: target.href,
+        tone: target.severity === "critical" ? "danger" : "primary"
+      },
+      { key: "review", label: "Review Board", href: CANONICAL_PIPELINE_HREFS.review },
+      { key: "publish", label: "Publish progress", href: CANONICAL_PIPELINE_HREFS.publishHealth }
     ];
   }
   return [
@@ -257,12 +301,12 @@ function nextActionLinks(dashboard: PipelineDashboardResponse): OpsItemAction[] 
 
 function summaryMetricDescription(key: string): string {
   const descriptions: Record<string, string> = {
-    captures_last_24h: "New capture sessions received in the last 24 hours.",
-    active_backlog: "Review, queue, and publish work currently in motion.",
-    attention_items: "Operator-facing items that should be cleared or monitored.",
-    export_ready: "Queue or package records ready for export handoff work.",
-    handoff_ready: "Publish Handoffs waiting for manual operator handling.",
-    published: "Drafts with completed publication state."
+    captures_last_24h: "Captures in the last 24 hours.",
+    active_backlog: "Review, queue, and publish work in motion.",
+    attention_items: "Items that need clearing or monitoring.",
+    export_ready: "Ready for export handoff.",
+    handoff_ready: "Handoffs waiting for operator handling.",
+    published: "Drafts with completed publication."
   };
   return descriptions[key] ?? "Aggregated pipeline metric.";
 }

@@ -10,7 +10,7 @@ from src.db.session import get_db_session
 from src.schemas.pipeline_dashboard import PipelineDashboardResponse
 from src.services.pipeline_dashboard_service import PipelineDashboardService
 
-router = APIRouter(prefix="/ops", tags=["operations"])
+router = APIRouter(tags=["pipeline-dashboard"])
 
 
 def get_pipeline_dashboard_service(

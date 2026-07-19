@@ -53,6 +53,23 @@ class OcrSummaryResponse(BaseModel):
     cleaned_video_asset_id: str | None = None
     ocr_events_asset_id: str | None = None
     visual_approved: bool = False
+    clean_produced: bool = False
+
+
+def _summary_response(summary: dict) -> OcrSummaryResponse:
+    return OcrSummaryResponse(
+        source_video_id=UUID(summary["source_video_id"]),
+        pipeline_version=summary.get("pipeline_version"),
+        provider=summary.get("provider"),
+        text_object_count=summary.get("text_object_count") or 0,
+        frame_detection_count=summary.get("frame_detection_count") or 0,
+        hardsub_events=summary.get("hardsub_events") or [],
+        warnings=summary.get("warnings") or [],
+        cleaned_video_asset_id=summary.get("cleaned_video_asset_id"),
+        ocr_events_asset_id=summary.get("ocr_events_asset_id"),
+        visual_approved=bool(summary.get("visual_approved")),
+        clean_produced=bool(summary.get("clean_produced")),
+    )
 
 
 def get_ocr_service(db: Session = Depends(get_db_session)) -> OcrPipelineService:
@@ -85,18 +102,7 @@ def get_ocr_summary(
     service: OcrPipelineService = Depends(get_ocr_service),
 ) -> OcrSummaryResponse:
     summary = service.get_ocr_summary(source_video_id)
-    return OcrSummaryResponse(
-        source_video_id=UUID(summary["source_video_id"]),
-        pipeline_version=summary.get("pipeline_version"),
-        provider=summary.get("provider"),
-        text_object_count=summary.get("text_object_count") or 0,
-        frame_detection_count=summary.get("frame_detection_count") or 0,
-        hardsub_events=summary.get("hardsub_events") or [],
-        warnings=summary.get("warnings") or [],
-        cleaned_video_asset_id=summary.get("cleaned_video_asset_id"),
-        ocr_events_asset_id=summary.get("ocr_events_asset_id"),
-        visual_approved=bool(summary.get("visual_approved")),
-    )
+    return _summary_response(summary)
 
 
 @router.post("/source-videos/{source_video_id}/ocr-visual-approve", response_model=OcrSummaryResponse)
@@ -108,18 +114,7 @@ def approve_ocr_visual(
         summary = service.approve_visual(source_video_id)
     except OcrPipelineError as exc:
         raise _ocr_http_error(exc) from exc
-    return OcrSummaryResponse(
-        source_video_id=UUID(summary["source_video_id"]),
-        pipeline_version=summary.get("pipeline_version"),
-        provider=summary.get("provider"),
-        text_object_count=summary.get("text_object_count") or 0,
-        frame_detection_count=summary.get("frame_detection_count") or 0,
-        hardsub_events=summary.get("hardsub_events") or [],
-        warnings=summary.get("warnings") or [],
-        cleaned_video_asset_id=summary.get("cleaned_video_asset_id"),
-        ocr_events_asset_id=summary.get("ocr_events_asset_id"),
-        visual_approved=bool(summary.get("visual_approved")),
-    )
+    return _summary_response(summary)
 
 
 def _ocr_http_error(exc: OcrPipelineError) -> HTTPException:

@@ -36,16 +36,19 @@ class TimedCoverVfTests(unittest.TestCase):
                 unstable=False,
             ),
         ]
-        vf = build_timed_cover_vf(events, hold_ms=500, pad_x=0.0, pad_y=0.0)
+        vf = build_timed_cover_vf(
+            events, hold_ms=500, pad_x=0.0, pad_y=0.0, frame_width=1080, frame_height=1920
+        )
 
-        self.assertIn("drawbox=", vf)
+        self.assertIn("delogo=", vf)
+        self.assertIn("show=0", vf)
         self.assertIn("enable=between(t\\,", vf)
-        self.assertEqual(vf.count("drawbox="), 2)
-        # Event geometry (no full-width force).
-        self.assertIn("x=iw*0.1000", vf)
-        self.assertIn("y=ih*0.8000", vf)
-        self.assertIn("w=iw*0.7000", vf)
-        self.assertIn("x=iw*0.2000", vf)
+        self.assertEqual(vf.count("delogo="), 2)
+        self.assertNotIn("drawbox=", vf)
+        self.assertNotIn("iw*", vf)
+        self.assertNotIn("ih*", vf)
+        # Narrow OCR unions expand to min cover width (not left as crumbs).
+        self.assertRegex(vf, r"delogo=x=\d+:y=\d+:w=\d+:h=\d+")
         self.assertNotIn("x=0:y=", vf)
         self.assertNotIn("w=iw:h=", vf)
         # Timed windows: [0, 1.0] and [2.0, 3.0] with hold_ms=500
@@ -67,7 +70,9 @@ class TimedCoverVfTests(unittest.TestCase):
                 unstable=True,
             )
         ]
-        vf = build_timed_cover_vf(events, hold_ms=500, pad_x=0.0, pad_y=0.0)
+        vf = build_timed_cover_vf(
+            events, hold_ms=500, pad_x=0.0, pad_y=0.0, frame_width=1080, frame_height=1920
+        )
         self.assertIn("between(t\\,1.000\\,1.500)", vf)
 
 

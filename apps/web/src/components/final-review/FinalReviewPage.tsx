@@ -60,6 +60,7 @@ export function FinalReviewPage({ sourceVideoId }: { sourceVideoId: string }) {
   const [loading, setLoading] = useState(true);
   const [actionBusy, setActionBusy] = useState(false);
   const [ocrBusy, setOcrBusy] = useState(false);
+  const [approveBusy, setApproveBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [ocrMessage, setOcrMessage] = useState<string | null>(null);
@@ -101,6 +102,17 @@ export function FinalReviewPage({ sourceVideoId }: { sourceVideoId: string }) {
 
   function toggleChecklist(key: FinalReviewChecklistKey) {
     setChecklist((current) => ({ ...current, [key]: !current[key] }));
+  }
+
+  function setAllChecklist(checked: boolean) {
+    setChecklist({
+      narration_clear: checked,
+      subtitle_ok: checked,
+      timing_ok: checked,
+      render_clean: checked,
+      playable: checked,
+      warnings_checked: checked
+    });
   }
 
   async function handleApprove() {
@@ -266,8 +278,16 @@ export function FinalReviewPage({ sourceVideoId }: { sourceVideoId: string }) {
         maxAttempts: 900
       });
       if (settled.outcome === "success") {
-        setOcrSummary(await fetchOcrSummary(sourceVideoId));
-        setOcrMessage(t("finalReviewVisual.analyzeSuccess"));
+        const summary = await fetchOcrSummary(sourceVideoId);
+        setOcrSummary(summary);
+        const noFreshClean =
+          summary.clean_produced === false ||
+          (summary.warnings || []).some(
+            (warning) => warning === "clean_skipped_no_hardsub" || warning === "no_hardsub_detected"
+          );
+        setOcrMessage(
+          noFreshClean ? t("finalReviewVisual.analyzeNoOutput") : t("finalReviewVisual.analyzeSuccess")
+        );
         return;
       }
       if (settled.outcome === "failed") {
@@ -287,7 +307,7 @@ export function FinalReviewPage({ sourceVideoId }: { sourceVideoId: string }) {
   }
 
   async function handleApproveVisual() {
-    setOcrBusy(true);
+    setApproveBusy(true);
     setOcrMessage(null);
     try {
       setOcrSummary(await approveOcrVisual(sourceVideoId));
@@ -295,7 +315,7 @@ export function FinalReviewPage({ sourceVideoId }: { sourceVideoId: string }) {
     } catch (err) {
       setError(err instanceof Error ? err.message : t("finalReviewVisual.approveFailed"));
     } finally {
-      setOcrBusy(false);
+      setApproveBusy(false);
     }
   }
 
@@ -315,13 +335,14 @@ export function FinalReviewPage({ sourceVideoId }: { sourceVideoId: string }) {
         <section className="final-review-layout final-review-layout--prep">
           <FinalReviewEmptyState
             sourceVideoId={sourceVideoId}
-            actionBusy={actionBusy || ocrBusy}
+            actionBusy={actionBusy || ocrBusy || approveBusy}
             onStartRender={() => void handleStartFirstRender()}
           />
           <aside className="final-review-side">
             <FinalReviewVisualCheckpoint
               summary={ocrSummary}
-              busy={ocrBusy || actionBusy}
+              analyzeBusy={ocrBusy || actionBusy}
+              approveBusy={approveBusy}
               message={ocrMessage}
               onAnalyze={() => void handleAnalyzeOcr()}
               onApprove={() => void handleApproveVisual()}
@@ -340,7 +361,7 @@ export function FinalReviewPage({ sourceVideoId }: { sourceVideoId: string }) {
   ];
 
   return (
-    <main className="final-review final-review--workspace">
+    <main className={`final-review final-review--workspace${railTab === "review" ? "" : " final-review--focus-rail"}`}>
       <FinalReviewHeader
         render={render}
         manifest={manifest}
@@ -375,14 +396,19 @@ export function FinalReviewPage({ sourceVideoId }: { sourceVideoId: string }) {
           <div className="fr-rail__panel" role="tabpanel">
             {railTab === "review" ? (
               <div className="fr-rail__stack">
-                <FinalReviewChecklist checklist={checklist} onToggle={toggleChecklist} />
+                <FinalReviewChecklist
+                  checklist={checklist}
+                  onToggle={toggleChecklist}
+                  onSetAll={setAllChecklist}
+                />
                 <FinalReviewWarningsPanel render={render} />
               </div>
             ) : null}
             {railTab === "visual" ? (
               <FinalReviewVisualCheckpoint
                 summary={ocrSummary}
-                busy={ocrBusy}
+                analyzeBusy={ocrBusy}
+                approveBusy={approveBusy}
                 message={ocrMessage}
                 onAnalyze={() => void handleAnalyzeOcr()}
                 onApprove={() => void handleApproveVisual()}
@@ -397,18 +423,20 @@ export function FinalReviewPage({ sourceVideoId }: { sourceVideoId: string }) {
                 onDecision={(decision) => void handleRiskDecision(decision)}
               />
             ) : null}
-            {railTab === "info" ? <FinalRenderMetadataPanel render={render} /> : null}
+            {railTab === "info" ? <FinalRenderMetadataPanel render={render} manifest={manifest} /> : null}
           </div>
         </aside>
       </section>
-      <FinalReviewActions
-        render={render}
-        checklist={checklist}
-        actionBusy={actionBusy}
-        actionMessage={actionMessage}
-        onApprove={() => void handleApprove()}
-        onPublishReady={() => void handlePublishReady()}
-      />
+      {railTab === "review" ? (
+        <FinalReviewActions
+          render={render}
+          checklist={checklist}
+          actionBusy={actionBusy}
+          actionMessage={actionMessage}
+          onApprove={() => void handleApprove()}
+          onPublishReady={() => void handlePublishReady()}
+        />
+      ) : null}
     </main>
   );
 }

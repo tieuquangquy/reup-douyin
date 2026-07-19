@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { fetchPublishHandoffs } from "../../lib/api";
 import type { PublishHandoff } from "../../types/export-handoff";
 import { OperatorStudioShell } from "../app-shell/OperatorStudioShell";
-import { PageShell } from "../app-shell/PageShell";
+import { TopbarRefreshButton } from "../app-shell/TopbarRefreshButton";
 import { OpsItemCard, OpsStatePanel, OpsSummaryCards, statusTone, type OpsItemAction, type OpsSummaryCardItem } from "../ops-console/OpsShared";
 
 export function PublishHandoffsIndexPage() {
@@ -40,7 +40,13 @@ export function PublishHandoffsIndexPage() {
 
   return (
     <OperatorStudioShell
-      actions={<button type="button" onClick={() => void load()}>Refresh</button>}
+      actions={
+        <>
+          <TopbarRefreshButton busy={loading && handoffs.length > 0} disabled={loading && handoffs.length === 0} onClick={() => void load()} />
+          <a href="/publishing/export-packages">Export Packages</a>
+          <a href="/selection/reup-queue">Reup Queue</a>
+        </>
+      }
       description="Inspect operator-controlled Publish Handoff records created from Export Packages. Handoffs are manual artifacts, not publish automation."
       title="Publish Handoffs"
     >
@@ -54,16 +60,7 @@ export function PublishHandoffsIndexPage() {
         />
       ) : null}
       {!loading && !error ? (
-        <PageShell
-          actions={
-            <>
-              <a href="/publishing/export-packages">Export Packages</a>
-              <a href="/selection/reup-queue">Reup Queue</a>
-            </>
-          }
-          description={`${total} handoff record(s). Handoffs are payloads for manual downstream publishing, not external automation.`}
-          title="Publish Handoff index"
-        >
+        <>
           <OpsSummaryCards cards={summaryCards} title="Publish Handoff summary" />
           <div className="operator-quick-grid">
             {handoffs.length === 0 ? (
@@ -73,7 +70,7 @@ export function PublishHandoffsIndexPage() {
               <PublishHandoffCard item={item} key={item.id} />
             ))}
           </div>
-        </PageShell>
+        </>
       ) : null}
     </OperatorStudioShell>
   );

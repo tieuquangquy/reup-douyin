@@ -95,6 +95,17 @@ class WorkspaceMemberView:
     role: str
     is_active: bool
     created_at: datetime | None
+    phone: str | None = None
+    address: str | None = None
+    notes: str | None = None
+    last_seen_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class TemporaryPasswordReset:
+    operator_id: UUID
+    email: str
+    temporary_password: str
 
 
 @dataclass(frozen=True)
@@ -399,6 +410,8 @@ class OperatorAuthService:
             .where(WorkspaceMembership.workspace_id == principal.workspace_id)
             .order_by(WorkspaceMembership.created_at.asc())
         ).all()
+        operator_ids = [operator.id for _, operator in rows]
+        last_seen_by_id = self._last_seen_by_operator_ids(operator_ids)
         return [
             WorkspaceMemberView(
                 operator_id=operator.id,
@@ -407,9 +420,23 @@ class OperatorAuthService:
                 role=membership.role,
                 is_active=bool(membership.is_active and operator.is_active),
                 created_at=getattr(membership, "created_at", None),
+                phone=operator.phone,
+                address=operator.address,
+                notes=operator.notes,
+                last_seen_at=last_seen_by_id.get(operator.id),
             )
             for membership, operator in rows
         ]
+
+    def _last_seen_by_operator_ids(self, operator_ids: list[UUID]) -> dict[UUID, datetime]:
+        if not operator_ids:
+            return {}
+        rows = self._db.execute(
+            select(OperatorRefreshToken.operator_id, func.max(OperatorRefreshToken.created_at))
+            .where(OperatorRefreshToken.operator_id.in_(operator_ids))
+            .group_by(OperatorRefreshToken.operator_id)
+        ).all()
+        return {operator_id: seen_at for operator_id, seen_at in rows if seen_at is not None}
 
     def list_workspace_invites(self, *, principal: AuthenticatedPrincipal) -> list[WorkspaceInviteView]:
         self._require_workspace_admin(principal)
@@ -451,6 +478,31 @@ class OperatorAuthService:
             self._db.commit()
         return {"ok": True}
 
+    def rotate_workspace_invite(self, *, principal: AuthenticatedPrincipal, invite_id: UUID) -> CreatedInvite:
+        """Issue a fresh invite token; previous token becomes invalid immediately."""
+        self._require_workspace_admin(principal)
+        invite = self._db.get(OperatorInvite, invite_id)
+        if invite is None or invite.workspace_id != principal.workspace_id:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Invite not found")
+        if invite.accepted_at is not None:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invite already accepted")
+        if invite.revoked_at is not None:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invite already revoked")
+
+        invite_token = secrets.token_urlsafe(32)
+        invite.token_hash = _hash_opaque_token(invite_token)
+        invite.expires_at = datetime.now(UTC) + timedelta(days=max(1, int(self._settings.auth_invite_ttl_days)))
+        self._db.commit()
+        self._db.refresh(invite)
+        return CreatedInvite(
+            invite_id=invite.id,
+            email=invite.email,
+            role=invite.role,
+            workspace_id=invite.workspace_id,
+            expires_at=invite.expires_at,
+            invite_token=invite_token,
+        )
+
     def update_workspace_member(
         self,
         *,
@@ -458,9 +510,18 @@ class OperatorAuthService:
         operator_id: UUID,
         role: str | None = None,
         is_active: bool | None = None,
+        display_name: str | None = None,
+        display_name_provided: bool = False,
+        phone: str | None = None,
+        phone_provided: bool = False,
+        address: str | None = None,
+        address_provided: bool = False,
+        notes: str | None = None,
+        notes_provided: bool = False,
     ) -> WorkspaceMemberView:
         actor_membership = self._require_workspace_admin(principal)
-        if role is None and is_active is None:
+        profile_touch = display_name_provided or phone_provided or address_provided or notes_provided
+        if role is None and is_active is None and not profile_touch:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="No updates provided")
 
         membership = self._active_membership(operator_id, principal.workspace_id, include_inactive=True)
@@ -492,6 +553,18 @@ class OperatorAuthService:
             target.is_active = next_active
             if not next_active:
                 self._revoke_operator_refresh_tokens(operator_id)
+        if display_name_provided:
+            cleaned = (display_name or "").strip()
+            target.display_name = cleaned or None
+        if phone_provided:
+            cleaned = (phone or "").strip()
+            target.phone = cleaned or None
+        if address_provided:
+            cleaned = (address or "").strip()
+            target.address = cleaned or None
+        if notes_provided:
+            cleaned = (notes or "").strip()
+            target.notes = cleaned or None
 
         self._db.commit()
         self._db.refresh(membership)
@@ -503,6 +576,37 @@ class OperatorAuthService:
             role=membership.role,
             is_active=bool(membership.is_active and target.is_active),
             created_at=getattr(membership, "created_at", None),
+            phone=target.phone,
+            address=target.address,
+            notes=target.notes,
+            last_seen_at=self._last_seen_by_operator_ids([target.id]).get(target.id),
+        )
+
+    def reset_workspace_member_password(
+        self,
+        *,
+        principal: AuthenticatedPrincipal,
+        operator_id: UUID,
+    ) -> TemporaryPasswordReset:
+        """Set a one-time temporary password and revoke existing sessions."""
+        actor_membership = self._require_workspace_admin(principal)
+        membership = self._active_membership(operator_id, principal.workspace_id, include_inactive=True)
+        if membership is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Member not found")
+        target = self._db.get(Operator, operator_id)
+        if target is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Member not found")
+        if membership.role == "owner" and actor_membership.role != "owner":
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only owners can manage owners")
+
+        temporary_password = secrets.token_urlsafe(12)
+        target.password_hash = hash_password(temporary_password)
+        self._revoke_operator_refresh_tokens(operator_id)
+        self._db.commit()
+        return TemporaryPasswordReset(
+            operator_id=target.id,
+            email=target.email,
+            temporary_password=temporary_password,
         )
 
     def _require_workspace_admin(self, principal: AuthenticatedPrincipal) -> WorkspaceMembership:

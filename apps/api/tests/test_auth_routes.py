@@ -420,6 +420,27 @@ class AuthRouteTests(unittest.TestCase):
             studio_blocked = client.get("/ops/metrics", headers={"Authorization": f"Bearer {owner_token}"})
             self.assertEqual(studio_blocked.status_code, 403)
 
+            studio_pipeline = client.get(
+                "/pipeline-dashboard",
+                headers={"Authorization": f"Bearer {owner_token}"},
+            )
+            self.assertNotEqual(
+                studio_pipeline.status_code,
+                403,
+                "Operator Studio token must reach the pipeline dashboard aggregation API",
+            )
+            self.assertNotEqual(studio_pipeline.status_code, 401)
+
+            ops_legacy = client.get(
+                "/ops/pipeline-dashboard",
+                headers={"Authorization": f"Bearer {ops_token}"},
+            )
+            self.assertEqual(
+                ops_legacy.status_code,
+                404,
+                "Legacy Ops-prefixed pipeline dashboard path must be retired",
+            )
+
     def test_register_rejects_api_ui_client(self) -> None:
         with TestClient(self.app) as client:
             response = client.post(
@@ -549,6 +570,56 @@ class AuthRouteTests(unittest.TestCase):
             self.assertEqual(enabled.status_code, 200, enabled.text)
             self.assertTrue(enabled.json()["is_active"])
 
+            renamed = client.patch(
+                f"/auth/workspace/members/{op_id}",
+                headers={"Authorization": f"Bearer {owner_token}"},
+                json={"display_name": "Users Operator Renamed"},
+            )
+            self.assertEqual(renamed.status_code, 200, renamed.text)
+            self.assertEqual(renamed.json()["display_name"], "Users Operator Renamed")
+            self.assertEqual(renamed.json()["role"], "admin")
+            self.assertTrue(renamed.json()["is_active"])
+
+            profiled = client.patch(
+                f"/auth/workspace/members/{op_id}",
+                headers={"Authorization": f"Bearer {owner_token}"},
+                json={
+                    "phone": "+84 90 123 4567",
+                    "address": "District 1, HCMC",
+                    "notes": "Primary reup operator",
+                },
+            )
+            self.assertEqual(profiled.status_code, 200, profiled.text)
+            self.assertEqual(profiled.json()["phone"], "+84 90 123 4567")
+            self.assertEqual(profiled.json()["address"], "District 1, HCMC")
+            self.assertEqual(profiled.json()["notes"], "Primary reup operator")
+
+            reset = client.post(
+                f"/auth/workspace/members/{op_id}/reset-password",
+                headers={"Authorization": f"Bearer {owner_token}"},
+            )
+            self.assertEqual(reset.status_code, 200, reset.text)
+            temp_password = reset.json()["temporary_password"]
+            self.assertTrue(temp_password)
+            old_login = client.post(
+                "/auth/login",
+                json={
+                    "email": "users-op@local.test",
+                    "password": "local-password",
+                    "workspace_slug": "local",
+                },
+            )
+            self.assertIn(old_login.status_code, {401, 403})
+            new_login = client.post(
+                "/auth/login",
+                json={
+                    "email": "users-op@local.test",
+                    "password": temp_password,
+                    "workspace_slug": "local",
+                },
+            )
+            self.assertEqual(new_login.status_code, 200, new_login.text)
+
             # Last owner cannot demote or disable self.
             demote_self = client.patch(
                 f"/auth/workspace/members/{owner_id}",
@@ -562,6 +633,43 @@ class AuthRouteTests(unittest.TestCase):
                 json={"is_active": False},
             )
             self.assertEqual(disable_self.status_code, 400)
+
+            invite3 = client.post(
+                "/auth/invites",
+                headers={"Authorization": f"Bearer {owner_token}"},
+                json={"email": "users-rotate@local.test", "role": "viewer"},
+            )
+            self.assertEqual(invite3.status_code, 200, invite3.text)
+            old_token = invite3.json()["invite_token"]
+            rotate_id = invite3.json()["invite_id"]
+            rotated = client.post(
+                f"/auth/workspace/invites/{rotate_id}/rotate",
+                headers={"Authorization": f"Bearer {owner_token}"},
+            )
+            self.assertEqual(rotated.status_code, 200, rotated.text)
+            new_token = rotated.json()["invite_token"]
+            self.assertTrue(new_token)
+            self.assertNotEqual(new_token, old_token)
+            self.assertEqual(rotated.json()["email"], "users-rotate@local.test")
+
+            old_accept = client.post(
+                "/auth/invites/accept",
+                json={
+                    "invite_token": old_token,
+                    "password": "local-password",
+                    "display_name": "Stale",
+                },
+            )
+            self.assertEqual(old_accept.status_code, 400)
+            new_accept = client.post(
+                "/auth/invites/accept",
+                json={
+                    "invite_token": new_token,
+                    "password": "local-password",
+                    "display_name": "Rotated User",
+                },
+            )
+            self.assertEqual(new_accept.status_code, 200, new_accept.text)
 
 
 class AuthRateLimitTests(unittest.TestCase):

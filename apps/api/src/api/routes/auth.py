@@ -272,6 +272,10 @@ class WorkspaceMemberResponse(BaseModel):
     role: str
     is_active: bool
     created_at: datetime | None = None
+    phone: str | None = None
+    address: str | None = None
+    notes: str | None = None
+    last_seen_at: datetime | None = None
 
 
 class WorkspaceMembersResponse(BaseModel):
@@ -295,6 +299,25 @@ class WorkspaceInvitesResponse(BaseModel):
 class WorkspaceMemberUpdateRequest(BaseModel):
     role: str | None = Field(default=None, max_length=64)
     is_active: bool | None = None
+    display_name: str | None = Field(default=None, max_length=160)
+    phone: str | None = Field(default=None, max_length=40)
+    address: str | None = Field(default=None, max_length=320)
+    notes: str | None = Field(default=None, max_length=2000)
+
+
+def _member_response(view) -> WorkspaceMemberResponse:
+    return WorkspaceMemberResponse(
+        operator_id=view.operator_id,
+        email=view.email,
+        display_name=view.display_name,
+        role=view.role,
+        is_active=view.is_active,
+        created_at=view.created_at,
+        phone=view.phone,
+        address=view.address,
+        notes=view.notes,
+        last_seen_at=view.last_seen_at,
+    )
 
 
 @router.get("/workspace/members", response_model=WorkspaceMembersResponse)
@@ -305,19 +328,7 @@ def list_workspace_members(
     if principal is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token")
     members = service.list_workspace_members(principal=principal)
-    return WorkspaceMembersResponse(
-        members=[
-            WorkspaceMemberResponse(
-                operator_id=m.operator_id,
-                email=m.email,
-                display_name=m.display_name,
-                role=m.role,
-                is_active=m.is_active,
-                created_at=m.created_at,
-            )
-            for m in members
-        ]
-    )
+    return WorkspaceMembersResponse(members=[_member_response(m) for m in members])
 
 
 @router.patch("/workspace/members/{operator_id}", response_model=WorkspaceMemberResponse)
@@ -329,19 +340,46 @@ def update_workspace_member(
 ) -> WorkspaceMemberResponse:
     if principal is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token")
+    fields = request.model_fields_set
     updated = service.update_workspace_member(
         principal=principal,
         operator_id=operator_id,
         role=request.role,
         is_active=request.is_active,
+        display_name=request.display_name,
+        display_name_provided="display_name" in fields,
+        phone=request.phone,
+        phone_provided="phone" in fields,
+        address=request.address,
+        address_provided="address" in fields,
+        notes=request.notes,
+        notes_provided="notes" in fields,
     )
-    return WorkspaceMemberResponse(
-        operator_id=updated.operator_id,
-        email=updated.email,
-        display_name=updated.display_name,
-        role=updated.role,
-        is_active=updated.is_active,
-        created_at=updated.created_at,
+    return _member_response(updated)
+
+
+class WorkspaceMemberPasswordResetResponse(BaseModel):
+    operator_id: UUID
+    email: str
+    temporary_password: str
+
+
+@router.post(
+    "/workspace/members/{operator_id}/reset-password",
+    response_model=WorkspaceMemberPasswordResetResponse,
+)
+def reset_workspace_member_password(
+    operator_id: UUID,
+    principal: AuthenticatedPrincipal | None = Depends(get_current_principal),
+    service: OperatorAuthService = Depends(get_operator_auth_service),
+) -> WorkspaceMemberPasswordResetResponse:
+    if principal is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token")
+    reset = service.reset_workspace_member_password(principal=principal, operator_id=operator_id)
+    return WorkspaceMemberPasswordResetResponse(
+        operator_id=reset.operator_id,
+        email=reset.email,
+        temporary_password=reset.temporary_password,
     )
 
 
@@ -378,3 +416,29 @@ def revoke_workspace_invite(
     if principal is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token")
     return service.revoke_workspace_invite(principal=principal, invite_id=invite_id)
+
+
+class WorkspaceInviteRotateResponse(BaseModel):
+    invite_id: UUID
+    email: str
+    role: str
+    expires_at: datetime
+    invite_token: str
+
+
+@router.post("/workspace/invites/{invite_id}/rotate", response_model=WorkspaceInviteRotateResponse)
+def rotate_workspace_invite(
+    invite_id: UUID,
+    principal: AuthenticatedPrincipal | None = Depends(get_current_principal),
+    service: OperatorAuthService = Depends(get_operator_auth_service),
+) -> WorkspaceInviteRotateResponse:
+    if principal is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token")
+    rotated = service.rotate_workspace_invite(principal=principal, invite_id=invite_id)
+    return WorkspaceInviteRotateResponse(
+        invite_id=rotated.invite_id,
+        email=rotated.email,
+        role=rotated.role,
+        expires_at=rotated.expires_at,
+        invite_token=rotated.invite_token,
+    )

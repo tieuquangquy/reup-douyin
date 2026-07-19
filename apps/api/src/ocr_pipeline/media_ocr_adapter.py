@@ -51,6 +51,7 @@ def hardsub_events_from_ocr_payload(
     *,
     band_ratio: float,
 ) -> list[HardSubEvent]:
-    """Build timed hard-sub events from Phase 2 JSON (boxes already band-filtered)."""
+    """Build timed overlay events from Phase 2 JSON (boxes already zone-filtered)."""
+    del band_ratio  # retained for call-site compatibility; payload is pre-filtered.
     frame_results = frame_results_from_ocr_payload(payload)
-    return group_hard_sub_events(frame_results, band_ratio=band_ratio)
+    return group_hard_sub_events(frame_results, apply_band_filter=False)

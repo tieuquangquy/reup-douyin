@@ -39,5 +39,8 @@ export function middleware(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/((?!api|_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)"]
+  // Exclude static fonts — otherwise /fonts/*.woff2 is redirected to login HTML and Google Sans never loads.
+  matcher: [
+    "/((?!api|_next/static|_next/image|favicon.ico|fonts/|.*\\.(?:svg|png|jpg|jpeg|gif|webp|woff2|woff|ttf|otf)$).*)"
+  ]
 };

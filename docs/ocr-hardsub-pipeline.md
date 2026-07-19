@@ -36,6 +36,7 @@ Final Review **Analyze OCR / clean hard-sub** (`clean_hardsub=True`, default) ru
 - Dry OCR: `OCR_FILTERING_USE_MOCK=1` or CLI `--mock-ocr`
 - HTTP timeout to Cloud Run: default **300s** (`OCR_HTTP_TIMEOUT_SECONDS`) — cold start can exceed 120s
 - Cold start: client polls `/health` up to **180s** (`OCR_WARMUP_DEADLINE_SECONDS`) before first `/predict`
+- When OCR finds **0 hard-sub boxes**, job stays `COMPLETED` but sets `error_code=OCR_NO_HARDSUB_OUTPUT` + message on the job (Ops Jobs Error column / warn badge). No new `CLEANED_VIDEO` is written; prior plate is restored if any.
 - **Perf (Phase 2 defaults):**
   - `OCR_CROP_BAND=1` — OCR only bottom subtitle band (smaller upload; boxes remapped to full frame)
   - `OCR_HTTP_CONCURRENCY=4` — parallel `/predict` calls (warmup is thread-safe)

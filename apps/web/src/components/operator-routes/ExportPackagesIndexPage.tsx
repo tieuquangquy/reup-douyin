@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { fetchExportPackages } from "../../lib/api";
 import type { ExportPackage } from "../../types/export-handoff";
 import { OperatorStudioShell } from "../app-shell/OperatorStudioShell";
-import { PageShell } from "../app-shell/PageShell";
+import { TopbarRefreshButton } from "../app-shell/TopbarRefreshButton";
 import { OpsItemCard, OpsStatePanel, OpsSummaryCards, statusTone, type OpsItemAction, type OpsSummaryCardItem } from "../ops-console/OpsShared";
 
 export function ExportPackagesIndexPage() {
@@ -40,7 +40,13 @@ export function ExportPackagesIndexPage() {
 
   return (
     <OperatorStudioShell
-      actions={<button type="button" onClick={() => void load()}>Refresh</button>}
+      actions={
+        <>
+          <TopbarRefreshButton busy={loading && packages.length > 0} disabled={loading && packages.length === 0} onClick={() => void load()} />
+          <a href="/selection/reup-queue">Open Reup Queue</a>
+          <a href="/publishing/publish-handoffs">Publish Handoffs</a>
+        </>
+      }
       description="Inspect durable Export Packages generated from READY_TO_EXPORT Reup Queue items. Packages are handoff containers and never publish externally."
       title="Export Packages"
     >
@@ -54,16 +60,7 @@ export function ExportPackagesIndexPage() {
         />
       ) : null}
       {!loading && !error ? (
-        <PageShell
-          actions={
-            <>
-              <a href="/selection/reup-queue">Open Reup Queue</a>
-              <a href="/publishing/publish-handoffs">Publish Handoffs</a>
-            </>
-          }
-          description={`${total} package record(s). Packages are inspectable handoff containers; they do not publish externally.`}
-          title="Export Package index"
-        >
+        <>
           <OpsSummaryCards cards={summaryCards} title="Export Package summary" />
           <div className="operator-quick-grid">
             {packages.length === 0 ? (
@@ -73,7 +70,7 @@ export function ExportPackagesIndexPage() {
               <ExportPackageCard item={item} key={item.id} />
             ))}
           </div>
-        </PageShell>
+        </>
       ) : null}
     </OperatorStudioShell>
   );

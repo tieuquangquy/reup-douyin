@@ -27,9 +27,10 @@ from src.models.artifacts import OcrFrameDetection, OcrTextObject
 from src.models.ingestion import SourceVideo
 from src.models.media import MediaAsset
 from src.ocr_pipeline.band_crop import crop_bottom_band_image, remap_box_from_band_crop
+from src.ocr_pipeline.completion_advisory import ocr_run_produced_cleaned_video
 from src.ocr_pipeline.errors import OcrPipelineError, OcrPipelineErrorCode
 from src.ocr_pipeline.frame_sampler import sample_video_frames
-from src.ocr_pipeline.hardsub_filter import filter_hard_sub_boxes, group_hard_sub_events
+from src.ocr_pipeline.hardsub_filter import group_hard_sub_events
 from src.ocr_pipeline.media_ocr_adapter import (
     frame_results_from_ocr_payload,
     hardsub_events_from_ocr_payload,
@@ -159,6 +160,14 @@ class OcrPipelineService:
         )
         anti_seed = (int(source_video.id.int % 2_147_483_647) or 42)
 
+        def _render_progress(seconds: float | None, _raw: str) -> None:
+            """Keep job heartbeat alive during Phase 3+4 (UI no longer looks stuck at 75%)."""
+            if seconds is None:
+                return
+            # Map rendered timeline into 76–89 before persist_detections@90.
+            pct = min(89, 76 + int(max(0.0, float(seconds)) / 2.0))
+            _progress("phase34_render", pct)
+
         with tempfile.TemporaryDirectory(prefix="ocr-e2e-") as tmp:
             cleaned_path = Path(tmp) / "cleaned.mp4"
             try:
@@ -173,7 +182,7 @@ class OcrPipelineService:
                     ffmpeg_binary=self.ffmpeg_binary,
                     band_ratio=request.hard_sub_band_ratio,
                     on_progress=_progress,
-                    render_progress=False,
+                    render_progress=_render_progress,
                 )
             except OcrFilteringError as exc:
                 raise OcrPipelineError(
@@ -218,29 +227,8 @@ class OcrPipelineService:
                 frame_results,
                 band_ratio=request.hard_sub_band_ratio,
             )
-            events_payload = {
-                "pipeline_version": OCR_PIPELINE_VERSION,
-                "pipeline_backend": PIPELINE_BACKEND,
-                "provider": e2e.ocr_provider_name,
-                "sample_fps": e2e.sample_fps,
-                "hard_sub_band_ratio": request.hard_sub_band_ratio,
-                "hardsub_events": [self._event_dict(e) for e in hardsub_events],
-                "vi_texts": e2e.vi_texts,
-                "caption_ai_source": e2e.caption_ai_source,
-                "warnings": warnings,
-                "ocr_region": "bottom_band_media_pipeline",
-            }
-            self._persist_json_asset(
-                source_video,
-                context,
-                MediaAssetType.OCR_EVENTS,
-                events_payload,
-                filename=f"{OCR_PIPELINE_VERSION}_hardsub_events.json",
-                manifest_group="ocr_events",
-                job_id=job_id,
-            )
-
             cleaned_asset_id: str | None = None
+            clean_produced = False
             out = Path(e2e.output_path) if e2e.output_path else None
             if out is not None and out.is_file():
                 _progress("clean_hardsub", 95)
@@ -265,9 +253,11 @@ class OcrPipelineService:
                         "caption_ai_source": e2e.caption_ai_source,
                         "vi_text_count": len(e2e.vi_texts),
                         "warnings": warnings,
+                        "clean_produced": True,
                     },
                 )
                 cleaned_asset_id = str(cleaned.id)
+                clean_produced = True
             elif request.clean_hardsub:
                 warnings.append("clean_skipped_no_hardsub")
                 restored = self._restore_latest_cleaned_current(source_video.id)
@@ -275,6 +265,43 @@ class OcrPipelineService:
                     cleaned_asset_id = str(restored.id)
                 else:
                     warnings.append("no_prior_cleaned_video")
+
+            warning_list = list(dict.fromkeys(warnings))
+            clean_produced = ocr_run_produced_cleaned_video(
+                warning_list,
+                cleaned_asset_id=cleaned_asset_id,
+            )
+            events_payload = {
+                "pipeline_version": OCR_PIPELINE_VERSION,
+                "pipeline_backend": PIPELINE_BACKEND,
+                "provider": e2e.ocr_provider_name,
+                "sample_fps": e2e.sample_fps,
+                "hard_sub_band_ratio": request.hard_sub_band_ratio,
+                "hardsub_events": [self._event_dict(e) for e in hardsub_events],
+                "vi_texts": e2e.vi_texts,
+                "caption_ai_source": e2e.caption_ai_source,
+                "warnings": warning_list,
+                "clean_produced": clean_produced,
+                "ocr_region": "overlay_zones_media_pipeline",
+            }
+            # Fold Phase-2 filtering diagnostics when present (e.g. probe early-exit).
+            ocr_warnings = e2e.ocr_payload.get("warnings") if isinstance(e2e.ocr_payload, dict) else None
+            if isinstance(ocr_warnings, list):
+                for item in ocr_warnings:
+                    if isinstance(item, str) and item and item not in events_payload["warnings"]:
+                        events_payload["warnings"].append(item)
+                warning_list = list(dict.fromkeys(events_payload["warnings"]))
+                events_payload["warnings"] = warning_list
+
+            self._persist_json_asset(
+                source_video,
+                context,
+                MediaAssetType.OCR_EVENTS,
+                events_payload,
+                filename=f"{OCR_PIPELINE_VERSION}_hardsub_events.json",
+                manifest_group="ocr_events",
+                job_id=job_id,
+            )
 
         self.db.commit()
         _progress("completed", 100)
@@ -287,6 +314,7 @@ class OcrPipelineService:
                 "detections": detection_count,
                 "events": len(hardsub_events),
                 "cleaned": cleaned_asset_id,
+                "clean_produced": clean_produced,
             },
         )
         return OcrPipelineResult(
@@ -296,8 +324,9 @@ class OcrPipelineService:
             detection_count=detection_count,
             hardsub_event_count=len(hardsub_events),
             cleaned_video_asset_id=cleaned_asset_id,
-            warnings=list(dict.fromkeys(warnings)),
+            warnings=warning_list,
             hardsub_events=hardsub_events,
+            clean_produced=clean_produced,
         )
 
     def _run_detect_only_pipeline(
@@ -439,6 +468,11 @@ class OcrPipelineService:
         frame_count = self.db.scalar(
             select(func.count()).select_from(OcrFrameDetection).where(OcrFrameDetection.source_video_id == source_video_id)
         )
+        warnings = (payload.get("warnings") if isinstance(payload, dict) else []) or []
+        cleaned_id = str(cleaned.id) if cleaned else None
+        clean_produced = bool(payload.get("clean_produced")) if isinstance(payload, dict) else False
+        if not clean_produced:
+            clean_produced = ocr_run_produced_cleaned_video(warnings, cleaned_asset_id=cleaned_id)
         return {
             "source_video_id": str(source_video_id),
             "pipeline_version": payload.get("pipeline_version") if isinstance(payload, dict) else None,
@@ -446,10 +480,14 @@ class OcrPipelineService:
             "text_object_count": int(text_count or 0),
             "frame_detection_count": int(frame_count or 0),
             "hardsub_events": (payload.get("hardsub_events") if isinstance(payload, dict) else []) or [],
-            "warnings": (payload.get("warnings") if isinstance(payload, dict) else []) or [],
-            "cleaned_video_asset_id": str(cleaned.id) if cleaned else None,
+            "warnings": warnings,
+            "cleaned_video_asset_id": cleaned_id,
             "ocr_events_asset_id": str(events_asset.id) if events_asset else None,
-            "visual_approved": bool((cleaned.metadata_json or {}).get("visual_approved")) if cleaned else False,
+            "visual_approved": bool(
+                (cleaned is not None and (cleaned.metadata_json or {}).get("visual_approved"))
+                or (events_asset is not None and (events_asset.metadata_json or {}).get("visual_approved"))
+            ),
+            "clean_produced": clean_produced,
         }
 
     def approve_visual(self, source_video_id: UUID) -> dict:
@@ -466,7 +504,7 @@ class OcrPipelineService:
             meta = dict(asset.metadata_json or {})
             meta["visual_approved"] = True
             asset.metadata_json = meta
-        self.db.flush()
+        self.db.commit()
         return self.get_ocr_summary(source_video_id)
 
     def _persist_detections(
@@ -476,10 +514,10 @@ class OcrPipelineService:
         *,
         band_ratio: float,
     ) -> int:
+        del band_ratio  # frames already overlay-zone filtered upstream.
         count = 0
         for frame in frames:
-            hard = filter_hard_sub_boxes(frame.boxes, band_ratio=band_ratio)
-            for box in hard:
+            for box in frame.boxes:
                 obj = OcrTextObject(
                     workspace_id=source_video.workspace_id,
                     source_video_id=source_video.id,
@@ -490,7 +528,7 @@ class OcrPipelineService:
                     confidence=box.confidence,
                     first_seen_ms=frame.frame_time_ms,
                     last_seen_ms=frame.frame_time_ms,
-                    metadata_json={"band": "hardsub_bottom", "pipeline_version": OCR_PIPELINE_VERSION},
+                    metadata_json={"band": "overlay_zone", "pipeline_version": OCR_PIPELINE_VERSION},
                 )
                 self.db.add(obj)
                 self.db.flush()

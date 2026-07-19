@@ -6,13 +6,16 @@ export const SESSION_SURFACE_COOKIE = "reup_douyin_surface";
 export const SESSION_SURFACE_STORAGE_KEY = "reup_douyin_auth_surface";
 
 /**
- * Capture Inbox lives under /ops/extensions/... but belongs to Operator Studio.
+ * Capture Inbox and Pipeline Dashboard live under /ops/... paths but belong to Operator Studio.
  * Legacy Extension Manager URL (/ops/extensions/douyin) redirects to Studio Setup;
  * path classification still treats the bare manager URL as Ops until the redirect runs.
  */
 export function isOpsConsolePath(pathname: string): boolean {
   const path = pathname.split("?")[0] || "/";
   if (path === "/ops/extensions/douyin/capture-inbox" || path.startsWith("/ops/extensions/douyin/capture-inbox/")) {
+    return false;
+  }
+  if (path === "/ops/pipeline" || path.startsWith("/ops/pipeline/")) {
     return false;
   }
   return path === "/ops" || path.startsWith("/ops/");

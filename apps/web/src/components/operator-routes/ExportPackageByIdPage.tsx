@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { createPublishHandoff, fetchExportPackage } from "../../lib/api";
 import type { ExportPackage, PublishHandoff } from "../../types/export-handoff";
 import { OperatorStudioShell } from "../app-shell/OperatorStudioShell";
-import { PageShell } from "../app-shell/PageShell";
+import { TopbarRefreshButton } from "../app-shell/TopbarRefreshButton";
 import { OpsDetailPanel, OpsDetailSection, OpsItemCard, OpsMetadataList, OpsStatePanel, OpsSummaryCards, statusTone, type OpsItemAction, type OpsSummaryCardItem } from "../ops-console/OpsShared";
 
 export function ExportPackageByIdPage({ packageId }: { packageId: string }) {
@@ -53,7 +53,18 @@ export function ExportPackageByIdPage({ packageId }: { packageId: string }) {
 
   return (
     <OperatorStudioShell
-      actions={<button type="button" onClick={() => void load()}>Refresh</button>}
+      actions={
+        <>
+          <TopbarRefreshButton busy={loading && Boolean(item)} disabled={loading && !item} onClick={() => void load()} />
+          <a href="/publishing/export-packages">All Export Packages</a>
+          <a href="/selection/reup-queue">Reup Queue</a>
+          {item ? (
+            <button disabled={creatingHandoff || item.item_count === 0 || item.status === "CANCELLED"} onClick={() => void createHandoff()} type="button">
+              {creatingHandoff ? "Creating..." : "Create Publish Handoff"}
+            </button>
+          ) : null}
+        </>
+      }
       description="Inspect package contents before creating or following a Publish Handoff. Export Packages are inspectable artifacts, not external publishing automation."
       title="Export Package detail"
     >
@@ -67,19 +78,7 @@ export function ExportPackageByIdPage({ packageId }: { packageId: string }) {
         />
       ) : null}
       {!loading && item ? (
-        <PageShell
-          actions={
-            <>
-              <a href="/publishing/export-packages">All Export Packages</a>
-              <a href="/selection/reup-queue">Reup Queue</a>
-              <button disabled={creatingHandoff || item.item_count === 0 || item.status === "CANCELLED"} onClick={() => void createHandoff()} type="button">
-                {creatingHandoff ? "Creating..." : "Create Publish Handoff"}
-              </button>
-            </>
-          }
-          description="Durable package generated from export-ready Reup Queue rows. No external publishing is triggered here."
-          title={item.label || `Export Package ${item.id.slice(0, 8)}`}
-        >
+        <>
           {actionMessage ? <p className="success-message">{actionMessage}</p> : null}
           {createdHandoff ? <p><a href={`/publishing/publish-handoffs/${createdHandoff.id}`}>Open created Publish Handoff</a></p> : null}
           {error ? <div className="inline-error">{error}</div> : null}
@@ -110,7 +109,7 @@ export function ExportPackageByIdPage({ packageId }: { packageId: string }) {
               <pre>{JSON.stringify({ manifest_json: item.manifest_json, diagnostics_json: item.diagnostics_json }, null, 2)}</pre>
             </OpsDetailSection>
           </OpsDetailPanel>
-        </PageShell>
+        </>
       ) : null}
     </OperatorStudioShell>
   );

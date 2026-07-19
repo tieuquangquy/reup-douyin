@@ -32,6 +32,50 @@ def normalize_sample_fps(sample_fps: float | int) -> SampleFps:
     )
 
 
+def extract_thumbnail_frame(
+    video_source: str | Path,
+    output_path: str | Path,
+    *,
+    ffmpeg_binary: str = "ffmpeg",
+) -> Path:
+    """Force-extract the cover frame at t=00:00:00.000 as ``thumbnail.jpg`` (or given path)."""
+    if shutil.which(ffmpeg_binary) is None:
+        raise FrameSamplingError(
+            FrameSamplingErrorCode.FFMPEG_MISSING,
+            f"ffmpeg binary not found on PATH ({ffmpeg_binary})",
+        )
+    destination = Path(output_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with resolve_video_source(video_source) as video_path:
+        completed = subprocess.run(
+            [
+                ffmpeg_binary,
+                "-y",
+                "-ss",
+                "00:00:00.000",
+                "-i",
+                str(video_path),
+                "-an",
+                "-frames:v",
+                "1",
+                "-q:v",
+                "3",
+                str(destination),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    if completed.returncode != 0 or not destination.is_file() or destination.stat().st_size <= 0:
+        detail = (completed.stderr or completed.stdout or "ffmpeg thumbnail failed").strip()
+        raise FrameSamplingError(
+            FrameSamplingErrorCode.FFMPEG_FAILED,
+            f"ffmpeg thumbnail extract failed: {detail[:400]}",
+        )
+    logger.info("frame_thumbnail_extracted path=%s", destination)
+    return destination
+
+
 def extract_video_frames(
     video_source: str | Path,
     output_dir: str | Path,
@@ -97,13 +141,43 @@ def extract_video_frames_detailed(
             text=True,
             check=False,
         )
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout or "ffmpeg sample failed").strip()
+            raise FrameSamplingError(
+                FrameSamplingErrorCode.FFMPEG_FAILED,
+                f"ffmpeg frame sample failed: {detail[:400]}",
+            )
 
-    if completed.returncode != 0:
-        detail = (completed.stderr or completed.stdout or "ffmpeg sample failed").strip()
-        raise FrameSamplingError(
-            FrameSamplingErrorCode.FFMPEG_FAILED,
-            f"ffmpeg frame sample failed: {detail[:400]}",
+        thumb_path = out_dir / "thumbnail.jpg"
+        thumb_done = subprocess.run(
+            [
+                ffmpeg_binary,
+                "-y",
+                "-ss",
+                "00:00:00.000",
+                "-i",
+                str(video_path),
+                "-an",
+                "-frames:v",
+                "1",
+                "-q:v",
+                "3",
+                str(thumb_path),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
         )
+        if (
+            thumb_done.returncode != 0
+            or not thumb_path.is_file()
+            or thumb_path.stat().st_size <= 0
+        ):
+            detail = (thumb_done.stderr or thumb_done.stdout or "ffmpeg thumbnail failed").strip()
+            raise FrameSamplingError(
+                FrameSamplingErrorCode.FFMPEG_FAILED,
+                f"ffmpeg thumbnail extract failed: {detail[:400]}",
+            )
 
     paths = sorted(out_dir.glob("frame_*.jpg"))
     if not paths:
@@ -113,12 +187,21 @@ def extract_video_frames_detailed(
         )
 
     interval_ms = int(round(1000.0 / float(fps)))
-    frames: list[ExtractedFrame] = []
+    frames: list[ExtractedFrame] = [
+        ExtractedFrame(path=thumb_path, frame_index=0, time_ms=0),
+    ]
     for index, path in enumerate(paths):
-        frames.append(ExtractedFrame(path=path, frame_index=index, time_ms=index * interval_ms))
+        frames.append(
+            ExtractedFrame(path=path, frame_index=index + 1, time_ms=index * interval_ms)
+        )
 
     logger.info(
         "frame_sampling_completed",
-        extra={"count": len(frames), "sample_fps": fps, "output_dir": str(out_dir)},
+        extra={
+            "count": len(frames),
+            "sample_fps": fps,
+            "output_dir": str(out_dir),
+            "thumbnail": str(thumb_path),
+        },
     )
     return frames

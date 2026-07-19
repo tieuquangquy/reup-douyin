@@ -519,7 +519,7 @@ export function OpsTtsAiPage() {
   const catalogModels = catalog?.models?.length ? catalog.models : null;
 
   return (
-    <main className="ops-page ops-page--settings ops-tts-page">
+    <main className="ops-page ops-page--settings ops-tts-page ops-ai-page is-compact">
       {error ? <div className="inline-error">{error}</div> : null}
 
       <OpsPanel
@@ -552,45 +552,33 @@ export function OpsTtsAiPage() {
           </div>
         }
       >
-        <div className="ops-tts-status" aria-label={t("opsTtsAi.statusLabel")}>
-          <span className={`ops-tts-chip ${meta.source === "workspace_db" ? "is-active" : "is-muted"}`}>
+        <div className="ops-ai-status ops-tts-status" aria-label={t("opsTtsAi.statusLabel")}>
+          <span className={`ops-ai-chip ops-tts-chip ${meta.source === "workspace_db" ? "is-active" : "is-muted"}`}>
             {meta.source === "workspace_db" ? t("opsTtsAi.sourceDbShort") : t("opsTtsAi.sourceEnvShort")}
           </span>
-          <span className={`ops-tts-chip ${meta.apiKeySet ? "is-ok" : "is-muted"}`}>
+          <span className={`ops-ai-chip ops-tts-chip ${meta.apiKeySet ? "is-ok" : "is-muted"}`}>
             {meta.apiKeySet ? `${t("opsTtsAi.keySet")}: ${meta.apiKeyMasked}` : t("opsTtsAi.keyUnset")}
           </span>
-          <span className="ops-tts-chip is-muted">{activeProvider}</span>
-          <span className="ops-tts-chip is-muted">{t(kindLabelKey(kind))}</span>
+          <span className="ops-ai-chip ops-tts-chip is-muted">{activeProvider}</span>
+          <span className="ops-ai-chip ops-tts-chip is-muted">{t(kindLabelKey(kind))}</span>
           <span
-            className={`ops-tts-chip ${ttsReadyChipClass(readyState)}`}
+            className={`ops-ai-chip ops-tts-chip ${ttsReadyChipClass(readyState)}`}
             title={t("opsTtsAi.readyHint")}
             data-ready-state={readyState}
           >
             {t(ttsReadyLabelKey(readyState))}
           </span>
-          {catalog?.source ? (
-            <span className="ops-tts-chip is-ok" title={catalog.warning || undefined} data-catalog-source={catalog.source}>
-              {t("opsTtsAi.catalogSource")}: {catalog.source}
-              {catalogVoices ? ` · ${catalogVoices.length}` : ""}
-            </span>
-          ) : null}
         </div>
 
-        <p className="ops-muted ops-tts-lede">{t("opsTtsAi.lede")}</p>
-        <ol className="ops-tts-steps" aria-label={t("opsTtsAi.stepsLabel")}>
-          <li>{t("opsTtsAi.step1")}</li>
-          <li>{t("opsTtsAi.step2")}</li>
-          <li>{t("opsTtsAi.step3")}</li>
-          <li>{t("opsTtsAi.step4")}</li>
-        </ol>
-        <p className="ops-muted ops-tts-lede">{t("opsTtsAi.readyHint")}</p>
-
-        {savedMessage ? (
-          <div className="ops-field-alert is-success" role="status">
-            <strong>{t("opsTtsAi.saved")}</strong>
-            <span>{t("opsTtsAi.savedHint")}</span>
-          </div>
-        ) : null}
+        <details className="ops-ai-howto">
+          <summary>{t("opsTtsAi.howItWorks")}</summary>
+          <ol className="ops-tts-steps" aria-label={t("opsTtsAi.stepsLabel")}>
+            <li>{t("opsTtsAi.step1")}</li>
+            <li>{t("opsTtsAi.step2")}</li>
+            <li>{t("opsTtsAi.step3")}</li>
+            <li>{t("opsTtsAi.step4")}</li>
+          </ol>
+        </details>
 
         {testFailure ? (
           <div className="ops-field-alert is-error" role="alert" title={testResult?.detail || undefined}>
@@ -605,7 +593,6 @@ export function OpsTtsAiPage() {
         <section className="ops-tts-section">
           <header className="ops-tts-section__head">
             <h3>{t("opsTtsAi.sectionAuthority")}</h3>
-            <p>{t("opsTtsAi.sectionAuthorityHint")}</p>
           </header>
           <label className="ops-tts-toggle">
             <input

@@ -37,6 +37,8 @@ Response mẫu:
 ]
 ```
 
+Parser (v1.0.1): unwraps PaddleOCR 3.x `Result.json` **property** and nested `{"res": {...}}` (older builds returned HTTP 200 with `[]`).
+
 ## Health
 
 ```text

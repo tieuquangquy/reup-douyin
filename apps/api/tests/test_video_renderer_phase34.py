@@ -7,7 +7,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from src.media_pipeline.video_renderer.errors import VideoRendererError, VideoRendererErrorCode
 from src.media_pipeline.video_renderer.filter_graph import (
     build_anti_detection_filters,
     build_single_render_filter,
@@ -18,7 +17,7 @@ from src.media_pipeline.video_renderer.renderer import render_video_single_pass
 
 
 class OverlayBuildTests(unittest.TestCase):
-    def test_overlays_from_phase2_payload_unions_boxes_and_maps_vi(self) -> None:
+    def test_overlays_from_phase2_payload_one_segment_per_box(self) -> None:
         payload = {
             "frames": [
                 {
@@ -38,16 +37,18 @@ class OverlayBuildTests(unittest.TestCase):
                 },
             ]
         }
-        vi = {0: "Xin chao", 1000: "Phu de dich"}
+        vi = {"0#0": "Xin chao", "0#1": "The gioi", "1000#0": "Phu de dich"}
         overlays = overlays_from_ocr_payload(payload, vi, hold_ms=500, pad_x=0.0, pad_y=0.0)
-        self.assertEqual(len(overlays), 2)
+        self.assertEqual(len(overlays), 3)
         self.assertEqual(overlays[0].text_vi, "Xin chao")
         self.assertAlmostEqual(overlays[0].x, 0.10, places=4)
-        self.assertAlmostEqual(overlays[0].width, 0.70, places=4)  # 0.10..0.80
+        self.assertAlmostEqual(overlays[0].width, 0.30, places=4)
+        self.assertEqual(overlays[1].text_vi, "The gioi")
+        self.assertAlmostEqual(overlays[1].x, 0.40, places=4)
         self.assertEqual(overlays[0].start_ms, 0)
         self.assertEqual(overlays[0].end_ms, 1000)  # until next sample
-        self.assertEqual(overlays[1].text_vi, "Phu de dich")
-        self.assertEqual(overlays[1].end_ms, 1500)  # last sample + hold_ms
+        self.assertEqual(overlays[2].text_vi, "Phu de dich")
+        self.assertEqual(overlays[2].end_ms, 1500)  # last sample + hold_ms
 
 
 class FilterGraphTests(unittest.TestCase):
@@ -70,18 +71,20 @@ class FilterGraphTests(unittest.TestCase):
             pad_x=0.0,
             pad_y=0.0,
             hold_ms=0,
+            frame_width=1080,
+            frame_height=1920,
         )
-        self.assertIn("drawbox=", vf)
+        self.assertIn("delogo=", vf)
         self.assertIn("drawtext=", vf)
         self.assertIn("enable=between(t\\,", vf)
         self.assertIn("eq=", vf)
         self.assertIn("noise=", vf)
-        # drawbox before drawtext before anti
-        self.assertLess(vf.index("drawbox="), vf.index("drawtext="))
+        # delogo before drawtext before anti
+        self.assertLess(vf.index("delogo="), vf.index("drawtext="))
         self.assertLess(vf.index("drawtext="), vf.index("eq="))
         self.assertLess(vf.index("eq="), vf.index("noise="))
         self.assertIn("text='Xin chao'", vf)
-        self.assertIn("x=iw*0.1000", vf)
+        self.assertNotIn("drawbox=", vf)
 
     def test_anti_detection_stays_in_one_to_two_percent(self) -> None:
         parts = build_anti_detection_filters(seed=7)
@@ -106,33 +109,35 @@ class RenderInvokeTests(unittest.TestCase):
             overlays = [
                 OverlaySegment(0, 500, 0.1, 0.8, 0.7, 0.1, "Mock VI"),
             ]
-            completed = MagicMock(returncode=0, stdout="", stderr="")
-            with patch("src.media_pipeline.video_renderer.renderer.shutil.which", return_value="ffmpeg"):
-                with patch(
-                    "src.media_pipeline.video_renderer.renderer.subprocess.Popen"
-                ) as popen:
-                    proc = MagicMock()
-                    proc.stderr = MagicMock()
-                    proc.stderr.readline = MagicMock(side_effect=["frame=1\n", ""])
-                    proc.wait.return_value = 0
-                    proc.returncode = 0
-                    popen.return_value = proc
-                    # pretend output exists after run
-                    def _wait() -> int:
-                        out.write_bytes(b"mp4")
-                        return 0
-
-                    proc.wait.side_effect = _wait
+            with patch.dict("os.environ", {"OCR_RENDER_BACKEND": "ffmpeg_delogo"}):
+                with patch("src.media_pipeline.video_renderer.renderer.shutil.which", return_value="ffmpeg"):
                     with patch(
-                        "src.media_pipeline.video_renderer.renderer.resolve_drawtext_font",
-                        return_value=Path("C:/Windows/Fonts/arial.ttf"),
-                    ):
-                        result = render_video_single_pass(
-                            src,
-                            out,
-                            overlays,
-                            anti_seed=1,
-                        )
+                        "src.media_pipeline.video_renderer.renderer.subprocess.Popen"
+                    ) as popen:
+                        proc = MagicMock()
+                        proc.stderr = MagicMock()
+                        proc.stderr.readline = MagicMock(side_effect=["frame=1\n", ""])
+                        proc.wait.return_value = 0
+                        proc.returncode = 0
+                        popen.return_value = proc
+
+                        def _wait() -> int:
+                            out.write_bytes(b"mp4")
+                            return 0
+
+                        proc.wait.side_effect = _wait
+                        with patch(
+                            "src.media_pipeline.video_renderer.renderer.resolve_drawtext_font",
+                            return_value=Path("C:/Windows/Fonts/arial.ttf"),
+                        ):
+                            result = render_video_single_pass(
+                                src,
+                                out,
+                                overlays,
+                                anti_seed=1,
+                                frame_width=1080,
+                                frame_height=1920,
+                            )
             self.assertEqual(result, out)
             self.assertEqual(popen.call_count, 1)
             cmd = popen.call_args.args[0]

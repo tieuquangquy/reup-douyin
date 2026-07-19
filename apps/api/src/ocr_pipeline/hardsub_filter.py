@@ -43,11 +43,16 @@ def group_hard_sub_events(
     band_ratio: float = DEFAULT_HARD_SUB_BAND_RATIO,
     min_stable_samples: int = DEFAULT_MIN_STABLE_SAMPLES,
     gap_ms: int = 800,
+    apply_band_filter: bool = True,
 ) -> list[HardSubEvent]:
-    """Merge consecutive sampled frames that have bottom-band text into timed events."""
+    """Merge consecutive sampled frames that have overlay text into timed events."""
     samples: list[tuple[int, OcrBox]] = []
     for frame in sorted(frames, key=lambda f: f.frame_time_ms):
-        hard = filter_hard_sub_boxes(frame.boxes, band_ratio=band_ratio)
+        hard = (
+            filter_hard_sub_boxes(frame.boxes, band_ratio=band_ratio)
+            if apply_band_filter
+            else list(frame.boxes)
+        )
         if not hard:
             continue
         samples.append((frame.frame_time_ms, _union_box(hard)))

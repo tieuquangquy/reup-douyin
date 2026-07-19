@@ -10,6 +10,6 @@ export async function generateMetadata({ params }: { params: Promise<{ sourceVid
 }
 
 export default async function Page({ params }: { params: Promise<{ sourceVideoId: string }> }) {
-const { sourceVideoId } = await params;
+  const { sourceVideoId } = await params;
   return <OperatorTranscriptEditorPage sourceVideoId={sourceVideoId} />;
 }

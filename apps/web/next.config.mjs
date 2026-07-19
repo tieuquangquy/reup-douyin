@@ -22,6 +22,20 @@ const nextConfig = {
       }
     ];
   },
+  async redirects() {
+    return [
+      {
+        source: "/source-videos/:id/transcript-editor",
+        destination: "/production/transcript-editor/:id",
+        permanent: false
+      },
+      {
+        source: "/source-videos/:id/final-review",
+        destination: "/production/final-review/:id",
+        permanent: false
+      }
+    ];
+  },
   async rewrites() {
     const apiUpstreamUrl = process.env.API_UPSTREAM_URL ?? "http://127.0.0.1:8000";
     return [

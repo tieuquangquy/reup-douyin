@@ -1,6 +1,6 @@
-"""Timed hard-sub box cover → cleaned video (Pilot A).
+"""Timed hard-sub region blur → cleaned video (Pilot A).
 
-Sampled OCR events (≈1–2 fps) drive opaque drawbox masks with enable=between(t,…),
+Sampled OCR events (≈1–2 fps) drive delogo masks with enable=between(t,…),
 using each event's bbox — not one static full-width bar for the whole clip.
 Scene/title text outside the hard-sub band remains out of scope.
 """
@@ -12,6 +12,11 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from src.media_pipeline.video_renderer.overlays import (
+    DEFAULT_PAD_X,
+    DEFAULT_PAD_Y,
+    expand_cover_rect,
+)
 from src.ocr_pipeline.errors import OcrPipelineError, OcrPipelineErrorCode
 from src.ocr_pipeline.types import DEFAULT_HARD_SUB_BAND_RATIO, HardSubEvent
 
@@ -19,41 +24,54 @@ logger = logging.getLogger(__name__)
 
 # Extend cover past last sample so glyphs stay hidden until the next absent sample.
 DEFAULT_HOLD_MS = 500
-# Slight pad so OCR box edges do not leave glyph crumbs.
-DEFAULT_PAD_X = 0.015
-DEFAULT_PAD_Y = 0.02
 
 
 def build_timed_cover_vf(
     events: list[HardSubEvent],
     *,
+    frame_width: int,
+    frame_height: int,
     hold_ms: int = DEFAULT_HOLD_MS,
     pad_x: float = DEFAULT_PAD_X,
     pad_y: float = DEFAULT_PAD_Y,
 ) -> str:
-    """Build ffmpeg -vf chain: one drawbox per hard-sub event, timed + geometric."""
+    """Build ffmpeg -vf chain: one delogo blur per hard-sub event, timed + geometric."""
+    from src.media_pipeline.video_renderer.filter_graph import normalized_rect_to_delogo_pixels
+
     if not events:
         raise OcrPipelineError(
             OcrPipelineErrorCode.CLEAN_HARD_SUB_FAILED,
             "No hard-sub events to cover",
         )
+    if int(frame_width) < 2 or int(frame_height) < 2:
+        raise OcrPipelineError(
+            OcrPipelineErrorCode.CLEAN_HARD_SUB_FAILED,
+            f"frame size required for delogo pixels (got {frame_width}x{frame_height})",
+        )
     hold = max(0, int(hold_ms))
     filters: list[str] = []
     for event in events:
-        x0 = max(0.0, float(event.x) - pad_x)
-        y0 = max(0.0, float(event.y) - pad_y)
-        x1 = min(1.0, float(event.x) + float(event.width) + pad_x)
-        y1 = min(1.0, float(event.y) + float(event.height) + pad_y)
-        w = max(0.01, x1 - x0)
-        h = max(0.01, y1 - y0)
+        x0, y0, w, h = expand_cover_rect(
+            float(event.x),
+            float(event.y),
+            float(event.width),
+            float(event.height),
+            pad_x=pad_x,
+            pad_y=pad_y,
+        )
+        px, py, pw, ph = normalized_rect_to_delogo_pixels(
+            x0,
+            y0,
+            w,
+            h,
+            frame_width=frame_width,
+            frame_height=frame_height,
+        )
         start_s = max(0.0, float(event.start_ms) / 1000.0)
         end_s = max(start_s + 0.05, (float(event.end_ms) + hold) / 1000.0)
         # Commas inside enable= must be escaped for filtergraph parsing.
         enable = f"between(t\\,{start_s:.3f}\\,{end_s:.3f})"
-        filters.append(
-            f"drawbox=x=iw*{x0:.4f}:y=ih*{y0:.4f}:w=iw*{w:.4f}:h=ih*{h:.4f}"
-            f":color=black@1:t=fill:enable={enable}"
-        )
+        filters.append(f"delogo=x={px}:y={py}:w={pw}:h={ph}:show=0:enable={enable}")
     return ",".join(filters)
 
 
@@ -79,7 +97,24 @@ def blur_hard_sub_band(
             f"Source video missing: {source_video}",
         )
 
-    vf = build_timed_cover_vf(events, hold_ms=hold_ms)
+    from src.media_pipeline.video_renderer.renderer import probe_video_frame_size
+
+    try:
+        frame_width, frame_height = probe_video_frame_size(
+            source_video, ffmpeg_binary=ffmpeg_binary
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise OcrPipelineError(
+            OcrPipelineErrorCode.CLEAN_HARD_SUB_FAILED,
+            f"Could not probe video size for delogo: {exc}",
+        ) from exc
+
+    vf = build_timed_cover_vf(
+        events,
+        hold_ms=hold_ms,
+        frame_width=frame_width,
+        frame_height=frame_height,
+    )
     output_video.parent.mkdir(parents=True, exist_ok=True)
     completed = subprocess.run(
         [
@@ -121,7 +156,7 @@ def blur_hard_sub_band(
             "output": str(output_video),
             "events": len(events),
             "hold_ms": hold_ms,
-            "clean_method": "ffmpeg_drawbox_timed_boxes",
+            "clean_method": "ffmpeg_delogo_timed_boxes",
         },
     )
     return output_video

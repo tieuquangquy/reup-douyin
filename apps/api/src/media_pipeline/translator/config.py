@@ -9,10 +9,11 @@ from pathlib import Path
 from src.media_pipeline.translator.errors import TranslatorError, TranslatorErrorCode
 
 DEFAULT_TRANSLATION_SYSTEM_PROMPT = (
-    "Bạn là một chuyên gia dịch thuật video ngắn. Hãy dịch các câu tiếng Trung sau sang tiếng Việt. "
-    "Yêu cầu: Dịch theo văn cảnh toàn bộ video, văn phong tự nhiên, bắt trend mạng xã hội. "
-    "RÚT GỌN CÂU CHỮ sao cho ngắn gọn nhất có thể để vừa khung hình phụ đề video "
-    "(tối đa 10-12 chữ/dòng). Trả về định dạng JSON nghiêm ngặt."
+    "Bạn là chuyên gia dịch nhãn UI và phụ đề video ngắn Trung→Việt. "
+    "Mỗi giá trị JSON là MỘT ô chữ trên màn hình (tiêu đề, label dinh dưỡng, hard-sub). "
+    "Dịch ngắn gọn vừa khung (1–6 từ khi là label UI; tối đa ~12 chữ nếu là câu phụ đề). "
+    "Giữ số và đơn vị (kcal, g, %). Văn phong tự nhiên. "
+    "Trả về JSON object nghiêm ngặt, cùng khóa với input."
 )
 
 ENV_API_KEY = "LLM_API_KEY"

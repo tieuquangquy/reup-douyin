@@ -61,7 +61,7 @@ export function OpsTranslationPromptPage() {
   }
 
   return (
-    <main className="ops-page ops-page--settings">
+    <main className="ops-page ops-page--settings ops-ai-page is-compact">
       <OpsTranslationSettingsTabs />
 
       {error ? <div className="inline-error">{error}</div> : null}
@@ -80,27 +80,23 @@ export function OpsTranslationPromptPage() {
           </div>
         }
       >
-        <p className="ops-muted">
-          {t("opsTranslationPrompt.hint")}{" "}
-          <code>{source === "workspace_db" ? t("opsTranslationPrompt.sourceDb") : t("opsTranslationPrompt.sourceEmpty")}</code>
-        </p>
+        <div className="ops-ai-status" aria-label={t("opsTranslationPrompt.hint")}>
+          <span className={`ops-ai-chip ${source === "workspace_db" ? "is-active" : "is-muted"}`}>
+            {source === "workspace_db" ? t("opsTranslationPrompt.sourceDb") : t("opsTranslationPrompt.sourceEmpty")}
+          </span>
+        </div>
 
-        {savedMessage ? (
-          <div className="ops-field-alert is-success" role="status">
-            <strong>{t("opsTranslationPrompt.saved")}</strong>
-            <span>{t("opsTranslationPrompt.savedHint")}</span>
-          </div>
-        ) : null}
-
-        <textarea
-          className="ops-prompt-textarea"
-          rows={18}
-          value={prompt}
-          onChange={(event) => setPrompt(event.target.value)}
-          placeholder={t("opsTranslationPrompt.placeholder")}
-          spellCheck={false}
-        />
-        <p className="ops-muted">{t("opsTranslationPrompt.clearHint")}</p>
+        <div className="ops-ai-prompt-body">
+          <textarea
+            className="ops-prompt-textarea"
+            rows={18}
+            value={prompt}
+            onChange={(event) => setPrompt(event.target.value)}
+            placeholder={t("opsTranslationPrompt.placeholder")}
+            spellCheck={false}
+          />
+          <p className="ops-muted">{t("opsTranslationPrompt.clearHint")}</p>
+        </div>
       </OpsPanel>
     </main>
   );

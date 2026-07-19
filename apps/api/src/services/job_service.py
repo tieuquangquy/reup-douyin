@@ -234,12 +234,33 @@ class JobService:
         job = self.get_job(job_id)
         if not can_delete_job(job.status):
             raise ValueError("Job cannot be deleted")
+        self._preserve_job_id_in_metadata(job_id)
         self._clear_job_references(job_id)
         for step in list(job.steps):
             self.db.delete(step)
         self.db.delete(job)
         self.db.commit()
         logger.info("job_deleted", extra={"job_id": str(job_id), "status": job.status})
+
+    def _preserve_job_id_in_metadata(self, job_id: UUID) -> None:
+        """Keep a durable string job id on renders before FK columns are cleared."""
+        from src.models.media import RenderOutput
+
+        job_s = str(job_id)
+        renders = list(
+            self.db.scalars(select(RenderOutput).where(RenderOutput.created_by_job_id == job_id))
+        )
+        for render in renders:
+            meta = dict(render.metadata_json or {})
+            nested = dict(meta.get("manifest") or {})
+            if meta.get("created_by_job_id") != job_s:
+                meta["created_by_job_id"] = job_s
+            if nested.get("job_id") != job_s:
+                nested["job_id"] = job_s
+            meta["manifest"] = nested
+            render.metadata_json = meta
+        if renders:
+            self.db.flush()
 
     def _clear_job_references(self, job_id: UUID) -> None:
         from src.models.artifacts import SubtitleSegment, TranscriptSegment, TranslationSegment

@@ -66,9 +66,10 @@ class OcrPipelineContractTests(unittest.TestCase):
         vf_source = inspect.getsource(
             __import__("src.ocr_pipeline.clean_hardsub", fromlist=["build_timed_cover_vf"]).build_timed_cover_vf
         )
-        self.assertIn("drawbox=", vf_source)
+        self.assertIn("delogo=", vf_source)
         self.assertIn("enable=", vf_source)
         self.assertIn("between(t", vf_source)
+        self.assertNotIn("drawbox=", vf_source)
         self.assertNotIn("boxblur=", vf_source)
 
 

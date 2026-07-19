@@ -42,6 +42,7 @@ class RenderOutputResponse(BaseModel):
     audio_strategy: str | None
     render_version: str | None
     created_by_job_id: UUID | None
+    size_bytes: int | None = None
     warning_summary_json: dict | None
     render_settings_json: dict | None
     metadata_json: dict | None
