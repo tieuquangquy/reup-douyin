@@ -1,43 +1,51 @@
 "use client";
 
-import { StatusBadge } from "../app-shell/StatusBadge";
 import { formatToken } from "../../lib/operatorHomeState";
 import { useT } from "../../lib/i18n";
 import type { RecentActivityItem } from "../../lib/operatorHomeState";
+import {
+  formatCompactActivityTime,
+  OperatorHomeChip,
+  OperatorHomeOpenLink,
+  OperatorHomePanel,
+} from "./OperatorHomeShared";
 
 export function RecentActivityPanel({ items }: { items: RecentActivityItem[] }) {
   const t = useT();
 
   return (
-    <section className="operator-panel">
-      <div className="operator-panel-heading">
-        <div>
-          <h2>{t("operatorHome.recentActivityHeading")}</h2>
-          <p>{t("operatorHome.recentActivityDesc")}</p>
-        </div>
-      </div>
-
+    <OperatorHomePanel title={t("operatorHome.recentActivityHeading")} description={t("operatorHome.recentActivityDesc")}>
       {items.length === 0 ? (
-        <div className="operator-empty-state">
-          <h3>{t("common.noRecentActivity")}</h3>
-          <p>{t("operatorHome.noRecentActivityBody")}</p>
+        <div className="operator-home-empty">
+          <strong>{t("common.noRecentActivity")}</strong>
+          <span>{t("operatorHome.noRecentActivityBody")}</span>
         </div>
       ) : (
-        <ol className="operator-activity-list">
-          {items.map((item) => (
-            <li key={item.key}>
-              <a href={item.href}>
-                <span>
+        <ol className="operator-home-activity">
+          {items.map((item) => {
+            const compactTime = item.at ? formatCompactActivityTime(item.at) : t("common.unknown");
+            return (
+              <li className="operator-home-row operator-home-activity__item" key={item.key}>
+                <OperatorHomeChip label={formatToken(item.tone)} tone={item.tone} />
+                <div className="operator-home-row__body">
                   <strong>{item.title}</strong>
-                  <small>{item.detail}</small>
-                  <small>{item.at ? new Date(item.at).toLocaleString() : t("common.unknown")}</small>
-                </span>
-                <StatusBadge label={formatToken(item.tone)} tone={item.tone} />
-              </a>
-            </li>
-          ))}
+                  <span title={item.detail}>{item.detail}</span>
+                </div>
+                <div className="operator-home-activity__trail">
+                  {item.at ? (
+                    <time dateTime={item.at} title={new Date(item.at).toLocaleString()}>
+                      {compactTime}
+                    </time>
+                  ) : (
+                    <time>{compactTime}</time>
+                  )}
+                  <OperatorHomeOpenLink href={item.href} label={t("opsPipeline.open")} />
+                </div>
+              </li>
+            );
+          })}
         </ol>
       )}
-    </section>
+    </OperatorHomePanel>
   );
 }

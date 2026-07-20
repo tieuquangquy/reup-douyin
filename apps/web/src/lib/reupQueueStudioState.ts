@@ -467,7 +467,7 @@ export function markMediaReadyNotice(item: ReupQueueItem): string {
   return (
     `Mark media ready applied → ${statusLabel}. `
     + `${jobType} ${jobStatus} (${item.job_id.slice(0, 8)}). `
-    + "Open /ops/jobs to monitor (Completed jobs still appear in the list)."
+    + "Check Pipeline for job progress (Completed jobs still appear in the list)."
   );
 }
 

@@ -55,8 +55,21 @@ assert.doesNotMatch(pageSource, /ops-users-directory/, "Single-column directory 
 assert.doesNotMatch(pageSource, /ops-users-person/, "Sparse person rows must stay retired");
 assert.doesNotMatch(pageSource, /ops-users-metrics/, "Large metric card strip must stay removed");
 assert.doesNotMatch(pageSource, /ops-users-rail/, "Left filter rail must stay removed");
-assert.match(globalCssSource, /\.ops-users-sheet/, "CSS must style sheet surface");
-assert.match(globalCssSource, /\.ops-users-table/, "CSS must style roster table");
+assert.match(
+  globalCssSource,
+  /\.ops-users-sheet-page\s+\.ops-users-table\s*\{[^}]*table-layout:\s*fixed/,
+  "Users roster must use table-layout:fixed so columns distribute evenly"
+);
+assert.match(
+  globalCssSource,
+  /\.ops-users-sheet-page\s+\.ops-users-table\s+th:nth-child\(2\)[\s\S]*?width:\s*15%/,
+  "Role/Status/date columns must share even widths (not shrink-wrap 1%)"
+);
+assert.match(
+  globalCssSource,
+  /\.ops-users-sheet-page\s+\.ops-users-table\s+th:nth-child\(6\)[\s\S]*?width:\s*12%/,
+  "Actions column must keep a real share of the row width"
+);
 assert.match(
   globalCssSource,
   /\.ops-users-table\s+\.ops-users-member-row\s*\{[^}]*display:\s*table-row/,
@@ -75,6 +88,31 @@ assert.match(pageSource, /ops-users-canvas/, "Users page must use a distinctive 
 assert.match(pageSource, /ops-users-role-chip/, "Roles must use distinctive role chips");
 assert.match(pageSource, /opsUsers\.inviteMember|opsUsers\.addMember/, "Primary add CTA must be Invite member");
 assert.match(pageSource, /opsUsers\.editMember|opsUsers\.edit/, "Row must expose Edit action");
+assert.match(
+  pageSource,
+  /filteredMembers\.map[\s\S]*ops-tts-setup-switch[\s\S]*member\.isActive/,
+  "Members Status column must use an on/off switch bound to isActive"
+);
+assert.match(
+  pageSource,
+  /aria-label=\{t\("opsUsers\.editMember"\)\}/,
+  "Edit must be an icon button with aria-label (not text CTA)"
+);
+assert.match(
+  pageSource,
+  /ops-tts-setup-table__icon-btn|ops-users-icon-btn/,
+  "Edit must use an icon button chrome"
+);
+assert.doesNotMatch(
+  pageSource,
+  /filteredMembers\.map[\s\S]*?\{t\("opsUsers\.enable"\)\}/,
+  "Members Actions must not show Enable text button"
+);
+assert.doesNotMatch(
+  pageSource,
+  /filteredMembers\.map[\s\S]*?\{t\("opsUsers\.disable"\)\}/,
+  "Members Actions must not show Disable text button"
+);
 assert.match(pageSource, /editDisplayName|displayName/, "Edit drawer must support display name");
 assert.match(pageSource, /editPhone|phone/, "Edit drawer must support phone");
 assert.match(pageSource, /editAddress|address/, "Edit drawer must support address");

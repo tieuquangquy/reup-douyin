@@ -39,17 +39,19 @@ const focusSource = readFileSync(resolve(testDir, "../components/transcript-edit
 
 assert.match(headerSource, /onReanalyze/, "Transcript header must expose Re-analyze audio CTA");
 assert.match(headerSource, /reanalyzeAudio/, "Transcript header must label Re-analyze audio");
-assert.match(headerSource, /onTranslateLiteral/, "Transcript header must expose Translate literal CTA");
-assert.match(headerSource, /translateNatural/, "Transcript header must expose Translate natural CTA");
-assert.match(headerSource, /natural_viral/, "Translate natural must enqueue natural_viral preset");
-assert.match(headerSource, /\/ops\/translation-ai/, "Transcript header must link Ops Translation settings");
+assert.match(headerSource, /onTranslateLiteral/, "Transcript header must expose Translate CTA");
+assert.match(headerSource, /literal_safe/, "Translate must enqueue literal_safe preset");
+assert.doesNotMatch(headerSource, /natural_viral|translateNatural/, "Natural translate option must be removed");
+assert.doesNotMatch(headerSource, /\/ops\/translation-ai/, "Transcript header must not deep-link Ops Translation settings");
+assert.doesNotMatch(headerSource, /\/ops\/jobs/, "Transcript header must not deep-link Ops job monitor");
 assert.doesNotMatch(headerSource, /<h1>/, "Transcript header must not duplicate shell title with h1");
 assert.doesNotMatch(
   headerSource,
   /\/ops\/translation-prompt/,
   "Transcript header must not duplicate prompt link when settings tabs cover it"
 );
-assert.match(headerSource, /editor-command__translate/, "Translate Literal/Natural live in one dropdown");
+assert.match(headerSource, /editor-command__translate/, "Translate must remain a primary command button");
+assert.doesNotMatch(headerSource, /editor-command__menu|<details/, "Translate must not use a dropdown");
 assert.doesNotMatch(headerSource, /onApproveSource/, "Approve source is not a primary CTA for non-Chinese operators");
 assert.doesNotMatch(focusSource, /aiTools/, "AI job menu must not duplicate on the segment toolbar");
 assert.match(pageSource, /createAudioAnalysis/, "Transcript page must enqueue ANALYZE_AUDIO via createAudioAnalysis");

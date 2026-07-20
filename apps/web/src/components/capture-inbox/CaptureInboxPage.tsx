@@ -30,6 +30,10 @@ import {
 } from "../../lib/api";
 import { hasMoreOffsetItems, mergeOffsetItemsById } from "../../lib/offsetListPagination";
 import { OffsetLoadMoreFooter } from "../shared/OffsetLoadMoreFooter";
+import { WorkItemDetailsDrawer } from "../shared/WorkItemDetailsDrawer";
+import { WorkMediaTileOverlay } from "../shared/WorkMediaTileOverlay";
+import { useOffsetLoadMoreOnScroll } from "../shared/useOffsetLoadMoreOnScroll";
+import { getOperatorTileScoreBadge } from "../../lib/operatorTileScore";
 import {
   hasMoreCapturedItems,
   hasMoreCapturedItemsAfterPage,
@@ -79,8 +83,6 @@ import {
 import { getReupScoreForCaptureItem } from "../../lib/captureInboxReupScore";
 import {
   formatReupScoreBadgeValue,
-  reupScoreBadgeLevelForCaptureItem,
-  reupScoreBadgeTier
 } from "../../lib/reupScoreBadge";
 import {
   DOUYIN_REVIEW_PRESETS,
@@ -198,7 +200,8 @@ const TARGET_DEBUG_AWEME_IDS = new Set(["7628281732369796388", "7631223404342857
 const CAPTURE_INBOX_ITEMS_PAGE_SIZE = 100;
 const CAPTURE_INBOX_VIRTUAL_ROW_HEIGHT = 520;
 const CAPTURE_INBOX_VIRTUAL_OVERSCAN_ROWS = 2;
-const CAPTURE_INBOX_VIRTUAL_MIN_COLUMN_WIDTH = 260;
+const CAPTURE_INBOX_GALLERY_MAX_COLUMNS = 5;
+const CAPTURE_INBOX_VIRTUAL_MIN_COLUMN_WIDTH = 180;
 const CAPTURE_INBOX_PROMOTE_TOP_BATCHES = [5, 10, 20] as const;
 const CAPTURE_INBOX_UI_VERSION = "22G-3C";
 const CAPTURE_INBOX_PRIMARY_PRESET_IDS: DouyinReviewPresetId[] = ["ready_to_promote", "high_potential", "needs_cleanup"];
@@ -1296,17 +1299,15 @@ export function CaptureInboxPage() {
                 working={working}
               />
             </main>
-            <aside className="capture-inbox-review-side" aria-label="Right-side sticky inspector">
-              <RightInspector
-                detailLoading={inspectorDetailLoading}
-                item={activeItem}
-                onClose={closeItemDetails}
-                open={rightInspectorOpen && Boolean(activeItemId)}
-                rawDetails={rawDetails}
-                sourceUrls={sourceUrls}
-              />
-            </aside>
           </div>
+          <RightInspector
+            detailLoading={inspectorDetailLoading}
+            item={activeItem}
+            onClose={closeItemDetails}
+            open={rightInspectorOpen && Boolean(activeItemId)}
+            rawDetails={rawDetails}
+            sourceUrls={sourceUrls}
+          />
           <BulkActionConfirmationDialog dialog={bulkActionDialog} onClose={closeBulkActionDialog} onConfirm={confirmBulkAction} working={working} />
         </OpsConsolePage>
     </OperatorStudioShell>
@@ -2163,6 +2164,7 @@ function SessionRibbon({
             onLoadMore={onLoadMore}
             pageSize={SESSION_PAGE_SIZE}
             totalCount={sessionsTotalCount}
+            variant="studio"
           />
         ) : null}
       </div>
@@ -2197,16 +2199,35 @@ function MediaTileGallery({
 }) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const loadMoreRef = useRef<HTMLDivElement | null>(null);
-  const [columnCount, setColumnCount] = useState(3);
+  const [scrollRoot, setScrollRoot] = useState<Element | null>(null);
+  const [columnCount, setColumnCount] = useState(CAPTURE_INBOX_GALLERY_MAX_COLUMNS);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(720);
+
+  useOffsetLoadMoreOnScroll({
+    sentinelRef: loadMoreRef,
+    hasMore: hasMoreItems,
+    loading: loadingMoreItems,
+    disabled: working !== null,
+    loadedCount: items.length,
+    onLoadMore,
+    root: scrollRoot,
+    rootMargin: "240px 0px",
+  });
+
+  useEffect(() => {
+    setScrollRoot(scrollRef.current);
+  }, [items.length]);
 
   useEffect(() => {
     const scrollElement = scrollRef.current;
     if (!scrollElement) return;
     const updateLayout = () => {
       const width = scrollElement.clientWidth;
-      const nextColumnCount = Math.max(1, Math.floor((width + 12) / (CAPTURE_INBOX_VIRTUAL_MIN_COLUMN_WIDTH + 12)));
+      const nextColumnCount = Math.min(
+        CAPTURE_INBOX_GALLERY_MAX_COLUMNS,
+        Math.max(1, Math.floor((width + 12) / (CAPTURE_INBOX_VIRTUAL_MIN_COLUMN_WIDTH + 12)))
+      );
       setColumnCount(nextColumnCount);
       setViewportHeight(scrollElement.clientHeight);
     };
@@ -2214,23 +2235,7 @@ function MediaTileGallery({
     const observer = typeof ResizeObserver !== "undefined" ? new ResizeObserver(updateLayout) : null;
     observer?.observe(scrollElement);
     return () => observer?.disconnect();
-  }, []);
-
-  useEffect(() => {
-    const sentinel = loadMoreRef.current;
-    const root = scrollRef.current;
-    if (!sentinel || !root || !hasMoreItems) return;
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries.some((entry) => entry.isIntersecting) && !loadingMoreItems) {
-          onLoadMore();
-        }
-      },
-      { root, rootMargin: "240px 0px" }
-    );
-    observer.observe(sentinel);
-    return () => observer.disconnect();
-  }, [hasMoreItems, items.length, loadingMoreItems, onLoadMore]);
+  }, [items.length]);
 
   if (!items.length) return <OpsEmptyState detail="No media tiles match the current studio filters." title="No media tiles match" />;
 
@@ -2260,15 +2265,7 @@ function MediaTileGallery({
       <div
         className="capture-inbox-virtual-scroll"
         onScroll={(event) => {
-          const element = event.currentTarget;
-          setScrollTop(element.scrollTop);
-          if (
-            hasMoreItems
-            && !loadingMoreItems
-            && element.scrollTop + element.clientHeight >= element.scrollHeight - CAPTURE_INBOX_VIRTUAL_ROW_HEIGHT
-          ) {
-            onLoadMore();
-          }
+          setScrollTop(event.currentTarget.scrollTop);
         }}
         ref={scrollRef}
       >
@@ -2296,10 +2293,19 @@ function MediaTileGallery({
             ))}
           </div>
         </div>
-        {hasMoreItems ? (
-          <div className="capture-inbox-load-more-sentinel" ref={loadMoreRef}>
-            {loadingMoreItems ? "Loading more items..." : "Scroll to load more items"}
-          </div>
+        {items.length > 0 || itemsTotalCount > 0 ? (
+          <OffsetLoadMoreFooter
+            ref={loadMoreRef}
+            autoLoad
+            disabled={working !== null}
+            loadedCount={items.length}
+            loadingMore={loadingMoreItems}
+            noun="tiles"
+            onLoadMore={hasMoreItems ? onLoadMore : undefined}
+            pageSize={CAPTURE_INBOX_ITEMS_PAGE_SIZE}
+            totalCount={itemsTotalCount}
+            variant="studio"
+          />
         ) : null}
       </div>
     </section>
@@ -2310,8 +2316,7 @@ function MediaTile({ focused, item, onAction, onFocusItem, onToggleItem, selecte
   const ready = isReadyItem(item);
   const thumbnailUrl = resolveThumbnailDisplayUrl(item);
   const cardModel = compactCardModelForItem(item);
-  const reupScore = getReupScoreForCaptureItem(item);
-  const scoreLevel = reupScoreBadgeLevelForCaptureItem(reupScore.reup_score, getDouyinMetadataCompletenessForItem(item));
+  const scoreBadge = getOperatorTileScoreBadge(item);
   const showTileMetrics = shouldShowCaptureInboxTileMetrics(item);
 
   useEffect(() => {
@@ -2329,35 +2334,19 @@ function MediaTile({ focused, item, onAction, onFocusItem, onToggleItem, selecte
             </>
           ) : <span className="capture-inbox-thumbnail-placeholder"><strong>Thumbnail not captured</strong><small>{resolvePreviewStatus(item)}</small></span>}
         </button>
-        <div className="capture-inbox-media-overlay capture-inbox-tile-overlay-toolbar" aria-label="Tile overlay controls">
-          <div className="capture-inbox-media-overlay-scrim capture-inbox-tile-overlay-scrim" aria-hidden="true" />
-          <div className="capture-inbox-tile-overlay-row">
-            <div className="capture-inbox-tile-overlay-left">
-              <label
-                className={`capture-inbox-tile-select-toggle ${selected ? "is-selected" : ""}`}
-                title={selected ? "Deselect item" : "Select item"}
-              >
-                <input
-                  aria-label={selected ? "Deselect item" : "Select item"}
-                  checked={selected}
-                  onChange={() => onToggleItem(item.id)}
-                  type="checkbox"
-                />
-                <span aria-hidden="true" className="capture-inbox-tile-select-visual" />
-              </label>
-              <span className={`capture-inbox-tile-status-chip is-${itemStatusTone(item.status)} ${ready ? "is-ready" : ""}`}>
-                {operatorStatusLabel(item.status)}
-              </span>
-            </div>
-            <span
-              className={`capture-inbox-reup-score-badge is-${scoreLevel} ${reupScore.reup_score == null ? "missing" : "ready"}`}
-              title={reupScoreDetailText(reupScore)}
-            >
-              <strong>{formatReupScoreBadgeValue(reupScore.reup_score)}</strong>
-              <small>{reupScoreBadgeTier(reupScore.reup_score)}</small>
-            </span>
-          </div>
-        </div>
+        <WorkMediaTileOverlay
+          onToggleSelect={() => onToggleItem(item.id)}
+          scoreBadge={scoreBadge}
+          selectAriaLabel={selected ? "Deselect item" : "Select item"}
+          selectTitle={selected ? "Deselect item" : "Select item"}
+          selected={selected}
+          statusChips={[
+            {
+              label: operatorStatusLabel(item.status),
+              tone: ready ? "ready" : itemStatusTone(item.status),
+            },
+          ]}
+        />
       </div>
       <div className="capture-inbox-tile-main capture-inbox-compact-main">
         <div className="capture-inbox-tile-primary-row">
@@ -2431,100 +2420,99 @@ function RightInspector({
   const reupScore = item ? getReupScoreForCaptureItem(item) : null;
 
   return (
-    <div className={`capture-inbox-right-inspector ${open ? "open" : "closed"}`} aria-hidden={!open && !item}>
-      <div className="drawer-header">
-        <div>
-          <p className="eyebrow">Right-side sticky inspector</p>
-          <h2>Item details</h2>
-        </div>
-        <button disabled={!item && !open} onClick={onClose} type="button">Close details</button>
-      </div>
+    <WorkItemDetailsDrawer
+      eyebrow="Capture Inbox"
+      open={open}
+      title="Item details"
+      titleId="capture-inbox-details-title"
+      onClose={onClose}
+    >
       <OpsDetailPanel emptyDetail={!item ? "Select an item to inspect details." : undefined} title="Item details">
-      {item ? (
-        <>
-          <div className="capture-inbox-detail-hero compact">
-            <div className="capture-inbox-detail-hero-topline">
-              <span className={`status-badge ${itemStatusTone(item.status)}`}>{operatorStatusLabel(item.status)}</span>
-              <span className="capture-inbox-session-time">{metadataSummary(item)}</span>
-            </div>
-            <CompactText
-              expanded={Boolean(expandedTextKeys.title)}
-              label="Title"
-              text={titleForItem(item)}
-              textKey="title"
-              threshold={140}
-              onToggle={toggleText}
-            />
-            <CompactText
-              expanded={Boolean(expandedTextKeys.caption)}
-              label="Caption"
-              placeholder="Caption not captured"
-              text={item.caption}
-              textKey="caption"
-              threshold={180}
-              onToggle={toggleText}
-            />
-          </div>
-          <OpsDetailSection title="Overview">
-            <OpsMetadataList items={inspectorOverviewItems(item)} />
-            {detailLoading ? <p className="capture-inbox-inspector-loading">Loading full item details…</p> : null}
-            {detailTextSections.length ? (
-              <div className="capture-inbox-compact-text-stack">
-                {detailTextSections.map((section) => (
-                  <CompactText
-                    expanded={Boolean(expandedTextKeys[section.key])}
-                    key={section.key}
-                    label={section.label}
-                    text={section.value}
-                    textKey={section.key}
-                    threshold={section.threshold}
-                    onToggle={toggleText}
-                  />
-                ))}
+        {item ? (
+          <>
+            <div className="capture-inbox-detail-hero compact">
+              <div className="capture-inbox-detail-hero-topline">
+                <span className={`status-badge ${itemStatusTone(item.status)}`}>{operatorStatusLabel(item.status)}</span>
+                <span className="capture-inbox-session-time">{metadataSummary(item)}</span>
               </div>
-            ) : null}
-          </OpsDetailSection>
-          {reupScore ? (
-            <OpsDetailSection title="Reup Score">
-              <ReupScoreBreakdown score={reupScore} />
+              <CompactText
+                expanded={Boolean(expandedTextKeys.title)}
+                label="Title"
+                text={titleForItem(item)}
+                textKey="title"
+                threshold={140}
+                onToggle={toggleText}
+              />
+              <CompactText
+                expanded={Boolean(expandedTextKeys.caption)}
+                label="Caption"
+                placeholder="Caption not captured"
+                text={item.caption}
+                textKey="caption"
+                threshold={180}
+                onToggle={toggleText}
+              />
+            </div>
+            <OpsDetailSection title="Overview">
+              <OpsMetadataList items={inspectorOverviewItems(item)} />
+              {detailLoading ? <p className="capture-inbox-inspector-loading">Loading full item details…</p> : null}
+              {detailTextSections.length ? (
+                <div className="capture-inbox-compact-text-stack">
+                  {detailTextSections.map((section) => (
+                    <CompactText
+                      expanded={Boolean(expandedTextKeys[section.key])}
+                      key={section.key}
+                      label={section.label}
+                      text={section.value}
+                      textKey={section.key}
+                      threshold={section.threshold}
+                      onToggle={toggleText}
+                    />
+                  ))}
+                </div>
+              ) : null}
             </OpsDetailSection>
-          ) : null}
-          <OpsDetailSection title="Source / References">
-            <OpsMetadataList items={[
-              { label: "Video ID", value: item.source_video_external_id ?? "Not captured" },
-              { label: "Source", value: item.source_url ? <a href={item.source_url} rel="noreferrer" target="_blank">Open source</a> : "Not captured" },
-              { label: "Share", value: item.share_url ? <a href={item.share_url} rel="noreferrer" target="_blank">Open share link</a> : "Not captured" },
-              { label: "Thumbnail", value: resolveThumbnailUrl(item) ? <a href={resolveThumbnailDisplayUrl(item) ?? "#"} rel="noreferrer" target="_blank">Open thumbnail</a> : "Not captured" }
-            ]} />
-          </OpsDetailSection>
-          <OpsDetailSection title="Performance & engagement">
-            <OpsMetadataList items={inspectorPerformanceItems(item)} />
-          </OpsDetailSection>
-          <OpsDetailSection title="Metadata quality">
-            <OpsMetadataList items={inspectorMetadataQualityItems(item)} />
-          </OpsDetailSection>
-          <OpsDetailSection title="Outputs / Downstream artifacts">
-            <OpsMetadataList items={[
-              { label: "Promoted", value: item.promoted_video_candidate_id ?? "Not promoted" },
-              { label: "Duplicate", value: item.duplicate_of_item_id ?? item.existing_source_video_id ?? "No" },
-              { label: "Preview URL", value: item.preview_url ? <a href={item.preview_url} rel="noreferrer" target="_blank">Open preview</a> : resolvePreviewStatus(item) }
-            ]} />
-          </OpsDetailSection>
-          <OpsDetailSection collapsed title="Diagnostics">
-            <OpsMetadataList items={[
-              { label: "Error", value: item.error_message ?? item.error_code ?? "None" },
-              { label: "Excluded reason", value: item.excluded_reason ?? "Not excluded" }
-            ]} />
-          </OpsDetailSection>
-          <OpsDetailSection collapsed title="Raw details">
-            <pre>{JSON.stringify({ enrichment: item.enrichment_json, metadata: item.metadata_json, raw: item.raw_payload_json }, null, 2)}</pre>
-          </OpsDetailSection>
-        </>
-      ) : null}
-      {sourceUrls.length ? <OpsDetailSection collapsed title="Action source URLs"><ul>{sourceUrls.map((url) => <li key={url}><a href={url} rel="noreferrer" target="_blank">{url}</a></li>)}</ul></OpsDetailSection> : null}
-      {rawDetails.length ? <OpsDetailSection collapsed title="Latest raw action details"><pre>{JSON.stringify(rawDetails, null, 2)}</pre></OpsDetailSection> : null}
+            {reupScore ? (
+              <OpsDetailSection title="Reup Score">
+                <ReupScoreBreakdown score={reupScore} />
+              </OpsDetailSection>
+            ) : null}
+            <OpsDetailSection title="Source / References">
+              <OpsMetadataList items={[
+                { label: "Video ID", value: item.source_video_external_id ?? "Not captured" },
+                { label: "Source", value: item.source_url ? <a href={item.source_url} rel="noreferrer" target="_blank">Open source</a> : "Not captured" },
+                { label: "Share", value: item.share_url ? <a href={item.share_url} rel="noreferrer" target="_blank">Open share link</a> : "Not captured" },
+                { label: "Thumbnail", value: resolveThumbnailUrl(item) ? <a href={resolveThumbnailDisplayUrl(item) ?? "#"} rel="noreferrer" target="_blank">Open thumbnail</a> : "Not captured" }
+              ]} />
+            </OpsDetailSection>
+            <OpsDetailSection title="Performance & engagement">
+              <OpsMetadataList items={inspectorPerformanceItems(item)} />
+            </OpsDetailSection>
+            <OpsDetailSection title="Metadata quality">
+              <OpsMetadataList items={inspectorMetadataQualityItems(item)} />
+            </OpsDetailSection>
+            <OpsDetailSection title="Outputs / Downstream artifacts">
+              <OpsMetadataList items={[
+                { label: "Promoted", value: item.promoted_video_candidate_id ?? "Not promoted" },
+                { label: "Duplicate", value: item.duplicate_of_item_id ?? item.existing_source_video_id ?? "No" },
+                { label: "Preview URL", value: item.preview_url ? <a href={item.preview_url} rel="noreferrer" target="_blank">Open preview</a> : resolvePreviewStatus(item) }
+              ]} />
+            </OpsDetailSection>
+            <OpsDetailSection collapsed title="Diagnostics">
+              <OpsMetadataList items={[
+                { label: "Error", value: item.error_message ?? item.error_code ?? "None" },
+                { label: "Excluded reason", value: item.excluded_reason ?? "Not excluded" }
+              ]} />
+            </OpsDetailSection>
+            <OpsDetailSection collapsed title="Raw details">
+              <pre>{JSON.stringify({ enrichment: item.enrichment_json, metadata: item.metadata_json, raw: item.raw_payload_json }, null, 2)}</pre>
+            </OpsDetailSection>
+          </>
+        ) : null}
+        {sourceUrls.length ? <OpsDetailSection collapsed title="Action source URLs"><ul>{sourceUrls.map((url) => <li key={url}><a href={url} rel="noreferrer" target="_blank">{url}</a></li>)}</ul></OpsDetailSection> : null}
+        {rawDetails.length ? <OpsDetailSection collapsed title="Latest raw action details"><pre>{JSON.stringify(rawDetails, null, 2)}</pre></OpsDetailSection> : null}
       </OpsDetailPanel>
-    </div>
+    </WorkItemDetailsDrawer>
   );
 }
 

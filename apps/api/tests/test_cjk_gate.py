@@ -75,10 +75,10 @@ class CjkOverlayTests(unittest.TestCase):
         self.assertEqual(len(labels), 4)
         texts = [seg.text_vi for seg in labels]
         self.assertEqual(texts, ["Bua trua", "Protein", "525 kcal", "Com"])
-        # Bottom VI band must not become a cover target (panel stops above band).
+        # Dense panel wipes near-full frame; labels stay on CJK boxes only.
         for seg in overlays:
             if seg.kind == "dense_ui":
-                self.assertLessEqual(seg.y + seg.height, 0.68)
+                self.assertGreaterEqual(seg.y + seg.height, 0.90)
             else:
                 self.assertLess(seg.y + seg.height, 0.80)
 

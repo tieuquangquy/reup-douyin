@@ -4,8 +4,10 @@ import { useEffect, useMemo, useState } from "react";
 import { useT } from "../../lib/i18n";
 import {
   fetchCandidates,
+  fetchDouyinExtensionStatus,
   fetchJobs,
   fetchOptimizationDashboard,
+  fetchPipelineDashboard,
   fetchPublishControlQueue,
   fetchPublishHealthDashboard
 } from "../../lib/api";
@@ -14,7 +16,11 @@ import { TopbarRefreshButton } from "../app-shell/TopbarRefreshButton";
 import {
   buildActionQueue,
   buildContinueItems,
+  buildExtensionSignal,
+  buildFreshness,
+  buildNextWork,
   buildOperatorMetrics,
+  buildPublishSuccessMetric,
   buildQuickLaunchItems,
   buildRecentActivity,
   firstReadyDraftId,
@@ -24,8 +30,10 @@ import {
 } from "../../lib/operatorHomeState";
 import { DEFAULT_FILTERS } from "../../lib/reviewBoardState";
 import type { PublishHealthDashboard } from "../../types/analytics";
+import type { DouyinExtensionStatusResponse } from "../../types/douyin-extension-setup";
 import type { Job } from "../../types/jobs";
 import type { OptimizationDashboard } from "../../types/optimization";
+import type { PipelineDashboardResponse } from "../../types/operations";
 import type { PublishControlQueue } from "../../types/publish-control";
 import type { Candidate } from "../../types/review-board";
 import { ActionQueuePanel } from "./ActionQueuePanel";
@@ -33,6 +41,8 @@ import { OverviewCards } from "./OverviewCards";
 import { QuickLaunchGrid } from "./QuickLaunchGrid";
 import { RecentActivityPanel } from "./RecentActivityPanel";
 import { ContinuePanel } from "./ContinuePanel";
+import { FreshnessStrip } from "./FreshnessStrip";
+import { NextWorkPanel } from "./NextWorkPanel";
 
 type OperatorHomeSnapshot = {
   candidates: Candidate[];
@@ -40,6 +50,8 @@ type OperatorHomeSnapshot = {
   health: PublishHealthDashboard | null;
   queue: PublishControlQueue | null;
   optimization: OptimizationDashboard | null;
+  pipeline: PipelineDashboardResponse | null;
+  extension: DouyinExtensionStatusResponse | null;
 };
 
 export function OperatorHomePage() {
@@ -52,14 +64,24 @@ export function OperatorHomePage() {
     setLoading(true);
     setError(null);
     try {
-      const [candidateResult, jobsPayload, health, queue, optimization] = await Promise.all([
+      const [candidateResult, jobsPayload, health, queue, optimization, pipeline, extension] = await Promise.all([
         fetchCandidates(DEFAULT_FILTERS),
         fetchJobs(undefined, { limit: 25 }),
         fetchPublishHealthDashboard("last_7_days"),
         fetchPublishControlQueue(),
-        fetchOptimizationDashboard()
+        fetchOptimizationDashboard(),
+        fetchPipelineDashboard().catch(() => null),
+        fetchDouyinExtensionStatus().catch(() => null)
       ]);
-      setSnapshot({ candidates: candidateResult.candidates, jobs: jobsPayload.jobs, health, queue, optimization });
+      setSnapshot({
+        candidates: candidateResult.candidates,
+        jobs: jobsPayload.jobs,
+        health,
+        queue,
+        optimization,
+        pipeline,
+        extension
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : t("operatorHome.loadError"));
     } finally {
@@ -93,9 +115,15 @@ export function OperatorHomePage() {
         candidates: snapshot.candidates,
         jobs: snapshot.jobs,
         health: snapshot.health,
-        queue: snapshot.queue
+        queue: snapshot.queue,
+        pipeline: snapshot.pipeline
       })
     : [];
+
+  const nextWork = snapshot ? buildNextWork(snapshot.pipeline) : [];
+  const freshness = snapshot ? buildFreshness(snapshot.pipeline) : null;
+  const extensionSignal = snapshot ? buildExtensionSignal(snapshot.extension) : null;
+  const publishSuccess = snapshot ? buildPublishSuccessMetric(snapshot.health) : null;
 
   const actionQueue = snapshot
     ? buildActionQueue({
@@ -134,10 +162,13 @@ export function OperatorHomePage() {
         </div>
       ) : null}
 
-      {snapshot ? (
+      {snapshot && freshness && extensionSignal && publishSuccess ? (
         <div className="operator-home">
           {error ? <div className="inline-error">{error}</div> : null}
+          <FreshnessStrip freshness={freshness} extension={extensionSignal} publishSuccess={publishSuccess} />
           <OverviewCards metrics={metrics} />
+          <NextWorkPanel items={nextWork} />
+          <ContinuePanel items={continueItems} />
 
           <section className="operator-home-layout">
             <div className="operator-home-main">
@@ -145,18 +176,23 @@ export function OperatorHomePage() {
               <QuickLaunchGrid items={quickLaunchItems} />
             </div>
             <aside className="operator-home-side">
-              <ContinuePanel items={continueItems} />
               <RecentActivityPanel items={recentActivity} />
-              <section className="operator-panel">
-                <div className="operator-panel-heading">
-                  <div>
-                    <h2>{t("operatorHome.optimizationSignal")}</h2>
-                    <p>{t("operatorHome.optimizationSignalDesc")}</p>
+              {optimizationHint ? (
+                <section className="operator-home-panel operator-home-opt">
+                  <div className="operator-home-panel__head">
+                    <div>
+                      <h2>{t("operatorHome.optimizationSignal")}</h2>
+                      <p>{t("operatorHome.optimizationSignalDesc")}</p>
+                    </div>
                   </div>
-                </div>
-                <p className="muted">{optimizationHint ?? t("operatorHome.noOptimizationHint")}</p>
-                <a className="operator-inline-link" href="/optimization">{t("operatorHome.openOptimization")}</a>
-              </section>
+                  <div className="operator-home-panel__body">
+                    <p className="operator-home-opt__hint">{optimizationHint}</p>
+                    <a className="operator-home-panel__link" href="/optimization">
+                      {t("operatorHome.openOptimization")}
+                    </a>
+                  </div>
+                </section>
+              ) : null}
             </aside>
           </section>
         </div>

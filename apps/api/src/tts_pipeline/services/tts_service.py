@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from collections import Counter
+from collections.abc import Callable
 from uuid import UUID
 
 from sqlalchemy import func, select, update
@@ -61,8 +62,7 @@ class TtsPipelineService:
         workspace_tts = WorkspaceSettingsService(self.db).get_tts_ai(workspace_id)
         return build_default_tts_provider(workspace_tts=workspace_tts)
 
-    def _voice_config_for_request(self, request: TtsRequest, workspace_id: UUID) -> VoiceConfig:
-        voice_config = request.voice_config
+    def _voice_config_for_request(self, _request: TtsRequest, workspace_id: UUID) -> VoiceConfig:
         workspace_tts = WorkspaceSettingsService(self.db).get_tts_ai(workspace_id)
         settings = get_settings()
 
@@ -70,29 +70,16 @@ class TtsPipelineService:
         env_rate = float(settings.audio_tts_speaking_rate or 1.0)
         env_lang = "vi"
 
-        # Ops workspace TTS enabled → Ops is authority (Preview/Save match Generate TTS).
-        if workspace_tts.enabled:
-            voice_id = (workspace_tts.voice_id or "").strip() or env_voice
-            language = (workspace_tts.language_code or "").strip() or env_lang
-            try:
-                rate = float(workspace_tts.speaking_rate or env_rate)
-            except (TypeError, ValueError):
-                rate = env_rate
-            rate = max(0.5, min(2.0, rate))
-            return VoiceConfig(voice_id=voice_id, language_code=language, speaking_rate=rate)
-
-        client_voice = (voice_config.voice_id or "").strip()
-        if not client_voice or client_voice == "vi_female_placeholder":
-            return VoiceConfig(
-                voice_id=env_voice,
-                language_code=(voice_config.language_code or env_lang).strip() or env_lang,
-                speaking_rate=voice_config.speaking_rate if voice_config.speaking_rate else env_rate,
-            )
-        return VoiceConfig(
-            voice_id=client_voice,
-            language_code=(voice_config.language_code or env_lang).strip() or env_lang,
-            speaking_rate=voice_config.speaking_rate or env_rate,
-        )
+        # Active Ops TTS profile is authority for Generate TTS (Preview parity), even when
+        # Enabled is off. Empty Ops voice/rate fall back to env defaults.
+        voice_id = (workspace_tts.voice_id or "").strip() or env_voice
+        language = (workspace_tts.language_code or "").strip() or env_lang
+        try:
+            rate = float(workspace_tts.speaking_rate or env_rate)
+        except (TypeError, ValueError):
+            rate = env_rate
+        rate = max(0.5, min(2.0, rate))
+        return VoiceConfig(voice_id=voice_id, language_code=language, speaking_rate=rate)
 
     def create_tts_job(self, request: TtsRequest):
         source_video = self._load_source_video(request.source_video_id)
@@ -111,7 +98,13 @@ class TtsPipelineService:
         logger.info("tts_job_created", extra={"job_id": str(job.id), "source_video_id": str(source_video.id)})
         return job
 
-    def run_pipeline(self, request: TtsRequest, *, job_id: UUID | None = None) -> RenderPrepResult:
+    def run_pipeline(
+        self,
+        request: TtsRequest,
+        *,
+        job_id: UUID | None = None,
+        on_progress: Callable[[str, int | None], None] | None = None,
+    ) -> RenderPrepResult:
         source_video = self._load_source_video(request.source_video_id)
         self.tts_provider = self._provider_for_workspace(source_video.workspace_id)
         voice_config = self._voice_config_for_request(request, source_video.workspace_id)
@@ -130,8 +123,12 @@ class TtsPipelineService:
             synthesized: list[SynthesizedSegment] = []
             assets: list[MediaAsset] = []
             warnings: list[str] = []
+            total = max(1, len(input_segments))
 
-            for segment in input_segments:
+            for index, segment in enumerate(input_segments):
+                if on_progress is not None:
+                    # Reserve headroom for join/subtitle/persist phases after the loop.
+                    on_progress("synthesize_segment", min(90, int((index / total) * 90)))
                 provider_output = self.tts_provider.synthesize(
                     TtsProviderInput(
                         text=segment.translated_text,
@@ -176,6 +173,8 @@ class TtsPipelineService:
                     )
                 )
 
+            if on_progress is not None:
+                on_progress("assemble_narration", 92)
             joined_audio, joined_metadata = self.narration_assembler.assemble(synthesized)
             assets.append(
                 self._persist_asset(

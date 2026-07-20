@@ -25,7 +25,7 @@ assert.match(apiSource, /export async function fetchTtsSummary/, "API must expos
 assert.match(
   apiSource,
   /voice_id:\s*""/,
-  "createTtsJob must omit client voice so Ops workspace TTS can be authority"
+  "createTtsJob must omit client voice so active Ops TTS profile can be authority"
 );
 assert.match(apiSource, /force_refresh/, "createTtsJob must allow force refresh");
 
@@ -38,7 +38,7 @@ assert.match(
 );
 
 assert.match(headerSource, /generateTts/, "Header must surface Generate TTS CTA");
-assert.match(headerSource, /\/ops\/tts-ai/, "Header must link to Ops TTS settings");
+assert.doesNotMatch(headerSource, /\/ops\/tts-ai/, "Header must not deep-link Ops TTS settings");
 assert.doesNotMatch(
   headerSource,
   /Translate-only|translate only/i,

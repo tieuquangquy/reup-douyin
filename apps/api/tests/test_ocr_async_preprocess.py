@@ -40,8 +40,8 @@ def _write_soft_textish_jpeg(path: Path, *, width: int, height: int) -> None:
 
 class AsyncOcrPreprocessUpgradeTests(unittest.TestCase):
     def test_defaults_max_edge_1920_semaphore_timeout(self) -> None:
-        self.assertEqual(ASYNC_OCR_CONCURRENCY, 3)
-        self.assertEqual(ASYNC_OCR_TIMEOUT_SECONDS, 120)
+        self.assertEqual(ASYNC_OCR_CONCURRENCY, 8)
+        self.assertEqual(ASYNC_OCR_TIMEOUT_SECONDS, 300)
         self.assertEqual(ASYNC_OCR_MAX_EDGE_PX, 1920)
         self.assertEqual(ASYNC_OCR_JPEG_QUALITY, 85)
 

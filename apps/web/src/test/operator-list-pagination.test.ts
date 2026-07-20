@@ -16,8 +16,13 @@ const apiSource = readFileSync(join(webSrc, "lib", "api.ts"), "utf-8");
 assert.equal(hasMoreOffsetItems(50, 120), true, "Load more must stay available while loaded < total");
 assert.equal(hasMoreOffsetItems(120, 120), false, "Load more must stop when all items are loaded");
 
-assert.match(reupQueueSource, /REUP_QUEUE_PAGE_SIZE_DEFAULT\s*=\s*50/, "Reup Queue must default page size 50");
+assert.match(reupQueueSource, /REUP_QUEUE_LOAD_BATCH_SIZE\s*=\s*50/, "Reup Queue must use fixed auto-load batch size 50");
+assert.doesNotMatch(reupQueueSource, /onPageSizeChange=\{handlePageSizeChange\}/, "Reup auto-load footer must not expose per-page control");
+assert.doesNotMatch(reupQueueSource, /pageSizeOptions=\{OPERATOR_LIST_PAGE_SIZE_PRESETS\}/, "Reup auto-load footer must not expose page size presets");
 assert.match(reupQueueSource, /loadMoreQueue/, "Reup Queue must expose load-more for offset pages");
+assert.match(reupQueueSource, /resolveOffsetPageMerge/, "Reup Queue load-more must reconcile stalled offset tail pages");
+assert.match(reupQueueSource, /loadMoreInFlightRef/, "Reup Queue must guard concurrent load-more requests");
+assert.doesNotMatch(reupQueueSource, /queuePagerDisabled = .*refreshing/, "Reup pager must stay stable during background refresh");
 assert.match(reupQueueSource, /OffsetLoadMoreFooter/, "Reup Queue must use shared load-more footer");
 assert.match(reupQueueSource, /hasMoreOffsetItems\(items\.length, totalCount\)/, "Reup Queue must gate load-more on total_count");
 assert.match(reupQueueSource, /statusesForReupQueueFilter/, "Reup Queue must map operator tabs to API statuses");
@@ -38,8 +43,11 @@ assert.match(apiSource, /Promise<JobListResponse>/, "fetchJobs must return JobLi
 assert.match(apiSource, /total_count: Number\(payload\.total_count/, "fetchJobs must normalize total_count");
 
 assert.match(reviewBoardSource, /OffsetLoadMoreFooter/, "Review Board must use shared load-more footer");
+assert.match(reviewBoardSource, /variant="studio"/, "Review Board must use Soft CTA studio pager");
 assert.match(captureInboxSource, /SESSION_PAGE_SIZE\s*=\s*25/, "Capture Inbox session rail must page at 25");
 assert.match(captureInboxSource, /loadMoreSessions/, "Capture Inbox must load more sessions");
 assert.match(captureInboxSource, /sessionsTotalCount/, "Capture Inbox must honor sessions total_count");
+assert.match(captureInboxSource, /variant="studio"/, "Capture Inbox must use Soft CTA studio pager");
+assert.match(reupQueueSource, /variant="studio"/, "Reup Queue must use Soft CTA studio pager");
 
 console.log("operator-list-pagination.test.ts: ok");

@@ -6,8 +6,11 @@ import logging
 import re
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
+from types import SimpleNamespace
 
 logger = logging.getLogger(__name__)
 
@@ -56,17 +59,21 @@ def build_tts_install_plan(
     pkg = (package or "").strip()
     repo = (repo_url or "").strip()
 
+    # Prefer git+ repo over a stale PyPI command (e.g. edge-tts left in the form).
+    if repo:
+        if not _REPO_URL_RE.match(repo):
+            raise TtsInstallError("invalid_repo_url")
+        cmd_is_git = bool(re.match(r"^pip\s+install\s+git\+", command, re.IGNORECASE)) if command else False
+        if not command or not cmd_is_git:
+            git_spec = repo if repo.startswith("git+") else f"git+{repo}"
+            return _plan_from_command(f"pip install {git_spec}")
+
     if command:
         return _plan_from_command(command)
     if pkg:
         if not _PACKAGE_RE.match(pkg):
             raise TtsInstallError("invalid_package")
         return _plan_from_command(f"pip install {pkg}")
-    if repo:
-        if not _REPO_URL_RE.match(repo):
-            raise TtsInstallError("invalid_repo_url")
-        git_spec = repo if repo.startswith("git+") else f"git+{repo}"
-        return _plan_from_command(f"pip install {git_spec}")
     raise TtsInstallError("missing_install_source")
 
 
@@ -85,24 +92,104 @@ def _plan_from_command(command: str) -> TtsInstallPlan:
     return TtsInstallPlan(display_command=f"pip install {spec}", argv=argv)
 
 
+def dist_name_from_install_plan(plan: TtsInstallPlan) -> str:
+    """Best-effort distribution / folder name for ``pip show`` checks."""
+    if not plan.argv:
+        return ""
+    spec = plan.argv[-1]
+    if spec.startswith("git+"):
+        leaf = spec.rstrip("/").rsplit("/", 1)[-1]
+        leaf = re.sub(r"@[^@]+$", "", leaf)
+        return leaf.removesuffix(".git")
+    return re.split(r"[\[=]", spec, maxsplit=1)[0].strip()
+
+
+def _pip_show_candidates(name: str) -> list[str]:
+    raw = (name or "").strip()
+    if not raw:
+        return []
+    variants = {
+        raw,
+        raw.replace("_", "-"),
+        raw.replace("-", "_"),
+        raw.lower(),
+        raw.lower().replace("_", "-"),
+        raw.lower().replace("-", "_"),
+    }
+    return [v for v in variants if v]
+
+
+def is_tts_package_installed(
+    plan: TtsInstallPlan,
+    *,
+    runner: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
+) -> bool:
+    """Return True when ``pip show`` finds the planned package in this Python env."""
+    name = dist_name_from_install_plan(plan)
+    if not name:
+        return False
+
+    def _run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            argv,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            shell=False,
+        )
+
+    execute = runner or _run
+    for candidate in _pip_show_candidates(name):
+        completed = execute([sys.executable, "-m", "pip", "show", candidate])
+        if completed.returncode == 0 and (completed.stdout or "").strip():
+            return True
+    return False
+
+
+def with_force_reinstall(plan: TtsInstallPlan) -> TtsInstallPlan:
+    """Add ``--upgrade`` so git+/PyPI reinstall pulls a newer revision when possible."""
+    argv = list(plan.argv)
+    try:
+        idx = argv.index("install")
+    except ValueError:
+        return plan
+    if "--upgrade" in argv:
+        return plan
+    argv.insert(idx + 1, "--upgrade")
+    display = plan.display_command.replace("pip install ", "pip install --upgrade ", 1)
+    return TtsInstallPlan(display_command=display, argv=argv)
+
+
 def run_tts_install(
     plan: TtsInstallPlan,
     *,
     timeout_seconds: float = 300.0,
-    runner: Callable[[], subprocess.CompletedProcess[str]] | None = None,
+    runner: Callable[[], subprocess.CompletedProcess[str] | SimpleNamespace] | None = None,
 ) -> TtsInstallResult:
     timeout = max(30.0, min(float(timeout_seconds or 300.0), 900.0))
     logger.info("tts_install_started", extra={"command": plan.display_command})
 
-    def _default_runner() -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            plan.argv,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            shell=False,
-        )
+    def _default_runner() -> SimpleNamespace:
+        # Avoid pipe deadlock when pip emits a large log (do not use capture_output).
+        with tempfile.TemporaryDirectory(prefix="tts-pip-") as tmp:
+            out_path = Path(tmp) / "stdout.txt"
+            err_path = Path(tmp) / "stderr.txt"
+            with out_path.open("w", encoding="utf-8", errors="replace") as out_f, err_path.open(
+                "w", encoding="utf-8", errors="replace"
+            ) as err_f:
+                completed = subprocess.run(
+                    plan.argv,
+                    check=False,
+                    stdout=out_f,
+                    stderr=err_f,
+                    text=True,
+                    timeout=timeout,
+                    shell=False,
+                )
+            stdout = out_path.read_text(encoding="utf-8", errors="replace")
+            stderr = err_path.read_text(encoding="utf-8", errors="replace")
+        return SimpleNamespace(returncode=completed.returncode, stdout=stdout, stderr=stderr)
 
     execute = runner or _default_runner
     try:

@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Reup Loop R">
+  <rect width="64" height="64" rx="14" fill="#007a5a"/>
+  <!-- Outer reup loop -->
+  <path
+    fill="none"
+    stroke="#ffffff"
+    stroke-width="4.2"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    d="M46 28c0-8.3-6.7-15-15-15S16 19.7 16 28s6.7 15 15 15c4.6 0 8.7-2.1 11.4-5.4"
+  />
+  <!-- Loop arrow head -->
+  <path fill="#ffffff" d="M44.2 33.8l6.2-1.1-2.4 5.8-3.8-4.7z"/>
+  <!-- Letter R -->
+  <path
+    fill="#ffffff"
+    d="M24.2 19.5h8.4c4.1 0 6.7 2.3 6.7 5.8 0 2.9-1.6 4.8-4.2 5.6l4.8 7.6h-5.1l-4.3-7H28.8v7h-4.6V19.5zm4.6 4v5.2h3.5c1.8 0 2.8-.9 2.8-2.6s-1-2.6-2.8-2.6H28.8z"
+  />
+</svg>

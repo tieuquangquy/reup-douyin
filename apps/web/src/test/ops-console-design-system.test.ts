@@ -64,7 +64,18 @@ for (const cssHook of requiredCssHooks) {
 }
 
 assert.match(globalCssSource, /\.ops-console-batch-action-bar[\s\S]*position: sticky/, "Shared batch action bar must remain sticky for selected operator work");
-assert.match(globalCssSource, /\.ops-console-page[\s\S]*padding:\s*22px 24px 28px/, "Ops Console page must breathe below the topbar");
+assert.match(globalCssSource, /\.ops-console-page[\s\S]*padding:\s*22px var\(--app-content-inset-x\) 28px/, "Ops Console page must breathe below the topbar with shared inset");
+assert.match(globalCssSource, /:root\s*\{[^}]*--app-content-inset-x:\s*24px;/, "globals must define shared 24px content inset token");
+assert.doesNotMatch(
+  globalCssSource,
+  /\.ops-console-page\s*\{[^}]*max-width:\s*1480px/,
+  "Ops Console page must be full-width (no 1480px content column)"
+);
+assert.doesNotMatch(
+  globalCssSource,
+  /\.ops-console-page\s*\{[^}]*margin:\s*0 auto/,
+  "Ops Console page must not center a capped column"
+);
 assert.match(globalCssSource, /\.ops-console-summary-grid[\s\S]*repeat\(auto-fit, minmax\(180px, 1fr\)\)/, "Shared summary grid must prevent vertical card stacking on normal widths");
 assert.match(globalCssSource, /@media \(max-width: 1180px\)[\s\S]*\.ops-console-content-grid[\s\S]*grid-template-columns: 1fr/, "Shared content grid must collapse cleanly at tablet widths");
 assert.match(sharedSource, /children\?: ReactNode/, "Shared detail panel must allow empty-selection states without placeholder children");
@@ -89,13 +100,19 @@ for (const [label, source] of surfaces) {
   } else if (label === "Capture Inbox" || label === "Review Board" || label === "Reup Queue") {
     // Studio media-tile surfaces: Operator shell + shared Ops primitives (not OpsItemCard lists).
     assert.match(source, /OpsConsolePage|OpsDetailPanel|OpsStatePanel/, `${label} must keep shared Ops Console primitives`);
+  } else if (label === "Export Packages index") {
+    assert.match(source, /ops-export-page/, `${label} must use triage ops-export-page shell`);
+    assert.doesNotMatch(source, /OpsItemCard|OpsSummaryCards/, `${label} must leave legacy OpsItemCard / OpsSummaryCards`);
+  } else if (label === "Publish Handoffs index") {
+    assert.match(source, /ops-handoffs-page/, `${label} must use triage ops-handoffs-page shell`);
+    assert.doesNotMatch(source, /OpsItemCard|OpsSummaryCards/, `${label} must leave legacy OpsItemCard / OpsSummaryCards`);
   } else {
     assert.match(source, /OpsItemCard|OpsSummaryCards/, `${label} must use shared list or summary primitives`);
   }
 }
 
 assert.match(exportPackageDetailSource, /does not call platform APIs/, "Export Package detail must keep handoff creation separate from platform publishing");
-assert.match(publishHandoffDetailSource, /does not call platform APIs or auto-publish/, "Publish Handoff detail must keep manual publishing boundary explicit");
+assert.match(publishHandoffDetailSource, /do(?:es)? not call platform APIs or auto-publish/, "Publish Handoff detail must keep manual publishing boundary explicit");
 
 assert.match(captureSource, /OpsConsolePage/, "Capture Inbox must compose OpsConsolePage under Operator Studio shell");
 assert.match(reupSource, /OpsConsolePage/, "Reup Queue must compose OpsConsolePage under Operator Studio shell");

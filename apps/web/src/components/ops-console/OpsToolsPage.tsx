@@ -15,7 +15,6 @@ const commands = [
 
 export function OpsToolsPage() {
   const t = useT();
-  const apiDocsUrl = `${(process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000").replace(/\/$/, "")}/docs`;
 
   return (
     <OpsConsoleShell description={t("opsTools.description")} title={t("opsTools.title")}>
@@ -47,13 +46,6 @@ export function OpsToolsPage() {
                 </span>
                 <span>Local</span>
               </div>
-              <a className="studio-card" href={apiDocsUrl} target="_blank" rel="noreferrer">
-                <span>
-                  <strong>{t("opsTools.swagger")}</strong>
-                  <small>{t("opsTools.swaggerDetail")}</small>
-                </span>
-                <span>{t("ops.open")}</span>
-              </a>
             </div>
           </OpsPanel>
 

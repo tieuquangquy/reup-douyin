@@ -1,36 +1,42 @@
 "use client";
 
-import { StatusBadge } from "../app-shell/StatusBadge";
 import { useT } from "../../lib/i18n";
 import type { OperatorActionItem } from "../../lib/operatorHomeState";
+import { OperatorHomeChip, OperatorHomeOpenLink, OperatorHomePanel } from "./OperatorHomeShared";
 
 export function ActionQueuePanel({ items }: { items: OperatorActionItem[] }) {
   const t = useT();
   const next = items.find((item) => item.count > 0);
 
   return (
-    <section className="operator-panel">
-      <div className="operator-panel-heading">
-        <div>
-          <h2>{t("operatorHome.actionQueueHeading")}</h2>
-          <p>{t("operatorHome.actionQueueDesc")}</p>
-        </div>
-        {next ? <a className="operator-inline-link" href={next.href}>{t("operatorHome.nextAction")} {next.cta}</a> : null}
-      </div>
-
-      <div className="operator-action-list">
-        {items.map((item) => (
-          <a className="operator-action-row" href={item.href} key={item.key}>
-            <span className="operator-action-count">{item.count}</span>
-            <span>
-              <strong>{item.title}</strong>
-              <small>{item.description}</small>
-              <small className="operator-next-action">{item.cta}</small>
-            </span>
-            <StatusBadge label={item.count > 0 ? t("common.needsWork") : t("common.clear")} tone={item.tone} />
+    <OperatorHomePanel
+      title={t("operatorHome.actionQueueHeading")}
+      description={t("operatorHome.actionQueueDesc")}
+      action={
+        next ? (
+          <a className="operator-home-panel__link" href={next.href}>
+            {t("operatorHome.nextAction")} {next.cta}
           </a>
+        ) : null
+      }
+    >
+      <ul className="operator-home-actions">
+        {items.map((item) => (
+          <li className="operator-home-row operator-home-actions__item" key={item.key}>
+            <b className="operator-home-num">{item.count}</b>
+            <div className="operator-home-row__body">
+              <strong>{item.title}</strong>
+              <span title={item.description}>{item.description}</span>
+              {item.count > 0 ? <em className="operator-home-row__cta">{item.cta}</em> : null}
+            </div>
+            <OperatorHomeChip
+              label={item.count > 0 ? t("common.needsWork") : t("common.clear")}
+              tone={item.count > 0 ? item.tone : "muted"}
+            />
+            <OperatorHomeOpenLink href={item.href} label={item.cta} />
+          </li>
         ))}
-      </div>
-    </section>
+      </ul>
+    </OperatorHomePanel>
   );
 }

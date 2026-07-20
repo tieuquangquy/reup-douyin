@@ -17,8 +17,7 @@ export function OperatorPublishDraftPage({
       actions={
         <>
           <a href={`/production/final-review/${sourceVideoId}`}>{t("nav.finalReview")}</a>
-          <a href="/ops/publish-health">{t("nav.publishHealth")}</a>
-          <a href="/ops/publish-control">{t("nav.publishControl")}</a>
+          <a href="/publishing/drafts">{t("nav.publishDrafts")}</a>
         </>
       }
       description={t("operatorRoutes.publishDraftDesc")}

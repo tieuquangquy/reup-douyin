@@ -199,25 +199,6 @@ export const opsNavSections: NavSection[] = [
         activePatterns: ["/ops/tts-ai"]
       }
     ]
-  },
-  {
-    title: "nav.sectionAdvanced",
-    items: [
-      {
-        label: "nav.apiAuthUi",
-        href: "http://127.0.0.1:8000/auth/ui",
-        description: "nav.apiAuthUiDesc",
-        status: "context",
-        external: true
-      },
-      {
-        label: "nav.swagger",
-        href: "http://127.0.0.1:8000/docs",
-        description: "nav.swaggerDesc",
-        status: "context",
-        external: true
-      }
-    ]
   }
 ];
 

@@ -1,6 +1,6 @@
 from collections.abc import Sequence
 
-from src.enums import JobStepStatus
+from src.enums import JobStatus, JobStepStatus
 
 
 TERMINAL_PROGRESS_STATUSES = {JobStepStatus.COMPLETED, JobStepStatus.SKIPPED}
@@ -62,10 +62,13 @@ def calculate_job_progress(steps: Sequence[object]) -> dict[str, int | str | Non
 
 def apply_job_progress(job: object) -> None:
     progress = calculate_job_progress(list(job.steps))
-    job.progress_percent = progress["progress_percent"]
     job.total_steps = progress["total_steps"]
     job.completed_steps = progress["completed_steps"]
     job.failed_steps = progress["failed_steps"]
     job.current_step_key = progress["current_step_key"]
     job.current_step_index = progress["current_step_index"]
+    if job.status == JobStatus.CANCELLED:
+        job.progress_percent = 0
+        return
+    job.progress_percent = progress["progress_percent"]
 

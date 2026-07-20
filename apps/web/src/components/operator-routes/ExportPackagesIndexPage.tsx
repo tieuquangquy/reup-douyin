@@ -1,15 +1,40 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import Link from "next/link";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { fetchExportPackages } from "../../lib/api";
+import { useT } from "../../lib/i18n";
 import type { ExportPackage } from "../../types/export-handoff";
 import { OperatorStudioShell } from "../app-shell/OperatorStudioShell";
 import { TopbarRefreshButton } from "../app-shell/TopbarRefreshButton";
-import { OpsItemCard, OpsStatePanel, OpsSummaryCards, statusTone, type OpsItemAction, type OpsSummaryCardItem } from "../ops-console/OpsShared";
+import { OpsState, formatDateTime, statusTone, type OpsTone } from "../ops-console/OpsShared";
+
+function ExportKpi({ label, value, detail, tone = "muted" }: { label: string; value: string; detail: string; tone?: OpsTone }) {
+  return (
+    <article className={`ops-export-kpi tone-${tone}`} title={detail}>
+      <em>{label}</em>
+      <strong>{value}</strong>
+      <span>{detail}</span>
+    </article>
+  );
+}
+
+function ExportPanel({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <section className="ops-export-panel">
+      <div className="ops-export-panel__head">
+        <h2>{title}</h2>
+      </div>
+      <div className="ops-export-panel__body">{children}</div>
+    </section>
+  );
+}
 
 export function ExportPackagesIndexPage() {
+  const t = useT();
   const [packages, setPackages] = useState<ExportPackage[]>([]);
   const [total, setTotal] = useState(0);
+  const [loadedAt, setLoadedAt] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -20,8 +45,9 @@ export function ExportPackagesIndexPage() {
       const payload = await fetchExportPackages(100);
       setPackages(payload.items);
       setTotal(payload.total_count);
+      setLoadedAt(new Date().toISOString());
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load Export Packages");
+      setError(err instanceof Error ? err.message : t("opsExportPackages.loadError"));
     } finally {
       setLoading(false);
     }
@@ -29,77 +55,117 @@ export function ExportPackagesIndexPage() {
 
   useEffect(() => {
     void load();
-  }, []);
+  }, [t]);
 
-  const summaryCards: OpsSummaryCardItem[] = [
-    { key: "total", label: "Package records", value: total, description: "Durable export containers loaded for review.", tone: "good" },
-    { key: "handoffs", label: "Linked handoffs", value: packages.reduce((count, item) => count + item.publish_handoff_ids.length, 0), description: "Manual Publish Handoff records created from packages.", tone: "good" },
-    { key: "failed", label: "Needs attention", value: packages.filter((item) => item.status === "FAILED_NEEDS_ATTENTION").length, description: "Packages that require operator inspection.", tone: "danger" },
-    { key: "cancelled", label: "Cancelled", value: packages.filter((item) => item.status === "CANCELLED").length, description: "Explicitly cancelled package records.", tone: "muted" }
-  ];
+  const needsAttention = useMemo(
+    () => packages.filter((item) => item.status === "FAILED_NEEDS_ATTENTION"),
+    [packages]
+  );
+  const linkedHandoffs = packages.reduce((count, item) => count + item.publish_handoff_ids.length, 0);
+  const cancelled = packages.filter((item) => item.status === "CANCELLED").length;
+  const hasAttention = needsAttention.length > 0;
+
+  const refreshAction = (
+    <TopbarRefreshButton busy={loading && packages.length > 0} disabled={loading && packages.length === 0} onClick={() => void load()} />
+  );
+
+  if (loading && packages.length === 0 && !error) {
+    return (
+      <OperatorStudioShell actions={refreshAction} description={t("opsExportPackages.description")} title={t("opsExportPackages.title")}>
+        <OpsState title={t("opsExportPackages.loadingTitle")} detail={t("opsExportPackages.loadingDetail")} />
+      </OperatorStudioShell>
+    );
+  }
+
+  if (error && packages.length === 0) {
+    return (
+      <OperatorStudioShell actions={refreshAction} description={t("opsExportPackages.description")} title={t("opsExportPackages.title")}>
+        <OpsState title={t("opsExportPackages.unavailableTitle")} detail={error} retry={() => void load()} />
+      </OperatorStudioShell>
+    );
+  }
 
   return (
-    <OperatorStudioShell
-      actions={
-        <>
-          <TopbarRefreshButton busy={loading && packages.length > 0} disabled={loading && packages.length === 0} onClick={() => void load()} />
-          <a href="/selection/reup-queue">Open Reup Queue</a>
-          <a href="/publishing/publish-handoffs">Publish Handoffs</a>
-        </>
-      }
-      description="Inspect durable Export Packages generated from READY_TO_EXPORT Reup Queue items. Packages are handoff containers and never publish externally."
-      title="Export Packages"
-    >
-      {loading ? <OpsStatePanel detail="Loading durable package records generated from Reup Queue export-ready rows." title="Loading Export Packages" variant="loading" /> : null}
-      {!loading && error ? (
-        <OpsStatePanel
-          action={<button type="button" onClick={() => void load()}>Retry</button>}
-          detail={error}
-          title="Could not load Export Packages"
-          variant="error"
-        />
-      ) : null}
-      {!loading && !error ? (
-        <>
-          <OpsSummaryCards cards={summaryCards} title="Export Package summary" />
-          <div className="operator-quick-grid">
+    <OperatorStudioShell actions={refreshAction} description={t("opsExportPackages.description")} title={t("opsExportPackages.title")}>
+      <main className="ops-page ops-export-page">
+        {error ? <div className="inline-error">{error}</div> : null}
+
+        <div className="ops-export-freshness">
+          <p>
+            {t("opsExportPackages.loadedAt")}{" "}
+            {loadedAt ? <time dateTime={loadedAt}>{formatDateTime(loadedAt)}</time> : "—"}
+          </p>
+        </div>
+
+        <section className="ops-export-kpis" aria-label={t("opsExportPackages.summary")}>
+          <ExportKpi label={t("opsExportPackages.packageRecords")} value={String(total)} detail={t("opsExportPackages.packageRecordsDetail")} tone="good" />
+          <ExportKpi label={t("opsExportPackages.linkedHandoffs")} value={String(linkedHandoffs)} detail={t("opsExportPackages.linkedHandoffsDetail")} tone="good" />
+          <ExportKpi
+            label={t("opsExportPackages.needsAttention")}
+            value={String(needsAttention.length)}
+            detail={t("opsExportPackages.needsAttentionDetail")}
+            tone={needsAttention.length > 0 ? "danger" : "muted"}
+          />
+          <ExportKpi label={t("opsExportPackages.cancelled")} value={String(cancelled)} detail={t("opsExportPackages.cancelledDetail")} tone="muted" />
+        </section>
+
+        <div className="ops-export-toolbar">
+          <nav className="ops-export-actions" aria-label={t("opsExportPackages.triage")}>
+            <Link href="/selection/reup-queue">{t("opsExportPackages.openReupQueue")}</Link>
+            <Link href="/publishing/publish-handoffs">{t("opsExportPackages.openHandoffs")}</Link>
+          </nav>
+        </div>
+
+        <section className={`ops-export-main${hasAttention ? " has-attention" : ""}`}>
+          <ExportPanel title={t("opsExportPackages.packages")}>
             {packages.length === 0 ? (
-              <OpsStatePanel detail="Select READY_TO_EXPORT rows in Reup Queue and create an Export Package." title="No Export Packages yet" variant="empty" />
-            ) : null}
-            {packages.map((item) => (
-              <ExportPackageCard item={item} key={item.id} />
-            ))}
-          </div>
-        </>
-      ) : null}
+              <p className="ops-export-empty">{t("opsExportPackages.empty")}</p>
+            ) : (
+              <ul className="ops-export-sheet">
+                <li className="ops-export-row is-head" aria-hidden="true">
+                  <span>{t("opsExportPackages.package")}</span>
+                  <span>{t("opsExportPackages.status")}</span>
+                  <span>{t("opsExportPackages.items")}</span>
+                  <span>{t("opsExportPackages.handoffs")}</span>
+                  <span>{t("opsExportPackages.created")}</span>
+                  <span>{t("opsExportPackages.action")}</span>
+                </li>
+                {packages.map((item) => (
+                  <li className={`ops-export-row${item.status === "FAILED_NEEDS_ATTENTION" ? " is-hot" : ""}`} key={item.id}>
+                    <strong className="ops-export-row__title" title={item.id}>
+                      {item.label || `${t("opsExportPackages.package")} ${item.id.slice(0, 8)}`}
+                    </strong>
+                    <span className={`ops-export-chip tone-${statusTone(item.status)}`}>{item.status}</span>
+                    <span>{item.item_count}</span>
+                    <span>{item.publish_handoff_ids.length}</span>
+                    <span>{formatDateTime(item.created_at)}</span>
+                    <Link className="ops-export-row__link" href={`/publishing/export-packages/${item.id}`}>
+                      {t("opsExportPackages.open")}
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <p className="ops-export-footnote">{t("opsExportPackages.noAutoPublish")}</p>
+          </ExportPanel>
+
+          {hasAttention ? (
+            <ExportPanel title={t("opsExportPackages.attention")}>
+              <ul className="ops-export-attention">
+                {needsAttention.map((item) => (
+                  <li key={item.id}>
+                    <div>
+                      <strong>{item.label || item.id.slice(0, 8)}</strong>
+                      <em>{item.status}</em>
+                    </div>
+                    <Link href={`/publishing/export-packages/${item.id}`}>{t("opsExportPackages.open")}</Link>
+                  </li>
+                ))}
+              </ul>
+            </ExportPanel>
+          ) : null}
+        </section>
+      </main>
     </OperatorStudioShell>
   );
-}
-
-function ExportPackageCard({ item }: { item: ExportPackage }) {
-  const actions: OpsItemAction[] = [
-    { key: "open", label: "Open package", href: `/publishing/export-packages/${item.id}`, tone: "primary" }
-  ];
-
-  return (
-    <OpsItemCard
-      actions={actions}
-      metadata={[
-        { label: "Items", value: item.item_count },
-        { label: "Handoffs", value: item.publish_handoff_ids.length },
-        { label: "Created", value: formatDateTime(item.created_at) }
-      ]}
-      preview={<strong>{item.item_count} item(s)</strong>}
-      statusLabel={item.status}
-      statusTone={statusTone(item.status)}
-      title={item.label || `Export Package ${item.id.slice(0, 8)}`}
-    >
-      <p>Inspectable package container for manual downstream handoff work.</p>
-    </OpsItemCard>
-  );
-}
-
-function formatDateTime(value: string | null): string {
-  if (!value) return "Not recorded";
-  return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
 }

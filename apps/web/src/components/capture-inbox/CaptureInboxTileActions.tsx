@@ -1,4 +1,5 @@
 import type { CapturedItem, CaptureInboxAction } from "../../types/capture-inbox";
+import { WorkItemActionIcon } from "../shared/WorkItemActionIcon";
 
 type CaptureInboxTileActionsProps = {
   item: CapturedItem;
@@ -41,6 +42,7 @@ export function CaptureInboxTileActions({
           tabIndex={!reviewBoardHref ? -1 : undefined}
           title="Open promoted candidate on Review Board"
         >
+          <WorkItemActionIcon kind="open" />
           Open candidate
         </a>
         <button
@@ -50,6 +52,7 @@ export function CaptureInboxTileActions({
           title="Inspect item details"
           type="button"
         >
+          <WorkItemActionIcon kind="details" />
           Details
         </button>
       </div>
@@ -72,6 +75,7 @@ export function CaptureInboxTileActions({
           title={promotable ? "Promote to review" : "Item is not ready to promote"}
           type="button"
         >
+          <WorkItemActionIcon kind="promote" />
           {actionLabel("Promote", "promote_now", workingAction)}
         </button>
       </div>
@@ -83,6 +87,7 @@ export function CaptureInboxTileActions({
           onClick={() => onAction(item, "re_evaluate_intake")}
           type="button"
         >
+          <WorkItemActionIcon kind="recheck" />
           {actionLabel("Re-check", "re_evaluate_intake", workingAction)}
         </button>
         <button
@@ -91,6 +96,7 @@ export function CaptureInboxTileActions({
           onClick={() => onAction(item, "delete_items")}
           type="button"
         >
+          <WorkItemActionIcon kind="delete" />
           {actionLabel("Delete", "delete_items", workingAction)}
         </button>
       </div>
@@ -102,6 +108,7 @@ export function CaptureInboxTileActions({
           onClick={() => onFocusItem(item.id)}
           type="button"
         >
+          <WorkItemActionIcon kind="details" />
           View details
         </button>
       </div>

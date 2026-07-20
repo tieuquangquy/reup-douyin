@@ -1,23 +1,47 @@
 # Frame sampling Phase 1 (Cloud Run ready)
 
-Independent FFmpeg frame extraction at **STRICT 1 fps or 2 fps** only. Never dumps every frame.
+Independent frame extraction for OCR Phase 1. Two backends:
+
+| Backend | Env | Behavior |
+|---------|-----|----------|
+| **text_onnx** (default for ANALYZE_OCR worker) | `OCR_FRAME_BACKEND=text_onnx` | OpenCV scan every 5 frames (~6fps) + local DBNet ONNX; keep JPEG only when **new** text boxes appear (IoU &lt; 0.1 vs previous). Progress via tqdm. |
+| **ffmpeg_fps** (rollback / Cloud Run Alpine image) | `OCR_FRAME_BACKEND=ffmpeg_fps` | STRICT FFmpeg `fps=1\|2` grid + thumbnail + EOF still. |
+
+Never dumps every source frame.
 
 ## Module
 
 - `apps/api/src/media_pipeline/frame_sampling/`
-  - `extract_video_frames(video_source, output_dir, sample_fps=1|2) -> list[Path]`
-  - `run_frame_sampling_job(...)` — serverless job payload/result
+  - `extract_phase1_frames(...)` — router used by hardsub E2E / OCR adapter
+  - `extract_video_frames(video_source, output_dir, sample_fps=1|2) -> list[Path]` — FFmpeg only
+  - `text_change_sampler.extract_text_change_keyframes` — ONNX text-change keyframes
+  - `local_text_detector.LocalTextDetector` — DBNet det-only via onnxruntime
+  - `ensure_dbnet_model.ensure_dbnet_onnx` — download `apps/api/models/dbnet.onnx` if missing
+  - `run_frame_sampling_job(...)` — serverless job payload/result (FFmpeg path)
   - `cloud_run_entry.py` — env batch or minimal HTTP (`PORT`) for Cloud Run scale-to-zero
+
+### Model download
+
+```powershell
+cd apps\api
+$env:PYTHONPATH="."
+python -c "from src.media_pipeline.frame_sampling.ensure_dbnet_model import ensure_dbnet_onnx; print(ensure_dbnet_onnx())"
+```
+
+Override URL: `DBNET_ONNX_URL=https://...`
 
 ## OCR adapter
 
-`ocr_pipeline/frame_sampler.py` delegates to this module (not deleted — still required by ANALYZE_OCR).
+`ocr_pipeline/frame_sampler.py` delegates to `extract_phase1_frames`.
 
 ## Call examples
 
 ```python
-from src.media_pipeline.frame_sampling import extract_video_frames, run_frame_sampling_job
+from src.media_pipeline.frame_sampling import extract_video_frames, extract_phase1_frames, run_frame_sampling_job
 from src.media_pipeline.frame_sampling.job import FrameSamplingJobRequest
+
+# Default: text_onnx (set OCR_FRAME_BACKEND=ffmpeg_fps to force grid)
+frames = extract_phase1_frames("/data/clip.mp4", "/tmp/frames")
 
 paths = extract_video_frames("/data/clip.mp4", "/tmp/frames", sample_fps=1)
 
@@ -26,12 +50,13 @@ result = run_frame_sampling_job(
 )
 ```
 
-Cloud Run Jobs (env):
+Cloud Run Jobs (env) — keep **ffmpeg_fps** (Alpine image has no onnxruntime):
 
 ```text
 VIDEO_SOURCE=...
 OUTPUT_DIR=/tmp/frames
 SAMPLE_FPS=1
+OCR_FRAME_BACKEND=ffmpeg_fps
 python -m src.media_pipeline.frame_sampling.cloud_run_entry
 ```
 

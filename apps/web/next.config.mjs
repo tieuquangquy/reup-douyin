@@ -2,6 +2,10 @@
 const nextConfig = {
   reactStrictMode: true,
   output: "standalone",
+  // Local TTS Preview / Install can exceed the default rewrite proxy budget.
+  experimental: {
+    proxyTimeout: 600_000
+  },
   webpack(config, { dev }) {
     if (dev) {
       // Stabilize local Windows dev by avoiding persistent webpack pack cache corruption/ENOENT.

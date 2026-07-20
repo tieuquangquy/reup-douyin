@@ -16,6 +16,8 @@ dependencies = [
   "Pillow>=10.0,<12.0",
   "numpy>=1.26,<3.0",
   "opencv-python-headless>=4.8,<5.0",
+  "onnxruntime>=1.16,<2.0",
+  "tqdm>=4.66,<5.0",
   "tenacity>=8.2,<10.0",
   "SQLAlchemy>=2.0,<3.0"
 ]

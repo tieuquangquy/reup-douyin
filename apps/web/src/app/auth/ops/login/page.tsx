@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { FormEvent, useState } from "react";
+import { AuthErrorBanner } from "../../../../components/auth/AuthErrorBanner";
 import { loginWithPassword } from "../../../../lib/api";
 import { useAuth } from "../../../../lib/auth";
 import { isDevAuthPrefillEnabled, sanitizeNextPath } from "../../../../lib/authPaths";
@@ -20,6 +21,14 @@ export default function OpsLoginPage() {
   const [workspaceSlug, setWorkspaceSlug] = useState(DEV_PREFILL ? "local" : "local");
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const errorCopy = {
+    title: t("auth.opsLoginFailed"),
+    serverUnavailable: t("auth.errorServerUnavailable"),
+    unauthorized: t("auth.errorUnauthorized"),
+    forbidden: t("auth.errorForbidden"),
+    network: t("auth.errorNetwork"),
+    generic: t("auth.errorGeneric")
+  };
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -44,55 +53,73 @@ export default function OpsLoginPage() {
 
   return (
     <main className="auth-page">
-      <section className="auth-card" aria-labelledby="ops-login-title">
-        <p className="eyebrow">{t("auth.opsEyebrow")}</p>
-        <h1 id="ops-login-title">{t("auth.opsLoginTitle")}</h1>
-        <p className="auth-copy">{t("auth.opsLoginCopy")}</p>
-        <form className="auth-form" onSubmit={handleSubmit}>
-          <label>
-            {t("auth.email")}
-            <input
-              autoComplete="email"
-              required
-              type="email"
-              value={email}
-              onChange={(event) => setEmail(event.target.value)}
+      <div className="auth-stage auth-stage--ops">
+        <aside className="auth-brand auth-brand--ops">
+          <img
+            alt=""
+            className="auth-brand__logo"
+            height={44}
+            src="/brand/logo-loop-r.svg"
+            width={44}
+          />
+          <p className="auth-brand__title">{t("auth.opsLoginBrand")}</p>
+          <p className="auth-brand__workflow">{t("auth.opsLoginWorkflow")}</p>
+          <div className="auth-brand__visual">
+            <img
+              alt={t("auth.opsLoginVisualAlt")}
+              className="auth-brand__art"
+              height={360}
+              src="/auth/ops-console-monitor.png"
+              width={480}
             />
-          </label>
-          <label>
-            {t("auth.password")}
-            <input
-              autoComplete="current-password"
-              minLength={8}
-              required
-              type="password"
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-            />
-          </label>
-          <label>
-            {t("auth.workspaceSlug")}
-            <input
-              minLength={3}
-              required
-              value={workspaceSlug}
-              onChange={(event) => setWorkspaceSlug(event.target.value)}
-            />
-          </label>
-          {error ? (
-            <p className="auth-error" role="alert">
-              {error}
-            </p>
-          ) : null}
-          <button className="primary" disabled={isSubmitting} type="submit">
-            {isSubmitting ? t("auth.signingIn") : t("auth.opsSignIn")}
-          </button>
-        </form>
-        <p className="auth-switch">
-          {t("auth.needOperatorStudio")}{" "}
-          <Link href="/auth/login">{t("auth.signInLink")}</Link>
-        </p>
-      </section>
+          </div>
+          <p className="auth-brand__copy">{t("auth.opsLoginCopy")}</p>
+        </aside>
+        <section className="auth-card" aria-labelledby="ops-login-title">
+          <h1 id="ops-login-title">{t("auth.opsLoginTitle")}</h1>
+          <p className="auth-copy auth-copy--compact">{t("auth.opsFormHint")}</p>
+          <form className="auth-form" onSubmit={handleSubmit}>
+            <label>
+              {t("auth.email")}
+              <input
+                autoComplete="email"
+                required
+                type="email"
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+              />
+            </label>
+            <label>
+              {t("auth.password")}
+              <input
+                autoComplete="current-password"
+                minLength={8}
+                required
+                type="password"
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+              />
+            </label>
+            <label>
+              {t("auth.workspaceSlug")}
+              <input
+                minLength={3}
+                required
+                value={workspaceSlug}
+                onChange={(event) => setWorkspaceSlug(event.target.value)}
+              />
+            </label>
+            {error ? <AuthErrorBanner raw={error} copy={errorCopy} /> : null}
+            <button className="primary" disabled={isSubmitting} type="submit">
+              {isSubmitting ? t("auth.signingIn") : t("auth.opsSignIn")}
+            </button>
+          </form>
+          <p className="auth-switch">
+            {t("auth.needOperatorStudio")}{" "}
+            <Link href="/auth/login">{t("auth.signInLink")}</Link>
+          </p>
+        </section>
+      </div>
     </main>
   );
 }

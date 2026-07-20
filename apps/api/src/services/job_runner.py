@@ -17,6 +17,10 @@ from src.services.reup_queue_download_sync import sync_reup_queue_from_download_
 logger = logging.getLogger(__name__)
 
 
+class JobCancelledAbort(Exception):
+    """Raised from long-running step heartbeats when the operator cancels the job."""
+
+
 @dataclass(frozen=True)
 class StepHandlerResult:
     status: JobStepStatus = JobStepStatus.COMPLETED
@@ -453,11 +457,24 @@ class JobRunner:
                 from src.tts_pipeline.errors import TtsPipelineError
                 from src.tts_pipeline.services.tts_service import TtsPipelineService
                 from src.tts_pipeline.types import TtsRequest, VoiceConfig
+                from src.services.job_service import utc_now
 
                 source_video_id = (job.payload_json or {}).get("source_video_id")
                 if source_video_id is None and job.source_video_id is not None:
                     source_video_id = str(job.source_video_id)
                 if source_video_id is not None:
+                    def _tts_heartbeat(phase: str, progress_percent: int | None) -> None:
+                        if self._is_cancelled(job):
+                            raise JobCancelledAbort()
+                        job.updated_at = utc_now()
+                        meta = dict(step.metadata_json or {})
+                        meta["tts_phase"] = phase
+                        step.metadata_json = meta
+                        if progress_percent is not None:
+                            step.progress_percent = max(0, min(99, int(progress_percent)))
+                            self.service.refresh_progress(job)
+                        self.db.commit()
+
                     try:
                         voice_config_json = (job.payload_json or {}).get("voice_config") or {}
                         result_summary = TtsPipelineService(self.db).run_pipeline(
@@ -471,6 +488,7 @@ class JobRunner:
                                 force_refresh=bool((job.payload_json or {}).get("force_refresh")),
                             ),
                             job_id=job.id,
+                            on_progress=_tts_heartbeat,
                         )
                         result = StepHandlerResult(
                             output_json={
@@ -481,6 +499,8 @@ class JobRunner:
                                 "warnings": result_summary.warnings,
                             }
                         )
+                    except JobCancelledAbort:
+                        return self._abort_cancelled_job(job)
                     except TtsPipelineError as exc:
                         result = StepHandlerResult(
                             status=JobStepStatus.FAILED,
@@ -543,10 +563,16 @@ class JobRunner:
                             output_json={"source_video_id": str(source_video_id)},
                         )
                     except Exception as exc:
+                        import traceback
+
                         logger.exception(
                             "job_step_unhandled_error",
                             extra={"job_id": str(job.id), "step_key": step.step_key},
                         )
+                        tb = traceback.format_exc()
+                        meta = dict(step.metadata_json or {})
+                        meta["unhandled_traceback"] = tb[-4000:]
+                        step.metadata_json = meta
                         result = StepHandlerResult(
                             status=JobStepStatus.FAILED,
                             progress_percent=0,

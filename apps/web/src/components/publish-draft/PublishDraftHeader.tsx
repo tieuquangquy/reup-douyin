@@ -34,8 +34,7 @@ export function PublishDraftHeader({
       </div>
       <div className="publish-header-actions">
         <Link href={draft ? `/production/final-review/${draft.source_video_id}` : "/selection/review-board"}>{t("publishDraftHeader.finalReview")}</Link>
-        <Link href="/ops/publish-health">{t("publishDraftHeader.publishHealth")}</Link>
-        <Link href="/ops/publish-control">{t("publishDraftHeader.publishControl")}</Link>
+        <Link href="/publishing/drafts">{t("nav.publishDrafts")}</Link>
         <button onClick={onDiscard} disabled={!dirty || saving}>{t("publishDraftHeader.discard")}</button>
         <button onClick={onSave} disabled={!dirty || saving || !draft}>{t("publishDraftHeader.saveDraft")}</button>
         <button className="primary" onClick={onMarkReady} disabled={saving || !draft || errors.length > 0}>{t("publishDraftHeader.markDraftReady")}</button>

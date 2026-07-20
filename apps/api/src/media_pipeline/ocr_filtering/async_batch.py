@@ -1,8 +1,10 @@
-"""Async OCR batch: preprocess (≤1920px + contrast/sharpen JPEG) + Semaphore(3) + 120s.
+"""Async OCR batch: preprocess (≤1920px + contrast/sharpen JPEG) + Semaphore + 300s.
 
 Full-frame uploads previously hung Cloud Run; local resize/compress cuts payload and
-model work before aiohttp POST. Client concurrency 3 matches Cloud Run --concurrency 2
-plus light multi-instance headroom. Contrast + sharpen boost thin/low-contrast UI glyphs.
+model work before aiohttp POST. Client concurrency defaults to 2 to match Cloud Run
+``--concurrency 2`` (override via OCR_ASYNC_CONCURRENCY). Raise only when scale-out
+is healthy; otherwise Cloud Run returns 429 Rate exceeded.
+Timeout 300s matches Cloud Run --timeout 300.
 """
 
 from __future__ import annotations
@@ -11,7 +13,9 @@ import asyncio
 import io
 import logging
 import os
+import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +28,9 @@ from tenacity import (
     wait_exponential,
 )
 
+# completed/total after each frame finishes (async batch heartbeat).
+OcrFrameDoneCallback = Callable[[int, int], None]
+
 from src.media_pipeline.ocr_filtering.errors import OcrFilteringError, OcrFilteringErrorCode
 from src.media_pipeline.ocr_filtering.providers import (
     normalize_predict_endpoint,
@@ -33,13 +40,78 @@ from src.media_pipeline.ocr_filtering.types import FrameOcrDetection
 
 logger = logging.getLogger(__name__)
 
-# Cloud Run --concurrency 2 → client hardcap 3 (not 5+) to avoid queue/timeout storms.
-ASYNC_OCR_CONCURRENCY = 3
-ASYNC_OCR_TIMEOUT_SECONDS = 120
+# Client parallel POSTs — default matches Cloud Run --concurrency 2 / instance.
+# Higher values need healthy scale-out; otherwise Cloud Run returns 429 Rate exceeded.
+OCR_ASYNC_CONCURRENCY_ENV = "OCR_ASYNC_CONCURRENCY"
+ASYNC_OCR_CONCURRENCY = 2
+_ASYNC_OCR_CONCURRENCY_MAX = 20
+ASYNC_OCR_TIMEOUT_SECONDS = 300
 ASYNC_OCR_MAX_EDGE_PX = 1920
 ASYNC_OCR_JPEG_QUALITY = 85
 OCR_PREPROCESS_MAX_EDGE_ENV = "OCR_PREPROCESS_MAX_EDGE"
 DEFAULT_ASYNC_CONCURRENCY = ASYNC_OCR_CONCURRENCY
+_RETRYABLE_OCR_HTTP = frozenset({429, 502, 503, 504})
+
+
+def _load_env_file(path: Path) -> None:
+    """Best-effort KEY=VALUE load without requiring python-dotenv."""
+    if not path.is_file():
+        return
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if not key or key in os.environ:
+            continue
+        os.environ[key] = value.strip().strip('"').strip("'")
+
+
+def _ocr_dotenv_candidates() -> list[Path]:
+    """Worker + API + repo-root .env (pydantic Settings does not export OCR_* to os.environ)."""
+    here = Path(__file__).resolve()
+    # async_batch.py → ocr_filtering → media_pipeline → src → api → apps → repo
+    api_root = here.parents[3]
+    apps_root = api_root.parent
+    repo_root = apps_root.parent
+    return [
+        apps_root / "worker" / ".env",
+        api_root / ".env",
+        repo_root / ".env",
+    ]
+
+
+def _ensure_ocr_async_env_loaded() -> None:
+    if (os.environ.get(OCR_ASYNC_CONCURRENCY_ENV) or "").strip():
+        return
+    for path in _ocr_dotenv_candidates():
+        _load_env_file(path)
+
+
+def resolve_async_ocr_concurrency(override: int | None = None) -> int:
+    """Return client OCR concurrency (1–20). Env ``OCR_ASYNC_CONCURRENCY`` or default 2."""
+    if override is not None:
+        try:
+            return max(1, min(_ASYNC_OCR_CONCURRENCY_MAX, int(override)))
+        except (TypeError, ValueError):
+            return ASYNC_OCR_CONCURRENCY
+    _ensure_ocr_async_env_loaded()
+    raw = (os.environ.get(OCR_ASYNC_CONCURRENCY_ENV) or "").strip()
+    if not raw:
+        return ASYNC_OCR_CONCURRENCY
+    try:
+        return max(1, min(_ASYNC_OCR_CONCURRENCY_MAX, int(raw)))
+    except ValueError:
+        logger.warning(
+            "invalid_ocr_async_concurrency",
+            extra={"raw": raw[:40]},
+        )
+        return ASYNC_OCR_CONCURRENCY
 
 _OCR_SHARPEN_KERNEL = np.array(
     [[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]],
@@ -48,19 +120,44 @@ _OCR_SHARPEN_KERNEL = np.array(
 
 
 def resolve_ocr_preprocess_max_edge() -> int:
-    """Default 1920; override via OCR_PREPROCESS_MAX_EDGE (e.g. 720 fast / 1280 lighter)."""
+    """Default 1920; override via OCR_PREPROCESS_MAX_EDGE; profile=best forces 1920."""
+    from src.media_pipeline.ocr_filtering.ocr_quality_profile import (
+        effective_ocr_preprocess_max_edge,
+    )
+
     raw = os.environ.get(OCR_PREPROCESS_MAX_EDGE_ENV, "").strip()
-    if not raw:
-        return ASYNC_OCR_MAX_EDGE_PX
-    try:
-        return max(64, int(raw))
-    except ValueError:
-        logger.warning(
-            "invalid_%s",
-            OCR_PREPROCESS_MAX_EDGE_ENV,
-            extra={"raw": raw[:40]},
-        )
-        return ASYNC_OCR_MAX_EDGE_PX
+    env_override: int | None = None
+    if raw:
+        try:
+            env_override = max(64, int(raw))
+        except ValueError:
+            logger.warning(
+                "invalid_%s",
+                OCR_PREPROCESS_MAX_EDGE_ENV,
+                extra={"raw": raw[:40]},
+            )
+    return effective_ocr_preprocess_max_edge(ASYNC_OCR_MAX_EDGE_PX, override=env_override)
+
+
+def resolve_ocr_jpeg_quality() -> int:
+    from src.media_pipeline.ocr_filtering.ocr_quality_profile import (
+        effective_ocr_jpeg_quality,
+    )
+
+    return effective_ocr_jpeg_quality(ASYNC_OCR_JPEG_QUALITY)
+
+
+def ocr_frame_progress_percent(completed: int, total: int) -> int:
+    """
+    Map finished OCR frames into job step percents 26–54.
+
+    Leaves headroom under ``phase25_translate`` (55) so the UI moves during
+    long Cloud Run batches instead of sitting frozen at ``phase2_ocr`` 25.
+    """
+    if total <= 0:
+        return 26
+    done = max(0, min(int(completed), int(total)))
+    return 26 + int(round((done / int(total)) * 28))
 
 
 def enhance_ocr_frame_bgr(frame_bgr: np.ndarray) -> np.ndarray:
@@ -144,7 +241,8 @@ def prepare_ocr_jpeg_bytes(path: Path) -> tuple[bytes, int, int, int, int]:
             out_img = Image.fromarray(enhanced_rgb, mode="RGB")
 
             buf = io.BytesIO()
-            out_img.save(buf, format="JPEG", quality=ASYNC_OCR_JPEG_QUALITY, optimize=True)
+            jpeg_q = resolve_ocr_jpeg_quality()
+            out_img.save(buf, format="JPEG", quality=jpeg_q, optimize=True)
             return buf.getvalue(), upload_w, upload_h, orig_w, orig_h
     except OcrFilteringError:
         raise
@@ -158,7 +256,7 @@ def prepare_ocr_jpeg_bytes(path: Path) -> tuple[bytes, int, int, int, int]:
 def _is_retryable_ocr_exception(exc: BaseException) -> bool:
     if isinstance(exc, (aiohttp.ClientError, asyncio.TimeoutError)):
         return True
-    if isinstance(exc, OcrRetryableHttpStatus) and exc.status in {502, 503, 504}:
+    if isinstance(exc, OcrRetryableHttpStatus) and exc.status in _RETRYABLE_OCR_HTTP:
         return True
     return False
 
@@ -198,9 +296,9 @@ async def post_ocr_predict(
     content: bytes,
 ) -> Any:
     """
-    POST one JPEG to /predict with fail-fast timeout=120s.
+    POST one JPEG to /predict with timeout=300s (Cloud Run request budget).
 
-    Retried by tenacity on network errors / timeouts / HTTP 502|503|504.
+    Retried by tenacity on network errors / timeouts / HTTP 429|502|503|504.
     """
     timeout = aiohttp.ClientTimeout(total=ASYNC_OCR_TIMEOUT_SECONDS)
     form = aiohttp.FormData()
@@ -212,7 +310,7 @@ async def post_ocr_predict(
     )
     async with session.post(endpoint, data=form, timeout=timeout) as response:
         body = await response.read()
-        if response.status in {502, 503, 504}:
+        if response.status in _RETRYABLE_OCR_HTTP:
             raise OcrRetryableHttpStatus(
                 response.status,
                 f"OCR HTTP {response.status}: {body[:200]!r}",
@@ -285,34 +383,51 @@ async def process_all_frames(
     *,
     endpoint_url: str,
     timeout_seconds: float | None = None,
-    concurrency: int = ASYNC_OCR_CONCURRENCY,
+    concurrency: int | None = None,
+    on_frame_done: OcrFrameDoneCallback | None = None,
 ) -> list[FrameOcrDetection]:
     """
-    Fire OCR /predict for all frames concurrently (asyncio.gather + Semaphore(3)).
+    Fire OCR /predict for all frames concurrently (asyncio.gather + Semaphore).
 
-    ``concurrency`` / ``timeout_seconds`` are accepted for API compat but hardcoded
-    to the Cloud Run profile (3 / 120s) with local JPEG preprocess.
+    Default concurrency 2 (env ``OCR_ASYNC_CONCURRENCY``) to match Cloud Run
+    per-instance ``--concurrency``. Timeout 300s + local JPEG preprocess.
+    ``on_frame_done(completed, total)`` fires after each successful frame detect
+    (order of completion, not path order).
     """
     del timeout_seconds
-    del concurrency
+    limit = resolve_async_ocr_concurrency(concurrency)
 
     if not frames:
         return []
     endpoint = normalize_predict_endpoint(endpoint_url)
-    semaphore = asyncio.Semaphore(ASYNC_OCR_CONCURRENCY)
-    connector = aiohttp.TCPConnector(limit=ASYNC_OCR_CONCURRENCY)
+    semaphore = asyncio.Semaphore(limit)
+    connector = aiohttp.TCPConnector(limit=limit)
     batch_started = time.perf_counter()
+    total = len(frames)
+    completed = 0
+    done_lock = asyncio.Lock()
+    logger.info("ocr_async_batch_start frames=%s concurrency=%s", total, limit)
+
+    results: list[FrameOcrDetection] = []
     try:
         async with aiohttp.ClientSession(connector=connector) as session:
-            tasks = [
-                _detect_one(
+
+            async def _detect_and_report(path: Path) -> FrameOcrDetection:
+                nonlocal completed
+                detection = await _detect_one(
                     session,
-                    Path(path),
+                    path,
                     endpoint=endpoint,
                     semaphore=semaphore,
                 )
-                for path in frames
-            ]
+                if on_frame_done is not None:
+                    async with done_lock:
+                        completed += 1
+                        current = completed
+                    on_frame_done(current, total)
+                return detection
+
+            tasks = [_detect_and_report(Path(path)) for path in frames]
             results = list(await asyncio.gather(*tasks))
     except OcrFilteringError:
         raise
@@ -321,13 +436,18 @@ async def process_all_frames(
             OcrFilteringErrorCode.OCR_PROVIDER_FAILED,
             f"OCR async batch failed: {exc}",
         ) from exc
+    finally:
+        # Deterministic connector shutdown before asyncio.run() closes the loop
+        # (avoids Proactor transport EINVAL noise on Windows).
+        if not connector.closed:
+            await connector.close()
 
     batch_ms = int(round((time.perf_counter() - batch_started) * 1000))
     logger.info(
         "ocr_async_batch_done",
         extra={
             "frames": len(results),
-            "concurrency": ASYNC_OCR_CONCURRENCY,
+            "concurrency": limit,
             "elapsed_ms": batch_ms,
         },
     )
@@ -339,14 +459,30 @@ def process_all_frames_sync(
     *,
     endpoint_url: str,
     timeout_seconds: float | None = None,
-    concurrency: int = ASYNC_OCR_CONCURRENCY,
+    concurrency: int | None = None,
+    on_frame_done: OcrFrameDoneCallback | None = None,
 ) -> list[FrameOcrDetection]:
     """Sync entrypoint for Phase 2 (runs the async batch on a dedicated event loop)."""
-    return asyncio.run(
-        process_all_frames(
-            frames,
-            endpoint_url=endpoint_url,
-            timeout_seconds=timeout_seconds,
-            concurrency=concurrency,
+    # Windows default ProactorEventLoop + aiohttp often raises
+    # ``OSError: [Errno 22] Invalid argument`` when asyncio.run() tears down after
+    # a long Cloud Run OCR batch — surfacing as STEP_UNHANDLED_ERROR mid-job.
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    try:
+        return asyncio.run(
+            process_all_frames(
+                frames,
+                endpoint_url=endpoint_url,
+                timeout_seconds=timeout_seconds,
+                concurrency=concurrency,
+                on_frame_done=on_frame_done,
+            )
         )
-    )
+    except OcrFilteringError:
+        raise
+    except OSError as exc:
+        # Loop/socket teardown EINVAL (22) or similar WinError after a finished batch.
+        raise OcrFilteringError(
+            OcrFilteringErrorCode.OCR_PROVIDER_FAILED,
+            f"OCR async batch failed: {exc}",
+        ) from exc

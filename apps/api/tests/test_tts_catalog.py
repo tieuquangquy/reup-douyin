@@ -52,6 +52,40 @@ class TtsCatalogTests(unittest.TestCase):
         catalog = discover_tts_catalog("google")
         self.assertEqual(catalog.source, "none")
         self.assertEqual(catalog.voices, [])
+        payload = catalog.to_dict()
+        self.assertIn("capabilities", payload)
+        self.assertTrue(payload["capabilities"]["voice"])
+        self.assertTrue(payload["capabilities"]["model"])
+        self.assertTrue(payload["capabilities"]["api_key"])
+
+    def test_edge_catalog_includes_capabilities(self) -> None:
+        catalog = discover_tts_catalog(
+            "edge",
+            language_code="vi",
+            edge_list_voices=lambda: [
+                {"ShortName": "vi-VN-HoaiMyNeural", "Locale": "vi-VN", "FriendlyName": "HoaiMy"},
+            ],
+        )
+        caps = catalog.to_dict()["capabilities"]
+        self.assertTrue(caps["voice"])
+        self.assertFalse(caps["model"])
+
+    def test_omnivoice_curated_catalog(self) -> None:
+        catalog = discover_tts_catalog("omnivoice")
+        self.assertEqual(catalog.source, "curated")
+        self.assertGreaterEqual(len(catalog.models), 12)
+        self.assertIn("omnivoice", catalog.models)
+        self.assertIn("cosyvoice", catalog.models)
+        self.assertIn("kittentts", catalog.models)
+        self.assertGreaterEqual(len(catalog.voices), 10)
+        ids = [v.id for v in catalog.voices]
+        self.assertIn("auto", ids)
+        self.assertIn("alloy", ids)
+        self.assertTrue(any(v.id.startswith("instruct:vi_") for v in catalog.voices))
+        self.assertEqual(catalog.default_voice_id, "auto")
+        caps = catalog.to_dict()["capabilities"]
+        self.assertTrue(caps["voice"])
+        self.assertTrue(caps["model"])
 
 
 if __name__ == "__main__":

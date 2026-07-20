@@ -29,7 +29,7 @@ export function OptimizationPage() {
 
   useEffect(() => {
     void load();
-  }, [load]);
+  }, [t]);
 
   async function loadScheduleHint(draftId: string) {
     setLoadingScheduleId(draftId);

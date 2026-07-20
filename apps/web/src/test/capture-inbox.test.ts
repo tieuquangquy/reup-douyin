@@ -188,17 +188,14 @@ assert.match(pageSource, /Thumbnail not captured/, "Media tiles must render an h
 assert.match(pageSource, /capture-inbox-tile-title/, "Media tiles must include a clampable title class");
 assert.doesNotMatch(pageSource, /capture-inbox-tile-caption/, "Compact cards must move verbose caption text out of card body");
 assert.match(pageSource, /capture-inbox-compact-card/, "Media tiles must adopt compact media action card classing");
-assert.match(pageSource, /capture-inbox-reup-score-badge/, "Media tiles must show a compact Reup Score badge");
-assert.match(pageSource, /capture-inbox-tile-overlay-toolbar/, "Tile overlay must use unified toolbar layout");
-assert.match(pageSource, /capture-inbox-tile-select-toggle/, "Tile overlay must use compact select toggle");
-assert.match(pageSource, /capture-inbox-tile-status-chip/, "Tile overlay must use inline status chip");
-assert.match(pageSource, /formatReupScoreBadgeValue\(reupScore\.reup_score\)/, "Tile score badge must use shared rounded score value formatter");
-assert.match(pageSource, /reupScoreBadgeTier\(reupScore\.reup_score\)/, "Tile score badge must use shared tier label like Review Board");
+assert.match(pageSource, /WorkMediaTileOverlay/, "Media tiles must use shared Work overlay labels");
+assert.match(pageSource, /getOperatorTileScoreBadge/, "Media tiles must use shared score badge authority");
+assert.doesNotMatch(
+  pageSource.slice(pageSource.indexOf("function MediaTile")),
+  /capture-inbox-tile-overlay-toolbar|capture-inbox-tile-select-toggle|capture-inbox-tile-status-chip/,
+  "MediaTile must not keep legacy inline overlay markup"
+);
 assert.doesNotMatch(pageSource, /<small>Score<\/small>/, "Tile score badge must not use generic Score caption");
-assert.match(pageSource, /reupScoreBadgeLevelForCaptureItem/, "Media tiles must derive score color levels from score and computed metadata completeness");
-assert.match(pageSource, /getDouyinMetadataCompletenessForItem\(item\)/, "Media tiles must reuse the shared metadata completeness helper");
-assert.match(pageSource, /reupScoreDetailText\(reupScore\)/, "Media tiles must expose detailed score tooltip");
-assert.match(pageSource, /capture-inbox-tile-overlay-left/, "Media tile overlay must group select and status on one row");
 assert.match(pageSource, /<OpsDetailSection title="Reup Score">/, "Right inspector must expose Reup Score details");
 assert.match(pageSource, /ReupScoreBreakdown/, "Right inspector must render Reup Score mini bars");
 assert.match(pageSource, /inspectorOverviewItems/, "Right inspector must merge capture fields into Overview");
@@ -395,15 +392,18 @@ assert.match(tileActionsSource, /is-promoted-details/, "Details must use promote
 assert.match(tileActionsSource, /Open candidate/, "Promoted items must expose open candidate action");
 
 assert.match(pageSource, /Item details/, "Capture Inbox must keep dense technical information out of tiles");
-assert.match(pageSource, /capture-inbox-review-workspace/, "Capture Inbox must split desktop review into main gallery and right inspector workspace");
-assert.match(pageSource, /capture-inbox-review-main/, "Capture Inbox must keep the item gallery in the left/main workspace column");
-assert.match(pageSource, /capture-inbox-review-side/, "Capture Inbox must reserve a right-side inspector column");
-assert.match(pageSource, /aria-label="Right-side sticky inspector"/, "Right inspector column must expose a clear accessible label");
-assert.match(pageSource, /function RightInspector/, "Capture Inbox must expose item details through the right-side sticky inspector");
-assert.match(pageSource, /title="Item details"/, "Detail panel must use the final right-inspector title");
-assert.match(pageSource, /capture-inbox-right-inspector \$\{open \? "open" : "closed"\}/, "Right inspector must have a real open/closed state class");
-assert.match(pageSource, /Close details/, "Right inspector must provide an explicit close action");
-assert.match(pageSource, /Select an item to inspect details\./, "Right inspector fallback must use the final empty prompt");
+assert.match(pageSource, /capture-inbox-review-workspace/, "Capture Inbox must use review workspace layout");
+assert.match(pageSource, /capture-inbox-review-main/, "Capture Inbox must keep the item gallery in the main workspace column");
+assert.doesNotMatch(pageSource, /capture-inbox-review-side/, "Capture Inbox must not reserve a sticky right-side inspector column");
+assert.match(pageSource, /WorkItemDetailsDrawer/, "Capture Inbox must open item details in WorkItemDetailsDrawer");
+assert.match(pageSource, /function RightInspector/, "Capture Inbox must expose item details through the details drawer");
+assert.match(pageSource, /title="Item details"/, "Detail panel must use the Item details title");
+assert.match(
+  readFileSync(join(repoRoot, "apps", "web", "src", "components", "shared", "WorkItemDetailsDrawer.tsx"), "utf-8"),
+  /Close details/,
+  "Details drawer must provide an explicit close action"
+);
+assert.match(pageSource, /Select an item to inspect details\./, "Details drawer fallback must use the final empty prompt");
 assert.match(tileActionsSource, /Details/, "Promoted tiles must keep Details as the secondary pair action");
 assert.doesNotMatch(pageSource, /function InspectorSheet/, "Capture Inbox must not keep the bottom Inspector Sheet as desktop primary UI");
 assert.doesNotMatch(pageSource, /title="Inspector Sheet"/, "Capture Inbox must not keep bottom-sheet detail panel title on desktop");
@@ -647,7 +647,7 @@ assert.match(pageSource, /getBulkActionEligibility/, "Bulk actions must use a sh
 assert.match(pageSource, /selectionScope = "visible_items" as const/, "Bulk selection scope must be explicit and visible-item based");
 assert.match(pageSource, /className="danger"[\s\S]*onAction\("delete"\)/, "Delete must remain clearly destructive");
 assert.match(pageSource, /capture-inbox-command-bar-clear/, "Clear must remain lowest-emphasis command bar action");
-assert.match(pageSource, /capture-inbox-tile-overlay-scrim/, "Tile overlay must include subtle contrast scrim for readability");
+assert.match(pageSource, /WorkMediaTileOverlay/, "Media tiles must use shared overlay with contrast scrim");
 assert.doesNotMatch(pageSource, /from ["'].*icon|Icon[A-Z]|icon:/, "Capture Inbox must not introduce noisy icon plumbing without a shared icon system");
 
 assert.match(globalCssSource, /\.capture-inbox-status-strip/, "Compact Status Strip styles must exist");
@@ -682,25 +682,27 @@ assert.match(globalCssSource, /\.capture-inbox-session-summary-chip[\s\S]*border
 assert.match(globalCssSource, /\.capture-inbox-session-summary-chip\.is-ready strong[\s\S]*color: var\(--good\)/, "Ready session summary text must use success tone");
 assert.doesNotMatch(globalCssSource, /\.capture-inbox-session-menu/, "Session Ribbon v2 must remove overflow menu styles from primary surface");
 assert.match(globalCssSource, /@media \(max-width: 760px\)[\s\S]*\.capture-inbox-session-ribbon[\s\S]*grid-auto-columns: minmax\(210px, 86vw\)/, "Session Ribbon must stay usable on narrow viewports with horizontal overflow");
-assert.match(globalCssSource, /\.capture-inbox-media-gallery/, "Media gallery styles must exist");
-assert.match(globalCssSource, /\.capture-inbox-media-tile-grid[\s\S]*grid-template-columns: repeat\(auto-fit, minmax\(260px, 1fr\)\)/, "Media gallery must be responsive and tile-first");
+assert.match(pageSource, /CAPTURE_INBOX_GALLERY_MAX_COLUMNS = 5/, "Capture Inbox desktop gallery must target 5 tiles per row");
+assert.match(pageSource, /Math\.min\(\s*CAPTURE_INBOX_GALLERY_MAX_COLUMNS/, "Virtual column count must cap at the desktop gallery max");
+assert.match(pageSource, /useState\(CAPTURE_INBOX_GALLERY_MAX_COLUMNS\)/, "Virtual gallery must default to 5 columns before measure");
+assert.match(globalCssSource, /\.capture-inbox-media-tile-grid[\s\S]*grid-template-columns: repeat\(5, minmax\(0, 1fr\)\)/, "Media gallery desktop grid must show 5 tiles per row");
+assert.match(globalCssSource, /\.capture-inbox-virtual-row[\s\S]*--capture-inbox-virtual-columns, 5/, "Virtual row CSS default must be 5 columns");
 assert.match(globalCssSource, /\.capture-inbox-media-tile\s*\{/, "Media tile styles must exist");
 assert.match(globalCssSource, /\.capture-inbox-media-frame[\s\S]*height: clamp\(220px, 26vw, 290px\)/, "Media tile thumbnail region must use a shorter compact fixed-height presentation");
 assert.match(globalCssSource, /\.capture-inbox-media-thumbnail img[\s\S]*object-fit: cover/, "Media tile thumbnail image must present captured posters more fully");
-assert.match(globalCssSource, /\.capture-inbox-tile-overlay-scrim/, "Tile overlay styles must include a subtle contrast scrim");
-assert.match(globalCssSource, /\.capture-inbox-tile-select-toggle/, "Tile overlay styles must include compact select toggle");
-assert.match(globalCssSource, /\.capture-inbox-tile-status-chip/, "Tile overlay styles must include inline status chip");
-assert.match(globalCssSource, /\.capture-inbox-reup-score-badge strong/, "Score badge must emphasize the numeric value");
-assert.match(globalCssSource, /\.capture-inbox-reup-score-badge small/, "Score badge must render tier caption");
-assert.match(globalCssSource, /\.capture-inbox-tile-overlay-row[\s\S]*justify-content: space-between/, "Score badge must remain right aligned in the top overlay");
-assert.match(globalCssSource, /\.capture-inbox-reup-score-breakdown/, "Inspector must style Reup Score mini bars");
-assert.match(globalCssSource, /\.capture-inbox-media-tile\.is-metrics-collapsed/, "Compact tiles must style collapsed metric surfaces");
-assert.match(globalCssSource, /\.capture-inbox-tile-overlay-left[\s\S]*align-items: center/, "Tile overlay left group must align select and status horizontally");
-assert.match(globalCssSource, /\.capture-inbox-reup-score-badge\.is-excellent[\s\S]*#14532d/, "Score 80-100 must use a strong green style");
-assert.match(globalCssSource, /\.capture-inbox-reup-score-badge\.is-good[\s\S]*#115e59/, "Score 60-79 must use a teal green style");
-assert.match(globalCssSource, /\.capture-inbox-reup-score-badge\.is-average[\s\S]*#92400e/, "Score 40-59 must use an amber style");
-assert.match(globalCssSource, /\.capture-inbox-reup-score-badge\.is-low[\s\S]*#991b1b/, "Score 1-39 must use a soft red style");
-assert.match(globalCssSource, /\.capture-inbox-reup-score-badge\.is-needs_metadata[\s\S]*#334155/, "Missing score/metadata must use a neutral gray style");
+assert.match(globalCssSource, /\.work-media-tile-overlay-scrim/, "Tile overlay styles must include a subtle contrast scrim");
+assert.match(globalCssSource, /\.work-media-tile-select/, "Tile overlay styles must include compact select toggle");
+assert.match(globalCssSource, /\.work-media-tile-status-chip/, "Tile overlay styles must include unified status chip");
+assert.match(globalCssSource, /\.work-media-tile-score-badge strong/, "Score badge must emphasize the numeric value");
+assert.match(globalCssSource, /\.work-media-tile-score-badge small/, "Score badge must render tier caption");
+assert.match(globalCssSource, /\.work-media-tile-overlay\.is-compact[\s\S]*min-height:\s*32px/, "Compact overlay must use thinner scrim");
+assert.match(globalCssSource, /\.work-media-tile-score-badge\.is-inline strong/, "Compact score badge must emphasize inline numeric value");
+assert.match(globalCssSource, /\.work-media-tile-overlay\.is-compact[\s\S]*max-width:\s*96px/, "Compact status chip must stay narrow");
+assert.match(globalCssSource, /\.work-media-tile-score-badge\.is-excellent[\s\S]*#14532d/, "Score 80-100 must use a strong green style");
+assert.match(globalCssSource, /\.work-media-tile-score-badge\.is-good[\s\S]*#115e59/, "Score 60-79 must use a teal green style");
+assert.match(globalCssSource, /\.work-media-tile-score-badge\.is-average[\s\S]*#92400e/, "Score 40-59 must use an amber style");
+assert.match(globalCssSource, /\.work-media-tile-score-badge\.is-low[\s\S]*#991b1b/, "Score 1-39 must use a soft red style");
+assert.match(globalCssSource, /\.work-media-tile-score-badge\.is-needs_metadata[\s\S]*#334155/, "Missing score/metadata must use a neutral gray style");
 assert.match(globalCssSource, /\.capture-inbox-command-bar[\s\S]*position: sticky[\s\S]*top: 12px/, "Batch command bar must stay sticky near top of Capture Inbox workspace");
 assert.match(globalCssSource, /\.capture-inbox-tile-title[\s\S]*-webkit-line-clamp: 2/, "Media tile titles must be clamped to two lines");
 assert.match(globalCssSource, /\.capture-inbox-tile-quick-meta[\s\S]*flex-wrap: wrap/, "Compact cards must style quick metadata chips as dense wrapped rows");
@@ -712,12 +714,11 @@ assert.match(globalCssSource, /\.review-board-tile-btn[\s\S]*min-height: 34px/, 
 assert.match(globalCssSource, /\.review-board-tile-btn\.is-danger[\s\S]*background: #fff/, "Delete action must stay visually exposed as a danger outline, not filled");
 assert.match(globalCssSource, /@media \(max-width: 1180px\)[\s\S]*\.capture-inbox-media-tile-grid[\s\S]*repeat\(2, minmax\(240px, 1fr\)\)/, "Media gallery must settle to two columns on medium screens");
 assert.match(globalCssSource, /@media \(max-width: 760px\)[\s\S]*\.capture-inbox-media-tile-grid[\s\S]*grid-template-columns: 1fr/, "Media gallery must become single-column on narrow screens");
-assert.match(globalCssSource, /\.capture-inbox-review-workspace[\s\S]*grid-template-columns: minmax\(0, 70fr\) minmax\(320px, 30fr\)/, "Desktop Capture Inbox workspace must allocate roughly 70/30 main-to-inspector columns");
-assert.match(globalCssSource, /\.capture-inbox-review-side[\s\S]*position: sticky[\s\S]*top: 16px/, "Right inspector column must stay sticky on desktop");
-assert.match(globalCssSource, /\.capture-inbox-right-inspector[\s\S]*max-height: calc\(100vh - 120px\)[\s\S]*overflow-y: auto/, "Right inspector must have an independent scroll region");
-assert.match(globalCssSource, /\.capture-inbox-right-inspector\.open[\s\S]*border-color: var\(--accent\)/, "Open right inspector must have visible styling");
+assert.match(globalCssSource, /\.capture-inbox-review-workspace[\s\S]*grid-template-columns: minmax\(0, 1fr\)/, "Desktop Capture Inbox workspace must be single-column full width");
+assert.match(globalCssSource, /\.work-item-details-drawer-backdrop/, "Work item details must use overlay drawer backdrop");
+assert.match(globalCssSource, /\.work-item-details-drawer\s*\{/, "Work item details must use overlay drawer panel");
+assert.match(globalCssSource, /\.work-item-details-drawer__body/, "Work item details drawer must have a scroll body");
 assert.match(globalCssSource, /\.capture-inbox-compact-text p\.clamped[\s\S]*-webkit-line-clamp: 4/, "Compact text must be clamped by default");
-assert.match(globalCssSource, /@media \(max-width: 760px\)[\s\S]*\.capture-inbox-right-inspector\.open[\s\S]*position: fixed/, "Right inspector may become bottom-sheet-like only on narrow screens");
 assert.doesNotMatch(globalCssSource, /\.capture-inbox-inspector-sheet/, "Capture Inbox CSS must not keep bottom inspector sheet styles as desktop primary UI");
 assert.doesNotMatch(globalCssSource, /\.capture-inbox-kpi-strip/, "Capture Inbox CSS must not keep KPI strip styles");
 assert.doesNotMatch(globalCssSource, /\.capture-inbox-kpi-chip/, "Capture Inbox CSS must not keep KPI chip styles");
@@ -752,7 +753,9 @@ assert.match(pageSource, /capture-inbox-hero-steps-inline/, "Capture Inbox hero 
 assert.match(pageSource, /capture-inbox-command-deck-kicker/, "Capture Inbox hero must show Capture studio kicker");
 assert.match(pageSource, /capture-inbox-studio-hero-headline/, "Capture studio hero must use a compact headline row");
 assert.match(pageSource, /capture-inbox-sr-only/, "Workflow guidance must stay available without cluttering the hero");
-assert.match(pageSource, /Scroll to load more items/, "Gallery footer must expose lazy-load guidance");
+assert.match(pageSource, /variant="studio"/, "Gallery footer must use Soft CTA studio pager");
+assert.match(pageSource, /autoLoad/, "Gallery footer must auto-load on scroll");
+assert.doesNotMatch(pageSource, /Scroll to load more items/, "Gallery must not keep scroll-hint sentinel copy");
 assert.doesNotMatch(pageSource, /capture-inbox-command-deck-meta/, "Capture Inbox hero must not duplicate gallery diagnostics in command deck meta");
 assert.match(globalCssSource, /\.capture-inbox-command-deck-sessions[\s\S]*border-top: 0/, "Session ribbon must sit flush inside the unified command deck band");
 assert.match(globalCssSource, /Capture Inbox tile actions share review-board ops button system/, "Styles must document shared ops tile actions for Capture Inbox");

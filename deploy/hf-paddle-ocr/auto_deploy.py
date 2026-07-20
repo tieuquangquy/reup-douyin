@@ -4,7 +4,7 @@ Auto-deploy PaddleOCR API to Google Cloud Run, then wire Phase 2 OCR_ENDPOINT_UR
 
 Reads deploy flags from README_DEPLOY.md (same directory), runs:
   gcloud run deploy ... --memory 8Gi --cpu 4 --concurrency 2
-  --min-instances 0|1 --max-instances 3 --allow-unauthenticated --port 8080
+  --min-instances 0|1 --max-instances 5 --allow-unauthenticated --port 8080
 
 After success:
   1) Extract service URL (describe --format=value(status.url) + regex fallback)
@@ -114,7 +114,7 @@ def parse_deploy_defaults_from_readme(readme: Path) -> dict[str, str]:
         "cpu": "4",
         "concurrency": "2",
         "min_instances": "0",
-        "max_instances": "3",
+        "max_instances": "5",
         "port": "8080",
         "timeout": "300",
     }

@@ -90,12 +90,35 @@ export function OpsPanel({
 }
 
 export function OpsState({ title, detail, retry }: { title: string; detail: string; retry?: () => void }) {
+  const isLoading = !retry;
   return (
     <main className="ops-page">
-      <div className="state-panel">
-        <h1>{title}</h1>
-        <p>{detail}</p>
-        {retry ? <button type="button" onClick={retry}>Retry</button> : null}
+      <div className={`state-panel${isLoading ? " is-loading" : ""}`} role={isLoading ? "status" : undefined} aria-live={isLoading ? "polite" : undefined}>
+        {isLoading ? (
+          <>
+            <div className="state-panel__boot" aria-hidden="true">
+              <span className="state-panel__spinner" />
+              <div className="state-panel__skeleton">
+                <i />
+                <i />
+                <i />
+                <i />
+              </div>
+            </div>
+            <h1 className="state-panel__title">{title}</h1>
+            <p>{detail}</p>
+          </>
+        ) : (
+          <>
+            <h1>{title}</h1>
+            <p>{detail}</p>
+            {retry ? (
+              <button type="button" onClick={retry}>
+                Retry
+              </button>
+            ) : null}
+          </>
+        )}
       </div>
     </main>
   );

@@ -12,7 +12,8 @@ import type { OcrCreateResponse, OcrSummaryResponse } from "../types/ocr";
 import type {
   Job,
   JobListResponse,
-  JobStatus
+  JobStatus,
+  JobType
 } from "../types/jobs";
 import type {
   AudioAnalysisSummaryResponse,
@@ -1451,14 +1452,28 @@ export async function cancelDouyinBrowserConnect(connectSessionId: string): Prom
 
 export async function fetchJobs(
   status?: JobStatus,
-  options: number | { limit?: number; offset?: number } = {}
+  options:
+    | number
+    | {
+        limit?: number;
+        offset?: number;
+        sourceVideoId?: string;
+        jobType?: JobType;
+      } = {}
 ): Promise<JobListResponse> {
   const normalized =
     typeof options === "number"
-      ? { limit: options, offset: 0 }
-      : { limit: options.limit ?? 50, offset: options.offset ?? 0 };
+      ? { limit: options, offset: 0, sourceVideoId: undefined as string | undefined, jobType: undefined as JobType | undefined }
+      : {
+          limit: options.limit ?? 50,
+          offset: options.offset ?? 0,
+          sourceVideoId: options.sourceVideoId,
+          jobType: options.jobType
+        };
   const params = new URLSearchParams();
   if (status) params.set("status", status);
+  if (normalized.sourceVideoId) params.set("source_video_id", normalized.sourceVideoId);
+  if (normalized.jobType) params.set("job_type", normalized.jobType);
   params.set("limit", String(normalized.limit));
   params.set("offset", String(normalized.offset));
 
@@ -1479,6 +1494,14 @@ export async function fetchJob(jobId: string): Promise<Job> {
   const response = await apiFetch(`${API_BASE_URL}/jobs/${jobId}`, { cache: "no-store" });
   if (!response.ok) {
     throw new Error(await formatApiError(response, "Failed to load job"));
+  }
+  return (await response.json()) as Job;
+}
+
+export async function cancelJob(jobId: string): Promise<Job> {
+  const response = await apiFetch(`${API_BASE_URL}/jobs/${jobId}/cancel`, { method: "POST" });
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to cancel job"));
   }
   return (await response.json()) as Job;
 }
@@ -1506,10 +1529,21 @@ export async function fetchOperationalMetrics(): Promise<OperationalMetrics> {
   return (await response.json()) as OperationalMetrics;
 }
 
+export type PromptProfileSummary = {
+  id: string;
+  name: string;
+  prompt: string;
+  is_active: boolean;
+};
+
 export type TranslationPromptResponse = {
   prompt: string;
   source: string;
   updated?: boolean;
+  active_profile_id?: string;
+  active_profile_name?: string;
+  profiles?: PromptProfileSummary[];
+  focus_profile_id?: string | null;
 };
 
 export async function fetchTranslationPrompt(): Promise<TranslationPromptResponse> {
@@ -1532,18 +1566,138 @@ export async function saveTranslationPrompt(prompt: string): Promise<Translation
   return (await response.json()) as TranslationPromptResponse;
 }
 
+export async function createTranslationPromptProfile(name: string): Promise<TranslationPromptResponse> {
+  const response = await apiFetch(`${API_BASE_URL}/ops/translation-prompt/profiles`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name })
+  });
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to create translation prompt setup"));
+  }
+  return (await response.json()) as TranslationPromptResponse;
+}
+
+export async function fetchTranslationPromptProfile(profileId: string): Promise<TranslationPromptResponse> {
+  const response = await apiFetch(
+    `${API_BASE_URL}/ops/translation-prompt/profiles/${encodeURIComponent(profileId)}`,
+    { cache: "no-store" }
+  );
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to load translation prompt setup"));
+  }
+  return (await response.json()) as TranslationPromptResponse;
+}
+
+export async function saveTranslationPromptProfile(
+  profileId: string,
+  prompt: string
+): Promise<TranslationPromptResponse> {
+  const response = await apiFetch(
+    `${API_BASE_URL}/ops/translation-prompt/profiles/${encodeURIComponent(profileId)}`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt })
+    }
+  );
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to save translation prompt setup"));
+  }
+  return (await response.json()) as TranslationPromptResponse;
+}
+
+export async function renameTranslationPromptProfile(
+  profileId: string,
+  name: string
+): Promise<TranslationPromptResponse> {
+  const response = await apiFetch(
+    `${API_BASE_URL}/ops/translation-prompt/profiles/${encodeURIComponent(profileId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name })
+    }
+  );
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to rename translation prompt setup"));
+  }
+  return (await response.json()) as TranslationPromptResponse;
+}
+
+export async function activateTranslationPromptProfile(
+  profileId: string
+): Promise<TranslationPromptResponse> {
+  const response = await apiFetch(
+    `${API_BASE_URL}/ops/translation-prompt/profiles/${encodeURIComponent(profileId)}/activate`,
+    { method: "POST" }
+  );
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to switch translation prompt setup"));
+  }
+  return (await response.json()) as TranslationPromptResponse;
+}
+
+export async function reorderTranslationPromptProfiles(
+  profileIds: string[]
+): Promise<TranslationPromptResponse> {
+  const response = await apiFetch(`${API_BASE_URL}/ops/translation-prompt/profiles/reorder`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ profile_ids: profileIds })
+  });
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to reorder translation prompt setups"));
+  }
+  return (await response.json()) as TranslationPromptResponse;
+}
+
+export async function deleteTranslationPromptProfile(
+  profileId: string
+): Promise<TranslationPromptResponse> {
+  const response = await apiFetch(
+    `${API_BASE_URL}/ops/translation-prompt/profiles/${encodeURIComponent(profileId)}`,
+    { method: "DELETE" }
+  );
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to delete translation prompt setup"));
+  }
+  return (await response.json()) as TranslationPromptResponse;
+}
+
+export type TranslationAiProfileSummary = {
+  id: string;
+  name: string;
+  enabled: boolean;
+  provider: string;
+  model: string;
+  api_key_set: boolean;
+  api_key_masked: string;
+  api_key?: string;
+  base_url: string;
+  timeout_seconds: number;
+  fallback_provider: string;
+  fallback_model: string;
+  is_active: boolean;
+};
+
 export type TranslationAiResponse = {
   enabled: boolean;
   provider: string;
   model: string;
   api_key_set: boolean;
   api_key_masked: string;
+  api_key?: string;
   base_url: string;
   timeout_seconds: number;
   fallback_provider: string;
   fallback_model: string;
   source: string;
   updated?: boolean;
+  active_profile_id?: string | null;
+  active_profile_name?: string | null;
+  profiles?: TranslationAiProfileSummary[];
+  focus_profile_id?: string | null;
 };
 
 export type TranslationAiPayload = {
@@ -1584,7 +1738,116 @@ export async function saveTranslationAi(payload: TranslationAiPayload): Promise<
   return (await response.json()) as TranslationAiResponse;
 }
 
-export async function testTranslationAi(payload: Partial<TranslationAiPayload>): Promise<TranslationAiTestResponse> {
+export async function createTranslationAiProfile(name: string): Promise<TranslationAiResponse> {
+  const response = await apiFetch(`${API_BASE_URL}/ops/translation-ai/profiles`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name })
+  });
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to create Translation AI setup"));
+  }
+  return (await response.json()) as TranslationAiResponse;
+}
+
+export async function fetchTranslationAiProfile(profileId: string): Promise<TranslationAiResponse> {
+  const response = await apiFetch(
+    `${API_BASE_URL}/ops/translation-ai/profiles/${encodeURIComponent(profileId)}`,
+    { cache: "no-store" }
+  );
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to load Translation AI setup"));
+  }
+  return (await response.json()) as TranslationAiResponse;
+}
+
+export async function saveTranslationAiProfile(
+  profileId: string,
+  payload: TranslationAiPayload
+): Promise<TranslationAiResponse> {
+  const response = await apiFetch(
+    `${API_BASE_URL}/ops/translation-ai/profiles/${encodeURIComponent(profileId)}`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    }
+  );
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to save Translation AI setup"));
+  }
+  return (await response.json()) as TranslationAiResponse;
+}
+
+export async function patchTranslationAiProfile(
+  profileId: string,
+  patch: { name?: string; enabled?: boolean }
+): Promise<TranslationAiResponse> {
+  const response = await apiFetch(
+    `${API_BASE_URL}/ops/translation-ai/profiles/${encodeURIComponent(profileId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch)
+    }
+  );
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to update Translation AI setup"));
+  }
+  return (await response.json()) as TranslationAiResponse;
+}
+
+export async function renameTranslationAiProfile(
+  profileId: string,
+  name: string
+): Promise<TranslationAiResponse> {
+  return patchTranslationAiProfile(profileId, { name });
+}
+
+export async function setTranslationAiProfileEnabled(
+  profileId: string,
+  enabled: boolean
+): Promise<TranslationAiResponse> {
+  return patchTranslationAiProfile(profileId, { enabled });
+}
+
+export async function activateTranslationAiProfile(profileId: string): Promise<TranslationAiResponse> {
+  const response = await apiFetch(
+    `${API_BASE_URL}/ops/translation-ai/profiles/${encodeURIComponent(profileId)}/activate`,
+    { method: "POST" }
+  );
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to switch Translation AI setup"));
+  }
+  return (await response.json()) as TranslationAiResponse;
+}
+
+export async function reorderTranslationAiProfiles(profileIds: string[]): Promise<TranslationAiResponse> {
+  const response = await apiFetch(`${API_BASE_URL}/ops/translation-ai/profiles/reorder`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ profile_ids: profileIds })
+  });
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to reorder Translation AI setups"));
+  }
+  return (await response.json()) as TranslationAiResponse;
+}
+
+export async function deleteTranslationAiProfile(profileId: string): Promise<TranslationAiResponse> {
+  const response = await apiFetch(
+    `${API_BASE_URL}/ops/translation-ai/profiles/${encodeURIComponent(profileId)}`,
+    { method: "DELETE" }
+  );
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to delete Translation AI setup"));
+  }
+  return (await response.json()) as TranslationAiResponse;
+}
+
+export async function testTranslationAi(
+  payload: Partial<TranslationAiPayload> & { profile_id?: string }
+): Promise<TranslationAiTestResponse> {
   const response = await apiFetch(`${API_BASE_URL}/ops/translation-ai/test`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1609,6 +1872,7 @@ export async function listTranslationAiModels(payload: {
   clear_api_key?: boolean;
   base_url?: string | null;
   timeout_seconds?: number;
+  profile_id?: string | null;
 }): Promise<TranslationAiModelsResponse> {
   const response = await apiFetch(`${API_BASE_URL}/ops/translation-ai/models`, {
     method: "POST",
@@ -1641,6 +1905,101 @@ export async function saveCaptionPrompt(prompt: string): Promise<TranslationProm
   return (await response.json()) as TranslationPromptResponse;
 }
 
+export async function createCaptionPromptProfile(name: string): Promise<TranslationPromptResponse> {
+  const response = await apiFetch(`${API_BASE_URL}/ops/caption-prompt/profiles`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name })
+  });
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to create caption prompt setup"));
+  }
+  return (await response.json()) as TranslationPromptResponse;
+}
+
+export async function fetchCaptionPromptProfile(profileId: string): Promise<TranslationPromptResponse> {
+  const response = await apiFetch(
+    `${API_BASE_URL}/ops/caption-prompt/profiles/${encodeURIComponent(profileId)}`,
+    { cache: "no-store" }
+  );
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to load caption prompt setup"));
+  }
+  return (await response.json()) as TranslationPromptResponse;
+}
+
+export async function saveCaptionPromptProfile(
+  profileId: string,
+  prompt: string
+): Promise<TranslationPromptResponse> {
+  const response = await apiFetch(
+    `${API_BASE_URL}/ops/caption-prompt/profiles/${encodeURIComponent(profileId)}`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt })
+    }
+  );
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to save caption prompt setup"));
+  }
+  return (await response.json()) as TranslationPromptResponse;
+}
+
+export async function renameCaptionPromptProfile(
+  profileId: string,
+  name: string
+): Promise<TranslationPromptResponse> {
+  const response = await apiFetch(
+    `${API_BASE_URL}/ops/caption-prompt/profiles/${encodeURIComponent(profileId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name })
+    }
+  );
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to rename caption prompt setup"));
+  }
+  return (await response.json()) as TranslationPromptResponse;
+}
+
+export async function activateCaptionPromptProfile(profileId: string): Promise<TranslationPromptResponse> {
+  const response = await apiFetch(
+    `${API_BASE_URL}/ops/caption-prompt/profiles/${encodeURIComponent(profileId)}/activate`,
+    { method: "POST" }
+  );
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to switch caption prompt setup"));
+  }
+  return (await response.json()) as TranslationPromptResponse;
+}
+
+export async function reorderCaptionPromptProfiles(
+  profileIds: string[]
+): Promise<TranslationPromptResponse> {
+  const response = await apiFetch(`${API_BASE_URL}/ops/caption-prompt/profiles/reorder`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ profile_ids: profileIds })
+  });
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to reorder caption prompt setups"));
+  }
+  return (await response.json()) as TranslationPromptResponse;
+}
+
+export async function deleteCaptionPromptProfile(profileId: string): Promise<TranslationPromptResponse> {
+  const response = await apiFetch(
+    `${API_BASE_URL}/ops/caption-prompt/profiles/${encodeURIComponent(profileId)}`,
+    { method: "DELETE" }
+  );
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to delete caption prompt setup"));
+  }
+  return (await response.json()) as TranslationPromptResponse;
+}
+
 export async function fetchCaptionAi(): Promise<TranslationAiResponse> {
   const response = await apiFetch(`${API_BASE_URL}/ops/caption-ai`, { cache: "no-store" });
   if (!response.ok) {
@@ -1661,7 +2020,113 @@ export async function saveCaptionAi(payload: TranslationAiPayload): Promise<Tran
   return (await response.json()) as TranslationAiResponse;
 }
 
-export async function testCaptionAi(payload: Partial<TranslationAiPayload>): Promise<TranslationAiTestResponse> {
+export async function createCaptionAiProfile(name: string): Promise<TranslationAiResponse> {
+  const response = await apiFetch(`${API_BASE_URL}/ops/caption-ai/profiles`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name })
+  });
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to create Caption AI setup"));
+  }
+  return (await response.json()) as TranslationAiResponse;
+}
+
+export async function fetchCaptionAiProfile(profileId: string): Promise<TranslationAiResponse> {
+  const response = await apiFetch(
+    `${API_BASE_URL}/ops/caption-ai/profiles/${encodeURIComponent(profileId)}`,
+    { cache: "no-store" }
+  );
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to load Caption AI setup"));
+  }
+  return (await response.json()) as TranslationAiResponse;
+}
+
+export async function saveCaptionAiProfile(
+  profileId: string,
+  payload: TranslationAiPayload
+): Promise<TranslationAiResponse> {
+  const response = await apiFetch(
+    `${API_BASE_URL}/ops/caption-ai/profiles/${encodeURIComponent(profileId)}`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    }
+  );
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to save Caption AI setup"));
+  }
+  return (await response.json()) as TranslationAiResponse;
+}
+
+export async function patchCaptionAiProfile(
+  profileId: string,
+  patch: { name?: string; enabled?: boolean }
+): Promise<TranslationAiResponse> {
+  const response = await apiFetch(
+    `${API_BASE_URL}/ops/caption-ai/profiles/${encodeURIComponent(profileId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch)
+    }
+  );
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to update Caption AI setup"));
+  }
+  return (await response.json()) as TranslationAiResponse;
+}
+
+export async function renameCaptionAiProfile(profileId: string, name: string): Promise<TranslationAiResponse> {
+  return patchCaptionAiProfile(profileId, { name });
+}
+
+export async function setCaptionAiProfileEnabled(
+  profileId: string,
+  enabled: boolean
+): Promise<TranslationAiResponse> {
+  return patchCaptionAiProfile(profileId, { enabled });
+}
+
+export async function activateCaptionAiProfile(profileId: string): Promise<TranslationAiResponse> {
+  const response = await apiFetch(
+    `${API_BASE_URL}/ops/caption-ai/profiles/${encodeURIComponent(profileId)}/activate`,
+    { method: "POST" }
+  );
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to switch Caption AI setup"));
+  }
+  return (await response.json()) as TranslationAiResponse;
+}
+
+export async function reorderCaptionAiProfiles(profileIds: string[]): Promise<TranslationAiResponse> {
+  const response = await apiFetch(`${API_BASE_URL}/ops/caption-ai/profiles/reorder`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ profile_ids: profileIds })
+  });
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to reorder Caption AI setups"));
+  }
+  return (await response.json()) as TranslationAiResponse;
+}
+
+export async function deleteCaptionAiProfile(profileId: string): Promise<TranslationAiResponse> {
+  const response = await apiFetch(
+    `${API_BASE_URL}/ops/caption-ai/profiles/${encodeURIComponent(profileId)}`,
+    { method: "DELETE" }
+  );
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to delete Caption AI setup"));
+  }
+  return (await response.json()) as TranslationAiResponse;
+}
+
+export async function testCaptionAi(
+  payload: Partial<TranslationAiPayload> & { profile_id?: string }
+): Promise<TranslationAiTestResponse> {
   const response = await apiFetch(`${API_BASE_URL}/ops/caption-ai/test`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1679,6 +2144,7 @@ export async function listCaptionAiModels(payload: {
   clear_api_key?: boolean;
   base_url?: string | null;
   timeout_seconds?: number;
+  profile_id?: string | null;
 }): Promise<TranslationAiModelsResponse> {
   const response = await apiFetch(`${API_BASE_URL}/ops/caption-ai/models`, {
     method: "POST",
@@ -1696,6 +2162,16 @@ export type TtsAiCatalogVoice = {
   label: string;
 };
 
+export type TtsAiFieldCapabilities = {
+  voice?: boolean;
+  model?: boolean;
+  styles?: boolean;
+  api_key?: boolean;
+  base_url?: boolean;
+  local_backend?: boolean;
+  cli_binary?: boolean;
+};
+
 export type TtsAiCatalog = {
   source: string;
   voices: TtsAiCatalogVoice[];
@@ -1705,6 +2181,7 @@ export type TtsAiCatalog = {
   warning: string;
   sample_rate?: number | null;
   backends?: string[];
+  capabilities?: TtsAiFieldCapabilities | null;
 };
 
 export type TtsAiRuntime = {
@@ -1723,6 +2200,28 @@ export type TtsAiRuntime = {
     detail?: string;
     catalog?: TtsAiCatalog | null;
   } | null;
+};
+
+export type TtsAiProfileSummary = {
+  id: string;
+  name: string;
+  provider: string;
+  enabled: boolean;
+  voice_id?: string;
+  speaking_rate?: number;
+  language_code?: string;
+  model_id?: string;
+  api_key_set?: boolean;
+  api_key_masked?: string;
+  base_url?: string;
+  timeout_seconds?: number;
+  fallback_provider?: string;
+  fallback_voice_id?: string;
+  local_backend?: string;
+  device?: string;
+  cli_binary?: string;
+  is_active?: boolean;
+  runtime?: TtsAiRuntime;
 };
 
 export type TtsAiResponse = {
@@ -1746,6 +2245,10 @@ export type TtsAiResponse = {
   live_import_ok?: boolean | null;
   source: string;
   updated?: boolean;
+  active_profile_id?: string;
+  active_profile_name?: string;
+  profiles?: TtsAiProfileSummary[];
+  focus_profile_id?: string | null;
 };
 
 export type TtsAiPayload = {
@@ -1795,7 +2298,97 @@ export async function saveTtsAi(payload: TtsAiPayload): Promise<TtsAiResponse> {
   return (await response.json()) as TtsAiResponse;
 }
 
-export async function testTtsAi(payload: Partial<TtsAiPayload>): Promise<TtsAiTestResponse> {
+export async function createTtsAiProfile(name: string): Promise<TtsAiResponse> {
+  const response = await apiFetch(`${API_BASE_URL}/ops/tts-ai/profiles`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name })
+  });
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to create TTS setup"));
+  }
+  return (await response.json()) as TtsAiResponse;
+}
+
+export async function fetchTtsAiProfile(profileId: string): Promise<TtsAiResponse> {
+  const response = await apiFetch(`${API_BASE_URL}/ops/tts-ai/profiles/${encodeURIComponent(profileId)}`, {
+    cache: "no-store"
+  });
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to load TTS setup"));
+  }
+  return (await response.json()) as TtsAiResponse;
+}
+
+export async function saveTtsAiProfile(profileId: string, payload: TtsAiPayload): Promise<TtsAiResponse> {
+  const response = await apiFetch(`${API_BASE_URL}/ops/tts-ai/profiles/${encodeURIComponent(profileId)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to save TTS setup"));
+  }
+  return (await response.json()) as TtsAiResponse;
+}
+
+export async function patchTtsAiProfile(
+  profileId: string,
+  patch: { name?: string; enabled?: boolean }
+): Promise<TtsAiResponse> {
+  const response = await apiFetch(`${API_BASE_URL}/ops/tts-ai/profiles/${encodeURIComponent(profileId)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch)
+  });
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to update TTS setup"));
+  }
+  return (await response.json()) as TtsAiResponse;
+}
+
+export async function renameTtsAiProfile(profileId: string, name: string): Promise<TtsAiResponse> {
+  return patchTtsAiProfile(profileId, { name });
+}
+
+export async function setTtsAiProfileEnabled(profileId: string, enabled: boolean): Promise<TtsAiResponse> {
+  return patchTtsAiProfile(profileId, { enabled });
+}
+
+export async function activateTtsAiProfile(profileId: string): Promise<TtsAiResponse> {
+  const response = await apiFetch(
+    `${API_BASE_URL}/ops/tts-ai/profiles/${encodeURIComponent(profileId)}/activate`,
+    { method: "POST" }
+  );
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to switch TTS setup"));
+  }
+  return (await response.json()) as TtsAiResponse;
+}
+
+export async function reorderTtsAiProfiles(profileIds: string[]): Promise<TtsAiResponse> {
+  const response = await apiFetch(`${API_BASE_URL}/ops/tts-ai/profiles/reorder`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ profile_ids: profileIds })
+  });
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to reorder TTS setups"));
+  }
+  return (await response.json()) as TtsAiResponse;
+}
+
+export async function deleteTtsAiProfile(profileId: string): Promise<TtsAiResponse> {
+  const response = await apiFetch(`${API_BASE_URL}/ops/tts-ai/profiles/${encodeURIComponent(profileId)}`, {
+    method: "DELETE"
+  });
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to delete TTS setup"));
+  }
+  return (await response.json()) as TtsAiResponse;
+}
+
+export async function testTtsAi(payload: Partial<TtsAiPayload> & { profile_id?: string }): Promise<TtsAiTestResponse> {
   const response = await apiFetch(`${API_BASE_URL}/ops/tts-ai/test`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1813,10 +2406,13 @@ export type TtsAiInstallPayload = {
   repo_url?: string | null;
   timeout_seconds?: number;
   provider?: string | null;
+  profile_id?: string | null;
+  force_reinstall?: boolean;
 };
 
 export type TtsAiInstallResponse = {
   ok: boolean;
+  status?: string;
   detail: string;
   command: string;
   log_tail: string;
@@ -1840,13 +2436,23 @@ export async function installTtsAiPackage(payload: TtsAiInstallPayload): Promise
   return (await response.json()) as TtsAiInstallResponse;
 }
 
+export async function fetchTtsAiInstallStatus(): Promise<TtsAiInstallResponse> {
+  const response = await apiFetch(`${API_BASE_URL}/ops/tts-ai/install/status`, { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to load TTS install status"));
+  }
+  return (await response.json()) as TtsAiInstallResponse;
+}
+
 export type TtsAiPreviewPayload = Partial<TtsAiPayload> & {
   text: string;
   max_chars?: number;
+  profile_id?: string;
 };
 
 export type TtsAiPreviewResponse = {
   ok: boolean;
+  status?: string;
   provider: string;
   detail: string;
   mime_type: string;
@@ -1864,6 +2470,24 @@ export async function previewTtsAiSpeech(payload: TtsAiPreviewPayload): Promise<
   });
   if (!response.ok) {
     throw new Error(await formatApiError(response, "Failed to preview TTS speech"));
+  }
+  return (await response.json()) as TtsAiPreviewResponse;
+}
+
+export async function fetchTtsAiPreviewStatus(): Promise<TtsAiPreviewResponse> {
+  const response = await apiFetch(`${API_BASE_URL}/ops/tts-ai/preview/status`, { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to load TTS preview status"));
+  }
+  return (await response.json()) as TtsAiPreviewResponse;
+}
+
+export async function cancelTtsAiPreview(): Promise<TtsAiPreviewResponse> {
+  const response = await apiFetch(`${API_BASE_URL}/ops/tts-ai/preview/cancel`, {
+    method: "POST"
+  });
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to cancel TTS preview"));
   }
   return (await response.json()) as TtsAiPreviewResponse;
 }
@@ -2106,7 +2730,7 @@ export function mediaAssetContentUrl(assetId: string): string {
 }
 
 const DEFAULT_TTS_VOICE = {
-  // Empty voice_id → API uses Ops workspace TTS (when enabled) or env default.
+  // Empty voice_id → API uses active Ops TTS profile (Preview parity) or env fallback.
   voice_id: "",
   language_code: "vi",
   speaking_rate: 1.0

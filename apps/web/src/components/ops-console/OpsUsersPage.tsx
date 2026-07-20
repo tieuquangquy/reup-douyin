@@ -53,6 +53,28 @@ function InviteIcon() {
   );
 }
 
+function EditMemberIcon() {
+  return (
+    <svg className="ops-tts-setup-table__icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path
+        d="M4 20h4.2L18.8 9.4a1.8 1.8 0 0 0 0-2.5l-1.7-1.7a1.8 1.8 0 0 0-2.5 0L4 15.8V20z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M13.2 6.4 17.6 10.8"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
 export function OpsUsersPage() {
   const t = useT();
   const { me } = useAuth();
@@ -275,6 +297,15 @@ export function OpsUsersPage() {
     }
   }
 
+  async function handleStatusToggle(member: WorkspaceMember, nextActive: boolean) {
+    if (nextActive === member.isActive) return;
+    if (nextActive) {
+      await handleEnable(member);
+      return;
+    }
+    await handleRemove(member);
+  }
+
   async function handleEnable(member: WorkspaceMember) {
     setBusyId(member.operatorId);
     setError(null);
@@ -471,10 +502,23 @@ export function OpsUsersPage() {
                             <span className={roleChipClass(member.role)}>{t(`opsUsers.roles.${member.role}`)}</span>
                           </td>
                           <td>
-                            <StatusBadge
-                              label={member.isActive ? t("opsUsers.active") : t("opsUsers.disabled")}
-                              tone={member.isActive ? "good" : "danger"}
-                            />
+                            <label
+                              className="ops-tts-setup-switch"
+                              title={member.isActive ? t("opsUsers.active") : t("opsUsers.disabled")}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={member.isActive}
+                                disabled={busyId === member.operatorId}
+                                aria-label={
+                                  member.isActive ? t("opsUsers.active") : t("opsUsers.disabled")
+                                }
+                                onChange={(event) =>
+                                  void handleStatusToggle(member, event.target.checked)
+                                }
+                              />
+                              <span className="ops-tts-setup-switch__track" aria-hidden="true" />
+                            </label>
                           </td>
                           <td>
                             <span className="ops-users-member-joined" title={formatDateTime(member.createdAt)}>
@@ -491,35 +535,18 @@ export function OpsUsersPage() {
                                 : t("opsUsers.neverSignedIn")}
                             </span>
                           </td>
-                          <td>
+                          <td className="ops-users-table__actions">
                             <div className="ops-users-member-controls">
                               <button
-                                className="ops-users-quiet-btn is-accent"
-                                disabled={busyId === member.operatorId}
                                 type="button"
+                                className="ops-tts-setup-table__icon-btn"
+                                disabled={busyId === member.operatorId}
+                                aria-label={t("opsUsers.editMember")}
+                                title={t("opsUsers.editMember")}
                                 onClick={() => openEditDrawer(member)}
                               >
-                                {t("opsUsers.editMember")}
+                                <EditMemberIcon />
                               </button>
-                              {member.isActive ? (
-                                <button
-                                  className="ops-users-link-danger"
-                                  disabled={busyId === member.operatorId}
-                                  type="button"
-                                  onClick={() => void handleRemove(member)}
-                                >
-                                  {t("opsUsers.disable")}
-                                </button>
-                              ) : (
-                                <button
-                                  className="ops-users-quiet-btn"
-                                  disabled={busyId === member.operatorId}
-                                  type="button"
-                                  onClick={() => void handleEnable(member)}
-                                >
-                                  {t("opsUsers.enable")}
-                                </button>
-                              )}
                             </div>
                           </td>
                         </tr>

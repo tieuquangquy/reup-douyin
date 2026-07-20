@@ -12,11 +12,13 @@ import logging
 import os
 import tempfile
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from src.media_pipeline.ocr_filtering.async_batch import (
     DEFAULT_ASYNC_CONCURRENCY,
+    ocr_frame_progress_percent,
     process_all_frames_sync,
 )
 from src.media_pipeline.ocr_filtering.errors import OcrFilteringError, OcrFilteringErrorCode
@@ -75,13 +77,18 @@ def resolve_ocr_probe_stride(override: int | None = None) -> int:
 
 
 def resolve_ocr_crop_band(override: bool | None = None) -> bool:
-    """Default False: full-frame OCR. Opt-in via OCR_CROP_BAND=1."""
+    """Default False: full-frame OCR. Opt-in via OCR_CROP_BAND=1; profile=best enables crop."""
+    from src.media_pipeline.ocr_filtering.ocr_quality_profile import effective_ocr_crop_band
+
     if override is not None:
         return bool(override)
     raw = os.environ.get(OCR_CROP_BAND_ENV, "").strip().lower()
+    env_val: bool | None = None
     if raw in {"1", "true", "yes", "on"}:
-        return True
-    return False
+        env_val = True
+    elif raw in {"0", "false", "no", "off"}:
+        env_val = False
+    return effective_ocr_crop_band(False, override=env_val)
 
 
 def resolve_ocr_probe_early_exit(override: bool | None = None) -> bool:
@@ -256,12 +263,16 @@ def _run_indices_parallel(
     return out
 
 
+OcrProgressCallback = Callable[[str, int | None], None]
+
+
 def _run_async_rest_batch(
     frame_paths: list[Path],
     *,
     rest: RestOcrEndpointProvider,
     frame_time_ms: list[int] | None,
     concurrency: int,
+    on_progress: OcrProgressCallback | None = None,
 ) -> dict[int, tuple[FrameOcrFilterResult, list[str]]]:
     """Warm endpoint once, then aiohttp.gather all frames."""
     # Trigger sync warmup (requests /health) before the concurrent storm.
@@ -274,11 +285,17 @@ def _run_async_rest_batch(
                 rest._warmed = True
 
     paths = [Path(p) for p in frame_paths]
+
+    def _on_frame_done(completed: int, total: int) -> None:
+        if on_progress is not None:
+            on_progress("phase2_ocr", ocr_frame_progress_percent(completed, total))
+
     detections = process_all_frames_sync(
         paths,
         endpoint_url=rest._endpoint,
         timeout_seconds=rest._timeout,
         concurrency=concurrency,
+        on_frame_done=_on_frame_done if on_progress is not None else None,
     )
     out: dict[int, tuple[FrameOcrFilterResult, list[str]]] = {}
     for index, detection in enumerate(detections):
@@ -309,6 +326,7 @@ def run_ocr_filtering(
     concurrency: int | None = None,
     probe_stride: int | None = None,
     early_exit_empty_probe: bool | None = None,
+    on_progress: OcrProgressCallback | None = None,
 ) -> OcrFilteringResult:
     """Run OCR on sampled frames and keep **all** detected text boxes (full-frame).
 
@@ -356,6 +374,7 @@ def run_ocr_filtering(
                 rest=rest,
                 frame_time_ms=frame_time_ms,
                 concurrency=workers,
+                on_progress=on_progress,
             )
             for idx, (frame, warns) in batch.items():
                 by_index[idx] = frame
@@ -379,6 +398,7 @@ def run_ocr_filtering(
                         rest=rest,
                         frame_time_ms=probe_times,
                         concurrency=workers,
+                        on_progress=on_progress,
                     )
                     probed = {
                         probe_indices[local_i]: item for local_i, item in local.items()
@@ -412,6 +432,7 @@ def run_ocr_filtering(
                             rest=rest,
                             frame_time_ms=rest_times,
                             concurrency=workers,
+                            on_progress=on_progress,
                         )
                         rest_map = {
                             remaining_indices[local_i]: item

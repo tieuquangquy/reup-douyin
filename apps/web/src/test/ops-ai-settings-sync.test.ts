@@ -9,11 +9,18 @@ import { fileURLToPath } from "node:url";
 const testDir = dirname(fileURLToPath(import.meta.url));
 const webSrc = resolve(testDir, "..");
 
-const translationAi = readFileSync(resolve(webSrc, "components/ops-console/OpsTranslationAiPage.tsx"), "utf8");
-const captionAi = readFileSync(resolve(webSrc, "components/ops-console/OpsCaptionAiPage.tsx"), "utf8");
+const translationAiWrapper = readFileSync(resolve(webSrc, "components/ops-console/OpsTranslationAiPage.tsx"), "utf8");
+const captionAiWrapper = readFileSync(resolve(webSrc, "components/ops-console/OpsCaptionAiPage.tsx"), "utf8");
+const translationPromptWrapper = readFileSync(
+  resolve(webSrc, "components/ops-console/OpsTranslationPromptPage.tsx"),
+  "utf8"
+);
+const captionPromptWrapper = readFileSync(resolve(webSrc, "components/ops-console/OpsCaptionPromptPage.tsx"), "utf8");
+const translationAi = readFileSync(resolve(webSrc, "components/ops-console/OpsLlmAiSetupsPage.tsx"), "utf8");
+const captionAi = translationAi;
 const ttsAi = readFileSync(resolve(webSrc, "components/ops-console/OpsTtsAiPage.tsx"), "utf8");
-const translationPrompt = readFileSync(resolve(webSrc, "components/ops-console/OpsTranslationPromptPage.tsx"), "utf8");
-const captionPrompt = readFileSync(resolve(webSrc, "components/ops-console/OpsCaptionPromptPage.tsx"), "utf8");
+const translationPrompt = readFileSync(resolve(webSrc, "components/ops-console/OpsPromptSetupsPage.tsx"), "utf8");
+const captionPrompt = translationPrompt;
 const translationTabs = readFileSync(resolve(webSrc, "components/ops-console/OpsTranslationSettingsTabs.tsx"), "utf8");
 const captionTabs = readFileSync(resolve(webSrc, "components/ops-console/OpsCaptionSettingsTabs.tsx"), "utf8");
 const sharedTabs = readFileSync(resolve(webSrc, "components/ops-console/OpsAiSettingsTabs.tsx"), "utf8");
@@ -22,23 +29,41 @@ const css = readFileSync(resolve(webSrc, "app/globals.css"), "utf8");
 assert.match(sharedTabs, /export function OpsAiSettingsTabs/, "Shared OpsAiSettingsTabs must exist");
 assert.match(translationTabs, /OpsAiSettingsTabs/, "Translation tabs must reuse OpsAiSettingsTabs");
 assert.match(captionTabs, /OpsAiSettingsTabs/, "Caption tabs must reuse OpsAiSettingsTabs");
+assert.match(translationAiWrapper, /OpsLlmAiSetupsPage/, "Translation AI page must mount shared setups page");
+assert.match(captionAiWrapper, /OpsLlmAiSetupsPage/, "Caption AI page must mount shared setups page");
+assert.match(translationPromptWrapper, /OpsPromptSetupsPage/, "Translation prompt page must mount shared prompt page");
+assert.match(captionPromptWrapper, /OpsPromptSetupsPage/, "Caption prompt page must mount shared prompt page");
 
 for (const [label, source] of [
   ["Translation AI", translationAi],
   ["Caption AI", captionAi],
   ["TTS AI", ttsAi]
 ] as const) {
-  assert.match(source, /ops-ai-status|ops-tts-status/, `${label} must use shared status chip strip`);
-  assert.match(source, /ops-ai-chip|ops-tts-chip/, `${label} must use status chips`);
+  if (label === "TTS AI") {
+    assert.match(source, /ops-ai-status|ops-tts-status/, `${label} must use shared status chip strip`);
+    assert.match(source, /ops-ai-chip|ops-tts-chip/, `${label} must use status chips`);
+  } else {
+    assert.doesNotMatch(
+      source,
+      /ops-ai-status|ops-tts-status/,
+      `${label} editor must not show Env/key/provider status chip strip`
+    );
+  }
   assert.match(source, /ops-ai-section|ops-tts-section/, `${label} must use section cards`);
-  assert.match(source, /ops-header-actions/, `${label} must keep Refresh/Test/Save toolbar`);
+  assert.match(source, /ops-header-actions|ops-tts-editor-actions/, `${label} must keep Refresh/Test/Save toolbar`);
   assert.match(source, /ops-page--settings/, `${label} must use settings page shell class`);
   assert.match(source, /is-compact/, `${label} must opt into compact settings density`);
   assert.doesNotMatch(
     source,
     /savedMessage \? \([\s\S]*ops-field-alert is-success/,
-    `${label} must not duplicate Saved as a field alert when the toolbar chip already shows it`
+    `${label} must not duplicate Saved as a field alert`
   );
+  assert.doesNotMatch(
+    source,
+    /ops-connection-status is-ok[\s\S]{0,120}?(saved|profileDeleted)/,
+    `${label} must not show Saved / Setup deleted toolbar chips`
+  );
+  assert.doesNotMatch(source, /\bsavedMessage\b/, `${label} must not keep savedMessage badge state`);
 }
 
 assert.match(translationAi, /ops-ai-section/, "Translation AI must use shared ops-ai-section (not TTS-only markup)");
@@ -57,18 +82,15 @@ for (const [label, source] of [
   ["Translation AI", translationAi],
   ["Caption AI", captionAi]
 ] as const) {
-  assert.match(source, /OpsPanel[\s\S]*meta=\{/, `${label} must place status + authority in the panel heading meta slot`);
-  assert.match(source, /ops-ai-meta/, `${label} must keep status chips + authority in one meta cluster`);
-  assert.match(source, /ops-ai-toggle--flush/, `${label} must use flush authority toggle (not a section card)`);
   assert.doesNotMatch(
     source,
-    /ops-ai-toggle--flush[\s\S]*?<small>/,
-    `${label} must not show a multi-line disableHint under the authority toggle`
+    /OpsPanel[\s\S]*meta=\{[\s\S]*ops-ai-meta/,
+    `${label} must not show Env/key/provider/override meta chips in the editor heading`
   );
-  assert.match(
+  assert.doesNotMatch(
     source,
-    /ops-ai-toggle--flush[\s\S]*title=\{t\("[^"]+\.disableHint"\)\}/,
-    `${label} must keep disableHint as a title tooltip on the toggle`
+    /ops-ai-toggle--flush/,
+    `${label} must not show Workspace override toggle in the editor (list On/Off is authority)`
   );
   assert.match(
     source,
@@ -77,23 +99,16 @@ for (const [label, source] of [
   );
   assert.match(
     source,
-    /ops-ai-toolbar__refresh|aria-label=\{t\("common\.refresh"\)\}/,
-    `${label} must keep Refresh accessible in the toolbar`
+    /TopbarRefreshButton|ops-ai-toolbar__refresh|aria-label=\{t\("common\.refresh"\)\}/,
+    `${label} must keep Refresh accessible`
   );
 }
 
 assert.match(
-  readFileSync(resolve(webSrc, "components/ops-console/OpsShared.tsx"), "utf8"),
-  /meta\?: ReactNode/,
-  "OpsPanel must accept an optional meta slot under the title"
+  ttsAi,
+  /TopbarRefreshButton|ops-ai-toolbar__refresh|aria-label=\{t\("common\.refresh"\)\}/,
+  "TTS must keep Refresh accessible"
 );
-assert.match(css, /\.ops-panel-heading__lead/, "CSS must style panel heading lead column for AI masthead");
-assert.match(css, /\.ops-ai-meta/, "CSS must style left-aligned AI meta cluster (not full-width stretch)");
-assert.match(css, /\.ops-ai-toolbar/, "CSS must define the compact AI action toolbar");
-
-
-assert.match(ttsAi, /<details[\s\S]*ops-tts-steps|ops-ai-howto/, "TTS how-to steps must be collapsible");
-assert.doesNotMatch(ttsAi, /ops-tts-lede">\{t\("opsTtsAi\.readyHint"\)\}/, "TTS must not keep readyHint as a second lede");
 
 for (const [label, source] of [
   ["Translation Prompt", translationPrompt],
@@ -107,12 +122,22 @@ for (const [label, source] of [
     /ops-ai-section__head[\s\S]*panelTitle/,
     `${label} must not repeat panelTitle inside a nested section head`
   );
+  assert.doesNotMatch(source, /\bsavedMessage\b/, `${label} must not keep savedMessage badge state`);
+  assert.doesNotMatch(
+    source,
+    /sourceEmpty|sourceDb|clearHint|editorSource/,
+    `${label} must not show empty/file/env/builtin source chip or clear-hint clutter`
+  );
 }
 
 assert.match(css, /\.ops-ai-section\s*[,{]/, "CSS must define .ops-ai-section");
 assert.match(css, /\.ops-ai-chip\s*[,{]/, "CSS must define .ops-ai-chip");
 assert.match(css, /\.ops-ai-status\s*[,{]/, "CSS must define .ops-ai-status");
-assert.match(css, /\.ops-ai-section[^\n]*\.ops-tts-section|\.ops-tts-section[^\n]*\.ops-ai-section/, "Shared section styles must cover both ops-ai and ops-tts");
+assert.match(
+  css,
+  /\.ops-ai-section[^\n]*\.ops-tts-section|\.ops-tts-section[^\n]*\.ops-ai-section/,
+  "Shared section styles must cover both ops-ai and ops-tts"
+);
 assert.match(css, /\.ops-ai-page\.is-compact/, "CSS must define compact AI settings density");
 
 console.log("ops-ai-settings-sync tests passed");

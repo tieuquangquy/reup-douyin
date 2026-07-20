@@ -1,8 +1,8 @@
 from dataclasses import dataclass
 import unittest
 
-from src.enums import JobStepStatus
-from src.services.job_progress import calculate_job_progress
+from src.enums import JobStatus, JobStepStatus
+from src.services.job_progress import apply_job_progress, calculate_job_progress
 
 
 @dataclass
@@ -11,6 +11,18 @@ class FakeStep:
     step_order: int
     status: JobStepStatus
     progress_percent: int = 0
+
+
+@dataclass
+class FakeJob:
+    status: JobStatus
+    steps: list[FakeStep]
+    progress_percent: int = 0
+    total_steps: int = 0
+    completed_steps: int = 0
+    failed_steps: int = 0
+    current_step_key: str | None = None
+    current_step_index: int = 0
 
 
 class JobProgressTests(unittest.TestCase):
@@ -54,6 +66,17 @@ class JobProgressTests(unittest.TestCase):
         self.assertEqual(progress["failed_steps"], 1)
         self.assertEqual(progress["current_step_key"], "b")
         self.assertEqual(progress["progress_percent"], 50)
+
+    def test_cancelled_job_progress_is_zero_even_when_steps_skipped(self) -> None:
+        job = FakeJob(
+            status=JobStatus.CANCELLED,
+            steps=[
+                FakeStep("a", 0, JobStepStatus.SKIPPED, 100),
+                FakeStep("b", 1, JobStepStatus.SKIPPED, 100),
+            ],
+        )
+        apply_job_progress(job)
+        self.assertEqual(job.progress_percent, 0)
 
 
 if __name__ == "__main__":

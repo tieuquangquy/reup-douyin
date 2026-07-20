@@ -15,14 +15,16 @@ const cssSource = readFileSync(resolve(testDir, "../app/globals.css"), "utf8");
 assert.doesNotMatch(headerSource, /<h1>/, "Header must not duplicate Operator shell title with h1");
 assert.match(headerSource, /transcript-header--command/, "Header must use command-bar layout");
 assert.match(headerSource, /editor-command__core/, "Save + Translate must form the core action pair");
-assert.match(headerSource, /editor-command__translate/, "Translate must remain a mode dropdown");
+assert.match(headerSource, /editor-command__translate/, "Translate must remain a core action");
 assert.match(headerSource, /editor-command__tts/, "Generate TTS must sit in the command core");
 assert.match(headerSource, /generateTtsConfirm/, "Generate TTS must confirm before enqueue");
 assert.match(headerSource, /onGenerateTts/, "Header must wire Generate TTS handler");
 assert.match(headerSource, /editor-command__rail/, "Secondary actions must live in one muted rail");
 assert.match(headerSource, /editor-command__discard/, "Discard must be demoted visually");
-assert.match(headerSource, /translateLiteralShort/, "Translate menu must offer Literal");
-assert.match(headerSource, /translateNaturalShort/, "Translate menu must offer Natural");
+assert.match(headerSource, /editor-command__icon/, "Command actions must show icon + text");
+assert.match(headerSource, /literal_safe/, "Single Translate button must enqueue literal_safe");
+assert.doesNotMatch(headerSource, /<details[\s\S]*editor-command__translate|editor-command__menu/, "Translate must not be a dropdown menu");
+assert.doesNotMatch(headerSource, /natural_viral|translateNaturalShort|translateLiteralShort/, "Literal/Natural translate options must be removed");
 assert.doesNotMatch(headerSource, /editor-toolbar__btn--save/, "Legacy multi-color button stack must be gone");
 
 assert.match(pageSource, /transcript-bench/, "Page must use Dialogue Bench workspace");
@@ -74,6 +76,12 @@ assert.match(
   "Job id / analysis / authority chips must live inside Run details"
 );
 assert.match(focusSource, /segment-ops__btn--play/, "Play remains the primary segment op");
+assert.match(focusSource, /segment-ops__icon/, "Segment ops must use icon + text");
+assert.match(
+  focusSource,
+  /segment-ops__btn--play[\s\S]*SegmentOpsIcon[\s\S]*play[\s\S]*segment-ops__btn[\s\S]*SegmentOpsIcon[\s\S]*split/,
+  "Play and Split must both render icon + text"
+);
 assert.match(cssSource, /\.transcript-focus-chrome\s*\{/, "CSS must style quiet focus chrome");
 assert.match(cssSource, /\.transcript-focus-chrome__toolbar\s*\{/, "CSS must style timing/ops toolbar strip");
 assert.match(cssSource, /\.timing-editor--compact/, "CSS must define compact timing editor");
@@ -89,12 +97,27 @@ assert.doesNotMatch(
   "Pipeline must not nest a second details toggle inside Machine details"
 );
 assert.match(focusSource, /compare-machine-details/, "Focus editor keeps Machine details disclosure");
+assert.match(focusSource, /compare-machine-details__title/, "Machine details summary must expose title");
+assert.match(focusSource, /compare-machine-details__hint/, "Machine details summary must expose hint");
+assert.match(cssSource, /\.compare-machine-details/, "CSS must style Machine details disclosure");
+assert.match(
+  cssSource,
+  /\.compare-machine-details\s*>\s*summary\s*\{[^}]*display:\s*flex;[^}]*gap:/,
+  "Machine details summary must flex title+hint with gap (no smashed text)"
+);
+assert.match(cssSource, /\.compare-machine-details__title/, "CSS must style Machine details title");
+assert.match(cssSource, /\.compare-machine-details__hint/, "CSS must style Machine details hint");
 assert.match(cssSource, /\.segment-flags--machine/, "CSS must style machine flag panel");
 assert.match(cssSource, /\.segment-flags__group/, "CSS must style machine flag groups");
 assert.match(
   cssSource,
   /\.segment-flags--machine\s*\{[^}]*align-items:\s*(?:stretch|flex-start);/,
   "Machine flag panel must left-align (not center children)"
+);
+assert.match(
+  cssSource,
+  /\.segment-flags--machine\s*\{[^}]*gap:\s*[1-4]px;/,
+  "Machine flag panel must stay vertically compact"
 );
 assert.match(
   cssSource,

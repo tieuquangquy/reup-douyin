@@ -24,6 +24,23 @@ const JOBS_PAGE_SIZE_DEFAULT = 50;
 
 type StatusFilter = "all" | "stale" | JobStatus;
 
+function parseStatusFilter(raw: string): StatusFilter | null {
+  const value = raw.trim();
+  if (!value) return null;
+  if (value.toLowerCase() === "stale") return "stale";
+  const upper = value.toUpperCase();
+  const allowed: JobStatus[] = [
+    "QUEUED",
+    "RUNNING",
+    "WAITING_FOR_REVIEW",
+    "RETRYABLE",
+    "FAILED",
+    "CANCELLED",
+    "COMPLETED",
+  ];
+  return allowed.includes(upper as JobStatus) ? (upper as JobStatus) : null;
+}
+
 function formatJobTypeLabel(jobType: string): string {
   return jobType
     .split(/[_-]+/)
@@ -32,17 +49,92 @@ function formatJobTypeLabel(jobType: string): string {
     .join(" ");
 }
 
-function formatRelativeStamp(value: string): string {
+function formatTableDateTime(value: string | null | undefined): string {
+  if (!value) return "—";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
-  const seconds = Math.max(0, Math.floor((Date.now() - date.getTime()) / 1000));
-  if (seconds < 60) return `${seconds}s ago`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes} min${minutes === 1 ? "" : "s"} ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 48) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
-  const days = Math.floor(hours / 24);
-  return `${days} day${days === 1 ? "" : "s"} ago`;
+  const dd = String(date.getDate()).padStart(2, "0");
+  const mm = String(date.getMonth() + 1).padStart(2, "0");
+  const yy = String(date.getFullYear()).slice(-2);
+  const hh = String(date.getHours()).padStart(2, "0");
+  const min = String(date.getMinutes()).padStart(2, "0");
+  return `${dd}/${mm}/${yy} ${hh}:${min}`;
+}
+
+/** Compact duration from finished_at − started_at; "—" when either side is missing. */
+function formatJobDuration(startedAt: string | null | undefined, finishedAt: string | null | undefined): string {
+  if (!startedAt || !finishedAt) return "—";
+  const startMs = new Date(startedAt).getTime();
+  const endMs = new Date(finishedAt).getTime();
+  if (Number.isNaN(startMs) || Number.isNaN(endMs) || endMs < startMs) return "—";
+  const totalSeconds = Math.floor((endMs - startMs) / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  if (minutes > 0) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
+}
+
+type JobActionIconKind = "retry" | "delete";
+
+function JobActionIcon({ kind }: { kind: JobActionIconKind }) {
+  if (kind === "retry") {
+    return (
+      <svg className="ops-jobs-table__icon" viewBox="0 0 24 24" aria-hidden="true">
+        <path
+          d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.8"
+          strokeLinecap="round"
+        />
+        <path
+          d="M19.5 5v5h-5"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.8"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+    );
+  }
+  return (
+    <svg className="ops-jobs-table__icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path
+        d="M5 7h14M9 7V5.8A1.8 1.8 0 0 1 10.8 4h2.4A1.8 1.8 0 0 1 15 5.8V7m-7.5 0 0.7 11.2A1.8 1.8 0 0 0 10 20h4a1.8 1.8 0 0 0 1.8-1.8L16.5 7"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function formatStatusLabel(status: string): string {
+  return status
+    .split(/[_-]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0) + part.slice(1).toLowerCase())
+    .join(" ");
+}
+
+function jobStatusChipClass(status: string, tone: OpsTone): string {
+  const key = status.toLowerCase().replace(/_/g, "-");
+  const classes = ["ops-jobs-table__status", `is-${key}`];
+  if (tone === "warn" && status === "COMPLETED") classes.push("is-warn");
+  return classes.join(" ");
+}
+
+function jobTypePillTone(jobType: string): "mint" | "slate" | "amber" | "sky" | "rose" {
+  let hash = 0;
+  for (let i = 0; i < jobType.length; i += 1) {
+    hash = (hash + jobType.charCodeAt(i) * (i + 1)) % 5;
+  }
+  return (["mint", "slate", "amber", "sky", "rose"] as const)[hash];
 }
 
 function isStaleRunning(job: Job): boolean {
@@ -88,7 +180,9 @@ function videoSourceLabel(job: Job): { label: string; href: string | null } {
   return { label: "—", href: null };
 }
 
-function KpiIcon({ kind }: { kind: "running" | "failed" | "retryable" | "stale" }) {
+type KpiKind = "running" | "failed" | "retryable" | "stale" | "backlog" | "retries";
+
+function KpiIcon({ kind }: { kind: KpiKind }) {
   if (kind === "running") {
     return (
       <svg className="ops-jobs-kpi__icon" viewBox="0 0 24 24" aria-hidden="true">
@@ -128,6 +222,27 @@ function KpiIcon({ kind }: { kind: "running" | "failed" | "retryable" | "stale" 
       </svg>
     );
   }
+  if (kind === "backlog") {
+    return (
+      <svg className="ops-jobs-kpi__icon" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M4 7h16M4 12h16M4 17h10" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+      </svg>
+    );
+  }
+  if (kind === "retries") {
+    return (
+      <svg className="ops-jobs-kpi__icon" viewBox="0 0 24 24" aria-hidden="true">
+        <path
+          d="M7 8h7a4 4 0 0 1 0 8H9"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.8"
+          strokeLinecap="round"
+        />
+        <path d="M10 5 7 8l3 3" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    );
+  }
   return (
     <svg className="ops-jobs-kpi__icon" viewBox="0 0 24 24" aria-hidden="true">
       <circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" strokeWidth="1.8" />
@@ -141,35 +256,55 @@ function KpiTile({
   label,
   value,
   detail,
+  sharePercent,
+  trend = "up",
   tone = "muted",
   active = false,
   onClick,
 }: {
-  kind: "running" | "failed" | "retryable" | "stale";
+  kind: KpiKind;
   label: string;
   value: string;
   detail: string;
+  sharePercent: number;
+  trend?: "up" | "down" | "flat";
   tone?: OpsTone | "info";
   active?: boolean;
   onClick?: () => void;
 }) {
+  const pct = Math.max(0, Math.min(100, Math.round(sharePercent)));
+  const className = `ops-jobs-kpi is-hotel tone-${tone}${active ? " is-active" : ""}${onClick ? "" : " is-static"}`;
+  const body = (
+    <>
+      <span className="ops-jobs-kpi__top">
+        <em className="ops-jobs-kpi__label">{label}</em>
+        <span className="ops-jobs-kpi__glyph">
+          <KpiIcon kind={kind} />
+        </span>
+      </span>
+      <strong className="ops-jobs-kpi__value">{value}</strong>
+      <span className="ops-jobs-kpi__foot">
+        <span className={`ops-jobs-kpi__trend is-${trend}${active ? " is-on-mint" : ""}`}>
+          <i aria-hidden="true" />
+          {pct}%
+        </span>
+        <span className="ops-jobs-kpi__hint">{detail}</span>
+      </span>
+    </>
+  );
+
+  if (onClick) {
+    return (
+      <button type="button" className={className} title={detail} aria-pressed={active} onClick={onClick}>
+        {body}
+      </button>
+    );
+  }
+
   return (
-    <button
-      type="button"
-      className={`ops-jobs-kpi tone-${tone}${active ? " is-active" : ""}`}
-      title={detail}
-      aria-pressed={active}
-      onClick={onClick}
-    >
-      <span className="ops-jobs-kpi__glyph">
-        <KpiIcon kind={kind} />
-      </span>
-      <span className="ops-jobs-kpi__body">
-        <em>{label}</em>
-        <strong>{value}</strong>
-        <small>{detail}</small>
-      </span>
-    </button>
+    <div className={className} title={detail}>
+      {body}
+    </div>
   );
 }
 
@@ -177,6 +312,7 @@ export function OpsJobsPage() {
   const t = useT();
   const searchParams = useSearchParams();
   const focusJobId = (searchParams.get("job_id") ?? "").trim() || null;
+  const statusFromUrl = parseStatusFilter(searchParams.get("status") ?? "");
   const [pageSize, setPageSize] = useState(() =>
     readOperatorListPageSize(OPS_JOBS_PAGE_SIZE_STORAGE_KEY, OPERATOR_LIST_PAGE_SIZE_PRESETS, JOBS_PAGE_SIZE_DEFAULT)
   );
@@ -188,7 +324,7 @@ export function OpsJobsPage() {
   const [error, setError] = useState<string | null>(null);
   const [deletingJobId, setDeletingJobId] = useState<string | null>(null);
   const [retryingJobId, setRetryingJobId] = useState<string | null>(null);
-  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>(() => statusFromUrl ?? "all");
   const [jobTypeFilter, setJobTypeFilter] = useState("all");
   const [searchQuery, setSearchQuery] = useState("");
   const [copiedJobId, setCopiedJobId] = useState<string | null>(null);
@@ -246,6 +382,11 @@ export function OpsJobsPage() {
   useEffect(() => {
     void load();
   }, [t]);
+
+  useEffect(() => {
+    if (!statusFromUrl) return;
+    setStatusFilter(statusFromUrl);
+  }, [statusFromUrl]);
 
   useEffect(() => {
     if (!focusJobId || loading) return;
@@ -355,12 +496,14 @@ export function OpsJobsPage() {
       <main className="ops-page ops-jobs-monitor is-compact">
         {error ? <div className="inline-error">{error}</div> : null}
 
-        <section className="ops-jobs-kpis" role="group" aria-label={t("opsJobs.filterByStatus")}>
+        <section className="ops-jobs-kpis is-hotel" role="group" aria-label={t("opsJobs.filterByStatus")}>
           <KpiTile
             kind="running"
             label={t("opsJobs.running")}
             value={String(running.length)}
-            detail={t("opsJobs.jobsActive")}
+            detail={t("opsJobs.ofLoaded")}
+            sharePercent={jobs.length > 0 ? (running.length / jobs.length) * 100 : 0}
+            trend="up"
             tone={running.length > 0 ? "info" : "muted"}
             active={statusFilter === "RUNNING"}
             onClick={() => toggleStatusFilter("RUNNING")}
@@ -369,7 +512,9 @@ export function OpsJobsPage() {
             kind="failed"
             label={t("opsJobs.failed")}
             value={String(failed.length)}
-            detail={t("opsJobs.jobErrors")}
+            detail={t("opsJobs.ofLoaded")}
+            sharePercent={jobs.length > 0 ? (failed.length / jobs.length) * 100 : 0}
+            trend="down"
             tone={failed.length > 0 ? "danger" : "muted"}
             active={statusFilter === "FAILED"}
             onClick={() => toggleStatusFilter("FAILED")}
@@ -378,7 +523,9 @@ export function OpsJobsPage() {
             kind="retryable"
             label={t("opsJobs.retryable")}
             value={String(retryable.length)}
-            detail={t("opsJobs.jobsToRetry")}
+            detail={t("opsJobs.ofLoaded")}
+            sharePercent={jobs.length > 0 ? (retryable.length / jobs.length) * 100 : 0}
+            trend="up"
             tone={retryable.length > 0 ? "warn" : "muted"}
             active={statusFilter === "RETRYABLE"}
             onClick={() => toggleStatusFilter("RETRYABLE")}
@@ -387,10 +534,30 @@ export function OpsJobsPage() {
             kind="stale"
             label={t("opsJobs.staleShort")}
             value={String(staleRunning.length)}
-            detail={t("opsJobs.idleJobs")}
+            detail={t("opsJobs.ofLoaded")}
+            sharePercent={jobs.length > 0 ? (staleRunning.length / jobs.length) * 100 : 0}
+            trend="flat"
             tone="muted"
             active={statusFilter === "stale"}
             onClick={() => toggleStatusFilter("stale")}
+          />
+          <KpiTile
+            kind="backlog"
+            label={t("opsJobs.backlog")}
+            value={String(backlog)}
+            detail={t("opsJobs.queuedJobs")}
+            sharePercent={totalCount > 0 ? Math.min(100, (backlog / totalCount) * 100) : 0}
+            trend={backlog > 0 ? "down" : "flat"}
+            tone={backlog > 0 ? "warn" : "muted"}
+          />
+          <KpiTile
+            kind="retries"
+            label={t("opsJobs.retriesShort")}
+            value={String(retries)}
+            detail={t("opsJobs.allTimeAttempts")}
+            sharePercent={jobs.length > 0 ? Math.min(100, (retries / Math.max(jobs.length, 1)) * 100) : 0}
+            trend={retries > 0 ? "up" : "flat"}
+            tone={retries > 0 ? "info" : "muted"}
           />
         </section>
 
@@ -433,22 +600,6 @@ export function OpsJobsPage() {
             </select>
           </label>
 
-          <p className="ops-jobs-controls__showing">
-            {t("opsJobs.showingOf")
-              .replace("{shown}", String(shownCount))
-              .replace("{total}", String(totalCount))}
-          </p>
-
-          <div className="ops-jobs-controls__pill" title={`${t("opsJobs.queuedJobs")} · ${t("opsJobs.allTimeAttempts")}`}>
-            <span>
-              {t("opsJobs.backlog")}: {backlog}
-            </span>
-            <span aria-hidden="true">|</span>
-            <span>
-              {t("opsJobs.retriesShort")}: {retries}
-            </span>
-          </div>
-
           <button type="button" className="ops-jobs-controls__view-all" onClick={clearFilters} disabled={!filterActive}>
             {t("opsJobs.viewAll")}
           </button>
@@ -486,158 +637,153 @@ export function OpsJobsPage() {
         ) : visibleJobs.length === 0 ? (
           <p className="ops-jobs-empty">{t("opsJobs.noFilterMatches")}</p>
         ) : (
-          <div className="ops-jobs-table-wrap">
-            <table className="ops-jobs-table">
-              <thead>
-                <tr>
-                  <th>{t("opsJobs.job")}</th>
-                  <th>{t("opsJobs.videoSource")}</th>
-                  <th>{t("opsJobs.status")}</th>
-                  <th>{t("opsJobs.progress")}</th>
-                  <th>{t("opsJobs.updated")}</th>
-                  <th>{t("opsJobs.actions")}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {visibleJobs.map((job) => {
-                  const tone =
-                    job.status === "COMPLETED" && job.error_message ? "warn" : statusTone(job.status);
-                  const source = videoSourceLabel(job);
-                  const progress = Math.max(0, Math.min(100, Number(job.progress_percent) || 0));
-                  const showProgress = !(job.status === "COMPLETED" && progress >= 100);
-                  const canRetry = job.status === "FAILED" || job.status === "RETRYABLE";
-                  const deleting = deletingJobId === job.id;
-                  const retrying = retryingJobId === job.id;
-                  return (
-                    <tr
-                      className={`tone-${tone}${job.id === focusJobId ? " is-focused" : ""}`}
-                      id={`ops-job-row-${job.id}`}
-                      key={job.id}
-                    >
-                      <td>
-                        <div className="ops-jobs-table__job is-inline">
-                          <strong title={job.job_type}>{formatJobTypeLabel(job.job_type)}</strong>
-                          <code title={job.id}>{job.id.slice(0, 8)}</code>
-                          <button
-                            type="button"
-                            className="ops-jobs-table__copy"
-                            aria-label={t("opsJobs.copyId")}
-                            title={copiedJobId === job.id ? t("opsJobs.copied") : t("opsJobs.copyId")}
-                            onClick={() => void handleCopyId(job.id)}
-                          >
-                            {copiedJobId === job.id ? "✓" : "⧉"}
-                          </button>
-                        </div>
-                      </td>
-                      <td>
-                        {source.href ? (
-                          <Link className="ops-jobs-table__source" href={source.href}>
-                            {source.label}
-                          </Link>
-                        ) : (
-                          <span className={`ops-jobs-table__source${source.label === "—" ? " is-empty" : ""}`}>
-                            {source.label}
+          <section className="ops-jobs-sheet">
+            <div className="ops-jobs-sheet__bar">
+              <p className="ops-jobs-sheet__meta">
+                {t("opsJobs.showingOf")
+                  .replace("{shown}", String(shownCount))
+                  .replace("{total}", String(totalCount))}
+              </p>
+            </div>
+            <div className="ops-jobs-table-wrap is-sheet">
+              <table className="ops-jobs-table is-sheet">
+                <thead>
+                  <tr>
+                    <th>{t("opsJobs.jobId")}</th>
+                    <th>{t("opsJobs.videoSource")}</th>
+                    <th>{t("opsJobs.type")}</th>
+                    <th>{t("opsJobs.progress")}</th>
+                    <th>{t("opsJobs.startedAt")}</th>
+                    <th>{t("opsJobs.finishedAt")}</th>
+                    <th>{t("opsJobs.duration")}</th>
+                    <th>{t("opsJobs.status")}</th>
+                    <th>{t("opsJobs.actions")}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {visibleJobs.map((job) => {
+                    const tone =
+                      job.status === "COMPLETED" && job.error_message ? "warn" : statusTone(job.status);
+                    const typeTone = jobTypePillTone(job.job_type);
+                    const source = videoSourceLabel(job);
+                    const progress = Math.max(
+                      0,
+                      Math.min(
+                        100,
+                        job.status === "COMPLETED"
+                          ? 100
+                          : job.status === "CANCELLED"
+                            ? 0
+                            : Number(job.progress_percent) || 0
+                      )
+                    );
+                    const canRetry = job.status === "FAILED" || job.status === "RETRYABLE";
+                    const deleting = deletingJobId === job.id;
+                    const retrying = retryingJobId === job.id;
+                    return (
+                      <tr
+                        className={`tone-${tone}${job.id === focusJobId ? " is-focused" : ""}`}
+                        id={`ops-job-row-${job.id}`}
+                        key={job.id}
+                      >
+                        <td>
+                          <div className="ops-jobs-table__id">
+                            <strong title={job.id}>#{job.id.slice(0, 8)}</strong>
+                            <button
+                              type="button"
+                              className="ops-jobs-table__copy"
+                              aria-label={t("opsJobs.copyId")}
+                              title={copiedJobId === job.id ? t("opsJobs.copied") : t("opsJobs.copyId")}
+                              onClick={() => void handleCopyId(job.id)}
+                            >
+                              {copiedJobId === job.id ? "✓" : "⧉"}
+                            </button>
+                          </div>
+                        </td>
+                        <td>
+                          {source.href ? (
+                            <Link className="ops-jobs-table__source" href={source.href}>
+                              {source.label}
+                            </Link>
+                          ) : (
+                            <span className={`ops-jobs-table__source${source.label === "—" ? " is-empty" : ""}`}>
+                              {source.label}
+                            </span>
+                          )}
+                        </td>
+                        <td>
+                          <span className={`ops-jobs-table__type tone-${typeTone}`} title={job.job_type}>
+                            {formatJobTypeLabel(job.job_type)}
                           </span>
-                        )}
-                      </td>
-                      <td>
-                        <span className={`ops-jobs-table__badge tone-${tone}`}>{job.status}</span>
-                      </td>
-                      <td>
-                        {showProgress ? (
+                        </td>
+                        <td>
                           <div className="ops-jobs-table__progress" aria-label={`${progress}%`}>
                             <div className="ops-jobs-table__bar">
                               <span style={{ width: `${progress}%` }} />
                             </div>
                             <em>{progress}%</em>
                           </div>
-                        ) : (
-                          <span className="ops-jobs-table__done">{t("opsJobs.doneShort")}</span>
-                        )}
-                      </td>
-                      <td>
-                        <time dateTime={job.updated_at} title={job.updated_at}>
-                          {formatRelativeStamp(job.updated_at)}
-                        </time>
-                      </td>
-                      <td>
-                        <div className="ops-jobs-table__actions">
-                          {job.source_video_id ? (
-                            <Link
-                              className="ops-jobs-table__view"
-                              href={`/source-videos/${job.source_video_id}`}
-                              aria-label={t("opsJobs.viewJob")}
-                              title={t("opsJobs.viewJob")}
-                            >
-                              <svg viewBox="0 0 24 24" aria-hidden="true">
-                                <path
-                                  d="M2.5 12s3.5-6.5 9.5-6.5S21.5 12 21.5 12s-3.5 6.5-9.5 6.5S2.5 12 2.5 12Z"
-                                  fill="none"
-                                  stroke="currentColor"
-                                  strokeWidth="1.7"
-                                />
-                                <circle cx="12" cy="12" r="2.5" fill="none" stroke="currentColor" strokeWidth="1.7" />
-                              </svg>
-                            </Link>
+                        </td>
+                        <td>
+                          {job.started_at ? (
+                            <time dateTime={job.started_at} title={job.started_at}>
+                              {formatTableDateTime(job.started_at)}
+                            </time>
                           ) : (
-                            <span className="ops-jobs-table__view is-disabled" aria-hidden="true">
-                              <svg viewBox="0 0 24 24">
-                                <path
-                                  d="M2.5 12s3.5-6.5 9.5-6.5S21.5 12 21.5 12s-3.5 6.5-9.5 6.5S2.5 12 2.5 12Z"
-                                  fill="none"
-                                  stroke="currentColor"
-                                  strokeWidth="1.7"
-                                />
-                                <circle cx="12" cy="12" r="2.5" fill="none" stroke="currentColor" strokeWidth="1.7" />
-                              </svg>
-                            </span>
+                            <span className="ops-jobs-table__empty">—</span>
                           )}
-                          <button
-                            type="button"
-                            className="ops-jobs-table__retry"
-                            disabled={!canRetry || retrying}
-                            aria-label={t("opsJobs.retry")}
-                            title={t("opsJobs.retry")}
-                            onClick={() => void handleRetry(job)}
-                          >
-                            {retrying ? "…" : (
-                              <svg viewBox="0 0 24 24" aria-hidden="true">
-                                <path
-                                  d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"
-                                  fill="none"
-                                  stroke="currentColor"
-                                  strokeWidth="1.7"
-                                  strokeLinecap="round"
-                                />
-                                <path
-                                  d="M19.5 5v5h-5"
-                                  fill="none"
-                                  stroke="currentColor"
-                                  strokeWidth="1.7"
-                                  strokeLinecap="round"
-                                  strokeLinejoin="round"
-                                />
-                              </svg>
-                            )}
-                          </button>
-                          <button
-                            className="ops-jobs-delete"
-                            type="button"
-                            disabled={deleting}
-                            aria-label={t("common.delete")}
-                            title={t("common.delete")}
-                            onClick={() => void handleDelete(job)}
-                          >
-                            {deleting ? "…" : "×"}
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+                        </td>
+                        <td>
+                          {job.finished_at ? (
+                            <time dateTime={job.finished_at} title={job.finished_at}>
+                              {formatTableDateTime(job.finished_at)}
+                            </time>
+                          ) : (
+                            <span className="ops-jobs-table__empty">—</span>
+                          )}
+                        </td>
+                        <td>
+                          <span className="ops-jobs-table__duration" title={t("opsJobs.duration")}>
+                            {formatJobDuration(job.started_at, job.finished_at)}
+                          </span>
+                        </td>
+                        <td className="ops-jobs-table__status-cell">
+                          <span className={jobStatusChipClass(job.status, tone)}>
+                            <i className="ops-jobs-table__status-dot" aria-hidden="true" />
+                            {formatStatusLabel(job.status)}
+                          </span>
+                        </td>
+                        <td>
+                          <div className="ops-jobs-table__actions">
+                            <button
+                              type="button"
+                              className="ops-jobs-table__retry is-icon"
+                              disabled={!canRetry || retrying}
+                              aria-label={t("opsJobs.retry")}
+                              title={t("opsJobs.retry")}
+                              onClick={() => void handleRetry(job)}
+                            >
+                              {retrying ? "…" : <JobActionIcon kind="retry" />}
+                            </button>
+                            <button
+                              className="ops-jobs-delete is-icon"
+                              type="button"
+                              disabled={deleting}
+                              aria-label={t("common.delete")}
+                              title={t("common.delete")}
+                              onClick={() => void handleDelete(job)}
+                            >
+                              {deleting ? "…" : <JobActionIcon kind="delete" />}
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </section>
         )}
 
         {(hasMore || totalCount > 0) && jobs.length > 0 ? (
@@ -651,6 +797,7 @@ export function OpsJobsPage() {
             pageSize={pageSize}
             pageSizeOptions={OPERATOR_LIST_PAGE_SIZE_PRESETS}
             totalCount={totalCount}
+            variant="inline"
           />
         ) : null}
       </main>

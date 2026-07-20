@@ -1,7 +1,7 @@
 "use client";
 
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { useT } from "../../lib/i18n";
 import { applyCandidatePreset, bulkUpdateCandidateStatus, deleteCandidate, enqueueReupCandidates, fetchCandidateDetail, fetchCandidates } from "../../lib/api";
 import { TopbarRefreshButton } from "../app-shell/TopbarRefreshButton";
@@ -27,6 +27,11 @@ import { ReviewBoardTileActions } from "./ReviewBoardTileActions";
 import { OperatorStudioShell } from "../app-shell/OperatorStudioShell";
 import { OpsConsolePage, OpsDetailPanel, OpsDetailSection, OpsMetadataList, OpsStatePanel, statusTone } from "../ops-console/OpsShared";
 import { OffsetLoadMoreFooter } from "../shared/OffsetLoadMoreFooter";
+import { WorkItemDetailsDrawer } from "../shared/WorkItemDetailsDrawer";
+import { WorkMediaTileOverlay } from "../shared/WorkMediaTileOverlay";
+import { useOffsetLoadMoreOnScroll } from "../shared/useOffsetLoadMoreOnScroll";
+import { getOperatorTileScoreBadge } from "../../lib/operatorTileScore";
+import { hasMoreOffsetItems, resolveOffsetPageMerge } from "../../lib/offsetListPagination";
 
 type ReviewFilterKey = "" | CandidateStatus;
 type ReviewBulkAction = "reject" | "remove";
@@ -117,32 +122,46 @@ export function ReviewBoardPage() {
     }
   }, [appliedFilters, t]);
 
-  const hasMoreCandidates = candidates.length < totalCount;
+  const hasMoreCandidates = hasMoreOffsetItems(candidates.length, totalCount);
+  const candidatesRef = useRef(candidates);
+  const loadMoreInFlightRef = useRef(false);
+  candidatesRef.current = candidates;
 
   const loadMoreCandidates = useCallback(async () => {
-    if (loadingMore || loading || refreshing || !hasMoreCandidates) return;
+    const currentCandidates = candidatesRef.current;
+    if (loadMoreInFlightRef.current || loadingMore || loading || !hasMoreOffsetItems(currentCandidates.length, totalCount)) return;
+    loadMoreInFlightRef.current = true;
     setLoadingMore(true);
     setError(null);
     try {
       const { candidates: nextPage, totalCount: nextTotalCount } = await fetchCandidates(appliedFilters, {
         limit: CANDIDATE_PAGE_SIZE,
-        offset: candidates.length
+        offset: currentCandidates.length
       });
-      setTotalCount(nextTotalCount);
-      setCandidates((current) => {
-        const seen = new Set(current.map((candidate) => candidate.id));
-        const merged = [...current];
-        for (const candidate of nextPage) {
-          if (!seen.has(candidate.id)) merged.push(candidate);
-        }
-        return merged;
-      });
+      const { merged, totalCount: resolvedTotalCount } = resolveOffsetPageMerge(
+        currentCandidates,
+        nextPage,
+        nextTotalCount
+      );
+      setCandidates(merged);
+      setTotalCount(resolvedTotalCount);
     } catch (err) {
       setError(err instanceof Error ? err.message : t("reviewBoardPage.loadError"));
     } finally {
+      loadMoreInFlightRef.current = false;
       setLoadingMore(false);
     }
-  }, [appliedFilters, candidates.length, hasMoreCandidates, loading, loadingMore, refreshing, t]);
+  }, [appliedFilters, loading, loadingMore, t, totalCount]);
+
+  const loadMoreRef = useRef<HTMLDivElement | null>(null);
+  useOffsetLoadMoreOnScroll({
+    sentinelRef: loadMoreRef,
+    hasMore: hasMoreCandidates,
+    loading: loadingMore,
+    disabled: mutating || loading,
+    loadedCount: candidates.length,
+    onLoadMore: loadMoreCandidates,
+  });
 
   useEffect(() => {
     void loadData();
@@ -623,31 +642,32 @@ export function ReviewBoardPage() {
                 </div>
                 {hasMoreCandidates || totalCount > 0 ? (
                   <OffsetLoadMoreFooter
+                    ref={loadMoreRef}
+                    autoLoad
                     disabled={mutating}
                     loadedCount={candidates.length}
                     loadingMore={loadingMore}
                     noun="candidates"
-                    onLoadMore={() => void loadMoreCandidates()}
+                    onLoadMore={loadMoreCandidates}
                     pageSize={CANDIDATE_PAGE_SIZE}
                     totalCount={totalCount}
+                    variant="studio"
                   />
                 ) : null}
               </section>
             ) : null}
           </main>
-          <aside className="capture-inbox-review-side" aria-label="Right-side sticky inspector">
-            <ReviewRightInspector
-              candidate={activeCandidate}
-              mutating={mutating}
-              onApprove={(candidate) => void updateCandidateStatuses([candidate.id], "APPROVED")}
-              onClose={closeInspector}
-              onLater={(candidate) => void updateCandidateStatuses([candidate.id], "IN_REVIEW")}
-              onReject={(candidate) => void updateCandidateStatuses([candidate.id], "REJECTED")}
-              onSendToQueue={(candidate) => void sendCandidatesToReupQueue([candidate.id])}
-              open={rightInspectorOpen && Boolean(activeCandidate)}
-            />
-          </aside>
         </div>
+        <ReviewRightInspector
+          candidate={activeCandidate}
+          mutating={mutating}
+          onApprove={(candidate) => void updateCandidateStatuses([candidate.id], "APPROVED")}
+          onClose={closeInspector}
+          onLater={(candidate) => void updateCandidateStatuses([candidate.id], "IN_REVIEW")}
+          onReject={(candidate) => void updateCandidateStatuses([candidate.id], "REJECTED")}
+          onSendToQueue={(candidate) => void sendCandidatesToReupQueue([candidate.id])}
+          open={rightInspectorOpen && Boolean(activeCandidate)}
+        />
         <ReviewBulkDialog
           action={bulkDialog}
           count={bulkSelectedIds.length}
@@ -935,11 +955,7 @@ function CandidateMediaTile({
 }) {
   const metadata = getReviewCandidateMetadata(candidate);
   const title = candidateTitle(candidate);
-  const score = reviewCandidateDisplayScore(candidate);
-  const scoreLevel = reupScoreBadgeLevelForCaptureItem(
-    score,
-    getDouyinMetadataCompletenessForItem(buildCapturedItemFromReviewCandidate(candidate))
-  );
+  const scoreBadge = getOperatorTileScoreBadge(buildCapturedItemFromReviewCandidate(candidate));
   const thumbnailUrl = metadata.thumbnailUrl;
   const approvedForQueue = isApprovedForReupQueue(candidate);
   const inReupQueue = isCandidateInReupQueue(candidate);
@@ -949,23 +965,20 @@ function CandidateMediaTile({
         <button className="capture-inbox-media-thumbnail" onClick={onDetails} type="button">
           {thumbnailUrl ? <img alt={`Thumbnail for ${title}`} src={thumbnailUrl} /> : <span className="capture-inbox-thumbnail-placeholder"><strong>No thumbnail</strong></span>}
         </button>
-        <div className="capture-inbox-media-overlay top" aria-label="Tile overlay controls">
-          <div className="capture-inbox-media-overlay-scrim review-board-tile-overlay-scrim" aria-hidden="true" />
-          <div className="capture-inbox-overlay-left-group review-board-tile-overlay-meta">
-            {showSelect ? (
-              <label className={`review-board-tile-select-toggle ${selected ? "is-selected" : ""}`} title={selected ? "Deselect for bulk actions" : "Select for bulk actions"}>
-                <input aria-label={selected ? "Deselect candidate" : "Select candidate"} checked={selected} onChange={onToggleSelect} type="checkbox" />
-                <span aria-hidden="true" className="review-board-tile-select-visual" />
-              </label>
-            ) : null}
-            <span className={`review-board-tile-status-chip is-${reviewBoardStatusTone(candidate.status)}`}>{candidateStatusLabel(candidate.status)}</span>
-            {inReupQueue ? <span className="review-board-tile-status-chip is-good review-board-tile-queue-chip">In queue</span> : null}
-          </div>
-          <div className="capture-inbox-overlay-right-group">
+        <WorkMediaTileOverlay
+          onToggleSelect={onToggleSelect}
+          rightSlot={(
             <button aria-label={starred ? "Unstar finalist" : "Star finalist"} aria-pressed={starred} className={`review-board-tile-star ${starred ? "active" : ""}`} onClick={onToggleStar} type="button">★</button>
-            <span className={`capture-inbox-reup-score-badge is-${scoreLevel} ${score == null ? "missing" : "ready"}`}><strong>{formatReupScoreBadgeValue(score)}</strong><small>{reupScoreBadgeTier(score)}</small></span>
-          </div>
-        </div>
+          )}
+          scoreBadge={scoreBadge}
+          selectAriaLabel={selected ? "Deselect candidate" : "Select candidate"}
+          selectTitle={selected ? "Deselect for bulk actions" : "Select for bulk actions"}
+          selectable={showSelect}
+          selected={selected}
+          statusChips={[
+            { label: candidateStatusLabel(candidate.status), tone: reviewBoardStatusTone(candidate.status) },
+          ]}
+        />
       </div>
       <div className="capture-inbox-tile-main capture-inbox-compact-main">
         <button className="link-button capture-inbox-tile-title" onClick={onDetails} title={title} type="button">{title}</button>
@@ -1013,14 +1026,30 @@ function ReviewRightInspector({ candidate, mutating, onApprove, onClose, onLater
   const approvedForQueue = candidate ? isApprovedForReupQueue(candidate) : false;
   const inReupQueue = candidate ? isCandidateInReupQueue(candidate) : false;
   return (
-    <div className={`capture-inbox-right-inspector ${open ? "open" : "closed"}`} aria-hidden={!open && !candidate}>
-      <div className="drawer-header">
-        <div>
-          <p className="eyebrow">Candidate inspector</p>
-          <h2>Review details</h2>
-        </div>
-        <button disabled={!candidate && !open} onClick={onClose} type="button">Close details</button>
-      </div>
+    <WorkItemDetailsDrawer
+      eyebrow="Candidate inspector"
+      footer={
+        candidate ? (
+          <div className="review-board-inspector-queue-actions">
+            <ReviewBoardTileActions
+              approvedForQueue={approvedForQueue}
+              inReupQueue={inReupQueue}
+              mutating={mutating}
+              onApprove={() => onApprove(candidate)}
+              onDetails={() => undefined}
+              onLater={() => onLater(candidate)}
+              onReject={() => onReject(candidate)}
+              onSendToQueue={() => onSendToQueue(candidate)}
+              variant="inspector"
+            />
+          </div>
+        ) : null
+      }
+      open={open}
+      title="Review details"
+      titleId="review-board-details-title"
+      onClose={onClose}
+    >
       <OpsDetailPanel emptyDetail={!candidate ? "Select a tile to inspect details." : undefined} title="Candidate details">
         {candidate && metadata ? (
           <>
@@ -1035,19 +1064,6 @@ function ReviewRightInspector({ candidate, mutating, onApprove, onClose, onLater
               </div>
               <p>{candidateTitle(candidate)}</p>
             </div>
-            <div className="review-board-inspector-queue-actions">
-              <ReviewBoardTileActions
-                approvedForQueue={approvedForQueue}
-                inReupQueue={inReupQueue}
-                mutating={mutating}
-                onApprove={() => onApprove(candidate)}
-                onDetails={() => undefined}
-                onLater={() => onLater(candidate)}
-                onReject={() => onReject(candidate)}
-                onSendToQueue={() => onSendToQueue(candidate)}
-                variant="inspector"
-              />
-            </div>
             <OpsDetailSection title="Core metadata">
               <OpsMetadataList items={[
                 { label: "Posted", value: formatReviewPostedLabel(metadata) },
@@ -1061,7 +1077,7 @@ function ReviewRightInspector({ candidate, mutating, onApprove, onClose, onLater
           </>
         ) : null}
       </OpsDetailPanel>
-    </div>
+    </WorkItemDetailsDrawer>
   );
 }
 

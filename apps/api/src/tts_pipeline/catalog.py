@@ -13,6 +13,28 @@ class TtsVoiceOption:
 
 
 @dataclass
+class TtsFieldCapabilities:
+    voice: bool = False
+    model: bool = False
+    styles: bool = False
+    api_key: bool = False
+    base_url: bool = False
+    local_backend: bool = False
+    cli_binary: bool = False
+
+    def to_dict(self) -> dict[str, bool]:
+        return {
+            "voice": self.voice,
+            "model": self.model,
+            "styles": self.styles,
+            "api_key": self.api_key,
+            "base_url": self.base_url,
+            "local_backend": self.local_backend,
+            "cli_binary": self.cli_binary,
+        }
+
+
+@dataclass
 class TtsProviderCatalog:
     source: str = "none"  # sdk | curated | none
     voices: list[TtsVoiceOption] = field(default_factory=list)
@@ -22,8 +44,10 @@ class TtsProviderCatalog:
     warning: str = ""
     sample_rate: int | None = None
     backends: list[str] = field(default_factory=list)
+    capabilities: TtsFieldCapabilities | None = None
 
     def to_dict(self) -> dict[str, Any]:
+        caps = self.capabilities or capabilities_for_provider("custom")
         return {
             "source": self.source,
             "voices": [{"id": v.id, "label": v.label} for v in self.voices],
@@ -33,6 +57,7 @@ class TtsProviderCatalog:
             "warning": self.warning,
             "sample_rate": self.sample_rate,
             "backends": list(self.backends),
+            "capabilities": caps.to_dict(),
         }
 
 
@@ -54,9 +79,79 @@ EDGE_FALLBACK_VOICES = (
     ("vi-VN-NamMinhNeural", "vi-VN-NamMinhNeural (Male)"),
 )
 
+# Curated OmniVoice-Studio TTS engine ids (Settings → TTS Engine / OMNIVOICE_TTS_BACKEND).
+# Not scraped from GitHub — kept in sync with the public engine matrix.
+OMNIVOICE_MODELS = (
+    "omnivoice",
+    "k2-fsa/OmniVoice",  # HF alias for default OmniVoice weights
+    "cosyvoice",
+    "gpt-sovits",
+    "voxcpm2",
+    "moss-tts-nano",
+    "kittentts",
+    "sherpa-onnx",
+    "mlx-audio",
+    "indextts2",
+    "omnivoice-gguf",
+    "supertonic3",
+    "moss-tts-v15",
+    "dots-tts",
+    "confucius4-tts",
+)
 
-def empty_catalog(*, warning: str = "") -> TtsProviderCatalog:
-    return TtsProviderCatalog(source="none", warning=warning)
+# Voice ids: auto + OpenAI-compat names Studio accepts + instruct presets for VI/EN.
+OMNIVOICE_VOICES = (
+    ("auto", "Auto (model picks voice)"),
+    ("alloy", "alloy (OpenAI-compat)"),
+    ("echo", "echo (OpenAI-compat)"),
+    ("fable", "fable (OpenAI-compat)"),
+    ("onyx", "onyx (OpenAI-compat)"),
+    ("nova", "nova (OpenAI-compat)"),
+    ("shimmer", "shimmer (OpenAI-compat)"),
+    ("instruct:vi_female_north", "VI · nữ miền Bắc (instruct)"),
+    ("instruct:vi_female_south", "VI · nữ miền Nam (instruct)"),
+    ("instruct:vi_male_north", "VI · nam miền Bắc (instruct)"),
+    ("instruct:vi_male_south", "VI · nam miền Nam (instruct)"),
+    ("instruct:vi_news", "VI · đọc tin (instruct)"),
+    ("instruct:vi_warm", "VI · ấm / kể chuyện (instruct)"),
+    ("instruct:en_female", "EN · female (instruct)"),
+    ("instruct:en_male", "EN · male (instruct)"),
+    ("instruct:en_british", "EN · British (instruct)"),
+)
+
+
+def capabilities_for_provider(provider: str, *, local_backend: str = "auto") -> TtsFieldCapabilities:
+    name = (provider or "").strip().lower()
+    if name == "edge":
+        return TtsFieldCapabilities(voice=True)
+    if name == "vieneu":
+        return TtsFieldCapabilities(
+            voice=True,
+            model=True,
+            styles=True,
+            local_backend=True,
+            base_url=(local_backend or "auto").strip().lower() == "remote",
+        )
+    if name == "cli":
+        return TtsFieldCapabilities(voice=True, cli_binary=True)
+    if name in {"google", "elevenlabs"}:
+        return TtsFieldCapabilities(voice=True, model=True, api_key=True)
+    if name in {"azure", "openai"}:
+        return TtsFieldCapabilities(voice=True, model=True, api_key=True, base_url=True)
+    if name in {"openai_compatible", "http_custom"}:
+        return TtsFieldCapabilities(voice=True, model=True, api_key=True, base_url=True)
+    if name in {"auto", "placeholder"}:
+        return TtsFieldCapabilities(voice=True)
+    # Custom / OmniVoice / unknown local
+    return TtsFieldCapabilities(voice=True, model=True)
+
+
+def empty_catalog(*, warning: str = "", provider: str = "custom") -> TtsProviderCatalog:
+    return TtsProviderCatalog(
+        source="none",
+        warning=warning,
+        capabilities=capabilities_for_provider(provider),
+    )
 
 
 def discover_tts_catalog(
@@ -85,7 +180,45 @@ def discover_tts_catalog(
             edge_list_voices=edge_list_voices,
             allow_missing=True,
         )
-    return empty_catalog()
+    if name in {"omnivoice", "omnivoice_studio", "omnivoice-studio"}:
+        return _discover_omnivoice()
+    if name in {
+        "google",
+        "azure",
+        "elevenlabs",
+        "openai",
+        "openai_compatible",
+        "http_custom",
+        "cli",
+        "placeholder",
+    }:
+        return empty_catalog(provider=name)
+    # Generic local/custom: adaptive form capabilities without inventing Edge voices.
+    return TtsProviderCatalog(
+        source="curated" if name else "none",
+        voices=[],
+        models=[],
+        default_voice_id="",
+        warning="",
+        capabilities=capabilities_for_provider(name or "custom"),
+    )
+
+
+def _discover_omnivoice() -> TtsProviderCatalog:
+    voices = [TtsVoiceOption(id=vid, label=label) for vid, label in OMNIVOICE_VOICES]
+    return TtsProviderCatalog(
+        source="curated",
+        voices=voices,
+        models=list(OMNIVOICE_MODELS),
+        default_voice_id="auto",
+        warning=(
+            "Curated OmniVoice-Studio engine + voice presets. "
+            "Some engines need extra install/GPU; Preview needs a wired adapter."
+        ),
+        sample_rate=None,
+        backends=list(OMNIVOICE_MODELS),
+        capabilities=capabilities_for_provider("omnivoice"),
+    )
 
 
 def _discover_vieneu(
@@ -114,7 +247,7 @@ def _discover_vieneu(
     except Exception as exc:  # noqa: BLE001 — catalog must not fail Test
         warning = f"VieNeu voice list unavailable: {exc}"
         if allow_missing and not voices:
-            return empty_catalog(warning=warning)
+            return empty_catalog(warning=warning, provider="vieneu")
 
     if not voices:
         voices = [TtsVoiceOption(id=vid, label=label) for label, vid in VIENEU_CURATED_VOICES]
@@ -131,6 +264,7 @@ def _discover_vieneu(
         warning=warning,
         sample_rate=VIENEU_SAMPLE_RATE,
         backends=list(VIENEU_BACKENDS),
+        capabilities=capabilities_for_provider("vieneu"),
     )
 
 
@@ -162,7 +296,7 @@ def _discover_edge(
     except Exception as exc:  # noqa: BLE001
         warning = f"edge-tts voice list unavailable: {exc}"
         if allow_missing and not voices:
-            return empty_catalog(warning=warning)
+            return empty_catalog(warning=warning, provider="edge")
 
     if not voices:
         voices = [TtsVoiceOption(id=vid, label=label) for vid, label in EDGE_FALLBACK_VOICES]
@@ -181,6 +315,7 @@ def _discover_edge(
         warning=warning,
         sample_rate=24000,
         backends=[],
+        capabilities=capabilities_for_provider("edge"),
     )
 
 

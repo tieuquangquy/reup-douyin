@@ -27,6 +27,9 @@ coverage/
 apps/**/release/
 *.zip
 
+# Local ONNX models (auto-downloaded; do not commit weights)
+apps/api/models/*.onnx
+
 # Local data / runtime
 data/
 storage/

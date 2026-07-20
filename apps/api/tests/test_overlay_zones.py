@@ -77,8 +77,8 @@ class EndcardDenseTests(unittest.TestCase):
         ]
         self.assertFalse(is_endcard_dense(boxes))
 
-    def test_late_clip_forces_dense_panel_plus_label_to_eof(self) -> None:
-        """Last 20% of timeline: dense_ui panel + per-box labels (OCR may miss UI crumbs)."""
+    def test_late_clip_sparse_label_is_per_box_not_dense_panel(self) -> None:
+        """Last 20% with one CJK label: per-box cover only — no force slate."""
         payload = {
             "frames": [
                 {
@@ -98,10 +98,9 @@ class EndcardDenseTests(unittest.TestCase):
         )
         panels = [seg for seg in overlays if seg.kind == "dense_ui"]
         labels = [seg for seg in overlays if seg.kind != "dense_ui"]
-        self.assertEqual(len(panels), 1)
+        self.assertEqual(len(panels), 0)
         self.assertEqual(len(labels), 1)
         self.assertEqual(labels[0].end_ms, 29000)
-        self.assertLessEqual(panels[0].y + panels[0].height, 0.68)
         self.assertLess(labels[0].width, 0.70)
 
     def test_dense_ui_frame_is_panel_plus_labels_to_eof(self) -> None:
@@ -125,7 +124,7 @@ class EndcardDenseTests(unittest.TestCase):
         labels = [seg for seg in overlays if seg.kind != "dense_ui"]
         self.assertEqual(len(panels), 1)
         self.assertEqual(len(labels), 8)
-        self.assertLessEqual(panels[0].y + panels[0].height, 0.68)
+        self.assertGreaterEqual(panels[0].y + panels[0].height, 0.90)
         self.assertEqual(overlays[0].start_ms, 28000)
         self.assertEqual(overlays[0].end_ms, 32000)
 

@@ -1,4 +1,4 @@
-"""Dense UI hybrid: slate panel above subtitle band + VI at CJK label boxes."""
+"""Dense UI hybrid: near-full-frame panel wipe + VI at CJK label boxes."""
 
 from __future__ import annotations
 
@@ -40,12 +40,14 @@ def _nutrition_dense_frame(*, time_ms: int = 25000) -> dict:
 
 
 class DenseUiPanelGeometryTests(unittest.TestCase):
-    def test_panel_stops_above_subtitle_band(self) -> None:
+    def test_panel_covers_near_full_frame(self) -> None:
+        """Dense Chinese UI spans the whole screen — panel must wipe nearly all of it."""
         x, y, w, h = dense_ui_content_panel()
         self.assertGreaterEqual(x, 0.02)
         self.assertLessEqual(x + w, 0.98)
-        self.assertLessEqual(y + h, 0.68)  # below ~2/3 reserved for hard-sub / VI
-        self.assertGreaterEqual(h, 0.45)
+        self.assertGreaterEqual(y + h, 0.90)
+        self.assertGreaterEqual(h, 0.85)
+        self.assertGreaterEqual(w, 0.85)
 
 
 class DenseUiOverlayTests(unittest.TestCase):
@@ -63,39 +65,52 @@ class DenseUiOverlayTests(unittest.TestCase):
         panels = [seg for seg in overlays if seg.kind == "dense_ui"]
         self.assertEqual(len(panels), 1)
         self.assertEqual(panels[0].text_vi, "")
-        self.assertLessEqual(panels[0].y + panels[0].height, 0.68)
+        self.assertGreaterEqual(panels[0].y + panels[0].height, 0.90)
         labels = [seg for seg in overlays if seg.kind != "dense_ui"]
         self.assertGreaterEqual(len(labels), 5)
-        self.assertTrue(all(seg.y + seg.height < 0.80 for seg in labels))
         self.assertEqual(overlays[-1].end_ms, 29000)
 
 
 class DenseUiRenderTests(unittest.TestCase):
-    def test_panel_wipes_ui_chinese_leaves_bottom_band(self) -> None:
+    def test_dense_panel_wipes_chinese_outside_ocr_boxes(self) -> None:
+        """Full-screen Chinese crumbs (no OCR box) must still be covered by the panel."""
         h, w = 400, 300
         frame = np.full((h, w, 3), 240, dtype=np.uint8)
-        # Chinese-like bars in UI region (under panel; away from VI label boxes).
-        frame[40:70, 30:120] = (15, 15, 15)
-        frame[200:230, 40:150] = (15, 15, 15)
-        # Dark bar in bottom subtitle band — must survive (no cover).
-        frame[340:370, 40:260] = (10, 10, 10)
+        # Crumb left of the OCR box — previously left uncovered when slate was skipped.
+        frame[100:130, 30:80] = (15, 15, 15)
+        frame[48:72, 165:255] = (15, 15, 15)
         x, y, bw, bh = dense_ui_content_panel()
         segs = [
             OverlaySegment(0, 1000, x, y, bw, bh, "", kind="dense_ui"),
-            # VI labels placed away from the wipe probe ROIs above.
             OverlaySegment(0, 1000, 0.55, 0.12, 0.30, 0.06, "Bua trua", kind="ui"),
-            OverlaySegment(0, 1000, 0.55, 0.45, 0.30, 0.06, "Com", kind="ui"),
         ]
         font = Path(r"C:\Windows\Fonts\arial.ttf")
         if not font.is_file():
             font = Path(r"C:\Windows\Fonts\segoeui.ttf")
         out = process_frame_bgr(frame, segs, fontfile=font)
-        # UI bars should be slate-wiped (not near-black Chinese strokes).
-        self.assertGreater(float(out[40:70, 30:120, 0].mean()), 40.0)
-        self.assertGreater(float(out[200:230, 40:150, 0].mean()), 40.0)
-        self.assertLess(float((out[40:70, 30:120, 0] < 25).mean()), 0.05)
-        # Bottom band largely unchanged (still dark).
-        self.assertGreater(float((out[340:370, 40:260, 0] < 40).mean()), 0.80)
+        self.assertLess(float((out[100:130, 30:80, 0] < 40).mean()), 0.40)
+        self.assertLess(float((out[48:72, 165:255, 0] < 25).mean()), 0.50)
+
+    def test_dense_vi_stays_at_ocr_box_when_ink_is_elsewhere(self) -> None:
+        """With dense_ui, VI authority is OCR box — do not snap to distant ink."""
+        h, w = 400, 300
+        frame = np.full((h, w, 3), 240, dtype=np.uint8)
+        # Dark ink far left; OCR/VI box on the right.
+        frame[48:72, 20:70] = (10, 10, 10)
+        x, y, bw, bh = dense_ui_content_panel()
+        segs = [
+            OverlaySegment(0, 1000, x, y, bw, bh, "", kind="dense_ui"),
+            OverlaySegment(0, 1000, 0.55, 0.12, 0.35, 0.06, "WWW", kind="ui"),
+        ]
+        font = Path(r"C:\Windows\Fonts\arial.ttf")
+        if not font.is_file():
+            font = Path(r"C:\Windows\Fonts\segoeui.ttf")
+        out = process_frame_bgr(frame, segs, fontfile=font)
+        # After panel fill (light), dark VI strokes land in the OCR box only.
+        ocr_roi = out[48:72, 165:255]
+        ink_roi = out[48:72, 20:70]
+        self.assertGreater(float((ocr_roi[:, :, 0] < 80).mean()), 0.02)
+        self.assertLess(float((ink_roi[:, :, 0] < 80).mean()), 0.02)
 
     def test_skips_filename_like_vi_burn(self) -> None:
         h, w = 200, 200
@@ -123,9 +138,9 @@ class DenseUiRenderTests(unittest.TestCase):
         self.assertLess(whiteish, 0.35)
 
 
-class LateClipForceDenseTests(unittest.TestCase):
-    def test_late_clip_one_cjk_hardsub_still_gets_dense_panel(self) -> None:
-        """Real job pattern: endcard OCR only returns 1 hard-sub line, misses UI labels."""
+class LateClipNoForcePanelTests(unittest.TestCase):
+    def test_late_clip_one_cjk_hardsub_does_not_force_dense_panel(self) -> None:
+        """Sparse endcard OCR (1 hard-sub) must not paint the ugly slate wipe."""
         payload = {
             "frames": [
                 {
@@ -156,16 +171,18 @@ class LateClipForceDenseTests(unittest.TestCase):
             hold_ms=500,
             video_duration_ms=29000,
         )
-        panels = [seg for seg in overlays if seg.kind == "dense_ui"]
-        labels = [seg for seg in overlays if seg.kind != "dense_ui"]
-        self.assertEqual(len(panels), 1)
-        self.assertLessEqual(panels[0].y + panels[0].height, 0.68)
-        self.assertEqual(len(labels), 1)
-        self.assertEqual(labels[0].text_vi, "Dang giam mo thi follow nhe")
-        self.assertEqual(overlays[-1].end_ms, 29000)
+        self.assertTrue(all(seg.kind != "dense_ui" for seg in overlays))
+        self.assertEqual(len(overlays), 1)
+        self.assertEqual(overlays[0].text_vi, "Dang giam mo thi follow nhe")
+        self.assertEqual(overlays[0].end_ms, 29000)
 
-    def test_late_clip_latin_only_still_gets_panel_no_vi_burn(self) -> None:
-        """OCR only saw VI hard-sub; still wipe missed Chinese UI above the band."""
+    def test_late_clip_latin_only_skips_without_slate(self) -> None:
+        """Latin/VI-only OCR must not invent a dense_ui slate."""
+        from src.media_pipeline.video_renderer.errors import (
+            VideoRendererError,
+            VideoRendererErrorCode,
+        )
+
         payload = {
             "frames": [
                 {
@@ -183,16 +200,14 @@ class LateClipForceDenseTests(unittest.TestCase):
                 }
             ]
         }
-        overlays = overlays_from_ocr_payload(
-            payload,
-            {},
-            hold_ms=500,
-            video_duration_ms=29000,
-        )
-        self.assertEqual(len(overlays), 1)
-        self.assertEqual(overlays[0].kind, "dense_ui")
-        self.assertEqual(overlays[0].text_vi, "")
-        self.assertLessEqual(overlays[0].y + overlays[0].height, 0.68)
+        with self.assertRaises(VideoRendererError) as ctx:
+            overlays_from_ocr_payload(
+                payload,
+                {},
+                hold_ms=500,
+                video_duration_ms=29000,
+            )
+        self.assertEqual(ctx.exception.code, VideoRendererErrorCode.EMPTY_OVERLAYS)
 
     def test_mid_clip_single_hardsub_does_not_force_panel(self) -> None:
         payload = {

@@ -26,7 +26,7 @@ export function PublishDraftByIdPage({ draftId }: { draftId: string }) {
 
   useEffect(() => {
     void load();
-  }, [draftId, load]);
+  }, [draftId, t]);
 
   if (loading) return <div className="state-panel skeleton">{t("publishDraftById.loading")}</div>;
 

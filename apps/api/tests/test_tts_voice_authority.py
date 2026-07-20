@@ -1,4 +1,4 @@
-"""Workspace TTS settings are authority for Generate TTS voice when enabled."""
+"""Active Ops TTS profile is authority for Generate TTS (Preview parity), even when disabled."""
 
 from __future__ import annotations
 
@@ -42,7 +42,8 @@ class TtsVoiceAuthorityTests(unittest.TestCase):
         self.assertEqual(resolved.speaking_rate, 1.15)
         self.assertEqual(resolved.language_code, "vi")
 
-    def test_workspace_disabled_keeps_client_voice(self) -> None:
+    def test_workspace_disabled_still_uses_ops_voice(self) -> None:
+        """Option A: active profile wins even when Enabled is off (match Preview)."""
         service = TtsPipelineService(db=MagicMock())
         workspace_tts = SimpleNamespace(
             enabled=False,
@@ -68,13 +69,14 @@ class TtsVoiceAuthorityTests(unittest.TestCase):
                     audio_tts_speaking_rate=1.0,
                 )
                 resolved = service._voice_config_for_request(request, uuid4())
-        self.assertEqual(resolved.voice_id, "vi-VN-NamMinhNeural")
-        self.assertEqual(resolved.speaking_rate, 0.9)
+        self.assertEqual(resolved.voice_id, "Ngọc Linh")
+        self.assertEqual(resolved.speaking_rate, 1.15)
+        self.assertEqual(resolved.language_code, "vi")
 
-    def test_workspace_enabled_empty_voice_falls_back_to_env(self) -> None:
+    def test_workspace_empty_voice_falls_back_to_env(self) -> None:
         service = TtsPipelineService(db=MagicMock())
         workspace_tts = SimpleNamespace(
-            enabled=True,
+            enabled=False,
             voice_id="",
             speaking_rate=1.0,
             language_code="vi",

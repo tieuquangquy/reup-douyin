@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { fetchReupQueueItems, purgeClearableReupQueueItems, runReupQueueAction, runReupQueueBatchAction } from "../../lib/api";
 import { TopbarRefreshButton } from "../app-shell/TopbarRefreshButton";
 import {
@@ -29,7 +29,6 @@ import {
   groupInspectorLifecycleActions,
   hasActiveDownloadJob,
   hasAnyBatchEligibility,
-  jobChipTone,
   itemTitle,
   metadataString,
   operatorStatusLabel,
@@ -55,7 +54,6 @@ import {
   worklistStageTone,
   worklistTranscriptHref,
   worklistNoDialogueHint,
-  shouldShowWorklistOpenJobLink,
   REUP_QUEUE_START_PROCESSING_BATCH_LIMIT,
   REUP_QUEUE_STATUS_FILTERS,
   secondaryBulkEligibilityTotal,
@@ -74,13 +72,7 @@ import {
   type ReupQueueOperatorFilter,
   type ReupQueueSortMode
 } from "../../lib/reupQueueStudioState";
-import { hasMoreOffsetItems, mergeOffsetItemsById } from "../../lib/offsetListPagination";
-import {
-  OPERATOR_LIST_PAGE_SIZE_PRESETS,
-  REUP_QUEUE_PAGE_SIZE_STORAGE_KEY,
-  readOperatorListPageSize,
-  writeOperatorListPageSize,
-} from "../../lib/operatorListPageSize";
+import { hasMoreOffsetItems, resolveOffsetPageMerge } from "../../lib/offsetListPagination";
 import {
   REUP_QUEUE_VIEW_MODE_LABELS,
   readReupQueueViewMode,
@@ -91,18 +83,19 @@ import type { BatchOperationResponse, ReupQueueBatchAction } from "../../types/e
 import type { ReupQueueAction, ReupQueueItem } from "../../types/reup-queue";
 import { OperatorStudioShell } from "../app-shell/OperatorStudioShell";
 import { OpsConsolePage, OpsDetailPanel, OpsDetailSection, OpsFilterBar, OpsMetadataList, OpsStatePanel } from "../ops-console/OpsShared";
+import { WorkItemActionIcon, type WorkItemActionIconKind } from "../shared/WorkItemActionIcon";
 import { OffsetLoadMoreFooter } from "../shared/OffsetLoadMoreFooter";
+import { WorkItemDetailsDrawer } from "../shared/WorkItemDetailsDrawer";
+import { WorkMediaTileOverlay } from "../shared/WorkMediaTileOverlay";
+import { useOffsetLoadMoreOnScroll } from "../shared/useOffsetLoadMoreOnScroll";
 
 const UI_VERSION = "22G-2K";
 const DEFAULT_HANDOFF_PLATFORM = "FACEBOOK_REELS";
 const REVIEW_BOARD_HREF = "/selection/review-board";
 const ACTIVE_DOWNLOAD_POLL_MS = 8_000;
-const REUP_QUEUE_PAGE_SIZE_DEFAULT = 50;
+const REUP_QUEUE_LOAD_BATCH_SIZE = 50;
 
 export function ReupQueuePage() {
-  const [pageSize, setPageSize] = useState(() =>
-    readOperatorListPageSize(REUP_QUEUE_PAGE_SIZE_STORAGE_KEY, OPERATOR_LIST_PAGE_SIZE_PRESETS, REUP_QUEUE_PAGE_SIZE_DEFAULT)
-  );
   const [items, setItems] = useState<ReupQueueItem[]>([]);
   const [totalCount, setTotalCount] = useState(0);
   const [statusCounts, setStatusCounts] = useState<Record<string, number>>({});
@@ -123,16 +116,65 @@ export function ReupQueuePage() {
   const [batchWorkingAction, setBatchWorkingAction] = useState<ReupQueueBatchAction | null>(null);
   const initialFilterApplied = useRef(false);
   const loadedCountRef = useRef(0);
+  const loadMoreInFlightRef = useRef(false);
+  const loadMoreRef = useRef<HTMLDivElement | null>(null);
+  const itemsRef = useRef(items);
+  const totalCountRef = useRef(totalCount);
+  itemsRef.current = items;
+  totalCountRef.current = totalCount;
   const operatorFilterRef = useRef(operatorFilter);
   operatorFilterRef.current = operatorFilter;
+  const queueHasMore = hasMoreOffsetItems(items.length, totalCount);
+  const queuePagerDisabled = mutatingAction !== null || batchWorkingAction !== null;
 
-  async function loadQueue(preserveUi = false, nextPageSize = pageSize, filter = operatorFilter, sort = sortMode) {
+  const loadMoreQueue = useCallback(async () => {
+    const currentItems = itemsRef.current;
+    const currentTotal = totalCountRef.current;
+    if (loadMoreInFlightRef.current || !hasMoreOffsetItems(currentItems.length, currentTotal)) return;
+    loadMoreInFlightRef.current = true;
+    setLoadingMore(true);
+    setError(null);
+    try {
+      const statuses = statusesForReupQueueFilter(operatorFilterRef.current);
+      const payload = await fetchReupQueueItems({
+        limit: REUP_QUEUE_LOAD_BATCH_SIZE,
+        offset: currentItems.length,
+        statuses,
+        sort: sortMode,
+      });
+      setStatusCounts(payload.status_counts ?? {});
+      const { merged, totalCount: nextTotalCount } = resolveOffsetPageMerge(
+        currentItems,
+        payload.items,
+        payload.total_count
+      );
+      loadedCountRef.current = merged.length;
+      setItems(merged);
+      setTotalCount(nextTotalCount);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load more Reup Queue items");
+    } finally {
+      loadMoreInFlightRef.current = false;
+      setLoadingMore(false);
+    }
+  }, [sortMode]);
+
+  useOffsetLoadMoreOnScroll({
+    sentinelRef: loadMoreRef,
+    hasMore: queueHasMore,
+    loading: loadingMore,
+    disabled: queuePagerDisabled,
+    loadedCount: items.length,
+    onLoadMore: loadMoreQueue,
+  });
+
+  async function loadQueue(preserveUi = false, filter = operatorFilter, sort = sortMode) {
     if (preserveUi) setRefreshing(true);
     else setLoading(true);
     setError(null);
     try {
       const statuses = statusesForReupQueueFilter(filter);
-      const windowLimit = Math.max(nextPageSize, preserveUi ? loadedCountRef.current || nextPageSize : nextPageSize);
+      const windowLimit = Math.max(REUP_QUEUE_LOAD_BATCH_SIZE, preserveUi ? loadedCountRef.current || REUP_QUEUE_LOAD_BATCH_SIZE : REUP_QUEUE_LOAD_BATCH_SIZE);
       const payload = await fetchReupQueueItems({ limit: windowLimit, offset: 0, statuses, sort });
       setStatusCounts(payload.status_counts ?? {});
       const nextSummary = buildReupQueueSummaryFromStatusCounts(payload.status_counts);
@@ -162,35 +204,6 @@ export function ReupQueuePage() {
     }
   }
 
-  async function loadMoreQueue() {
-    if (loadingMore || !hasMoreOffsetItems(items.length, totalCount)) return;
-    setLoadingMore(true);
-    setError(null);
-    try {
-      const statuses = statusesForReupQueueFilter(operatorFilter);
-      const payload = await fetchReupQueueItems({ limit: pageSize, offset: items.length, statuses, sort: sortMode });
-      setStatusCounts(payload.status_counts ?? {});
-      setItems((current) => {
-        const merged = mergeOffsetItemsById(current, payload.items);
-        loadedCountRef.current = merged.length;
-        return merged;
-      });
-      setTotalCount(payload.total_count);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load more Reup Queue items");
-    } finally {
-      setLoadingMore(false);
-    }
-  }
-
-  function handlePageSizeChange(nextPageSize: number) {
-    if (nextPageSize === pageSize) return;
-    writeOperatorListPageSize(REUP_QUEUE_PAGE_SIZE_STORAGE_KEY, nextPageSize, OPERATOR_LIST_PAGE_SIZE_PRESETS);
-    setPageSize(nextPageSize);
-    loadedCountRef.current = 0;
-    void loadQueue(false, nextPageSize, operatorFilter, sortMode);
-  }
-
   function handleOperatorFilterChange(nextFilter: ReupQueueOperatorFilter) {
     if (nextFilter === operatorFilter) return;
     setOperatorFilter(nextFilter);
@@ -212,7 +225,7 @@ export function ReupQueuePage() {
   }
 
   useEffect(() => {
-    void loadQueue(false, pageSize, operatorFilter, sortMode);
+    void loadQueue(false, operatorFilter, sortMode);
   }, [operatorFilter, sortMode]);
 
   const hasActiveDownloads = useMemo(() => items.some((item) => hasActiveDownloadJob(item)), [items]);
@@ -220,10 +233,10 @@ export function ReupQueuePage() {
   useEffect(() => {
     if (!hasActiveDownloads) return;
     const timer = window.setInterval(() => {
-      void loadQueue(true, pageSize, operatorFilterRef.current, sortMode);
+      void loadQueue(true, operatorFilterRef.current, sortMode);
     }, ACTIVE_DOWNLOAD_POLL_MS);
     return () => window.clearInterval(timer);
-  }, [hasActiveDownloads, pageSize, sortMode]);
+  }, [hasActiveDownloads, sortMode]);
 
   useEffect(() => {
     if (!queueInspectorOpen) return;
@@ -519,32 +532,31 @@ export function ReupQueuePage() {
                 )}
                 {(totalCount > 0 || items.length > 0) ? (
                   <OffsetLoadMoreFooter
-                    disabled={mutatingAction !== null || batchWorkingAction !== null || refreshing}
+                    ref={loadMoreRef}
+                    autoLoad
+                    disabled={queuePagerDisabled}
                     loadedCount={items.length}
                     loadingMore={loadingMore}
                     noun="queue items"
-                    onLoadMore={() => void loadMoreQueue()}
-                    onPageSizeChange={handlePageSizeChange}
-                    pageSize={pageSize}
-                    pageSizeOptions={OPERATOR_LIST_PAGE_SIZE_PRESETS}
+                    onLoadMore={loadMoreQueue}
+                    pageSize={REUP_QUEUE_LOAD_BATCH_SIZE}
                     totalCount={totalCount}
+                    variant="studio"
                   />
                 ) : null}
               </section>
             ) : null}
           </main>
-
-          <aside className="capture-inbox-review-side" aria-label="Right-side sticky inspector">
-            <ReupQueueRightInspector
-              item={activeItem}
-              mutatingAction={mutatingAction}
-              onApplyAction={(target, action) => void applyQueueAction(target, action)}
-              onBatchAction={(action) => void applyBatchAction(action, activeItem ? [activeItem.id] : [])}
-              onClose={closeItemDetails}
-              open={queueInspectorOpen && Boolean(activeItem)}
-            />
-          </aside>
         </div>
+
+        <ReupQueueRightInspector
+          item={activeItem}
+          mutatingAction={mutatingAction}
+          onApplyAction={(target, action) => void applyQueueAction(target, action)}
+          onBatchAction={(action) => void applyBatchAction(action, activeItem ? [activeItem.id] : [])}
+          onClose={closeItemDetails}
+          open={queueInspectorOpen && Boolean(activeItem)}
+        />
       </OpsConsolePage>
     </OperatorStudioShell>
   );
@@ -836,16 +848,12 @@ function ReupQueueWorklistRow({
   const showDetailsButton = shouldShowQueueTileDetailsButton(item);
   const dismissAction = terminalQueueDismissAction(item);
   const primaryLabel = primaryQueueActionLabel(item);
-  const primaryAction = primaryQueueAction(item);
   const terminalDismissPair = Boolean(dismissAction) && !showDetailsButton;
   const buttonTone = queueTilePrimaryButtonTone(item);
   const primaryTone = buttonTone === "recover" ? "is-recover" : buttonTone === "forward" ? "is-primary" : "is-quiet";
-  const primaryAsIcon = primaryAction === "HOLD" || primaryAction === "RESUME";
-  const primaryIconKind: WorklistActionIconKind | null =
-    primaryAction === "HOLD" ? "pause" : primaryAction === "RESUME" ? "play" : null;
+  const primaryIconKind = worklistPrimaryIconKind(item);
   const transcriptHref = worklistTranscriptHref(item);
   const noDialogueHint = worklistNoDialogueHint(item);
-  const showOpenJob = shouldShowWorklistOpenJobLink(item);
 
   return (
     <article
@@ -884,11 +892,6 @@ function ReupQueueWorklistRow({
         </span>
       </div>
       <div className="reup-queue-worklist-actions">
-        {showOpenJob && item.job_id ? (
-          <a className="reup-queue-worklist-action is-quiet" href={`/ops/jobs?job_id=${item.job_id}`}>
-            Open job
-          </a>
-        ) : null}
         {noDialogueHint ? (
           <span className="reup-queue-worklist-action is-quiet reup-queue-worklist-no-dialogue" title={noDialogueHint}>
             {noDialogueHint}
@@ -896,53 +899,36 @@ function ReupQueueWorklistRow({
         ) : null}
         {transcriptHref ? (
           <>
-            <a className="reup-queue-worklist-action is-primary" href={transcriptHref}>
+            <a className="reup-queue-worklist-action is-primary is-with-icon" href={transcriptHref}>
+              <WorkItemActionIcon className="reup-queue-worklist-action__icon" kind="transcript" />
               Transcript
             </a>
-            <button aria-label="Details" className="reup-queue-worklist-icon-action" disabled={mutating} onClick={onDetails} title="Details" type="button">
-              <span aria-hidden="true" className="reup-queue-worklist-icon-ring">
-                <WorklistActionIcon kind="details" />
-              </span>
+            <button className="reup-queue-worklist-action is-quiet is-with-icon" disabled={mutating} onClick={onDetails} type="button">
+              <WorkItemActionIcon className="reup-queue-worklist-action__icon" kind="details" />
+              Details
             </button>
           </>
         ) : terminalDismissPair ? (
           <>
-            <button aria-label="Details" className="reup-queue-worklist-icon-action" disabled={mutating} onClick={onDetails} title="Details" type="button">
-              <span aria-hidden="true" className="reup-queue-worklist-icon-ring">
-                <WorklistActionIcon kind="details" />
-              </span>
+            <button className="reup-queue-worklist-action is-quiet is-with-icon" disabled={mutating} onClick={onDetails} type="button">
+              <WorkItemActionIcon className="reup-queue-worklist-action__icon" kind="details" />
+              Details
             </button>
-            <button aria-label="Dismiss" className="reup-queue-worklist-icon-action" disabled={mutating} onClick={onDismiss} title="Dismiss" type="button">
-              <span aria-hidden="true" className="reup-queue-worklist-icon-ring">
-                <WorklistActionIcon kind="dismiss" />
-              </span>
+            <button className="reup-queue-worklist-action is-quiet is-with-icon" disabled={mutating} onClick={onDismiss} type="button">
+              <WorkItemActionIcon className="reup-queue-worklist-action__icon" kind="dismiss" />
+              Dismiss
             </button>
           </>
         ) : (
           <>
-            {primaryAsIcon && primaryIconKind ? (
-              <button
-                aria-label={primaryLabel}
-                className="reup-queue-worklist-icon-action"
-                disabled={mutating}
-                onClick={onPrimary}
-                title={primaryLabel}
-                type="button"
-              >
-                <span aria-hidden="true" className="reup-queue-worklist-icon-ring">
-                  <WorklistActionIcon kind={primaryIconKind} />
-                </span>
-              </button>
-            ) : (
-              <button className={`reup-queue-worklist-action ${primaryTone}`} disabled={mutating} onClick={onPrimary} type="button">
-                {primaryLabel}
-              </button>
-            )}
+            <button className={`reup-queue-worklist-action ${primaryTone} is-with-icon`} disabled={mutating} onClick={onPrimary} type="button">
+              <WorkItemActionIcon className="reup-queue-worklist-action__icon" kind={primaryIconKind} />
+              {primaryLabel}
+            </button>
             {showDetailsButton ? (
-              <button aria-label="Details" className="reup-queue-worklist-icon-action" disabled={mutating} onClick={onDetails} title="Details" type="button">
-                <span aria-hidden="true" className="reup-queue-worklist-icon-ring">
-                  <WorklistActionIcon kind="details" />
-                </span>
+              <button className="reup-queue-worklist-action is-quiet is-with-icon" disabled={mutating} onClick={onDetails} type="button">
+                <WorkItemActionIcon className="reup-queue-worklist-action__icon" kind="details" />
+                Details
               </button>
             ) : null}
           </>
@@ -982,39 +968,15 @@ function WorklistProgressRing({ percent, tone }: { percent: number; tone: string
   );
 }
 
-type WorklistActionIconKind = "pause" | "play" | "details" | "dismiss";
-
-function WorklistActionIcon({ kind }: { kind: WorklistActionIconKind }) {
-  if (kind === "pause") {
-    return (
-      <svg aria-hidden="true" className="reup-queue-worklist-icon" fill="currentColor" viewBox="0 0 24 24">
-        <rect height="14" rx="1.5" width="3.5" x="7" y="5" />
-        <rect height="14" rx="1.5" width="3.5" x="13.5" y="5" />
-      </svg>
-    );
-  }
-  if (kind === "play") {
-    return (
-      <svg aria-hidden="true" className="reup-queue-worklist-icon" fill="currentColor" viewBox="0 0 24 24">
-        <path d="M8.5 5.8v12.4c0 .7.8 1.1 1.4.7l9.2-6.2c.5-.4.5-1.1 0-1.4L9.9 5.1c-.6-.4-1.4 0-1.4.7Z" />
-      </svg>
-    );
-  }
-  if (kind === "dismiss") {
-    return (
-      <svg aria-hidden="true" className="reup-queue-worklist-icon" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="1.8" viewBox="0 0 24 24">
-        <path d="M7 7l10 10M17 7 7 17" />
-      </svg>
-    );
-  }
-  return (
-    <svg aria-hidden="true" className="reup-queue-worklist-icon" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.7" viewBox="0 0 24 24">
-      <rect height="7" rx="1.2" width="7" x="4" y="4" />
-      <rect height="7" rx="1.2" width="7" x="13" y="4" />
-      <rect height="7" rx="1.2" width="7" x="4" y="13" />
-      <rect height="7" rx="1.2" width="7" x="13" y="13" />
-    </svg>
-  );
+function worklistPrimaryIconKind(item: ReupQueueItem): WorkItemActionIconKind {
+  const action = primaryQueueAction(item);
+  if (action === "HOLD") return "pause";
+  if (action === "RESUME" || action === "START_PROCESSING" || action === "MARK_MEDIA_READY") return "process";
+  if (action === "RETRY") return "retry";
+  if (action === "DISMISS") return "dismiss";
+  if (action === "CREATE_EXPORT_PACKAGE" || action === "CREATE_PUBLISH_HANDOFF") return "send";
+  if (action === "inspect") return "details";
+  return "process";
 }
 
 function ReupQueueMediaTile({
@@ -1042,7 +1004,6 @@ function ReupQueueMediaTile({
   const stageTone = queueStageTone(item);
   const selectable = hasAnyBatchEligibility(item);
   const pipelineStages = buildPipelineStages(item);
-  const jobChip = formatJobChipLabel(item);
   const downloadProgress = downloadJobProgressPercent(item);
   const downloadError = downloadJobErrorLine(item);
   const showDetailsButton = shouldShowQueueTileDetailsButton(item);
@@ -1064,28 +1025,16 @@ function ReupQueueMediaTile({
             <span className="capture-inbox-thumbnail-placeholder"><strong>No thumbnail</strong><small>{queueStageLabel(item)}</small></span>
           )}
         </button>
-        <div className="capture-inbox-media-overlay top" aria-label="Tile overlay controls">
-          <div className="capture-inbox-media-overlay-scrim review-board-tile-overlay-scrim" aria-hidden="true" />
-          <div className="capture-inbox-overlay-left-group review-board-tile-overlay-meta">
-            {selectable ? (
-              <label className={`review-board-tile-select-toggle ${selected ? "is-selected" : ""}`} title={selected ? "Deselect for bulk actions" : "Select for bulk actions"}>
-                <input aria-label={selected ? "Deselect queue item" : "Select queue item"} checked={selected} onChange={onToggleSelect} type="checkbox" />
-                <span aria-hidden="true" className="review-board-tile-select-visual" />
-              </label>
-            ) : null}
-            <span className={`review-board-tile-status-chip is-${stageTone}`}>{queueStageLabel(item)}</span>
-            {jobChip ? <span className={`review-board-tile-status-chip is-${jobChipTone(item)} reup-queue-job-chip`}>{jobChip}</span> : null}
-          </div>
-          <div className="capture-inbox-overlay-right-group">
-            <span
-              className={`capture-inbox-reup-score-badge is-${scoreBadge.level} ${scoreBadge.score == null ? "missing" : "ready"} reup-queue-score-badge`}
-              title={scoreBadge.title}
-            >
-              <strong>{scoreBadge.valueLabel}</strong>
-              <small>{scoreBadge.tierLabel}</small>
-            </span>
-          </div>
-        </div>
+        <WorkMediaTileOverlay
+          onToggleSelect={onToggleSelect}
+          scoreBadge={scoreBadge}
+          scoreBadgeClassName="reup-queue-score-badge"
+          selectAriaLabel={selected ? "Deselect queue item" : "Select queue item"}
+          selectTitle={selected ? "Deselect for bulk actions" : "Select for bulk actions"}
+          selectable={selectable}
+          selected={selected}
+          statusChips={[{ label: queueStageLabel(item), tone: stageTone }]}
+        />
         {downloadProgress != null ? (
           <div
             aria-label={`Download progress ${downloadProgress} percent`}
@@ -1157,6 +1106,7 @@ function ReupQueueMediaTile({
                   title="Inspect queue item details"
                   type="button"
                 >
+                  <WorkItemActionIcon kind="details" />
                   Details
                 </button>
                 <button
@@ -1166,6 +1116,7 @@ function ReupQueueMediaTile({
                   title="Hide this item from Reup Queue"
                   type="button"
                 >
+                  <WorkItemActionIcon kind="dismiss" />
                   Dismiss
                 </button>
               </>
@@ -1177,6 +1128,7 @@ function ReupQueueMediaTile({
                   onClick={onPrimary}
                   type="button"
                 >
+                  <WorkItemActionIcon kind={worklistPrimaryIconKind(item)} />
                   {primaryLabel}
                 </button>
                 <button
@@ -1186,6 +1138,7 @@ function ReupQueueMediaTile({
                   title="Inspect queue item details"
                   type="button"
                 >
+                  <WorkItemActionIcon kind="details" />
                   Details
                 </button>
               </>
@@ -1203,6 +1156,7 @@ function ReupQueueMediaTile({
                 onClick={onPrimary}
                 type="button"
               >
+                <WorkItemActionIcon kind={worklistPrimaryIconKind(item)} />
                 {primaryLabel}
               </button>
             </div>
@@ -1229,16 +1183,15 @@ function ReupQueueRightInspector({
   open: boolean;
 }) {
   return (
-    <div className={`capture-inbox-right-inspector reup-queue-right-inspector ${open ? "open" : "closed"}`} aria-hidden={!open && !item}>
-      <div className="drawer-header">
-        <div>
-          <p className="eyebrow">Queue item inspector</p>
-          <h2>Production details</h2>
-        </div>
-        <button disabled={!item && !open} onClick={onClose} type="button">Close details</button>
-      </div>
+    <WorkItemDetailsDrawer
+      eyebrow="Queue item inspector"
+      open={open}
+      title="Production details"
+      titleId="reup-queue-details-title"
+      onClose={onClose}
+    >
       <QueueDetailPanel item={item} mutatingAction={mutatingAction} onApplyAction={onApplyAction} onBatchAction={onBatchAction} />
-    </div>
+    </WorkItemDetailsDrawer>
   );
 }
 
@@ -1327,8 +1280,6 @@ function QueueDetailPanel({
               {" · "}
               {formatJobChipLabel(item) ?? item.job_status ?? "Attached"}
               {typeof item.job_progress_percent === "number" ? ` · ${item.job_progress_percent}%` : ""}
-              {" · "}
-              <a href={`/ops/jobs?job_id=${item.job_id}`}>Open job</a>
             </>
           ) : "No worker job attached yet" },
           { label: "Job error", value: item.job_error_message ?? item.job_error_code ?? item.last_error_message ?? "No job error" },

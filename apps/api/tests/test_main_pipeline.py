@@ -27,7 +27,7 @@ class MainPipelineOrchestratorTests(unittest.TestCase):
             frame_obj.time_ms = 0
             return [frame_obj]
 
-        def fake_ocr(paths, *, ocr_provider=None, frame_time_ms=None, band_ratio=None):
+        def fake_ocr(paths, *, ocr_provider=None, frame_time_ms=None, band_ratio=None, **_kwargs):
             call_order.append("phase2")
             self.assertEqual(len(paths), 1)
             self.assertEqual(frame_time_ms, [0])
@@ -68,7 +68,7 @@ class MainPipelineOrchestratorTests(unittest.TestCase):
             output = root / "out" / "final.mp4"
             with (
                 patch(
-                    "src.media_pipeline.hardsub_e2e.extract_video_frames_detailed",
+                    "src.media_pipeline.hardsub_e2e.extract_phase1_frames",
                     side_effect=fake_extract,
                 ),
                 patch(
@@ -118,7 +118,7 @@ class MainPipelineOrchestratorTests(unittest.TestCase):
             video.write_bytes(b"v")
             with (
                 patch(
-                    "src.media_pipeline.hardsub_e2e.extract_video_frames_detailed",
+                    "src.media_pipeline.hardsub_e2e.extract_phase1_frames",
                     side_effect=fake_extract,
                 ),
                 patch(

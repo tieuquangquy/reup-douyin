@@ -18,7 +18,9 @@ from src.media_pipeline.ocr_filtering.types import DetectedTextBox
 OVERLAY_CROP_TOP = 0.20
 
 MID_TITLE_Y_MIN = 0.22
-MID_TITLE_Y_MAX = 0.72
+# Stay above hardsub band top (~0.667); overlap caused band-stuck captions to be
+# treated as mid-titles and then dropped by hardsub_min_center_y.
+MID_TITLE_Y_MAX = 0.65
 MID_TITLE_MIN_HEIGHT = 0.035
 MID_TITLE_MIN_WIDTH = 0.18
 MID_TITLE_CENTER_X_MIN = 0.12
@@ -144,7 +146,11 @@ def is_late_clip_ui_frame(
     duration_ms: int | None,
     boxes: Sequence[DetectedTextBox | Mapping[str, Any]],
 ) -> bool:
-    """Last 20% of video with any OCR → force endcard panel (covers short UI outros)."""
+    """True when timeline is in the last 20% and OCR saw any boxes.
+
+    Kept for diagnostics / callers; overlay build no longer force-panels on late
+    alone (that produced the ugly slate when OCR only returned the caption).
+    """
     if not boxes:
         return False
     dur = int(duration_ms or 0)

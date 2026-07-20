@@ -215,8 +215,13 @@ assert.equal(opsLabels().includes("nav.tools"), false, "Tools must be removed fr
 assert.ok(opsLabels().includes("nav.jobMonitor"), "Job Monitor stays on Ops");
 assert.ok(opsLabels().includes("nav.users"), "Users stays on Ops");
 assert.ok(opsLabels().includes("nav.captionAiSettings"), "Caption AI stays on Ops");
-assert.ok(opsLabels().includes("nav.swagger"), "Swagger stays on Ops Advanced");
-assert.ok(opsLabels().includes("nav.apiAuthUi"), "API login UI stays on Ops Advanced");
+assert.equal(opsLabels().includes("nav.swagger"), false, "Swagger must not appear in Ops sidebar");
+assert.equal(opsLabels().includes("nav.apiAuthUi"), false, "API login UI must not appear in Ops sidebar");
+assert.equal(
+  opsNavSections.some((s) => s.title === "nav.sectionAdvanced"),
+  false,
+  "Ops Advanced backend section must be removed"
+);
 assert.equal(opsLabels().includes("nav.douyinExtensionManager"), false, "Extension Manager must be removed from Ops sidebar");
 assert.equal(operatorLabels().includes("nav.douyinAccounts"), false, "Douyin Accounts must be removed from Operator sidebar");
 assert.ok(operatorLabels().includes("nav.douyinExtensionSetup"), "Extension Setup stays on Operator Studio");

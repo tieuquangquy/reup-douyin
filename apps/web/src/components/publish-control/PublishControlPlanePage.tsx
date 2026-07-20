@@ -1,19 +1,63 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import type { ReactNode } from "react";
-import { useT } from "../../lib/i18n";
+import Link from "next/link";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   assignPublishDraft,
   bulkAssignPublishDrafts,
   fetchPublishControlQueue,
   fetchRoutingRules,
   unassignPublishDraft,
-  updatePlatformAccount
+  updatePlatformAccount,
 } from "../../lib/api";
+import { useT } from "../../lib/i18n";
 import { defaultAssignmentReason, healthTone, queueAttentionCount } from "../../lib/publishControlState";
 import { humanizeStatus } from "../../lib/statusLabels";
 import type { AccountHealthSummary, PublishControlQueue, PublishQueueItem, RoutingRule } from "../../types/publish-control";
+import { OpsConsoleShell } from "../app-shell/OpsConsoleShell";
+import { TopbarRefreshButton } from "../app-shell/TopbarRefreshButton";
+import { OpsState, formatDateTime, type OpsTone } from "../ops-console/OpsShared";
+
+type QueueFilter = "UNASSIGNED" | "ASSIGNED" | "ALL";
+
+function mapHealthTone(status: string): OpsTone {
+  return healthTone(status as AccountHealthSummary["health_status"]);
+}
+
+function ControlKpi({
+  label,
+  value,
+  detail,
+  tone = "muted",
+}: {
+  label: string;
+  value: string;
+  detail: string;
+  tone?: OpsTone;
+}) {
+  return (
+    <article className={`ops-control-kpi tone-${tone}`} title={detail}>
+      <em>{label}</em>
+      <strong>{value}</strong>
+      <span>{detail}</span>
+    </article>
+  );
+}
+
+function ControlPanel({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <section className="ops-control-panel">
+      <div className="ops-control-panel__head">
+        <h2>{title}</h2>
+      </div>
+      <div className="ops-control-panel__body">{children}</div>
+    </section>
+  );
+}
+
+function ControlChip({ label, tone }: { label: string; tone: OpsTone }) {
+  return <span className={`ops-control-chip tone-${tone}`}>{label}</span>;
+}
 
 export function PublishControlPlanePage() {
   const t = useT();
@@ -21,6 +65,7 @@ export function PublishControlPlanePage() {
   const [rules, setRules] = useState<RoutingRule[]>([]);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkAccountId, setBulkAccountId] = useState("");
+  const [queueFilter, setQueueFilter] = useState<QueueFilter>("UNASSIGNED");
   const [loading, setLoading] = useState(true);
   const [savingId, setSavingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -45,25 +90,39 @@ export function PublishControlPlanePage() {
 
   useEffect(() => {
     void load();
-  }, [load]);
+  }, [t]);
 
-  const allDrafts = useMemo(() => [...(queue?.unassigned_drafts ?? []), ...(queue?.assigned_drafts ?? []), ...(queue?.scheduled_drafts ?? [])], [queue]);
+  const allDrafts = useMemo(
+    () => [...(queue?.unassigned_drafts ?? []), ...(queue?.assigned_drafts ?? []), ...(queue?.scheduled_drafts ?? [])],
+    [queue],
+  );
   const selectedCount = selectedIds.size;
+  const warningCount = queueAttentionCount(allDrafts);
+  const attentionDrafts = queue?.needs_attention ?? [];
+  const holdAccounts = (queue?.accounts ?? []).filter((account) => account.is_on_hold || account.health_status === "UNHEALTHY");
+
+  const queueItems = useMemo(() => {
+    if (!queue) return [];
+    if (queueFilter === "UNASSIGNED") return queue.unassigned_drafts;
+    if (queueFilter === "ASSIGNED") return queue.assigned_drafts;
+    return [...queue.unassigned_drafts, ...queue.assigned_drafts];
+  }, [queue, queueFilter]);
 
   async function assignRecommended(item: PublishQueueItem) {
     if (!item.recommended_platform_account_id) return;
     setSavingId(item.publish_draft_id);
     setError(null);
+    setMessage(null);
     try {
       await assignPublishDraft(item.publish_draft_id, {
         platform_account_id: item.recommended_platform_account_id,
         reason: defaultAssignmentReason(item),
-        assigned_by: "local_operator"
+        assigned_by: "local_operator",
       });
-      setMessage("Draft assigned.");
+      setMessage(t("publishControlPage.assignSuccess"));
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to assign draft");
+      setError(err instanceof Error ? err.message : t("publishControlPage.assignError"));
     } finally {
       setSavingId(null);
     }
@@ -72,12 +131,13 @@ export function PublishControlPlanePage() {
   async function unassign(item: PublishQueueItem) {
     setSavingId(item.publish_draft_id);
     setError(null);
+    setMessage(null);
     try {
       await unassignPublishDraft(item.publish_draft_id);
-      setMessage("Draft unassigned.");
+      setMessage(t("publishControlPage.unassignSuccess"));
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to unassign draft");
+      setError(err instanceof Error ? err.message : t("publishControlPage.unassignError"));
     } finally {
       setSavingId(null);
     }
@@ -87,18 +147,19 @@ export function PublishControlPlanePage() {
     if (!bulkAccountId || selectedIds.size === 0) return;
     setSavingId("bulk");
     setError(null);
+    setMessage(null);
     try {
       await bulkAssignPublishDrafts({
         publish_draft_ids: Array.from(selectedIds),
         platform_account_id: bulkAccountId,
         reason: "Bulk manual routing from publish control plane",
-        assigned_by: "local_operator"
+        assigned_by: "local_operator",
       });
       setSelectedIds(new Set());
-      setMessage("Selected drafts assigned.");
+      setMessage(t("publishControlPage.bulkAssignSuccess"));
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to bulk assign drafts");
+      setError(err instanceof Error ? err.message : t("publishControlPage.bulkAssignError"));
     } finally {
       setSavingId(null);
     }
@@ -107,15 +168,16 @@ export function PublishControlPlanePage() {
   async function toggleHold(account: AccountHealthSummary) {
     setSavingId(account.platform_account_id);
     setError(null);
+    setMessage(null);
     try {
       await updatePlatformAccount(account.platform_account_id, {
         is_on_hold: !account.is_on_hold,
-        hold_reason: account.is_on_hold ? null : "Manual hold from publish control plane"
+        hold_reason: account.is_on_hold ? null : "Manual hold from publish control plane",
       });
-      setMessage(account.is_on_hold ? "Account hold removed." : "Account placed on hold.");
+      setMessage(account.is_on_hold ? t("publishControlPage.holdRemoved") : t("publishControlPage.holdPlaced"));
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to update account hold");
+      setError(err instanceof Error ? err.message : t("publishControlPage.holdError"));
     } finally {
       setSavingId(null);
     }
@@ -128,205 +190,336 @@ export function PublishControlPlanePage() {
     setSelectedIds(next);
   }
 
+  const refreshAction = (
+    <TopbarRefreshButton busy={loading && Boolean(queue)} disabled={loading && !queue} onClick={() => void load()} />
+  );
+
   if (loading && !queue) {
-    return <main className="control-page"><div className="state-panel skeleton">{t("publishControlPage.loading")}</div></main>;
+    return (
+      <OpsConsoleShell actions={refreshAction} description={t("publishControlPage.pageDesc")} title={t("publishControlPage.pageTitle")}>
+        <OpsState title={t("publishControlPage.loading")} detail={t("publishControlPage.loadingDetail")} />
+      </OpsConsoleShell>
+    );
   }
 
   if (error && !queue) {
     return (
-      <main className="control-page">
-        <div className="state-panel">
-          <h1>{t("publishControlPage.unavailable")}</h1>
-          <p>{error}</p>
-          <button type="button" onClick={() => void load()}>{t("publishControlPage.retry")}</button>
-        </div>
-      </main>
+      <OpsConsoleShell actions={refreshAction} description={t("publishControlPage.pageDesc")} title={t("publishControlPage.pageTitle")}>
+        <OpsState title={t("publishControlPage.unavailable")} detail={error} retry={() => void load()} />
+      </OpsConsoleShell>
     );
   }
 
+  const showAttention = attentionDrafts.length > 0 || holdAccounts.length > 0;
+
   return (
-    <main className="control-page">
-      <header className="control-header">
-        <div>
-          <span className="eyebrow">{t("publishControlPage.operations")}</span>
-          <h1>{t("publishControlPage.pageTitle")}</h1>
-          <p>{t("publishControlPage.pageDesc")}</p>
-        </div>
-        <button type="button" onClick={() => void load()}>{t("publishControlPage.refresh")}</button>
-      </header>
+    <OpsConsoleShell actions={refreshAction} description={t("publishControlPage.pageDesc")} title={t("publishControlPage.pageTitle")}>
+      <main className="ops-page ops-control-page">
+        {error ? <div className="inline-error">{error}</div> : null}
+        {message ? <div className="ops-control-notice">{message}</div> : null}
 
-      {error ? <div className="inline-error">{error}</div> : null}
-      {message ? <div className="publish-ready-banner">{message}</div> : null}
+        <p className="ops-control-freshness">
+          {t("publishControlPage.metricsGenerated")}{" "}
+          <time dateTime={queue?.generated_at}>{formatDateTime(queue?.generated_at)}</time>
+        </p>
 
-      {queue ? (
-        <>
-          <section className="control-overview-grid">
-            <Metric label={t("publishControlPage.accountsLabel")} value={queue.accounts.length.toString()} detail={t("publishControlPage.configuredPages")} />
-            <Metric label={t("publishControlPage.unassignedLabel")} value={queue.unassigned_drafts.length.toString()} detail={t("publishControlPage.readyDraftsNeedAccount")} />
-            <Metric label={t("publishControlPage.assignedLabel")} value={queue.assigned_drafts.length.toString()} detail={t("publishControlPage.readyDraftsRouted")} />
-            <Metric label={t("publishControlPage.scheduledLabel")} value={queue.scheduled_drafts.length.toString()} detail={t("publishControlPage.plannedPerAccount")} />
-            <Metric label={t("publishControlPage.needsAttention")} value={queue.needs_attention.length.toString()} detail={t("publishControlPage.failedOrBlocked")} />
-            <Metric label={t("publishControlPage.routingWarnings")} value={queueAttentionCount(allDrafts).toString()} detail={t("publishControlPage.overrideOrWarning")} />
-          </section>
+        {queue ? (
+          <>
+            <section className="ops-control-kpis" aria-label={t("publishControlPage.pageTitle")}>
+              <ControlKpi
+                label={t("publishControlPage.accountsLabel")}
+                value={String(queue.accounts.length)}
+                detail={t("publishControlPage.configuredPages")}
+                tone="muted"
+              />
+              <ControlKpi
+                label={t("publishControlPage.unassignedLabel")}
+                value={String(queue.unassigned_drafts.length)}
+                detail={t("publishControlPage.readyDraftsNeedAccount")}
+                tone={queue.unassigned_drafts.length > 0 ? "warn" : "good"}
+              />
+              <ControlKpi
+                label={t("publishControlPage.assignedLabel")}
+                value={String(queue.assigned_drafts.length)}
+                detail={t("publishControlPage.readyDraftsRouted")}
+                tone="muted"
+              />
+              <ControlKpi
+                label={t("publishControlPage.scheduledLabel")}
+                value={String(queue.scheduled_drafts.length)}
+                detail={t("publishControlPage.plannedPerAccount")}
+                tone="muted"
+              />
+              <ControlKpi
+                label={t("publishControlPage.needsAttention")}
+                value={String(queue.needs_attention.length)}
+                detail={t("publishControlPage.failedOrBlocked")}
+                tone={queue.needs_attention.length > 0 ? "danger" : "good"}
+              />
+              <ControlKpi
+                label={t("publishControlPage.routingWarnings")}
+                value={String(warningCount)}
+                detail={t("publishControlPage.overrideOrWarning")}
+                tone={warningCount > 0 ? "warn" : "good"}
+              />
+            </section>
 
-          <section className="control-layout">
-            <div className="control-main">
-              <Panel title={t("publishControlPage.accountsOverview")}>
-                <div className="account-grid">
-                  {queue.accounts.map((account) => (
-                    <AccountCard key={account.platform_account_id} account={account} saving={savingId === account.platform_account_id} onToggleHold={toggleHold} />
-                  ))}
-                  {queue.accounts.length === 0 ? <p className="muted">{t("publishControlPage.noAccountsYet")}</p> : null}
-                </div>
-              </Panel>
-
-              <Panel title={t("publishControlPage.draftRoutingQueue")}>
-                <div className="bulk-bar">
-                  <strong>{selectedCount} {t("publishControlPage.bulkBarSelected")}</strong>
-                  <select value={bulkAccountId} onChange={(event) => setBulkAccountId(event.target.value)}>
-                    {queue.accounts.map((account) => (
-                      <option key={account.platform_account_id} value={account.platform_account_id}>{account.display_name}</option>
-                    ))}
-                  </select>
-                  <button type="button" disabled={selectedCount === 0 || savingId === "bulk"} onClick={() => void bulkAssign()}>
-                    {savingId === "bulk" ? t("publishControlPage.assigning") : t("publishControlPage.bulkAssign")}
+            <div className="ops-control-toolbar">
+              <nav className="ops-control-filters" aria-label={t("publishControlPage.queueFilter")}>
+                {(
+                  [
+                    { key: "UNASSIGNED" as const, label: t("publishControlPage.unassignedReady"), count: queue.unassigned_drafts.length },
+                    { key: "ASSIGNED" as const, label: t("publishControlPage.assignedReady"), count: queue.assigned_drafts.length },
+                    {
+                      key: "ALL" as const,
+                      label: t("publishControlPage.filterAllReady"),
+                      count: queue.unassigned_drafts.length + queue.assigned_drafts.length,
+                    },
+                  ] as const
+                ).map((option) => (
+                  <button
+                    key={option.key}
+                    type="button"
+                    className={`ops-control-filter${queueFilter === option.key ? " is-active" : ""}`}
+                    onClick={() => setQueueFilter(option.key)}
+                  >
+                    {option.label} <strong>{option.count}</strong>
                   </button>
-                  <button type="button" onClick={() => setSelectedIds(new Set())}>{t("publishControlPage.clear")}</button>
-                </div>
-                <DraftTable
-                  title={t("publishControlPage.unassignedReady")}
-                  items={queue.unassigned_drafts}
-                  selectedIds={selectedIds}
-                  savingId={savingId}
-                  onToggle={toggle}
-                  onAssignRecommended={assignRecommended}
-                  onUnassign={unassign}
-                />
-                <DraftTable
-                  title={t("publishControlPage.assignedReady")}
-                  items={queue.assigned_drafts}
-                  selectedIds={selectedIds}
-                  savingId={savingId}
-                  onToggle={toggle}
-                  onAssignRecommended={assignRecommended}
-                  onUnassign={unassign}
-                />
-              </Panel>
+                ))}
+              </nav>
+              <nav className="ops-control-actions" aria-label={t("publishControlPage.triage")}>
+                <Link href="/ops/accounts">{t("publishControlPage.openAccounts")}</Link>
+                <Link href="/ops/routing-rules">{t("publishControlPage.openRoutingRules")}</Link>
+                <Link href="/ops/reconciliation">{t("publishControlPage.openReconciliation")}</Link>
+              </nav>
             </div>
 
-            <aside className="control-side">
-              <Panel title={t("publishControlPage.scheduledByAccount")}>
-                <DraftMiniList items={queue.scheduled_drafts} empty={t("publishControlPage.noScheduled")} />
-              </Panel>
-              <Panel title={t("publishControlPage.needsAttentionPanel")}>
-                <DraftMiniList items={queue.needs_attention} empty={t("publishControlPage.noBlocked")} />
-              </Panel>
-              <Panel title={t("publishControlPage.routingRules")}>
-                {rules.length === 0 ? <p className="muted">{t("publishControlPage.noRoutingRules")}</p> : null}
-                <ul className="compact-list">
-                  {rules.map((rule) => (
-                    <li key={rule.id}>
-                      <strong>{rule.rule_name}</strong>
-                      <span>{humanizeStatus(rule.status)} / priority {rule.priority}</span>
-                    </li>
-                  ))}
-                </ul>
-              </Panel>
-            </aside>
-          </section>
-        </>
-      ) : null}
-    </main>
-  );
-}
+            <section className={`ops-control-main${showAttention ? " has-attention" : ""}`}>
+              <div className="ops-control-primary">
+                <ControlPanel title={t("publishControlPage.accountsOverview")}>
+                  {queue.accounts.length === 0 ? (
+                    <p className="ops-control-empty">{t("publishControlPage.noAccountsYet")}</p>
+                  ) : (
+                    <ul className="ops-control-accounts">
+                      <li className="ops-control-account is-head" aria-hidden="true">
+                        <span>{t("publishControlPage.account")}</span>
+                        <span>{t("publishControlPage.health")}</span>
+                        <span>{t("publishControlPage.success")}</span>
+                        <span>{t("publishControlPage.assignedCount")}</span>
+                        <span>{t("publishControlPage.scheduledCount")}</span>
+                        <span>{t("publishControlPage.reconcileCount")}</span>
+                        <span>{t("publishControlPage.action")}</span>
+                      </li>
+                      {queue.accounts.map((account) => (
+                        <li
+                          className={`ops-control-account${account.is_on_hold || account.health_status === "UNHEALTHY" ? " is-hot" : ""}`}
+                          key={account.platform_account_id}
+                        >
+                          <div>
+                            <strong className="ops-control-account__title">{account.display_name}</strong>
+                            <em>{account.reasons[0] ?? t("publishControlPage.noHealthNote")}</em>
+                          </div>
+                          <ControlChip label={humanizeStatus(account.health_status)} tone={mapHealthTone(account.health_status)} />
+                          <span>{account.success_rate_percent}%</span>
+                          <span>{account.assigned_draft_count}</span>
+                          <span>{account.scheduled_draft_count}</span>
+                          <span>{account.needs_reconciliation_count}</span>
+                          <button
+                            type="button"
+                            className="ops-control-row__action"
+                            disabled={savingId === account.platform_account_id}
+                            onClick={() => void toggleHold(account)}
+                          >
+                            {savingId === account.platform_account_id
+                              ? t("publishControlPage.updating")
+                              : account.is_on_hold
+                                ? t("publishControlPage.removeHold")
+                                : t("publishControlPage.putOnHold")}
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </ControlPanel>
 
-function Metric({ label, value, detail }: { label: string; value: string; detail: string }) {
-  return <div className="health-card"><span>{label}</span><strong>{value}</strong><small>{detail}</small></div>;
-}
+                <ControlPanel title={t("publishControlPage.draftRoutingQueue")}>
+                  <div className="ops-control-bulk">
+                    <strong>
+                      {selectedCount} {t("publishControlPage.bulkBarSelected")}
+                    </strong>
+                    <select
+                      aria-label={t("publishControlPage.accountsLabel")}
+                      value={bulkAccountId}
+                      onChange={(event) => setBulkAccountId(event.target.value)}
+                    >
+                      {queue.accounts.map((account) => (
+                        <option key={account.platform_account_id} value={account.platform_account_id}>
+                          {account.display_name}
+                        </option>
+                      ))}
+                    </select>
+                    <button type="button" disabled={selectedCount === 0 || savingId === "bulk"} onClick={() => void bulkAssign()}>
+                      {savingId === "bulk" ? t("publishControlPage.assigning") : t("publishControlPage.bulkAssign")}
+                    </button>
+                    <button type="button" onClick={() => setSelectedIds(new Set())}>
+                      {t("publishControlPage.clear")}
+                    </button>
+                  </div>
 
-function Panel({ title, children }: { title: string; children: ReactNode }) {
-  return <section className="health-panel"><h2>{title}</h2>{children}</section>;
-}
+                  {queueItems.length === 0 ? (
+                    <p className="ops-control-empty">{t("publishControlPage.noDraftsInBucket")}</p>
+                  ) : (
+                    <ul className="ops-control-queue">
+                      <li className="ops-control-draft is-head" aria-hidden="true">
+                        <span>{t("publishControlPage.select")}</span>
+                        <span>{t("publishControlPage.draft")}</span>
+                        <span>{t("publishControlPage.status")}</span>
+                        <span>{t("publishControlPage.recommended")}</span>
+                        <span>{t("publishControlPage.assigned")}</span>
+                        <span>{t("publishControlPage.warnings")}</span>
+                        <span>{t("publishControlPage.action")}</span>
+                      </li>
+                      {queueItems.map((item) => (
+                        <li className="ops-control-draft" key={item.publish_draft_id}>
+                          <input
+                            type="checkbox"
+                            aria-label={t("publishControlPage.select")}
+                            checked={selectedIds.has(item.publish_draft_id)}
+                            onChange={() => toggle(item.publish_draft_id)}
+                          />
+                          <div>
+                            <Link href={`/publishing/drafts/${item.publish_draft_id}`}>
+                              <strong>{item.title ?? item.publish_draft_id.slice(0, 8)}</strong>
+                            </Link>
+                            <em>{item.publish_draft_id.slice(0, 8)}</em>
+                          </div>
+                          <ControlChip label={humanizeStatus(item.status)} tone="muted" />
+                          <span>{item.recommended_account_name ?? "—"}</span>
+                          <span>{item.assigned_platform_account_id ? item.assigned_platform_account_id.slice(0, 8) : "—"}</span>
+                          <span className="ops-control-draft__warn" title={item.warnings[0]}>
+                            {item.warnings[0] ?? "—"}
+                          </span>
+                          <div className="ops-control-draft__actions">
+                            <button
+                              type="button"
+                              className="ops-control-row__action"
+                              disabled={!item.recommended_platform_account_id || savingId === item.publish_draft_id}
+                              onClick={() => void assignRecommended(item)}
+                            >
+                              {t("publishControlPage.useRec")}
+                            </button>
+                            <button
+                              type="button"
+                              className="ops-control-row__action"
+                              disabled={!item.assigned_platform_account_id || savingId === item.publish_draft_id}
+                              onClick={() => void unassign(item)}
+                            >
+                              {t("publishControlPage.unassign")}
+                            </button>
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  <p className="ops-control-footnote">{t("publishControlPage.assignmentAuthorityFootnote")}</p>
+                </ControlPanel>
+              </div>
 
-function AccountCard({ account, saving, onToggleHold }: { account: AccountHealthSummary; saving: boolean; onToggleHold: (account: AccountHealthSummary) => Promise<void> }) {
-  const t = useT();
-  return (
-    <div className="account-card">
-      <div>
-        <strong>{account.display_name}</strong>
-        <span className={`pill ${healthTone(account.health_status)}`}>{humanizeStatus(account.health_status)}</span>
-      </div>
-      <dl>
-        <div><dt>{t("publishControlPage.success")}</dt><dd>{account.success_rate_percent}%</dd></div>
-        <div><dt>{t("publishControlPage.assignedCount")}</dt><dd>{account.assigned_draft_count}</dd></div>
-        <div><dt>{t("publishControlPage.scheduledCount")}</dt><dd>{account.scheduled_draft_count}</dd></div>
-        <div><dt>{t("publishControlPage.reconcileCount")}</dt><dd>{account.needs_reconciliation_count}</dd></div>
-      </dl>
-      <small>{account.reasons[0] ?? t("publishControlPage.noHealthNote")}</small>
-      <button type="button" disabled={saving} onClick={() => void onToggleHold(account)}>
-        {saving ? t("publishControlPage.updating") : account.is_on_hold ? t("publishControlPage.removeHold") : t("publishControlPage.putOnHold")}
-      </button>
-    </div>
-  );
-}
+              {showAttention ? (
+                <aside className="ops-control-side">
+                  {attentionDrafts.length > 0 ? (
+                    <ControlPanel title={t("publishControlPage.needsAttentionPanel")}>
+                      <ul className="ops-control-attention">
+                        {attentionDrafts.map((item) => (
+                          <li key={item.publish_draft_id}>
+                            <div>
+                              <strong>{item.title ?? item.publish_draft_id.slice(0, 8)}</strong>
+                              <em>
+                                {humanizeStatus(item.status)} · {item.recommended_account_name ?? t("publishControlPage.noRecommendation")}
+                              </em>
+                            </div>
+                            <Link href={`/publishing/drafts/${item.publish_draft_id}`}>{t("publishControlPage.openDraft")}</Link>
+                          </li>
+                        ))}
+                      </ul>
+                    </ControlPanel>
+                  ) : null}
 
-function DraftTable({
-  title,
-  items,
-  selectedIds,
-  savingId,
-  onToggle,
-  onAssignRecommended,
-  onUnassign
-}: {
-  title: string;
-  items: PublishQueueItem[];
-  selectedIds: Set<string>;
-  savingId: string | null;
-  onToggle: (id: string) => void;
-  onAssignRecommended: (item: PublishQueueItem) => Promise<void>;
-  onUnassign: (item: PublishQueueItem) => Promise<void>;
-}) {
-  const t = useT();
-  return (
-    <div className="draft-table-wrap">
-      <h3>{title}</h3>
-      <table className="health-table">
-        <thead>
-          <tr><th>{t("publishControlPage.select")}</th><th>{t("publishControlPage.draft")}</th><th>Status</th><th>{t("publishControlPage.recommended")}</th><th>{t("publishControlPage.assigned")}</th><th>{t("publishControlPage.warnings")}</th><th>Actions</th></tr>
-        </thead>
-        <tbody>
-          {items.length === 0 ? <tr><td colSpan={7}>{t("publishControlPage.noDraftsInBucket")}</td></tr> : null}
-          {items.map((item) => (
-            <tr key={item.publish_draft_id}>
-              <td><input type="checkbox" checked={selectedIds.has(item.publish_draft_id)} onChange={() => onToggle(item.publish_draft_id)} /></td>
-              <td><strong>{item.title ?? item.publish_draft_id.slice(0, 8)}</strong><small>{item.publish_draft_id.slice(0, 8)}</small></td>
-              <td>{humanizeStatus(item.status)}</td>
-              <td>{item.recommended_account_name ?? "-"}</td>
-              <td>{item.assigned_platform_account_id ? item.assigned_platform_account_id.slice(0, 8) : "-"}</td>
-              <td>{item.warnings.length > 0 ? item.warnings[0] : "-"}</td>
-              <td className="table-actions">
-                <button type="button" disabled={!item.recommended_platform_account_id || savingId === item.publish_draft_id} onClick={() => void onAssignRecommended(item)}>{t("publishControlPage.useRec")}</button>
-                <button type="button" disabled={!item.assigned_platform_account_id || savingId === item.publish_draft_id} onClick={() => void onUnassign(item)}>{t("publishControlPage.unassign")}</button>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
+                  {holdAccounts.length > 0 ? (
+                    <ControlPanel title={t("publishControlPage.accountAttention")}>
+                      <ul className="ops-control-attention">
+                        {holdAccounts.map((account) => (
+                          <li key={account.platform_account_id}>
+                            <div>
+                              <strong>{account.display_name}</strong>
+                              <em>
+                                {humanizeStatus(account.health_status)}
+                                {account.is_on_hold ? ` · ${t("publishControlPage.onHold")}` : ""}
+                              </em>
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                    </ControlPanel>
+                  ) : null}
 
-function DraftMiniList({ items, empty }: { items: PublishQueueItem[]; empty: string }) {
-  if (items.length === 0) return <p className="muted">{empty}</p>;
-  return (
-    <ul className="compact-list">
-      {items.map((item) => (
-        <li key={item.publish_draft_id}>
-          <strong>{item.title ?? item.publish_draft_id.slice(0, 8)}</strong>
-          <span>{humanizeStatus(item.status)} / {item.recommended_account_name ?? "no recommendation"}</span>
-        </li>
-      ))}
-    </ul>
+                  {queue.scheduled_drafts.length > 0 ? (
+                    <ControlPanel title={t("publishControlPage.scheduledByAccount")}>
+                      <ul className="ops-control-attention">
+                        {queue.scheduled_drafts.map((item) => (
+                          <li key={item.publish_draft_id}>
+                            <div>
+                              <strong>{item.title ?? item.publish_draft_id.slice(0, 8)}</strong>
+                              <em>{humanizeStatus(item.status)}</em>
+                            </div>
+                            <Link href={`/publishing/drafts/${item.publish_draft_id}`}>{t("publishControlPage.openDraft")}</Link>
+                          </li>
+                        ))}
+                      </ul>
+                    </ControlPanel>
+                  ) : null}
+
+                  <ControlPanel title={t("publishControlPage.routingRules")}>
+                    {rules.length === 0 ? (
+                      <p className="ops-control-empty">{t("publishControlPage.noRoutingRules")}</p>
+                    ) : (
+                      <ul className="ops-control-rules">
+                        {rules.map((rule) => (
+                          <li key={rule.id}>
+                            <strong>{rule.rule_name}</strong>
+                            <span>
+                              {humanizeStatus(rule.status)} · {t("publishControlPage.priority")} {rule.priority}
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </ControlPanel>
+                </aside>
+              ) : (
+                <aside className="ops-control-side">
+                  <ControlPanel title={t("publishControlPage.routingRules")}>
+                    {rules.length === 0 ? (
+                      <p className="ops-control-empty">{t("publishControlPage.noRoutingRules")}</p>
+                    ) : (
+                      <ul className="ops-control-rules">
+                        {rules.map((rule) => (
+                          <li key={rule.id}>
+                            <strong>{rule.rule_name}</strong>
+                            <span>
+                              {humanizeStatus(rule.status)} · {t("publishControlPage.priority")} {rule.priority}
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </ControlPanel>
+                </aside>
+              )}
+            </section>
+          </>
+        ) : null}
+      </main>
+    </OpsConsoleShell>
   );
 }

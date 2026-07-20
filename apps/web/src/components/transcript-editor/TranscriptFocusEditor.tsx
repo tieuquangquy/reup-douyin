@@ -13,6 +13,79 @@ import {
 import { TranscriptSegmentFlags } from "./TranscriptSegmentFlags";
 import { TranscriptSegmentTimingEditor } from "./TranscriptSegmentTimingEditor";
 
+type SegmentOpsIconKind = "play" | "split" | "merge-prev" | "merge-next" | "reset";
+
+function SegmentOpsIcon({ kind }: { kind: SegmentOpsIconKind }) {
+  if (kind === "play") {
+    return (
+      <svg className="segment-ops__icon" viewBox="0 0 20 20" aria-hidden="true">
+        <path d="M7 5.2v9.6L15 10 7 5.2z" fill="currentColor" />
+      </svg>
+    );
+  }
+  if (kind === "split") {
+    return (
+      <svg className="segment-ops__icon" viewBox="0 0 20 20" aria-hidden="true">
+        <path
+          d="M10 4.5v11M6.2 8.2 10 4.5l3.8 3.7M6.2 11.8 10 15.5l3.8-3.7"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.7"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+    );
+  }
+  if (kind === "merge-prev") {
+    return (
+      <svg className="segment-ops__icon" viewBox="0 0 20 20" aria-hidden="true">
+        <path
+          d="M15.5 10H6.2M9.5 6.5 6 10l3.5 3.5"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.7"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+    );
+  }
+  if (kind === "merge-next") {
+    return (
+      <svg className="segment-ops__icon" viewBox="0 0 20 20" aria-hidden="true">
+        <path
+          d="M4.5 10h9.3M10.5 6.5 14 10l-3.5 3.5"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.7"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+    );
+  }
+  return (
+    <svg className="segment-ops__icon" viewBox="0 0 20 20" aria-hidden="true">
+      <path
+        d="M15.2 9.2a5.2 5.2 0 1 1-1.5-3.6"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinecap="round"
+      />
+      <path
+        d="M15.2 4.5v3.5h-3.5"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 type Props = {
   segment: EditableSegment;
   sourceVideoId: string;
@@ -97,19 +170,24 @@ export function TranscriptFocusEditor({
           />
           <div className="transcript-focus-editor__actions segment-ops">
             <button type="button" className="segment-ops__btn segment-ops__btn--play" onClick={onPlay}>
-              {t("transcriptEditorRow.play")}
+              <SegmentOpsIcon kind="play" />
+              <span>{t("transcriptEditorRow.play")}</span>
             </button>
             <button type="button" className="segment-ops__btn" onClick={onSplit}>
-              {t("transcriptEditorRow.split")}
+              <SegmentOpsIcon kind="split" />
+              <span>{t("transcriptEditorRow.split")}</span>
             </button>
             <button type="button" className="segment-ops__btn" disabled={!canMergePrevious} onClick={onMergePrevious}>
-              {t("transcriptEditorRow.mergePrev")}
+              <SegmentOpsIcon kind="merge-prev" />
+              <span>{t("transcriptEditorRow.mergePrev")}</span>
             </button>
             <button type="button" className="segment-ops__btn" disabled={!canMergeNext} onClick={onMergeNext}>
-              {t("transcriptEditorRow.mergeNext")}
+              <SegmentOpsIcon kind="merge-next" />
+              <span>{t("transcriptEditorRow.mergeNext")}</span>
             </button>
             <button type="button" className="segment-ops__btn" onClick={onReset} disabled={!segment.isDirty}>
-              {t("transcriptEditorRow.reset")}
+              <SegmentOpsIcon kind="reset" />
+              <span>{t("transcriptEditorRow.reset")}</span>
             </button>
           </div>
         </div>

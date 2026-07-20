@@ -34,23 +34,15 @@ def dense_ui_content_panel(
     bottom_gap: float = DENSE_UI_BOTTOM_GAP,
 ) -> tuple[float, float, float, float]:
     """
-    Near-full content panel that stops above the bottom subtitle band.
+    Near-full-frame wipe for dense Chinese UI (nutrition / endcard overlays).
 
-    Leaves the lower third free so existing Vietnamese hard-subs stay visible.
+    ``band_ratio`` / ``bottom_gap`` are kept for call-site compat but ignored —
+    full-screen CJK UI needs the panel to cover past the old subtitle cut.
     """
-    from src.media_pipeline.ocr_filtering.subtitle_band import (
-        BOTTOM_BAND_RATIO,
-        subtitle_band_top_normalized,
-    )
-
-    ratio = BOTTOM_BAND_RATIO if band_ratio is None else float(band_ratio)
+    del band_ratio, bottom_gap  # compat kwargs; full-frame wipe is intentional
     edge = max(0.02, float(inset))
-    bottom = subtitle_band_top_normalized(ratio) - max(0.0, float(bottom_gap))
-    y0 = edge
-    h = max(0.40, bottom - y0)
-    x0 = edge
-    w = max(0.50, 1.0 - 2.0 * edge)
-    return x0, y0, w, h
+    span = max(0.50, 1.0 - 2.0 * edge)
+    return edge, edge, span, span
 
 
 def is_artifact_vi_text(text: str) -> bool:
@@ -242,14 +234,13 @@ def overlays_from_ocr_payload(
     Build timed overlays from Phase 2 OCR (+ VI map).
 
     - Latin/VI-only boxes are skipped for per-label VI (CJK gate).
-    - Sparse mid-clip: one segment per CJK box (local cover + VI).
-    - Dense UI **or last 20% of the clip** with any OCR activity: emit a
-      ``dense_ui`` slate panel above the subtitle band (wipes unread Chinese UI
-      even when PaddleOCR only returns the bottom caption).
+    - Sparse frames: one segment per CJK box (local cover + VI).
+    - Truly dense endcards (``is_endcard_dense``): also emit a ``dense_ui``
+      slate panel above the subtitle band. Late-clip alone does **not** force
+      a panel (avoids the ugly wipe when OCR only saw the bottom caption).
     """
     from src.media_pipeline.ocr_filtering.overlay_zones import (
         is_endcard_dense,
-        is_late_clip_ui_frame,
         overlay_kind_for_box,
     )
     from src.media_pipeline.ocr_filtering.script_filter import contains_cjk
@@ -306,12 +297,8 @@ def overlays_from_ocr_payload(
             kind = overlay_kind_for_box(detected)
             cjk_items.append((detected, (x, y, w, h), kind))
 
-        late = is_late_clip_ui_frame(time_ms, duration_ms, text_boxes)
-        dense = bool(cjk_items) and is_endcard_dense([item[0] for item in cjk_items])
-        force_panel = dense or late
+        force_panel = bool(cjk_items) and is_endcard_dense([item[0] for item in cjk_items])
 
-        # Late-clip endcards often OCR only the bottom caption (or Latin VI) while
-        # missing dense UI labels — still emit a content panel above the sub band.
         if not cjk_items and not force_panel:
             continue
 

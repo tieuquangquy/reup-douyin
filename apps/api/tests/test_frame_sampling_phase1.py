@@ -38,8 +38,22 @@ class ExtractVideoFramesTests(unittest.TestCase):
 
             def fake_run(cmd, **_kwargs):
                 out.mkdir(parents=True, exist_ok=True)
+                joined = " ".join(str(c) for c in cmd)
+                if "format=duration" in joined:
+                    # Exactly matches last 1fps tick (2s) so no extra EOF still.
+                    return type(
+                        "Completed",
+                        (),
+                        {"returncode": 0, "stderr": "", "stdout": "2.0\n"},
+                    )()
                 if "thumbnail.jpg" in str(cmd[-1]):
                     Path(cmd[-1]).write_bytes(b"jpg")
+                    return type("Completed", (), {"returncode": 0, "stderr": "", "stdout": ""})()
+                if "-sseof" in joined or (
+                    "-ss" in joined and "fps=" not in joined and "thumbnail" not in joined
+                ):
+                    # Near-EOF still (gap from last 1fps tick may trigger this).
+                    Path(cmd[-1]).write_bytes(b"jpg-eof")
                     return type("Completed", (), {"returncode": 0, "stderr": "", "stdout": ""})()
                 # Ensure STRICT fps filter is present and not a full dump.
                 self.assertIn("-vf", cmd)
@@ -71,8 +85,19 @@ class ExtractVideoFramesTests(unittest.TestCase):
 
             def fake_run(cmd, **_kwargs):
                 out.mkdir(parents=True, exist_ok=True)
+                joined = " ".join(str(c) for c in cmd)
+                if "format=duration" in joined:
+                    # Last 2fps tick at 0ms; duration within gap → no EOF still.
+                    return type(
+                        "Completed",
+                        (),
+                        {"returncode": 0, "stderr": "", "stdout": "0.1\n"},
+                    )()
                 if "thumbnail.jpg" in str(cmd[-1]):
                     Path(cmd[-1]).write_bytes(b"jpg")
+                    return type("Completed", (), {"returncode": 0, "stderr": "", "stdout": ""})()
+                if "-sseof" in joined:
+                    Path(cmd[-1]).write_bytes(b"jpg-eof")
                     return type("Completed", (), {"returncode": 0, "stderr": "", "stdout": ""})()
                 (out / "frame_000001.jpg").write_bytes(b"jpg")
                 return type("Completed", (), {"returncode": 0, "stderr": "", "stdout": ""})()

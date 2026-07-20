@@ -26,7 +26,8 @@ const globalStylesSource = readFileSync(resolve(webSrcDir, "app/globals.css"), "
 
 assert.match(reviewPageSource, /capture-inbox-review-workspace/, "22F-6A must use Capture Inbox review workspace layout");
 assert.match(reviewPageSource, /capture-inbox-review-main/, "22F-6A must use Capture Inbox main gallery column");
-assert.match(reviewPageSource, /capture-inbox-review-side/, "22F-6A must use Capture Inbox right inspector column");
+assert.doesNotMatch(reviewPageSource, /capture-inbox-review-side/, "Review Board must not reserve sticky right inspector column");
+assert.match(reviewPageSource, /WorkItemDetailsDrawer/, "Review Board must open details in WorkItemDetailsDrawer");
 assert.match(reviewPageSource, /capture-inbox-status-strip/, "22F-6A must use Capture Inbox status strip");
 assert.match(reviewPageSource, /capture-inbox-status-pill/, "22F-6A must use Capture Inbox status pills");
 assert.match(reviewPageSource, /review-board-command-deck/, "Review Board must use unified command deck");
@@ -37,7 +38,6 @@ assert.match(reviewPageSource, /capture-inbox-command-bar/, "22F-6A must use Cap
 assert.match(reviewPageSource, /review-board-bulk-command-bar/, "22F-6B must use compact bulk command bar");
 assert.match(reviewPageSource, /capture-inbox-media-tile/, "22F-6A must render candidate tiles like Capture Inbox");
 assert.match(reviewPageSource, /capture-inbox-media-tile-grid/, "22F-6A must render tile gallery grid");
-assert.match(reviewPageSource, /capture-inbox-right-inspector/, "22F-6A must use Capture Inbox right inspector shell");
 assert.match(reviewPageSource, /Select visible/, "Bulk bar must expose select visible");
 assert.match(reviewBoardSource, /Approve & send/, "Bulk bar must expose approve and send fast path");
 assert.match(reviewPageSource, /title="Approve selected candidates without queueing"/, "Bulk bar must expose approve-only action");
@@ -46,7 +46,7 @@ assert.match(reviewPageSource, /bulkLaterSelected/, "Later must run without conf
 assert.match(reviewPageSource, /Reject selected candidates/, "Reject must use confirmation dialog");
 assert.match(reviewPageSource, /Remove from board/, "Bulk bar must expose remove from board action");
 assert.match(reviewPageSource, /review-board-bulk-dialog-backdrop/, "Bulk dialog must use viewport backdrop");
-assert.match(reviewPageSource, /<\/aside>\s*<\/div>\s*<ReviewBulkDialog/, "Bulk dialog must render after workspace, not inside aside");
+assert.match(reviewPageSource, /<\/div>\s*<ReviewRightInspector[\s\S]*<ReviewBulkDialog/, "Bulk dialog must render after workspace drawer, not inside side column");
 assert.match(reviewPageSource, /selectedIds/, "Studio must track bulk selection");
 assert.match(reviewPageSource, /toggleSelection/, "Bulk select must use shared selection helper");
 assert.match(reviewPageSource, /pickBestBenchCandidateId/, "Compare finalists must use scoring helper");
@@ -72,11 +72,10 @@ assert.doesNotMatch(reviewPageSource, /review-board-soft-chip/, "Review Board mu
 assert.doesNotMatch(reviewPageSource, /review-board-pipeline-segmented/, "Review Board must not use pipeline segmented control");
 assert.match(reviewPageSource, /review-board-media-tile/, "Tiles must use review-board overlay styling scope");
 assert.match(reviewPageSource, /is-bulk-selected/, "Bulk selection must highlight tile border");
-assert.match(reviewPageSource, /review-board-tile-select-toggle/, "Tiles must use compact select toggle");
-assert.match(reviewPageSource, /review-board-tile-status-chip/, "Status must use readable overlay chip");
+assert.match(reviewPageSource, /WorkMediaTileOverlay/, "Tiles must use shared Work overlay labels");
+assert.match(reviewPageSource, /getOperatorTileScoreBadge/, "Tiles must use shared score badge authority");
 assert.match(reviewPageSource, /reviewBoardStatusTone/, "Review Board must map SHORTLISTED to visible status tone");
 assert.doesNotMatch(reviewPageSource, /review-board-decision-focus-compact|review-board-queue-table|review-board-gallery-shell|review-board-decision-layout/, "22F-6A must remove decision-console layout");
-assert.match(reviewPageSource, /capture-inbox-reup-score-badge/, "Tiles must reuse Capture Inbox score badge styling");
 assert.match(reviewPageSource, /formatExactEngagementMetric\(metadata\.likeCount, metadata\.likeCountText\)/, "Review Board tiles must render exact engagement metrics");
 assert.match(reviewBoardSource, /review-board-queue-pair/, "Approved in-queue tiles must use queue action pair layout");
 assert.match(reviewBoardSource, /ReviewBoardTileActions/, "Review Board tiles must use dedicated tile action component");
@@ -89,7 +88,7 @@ assert.doesNotMatch(reviewBoardSource, /review-board-tile-action-span" href="\/s
 assert.match(reviewPageSource, /reviewCandidateDisplayScore\(candidate\)/, "Visible score must use reup_score adapter");
 assert.match(reviewPageSource, /buildCapturedItemFromReviewCandidate/, "Review Board score badge must use shared capture scoring shape");
 assert.match(reviewPageSource, /reupScoreBadgeLevelForCaptureItem/, "Review Board score badge must use shared completeness-aware levels");
-assert.match(reviewPageSource, /formatReupScoreBadgeValue\(score\)/, "Review Board tiles must use shared score value formatter");
+assert.match(reviewPageSource, /getOperatorTileScoreBadge\(buildCapturedItemFromReviewCandidate\(candidate\)\)/, "Review Board tiles must use shared score badge authority");
 assert.doesNotMatch(reviewPageSource, /function formatScore/, "Review Board must not keep local score badge formatters");
 assert.match(apiSource, /params\.set\("view", "summary"\)/, "Review Board API helper must request summary list view");
 assert.match(globalStylesSource, /Phase 22F-7E: unified command deck/, "Styles must document 22F-7E command deck");

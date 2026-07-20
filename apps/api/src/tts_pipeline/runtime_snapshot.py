@@ -32,8 +32,9 @@ def build_last_install(
     package: str,
     detail: str,
     already_satisfied: bool = False,
+    status: str = "",
 ) -> dict[str, Any]:
-    return {
+    row: dict[str, Any] = {
         "at": utc_now_iso(),
         "ok": bool(ok),
         "command": (command or "").strip(),
@@ -41,6 +42,10 @@ def build_last_install(
         "detail": (detail or "").strip()[:500],
         "already_satisfied": bool(already_satisfied),
     }
+    cleaned_status = (status or "").strip()
+    if cleaned_status:
+        row["status"] = cleaned_status
+    return row
 
 
 def build_last_probe(

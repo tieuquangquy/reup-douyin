@@ -9,9 +9,8 @@ export default function Page() {
     <OperatorStudioShell
       actions={
         <>
-          <a href="/ops/publish-health">Publish health</a>
-          <a href="/ops/publish-control">Publish control</a>
-          <a href="/ops/optimization">Ops optimization</a>
+          <a href="/publishing/drafts">Publish drafts</a>
+          <a href="/selection/reup-queue">Reup queue</a>
         </>
       }
       description="Operator-facing optimization hints for source, account, and scheduling choices."

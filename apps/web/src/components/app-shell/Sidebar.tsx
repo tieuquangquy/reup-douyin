@@ -27,8 +27,13 @@ export function Sidebar({ surface, sections }: { surface: NavSurface; sections: 
   return (
     <aside className="app-sidebar">
       <a className="app-brand" href={surface === "operator" ? "/" : "/ops"}>
-        <span>reup-douyin</span>
-        <strong>{surface === "operator" ? t("nav.operatorStudio") : t("nav.opsConsole")}</strong>
+        <span className="app-brand__mark">
+          <img alt="" height={28} src="/brand/logo-loop-r.svg" width={28} />
+        </span>
+        <span className="app-brand__text">
+          <span>reup-douyin</span>
+          <strong>{surface === "operator" ? t("nav.operatorStudio") : t("nav.opsConsole")}</strong>
+        </span>
       </a>
       <nav aria-label={`${surface === "operator" ? t("nav.operatorStudio") : t("nav.opsConsole")} navigation`}>
         {sections.map((section) => (

@@ -29,6 +29,29 @@ export function formatConnectionTestSummary(
   return detail ? `${status} · ${provider} — ${detail}` : `${status} · ${provider}`;
 }
 
+export type LlmProbeSuccessView = {
+  title: string;
+  message: string;
+  provider: string;
+};
+
+/**
+ * Ops Test success copy for Translation / Caption AI — same banner shape as TTS.
+ * Probe passed ≠ setup saved; UI hint covers that separately.
+ */
+export function formatLlmProbeSuccess(
+  result: ConnectionTestResult,
+  labels: { passed: string; generic: string }
+): LlmProbeSuccessView {
+  const provider = result.provider.trim() || "unknown";
+  const cleaned = formatConnectionTestDetail(result.detail || "");
+  return {
+    title: labels.passed,
+    message: cleaned || labels.generic,
+    provider
+  };
+}
+
 function redactSecrets(text: string): string {
   return text
     .replace(/\bsk-[A-Za-z0-9_\-*]{8,}\b/g, "sk-••••")
@@ -58,6 +81,33 @@ function extractJsonMessage(chunk: string): string | null {
   return null;
 }
 
+function looksLikeProviderDump(text: string): boolean {
+  const value = text.trim();
+  if (!value) return true;
+  if (value.startsWith("{") || value.startsWith('"')) return true;
+  if (/^\w+_http_\d{3}\s*:/i.test(value)) return true;
+  if (/^\w+_http_\d{3}\b/i.test(value) && value.includes("{")) return true;
+  return false;
+}
+
+function looksLikeConnectionFailure(text: string): boolean {
+  return /urlopen|winerror\s*10060|timed?\s*out|connection\s*(attempt\s*)?failed|connection\s*refused|name\s*or\s*service\s*not\s*known|getaddrinfo|network\s*is\s*unreachable/i.test(
+    text
+  );
+}
+
+function polishOperatorMessage(message: string): string {
+  let text = message
+    .replace(/\s*For more information on this error,?\s*head to:\s*https?:\/\/\S+/gi, "")
+    .replace(/\s*https?:\/\/[^\s)"]+/g, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+  if (text.length > 160) {
+    text = `${text.slice(0, 157).trimEnd()}…`;
+  }
+  return text;
+}
+
 function titleForHttpStatus(status: number | null, labels: { unauthorized: string; forbidden: string; notFound: string; rateLimited: string; failed: string }): string {
   if (status === 401) return labels.unauthorized;
   if (status === 403) return labels.forbidden;
@@ -82,24 +132,46 @@ export function formatProviderError(
   }
 ): ProviderErrorView {
   const raw = (detail || "").trim();
-  const httpMatch = raw.match(/(?:list_models_|openai_compatible_|gemini_|ollama_)?http_(\d{3})\s*:?\s*(.*)$/i);
-  const httpStatus = httpMatch ? Number(httpMatch[1]) : null;
-  const remainder = httpMatch ? httpMatch[2].trim() : raw;
-  const fromJson = extractJsonMessage(remainder);
+  if (looksLikeConnectionFailure(raw)) {
+    return {
+      title: labels.failed,
+      message: polishOperatorMessage(labels.checkEndpoint),
+      httpStatus: null,
+      raw
+    };
+  }
+  const httpMatch =
+    raw.match(/(?:list_models_|openai_compatible_|gemini_|ollama_)http_(\d{3})\s*:?\s*(.*)$/i) ||
+    raw.match(/\bhttp_(\d{3})\s*:?\s*(.*)$/i);
+  // API client errors look like "Failed to test …: 500" with no provider dump.
+  const bareStatusMatch = !httpMatch ? raw.match(/:\s*(\d{3})\s*$/) : null;
+  const httpStatus = httpMatch
+    ? Number(httpMatch[1])
+    : bareStatusMatch
+      ? Number(bareStatusMatch[1])
+      : null;
+  const remainder = httpMatch ? httpMatch[2].trim() : bareStatusMatch ? "" : raw;
+  const fromJson = extractJsonMessage(remainder) || extractJsonMessage(raw);
   const title = titleForHttpStatus(httpStatus, labels);
 
   let message = fromJson;
   if (!message) {
     const cleaned = redactSecrets(remainder).trim();
-    // Avoid dumping truncated provider JSON into the UI.
-    if (!cleaned || cleaned.startsWith("{") || cleaned.startsWith('"')) {
+    // Avoid dumping truncated provider JSON / bare client errors into the UI.
+    if (!cleaned || looksLikeProviderDump(cleaned) || looksLikeConnectionFailure(cleaned)) {
       if (httpStatus === 401 || httpStatus === 403) message = labels.checkKey;
       else if (httpStatus === 429) message = labels.rateLimited;
       else message = labels.checkEndpoint;
     } else {
-      message = cleaned.slice(0, 220);
+      message = cleaned;
     }
   }
 
-  return { title, message, httpStatus, raw };
+  if (looksLikeProviderDump(message) || looksLikeConnectionFailure(message)) {
+    if (httpStatus === 401 || httpStatus === 403) message = labels.checkKey;
+    else if (httpStatus === 429) message = labels.rateLimited;
+    else message = labels.checkEndpoint;
+  }
+
+  return { title, message: polishOperatorMessage(message), httpStatus, raw };
 }

@@ -21,8 +21,12 @@ const OPS_PAGES_WITH_REFRESH = [
   "OpsReconciliationPage.tsx",
   "OpsRiskPage.tsx",
   "OpsRoutingRulesPage.tsx",
-  "OpsUsersPage.tsx"
+  "OpsUsersPage.tsx",
+  "OpsTtsAiPage.tsx"
 ];
+
+const PUBLISH_HEALTH_PAGE = join(webSrc, "components", "publish-health", "PublishHealthDashboardPage.tsx");
+const PUBLISH_CONTROL_PAGE = join(webSrc, "components", "publish-control", "PublishControlPlanePage.tsx");
 
 const OPS_PAGES_NO_HEADER = [
   ...OPS_PAGES_WITH_REFRESH,
@@ -33,6 +37,22 @@ for (const fileName of OPS_PAGES_NO_HEADER) {
   const source = readFileSync(join(opsConsoleDir, fileName), "utf8");
   assert.doesNotMatch(source, /OpsPageHeader/, `${fileName} must not duplicate Topbar with OpsPageHeader`);
   assert.match(source, /OpsConsoleShell/, `${fileName} must own OpsConsoleShell so title/actions live in Topbar`);
+}
+
+{
+  const source = readFileSync(PUBLISH_HEALTH_PAGE, "utf8");
+  assert.doesNotMatch(source, /OpsPageHeader/, "PublishHealthDashboardPage must not duplicate Topbar with OpsPageHeader");
+  assert.doesNotMatch(source, /health-header/, "PublishHealthDashboardPage must not render nested health-header");
+  assert.match(source, /OpsConsoleShell/, "PublishHealthDashboardPage must own OpsConsoleShell");
+  assert.match(source, /TopbarRefreshButton/, "PublishHealthDashboardPage must put Refresh in the Topbar");
+}
+
+{
+  const source = readFileSync(PUBLISH_CONTROL_PAGE, "utf8");
+  assert.doesNotMatch(source, /OpsPageHeader/, "PublishControlPlanePage must not duplicate Topbar with OpsPageHeader");
+  assert.doesNotMatch(source, /control-header/, "PublishControlPlanePage must not render nested control-header");
+  assert.match(source, /OpsConsoleShell/, "PublishControlPlanePage must own OpsConsoleShell");
+  assert.match(source, /TopbarRefreshButton/, "PublishControlPlanePage must put Refresh in the Topbar");
 }
 
 for (const fileName of OPS_PAGES_WITH_REFRESH) {
@@ -47,11 +67,14 @@ const routeShellOwners: Array<{ route: string; page: string }> = [
   { route: "assets/page.tsx", page: "OpsAssetsPage" },
   { route: "accounts/page.tsx", page: "OpsAccountsPage" },
   { route: "publish-attempts/page.tsx", page: "OpsPublishAttemptsPage" },
+  { route: "publish-health/page.tsx", page: "PublishHealthDashboardPage" },
+  { route: "publish-control/page.tsx", page: "PublishControlPlanePage" },
   { route: "reconciliation/page.tsx", page: "OpsReconciliationPage" },
   { route: "risk/page.tsx", page: "OpsRiskPage" },
   { route: "routing-rules/page.tsx", page: "OpsRoutingRulesPage" },
   { route: "tools/page.tsx", page: "OpsToolsPage" },
-  { route: "users/page.tsx", page: "OpsUsersPage" }
+  { route: "users/page.tsx", page: "OpsUsersPage" },
+  { route: "tts-ai/page.tsx", page: "OpsTtsAiPage" }
 ];
 
 for (const { route, page } of routeShellOwners) {
@@ -89,7 +112,7 @@ assert.match(sharedSource, /export function OpsPageHeader/, "OpsPageHeader may r
 
 const pageFiles = readdirSync(opsConsoleDir).filter((name) => /^Ops.+Page\.tsx$/.test(name));
 for (const fileName of pageFiles) {
-  if (fileName === "OpsCaptionAiPage.tsx" || fileName === "OpsTranslationAiPage.tsx" || fileName === "OpsTtsAiPage.tsx") {
+  if (fileName === "OpsCaptionAiPage.tsx" || fileName === "OpsTranslationAiPage.tsx") {
     // Settings pages are wrapped by route shell; still must not use OpsPageHeader.
     const source = readFileSync(join(opsConsoleDir, fileName), "utf8");
     assert.doesNotMatch(source, /OpsPageHeader/, `${fileName} must not use OpsPageHeader`);

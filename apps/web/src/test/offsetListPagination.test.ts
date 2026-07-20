@@ -5,6 +5,8 @@ import {
   hasMoreOffsetItems,
   mergeOffsetItemsById,
   nextOffsetPageSize,
+  reconcileOffsetTotalAfterStall,
+  resolveOffsetPageMerge,
 } from "../lib/offsetListPagination";
 
 assert.equal(hasMoreOffsetItems(50, 120), true);
@@ -23,5 +25,16 @@ assert.deepEqual(
   merged.map((item) => item.id),
   ["a", "b", "c"]
 );
+
+assert.equal(reconcileOffsetTotalAfterStall(73, 75), 73);
+
+const stalled = resolveOffsetPageMerge(
+  Array.from({ length: 73 }, (_, index) => ({ id: `item-${index}` })),
+  [{ id: "item-0" }, { id: "item-1" }],
+  75
+);
+assert.equal(stalled.appendedCount, 0, "Duplicate tail page must not append rows");
+assert.equal(stalled.totalCount, 73, "Stalled tail must reconcile total_count to loaded count");
+assert.equal(stalled.hasMore, false, "Stalled tail must stop auto-load");
 
 console.log("offsetListPagination.test.ts: ok");

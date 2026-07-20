@@ -16,7 +16,7 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
-from src.media_pipeline.frame_sampling.ffmpeg_engine import extract_video_frames_detailed
+from src.media_pipeline.frame_sampling.backend import extract_phase1_frames
 from src.media_pipeline.ocr_filtering.pipeline import run_ocr_filtering
 from src.media_pipeline.ocr_filtering.providers import build_default_ocr_provider
 from src.media_pipeline.translator.service import translate_subtitles
@@ -98,8 +98,8 @@ def run_hardsub_phases_1_to_4(
     caption_source = "unknown"
     try:
         _progress("phase1_sample", 5)
-        logger.info("Phase 1: Frame sampling (%s fps)...", fps)
-        extracted = extract_video_frames_detailed(
+        logger.info("Phase 1: Frame sampling (backend via OCR_FRAME_BACKEND)...")
+        extracted = extract_phase1_frames(
             source,
             frames_dir,
             sample_fps=fps,
@@ -120,8 +120,20 @@ def run_hardsub_phases_1_to_4(
         }
         if band_ratio is not None:
             ocr_kwargs["band_ratio"] = float(band_ratio)
-        ocr_result = run_ocr_filtering(frame_paths, **ocr_kwargs)
+        ocr_result = run_ocr_filtering(
+            frame_paths,
+            on_progress=_progress,
+            **ocr_kwargs,
+        )
         ocr_payload = ocr_result.to_dict()
+        from src.media_pipeline.ocr_filtering.ocr_box_authority import apply_best_box_authority
+        from src.media_pipeline.ocr_filtering.ocr_quality_profile import is_best_ocr_profile
+
+        if is_best_ocr_profile():
+            ocr_payload = apply_best_box_authority(
+                ocr_payload,
+                frame_paths=[Path(p) for p in frame_paths],
+            )
         ocr_name = str(getattr(ocr_provider, "provider_name", ocr_result.provider) or "unknown")
         logger.info("Phase 2 done: provider=%s frames=%s", ocr_name, ocr_result.frame_count)
 

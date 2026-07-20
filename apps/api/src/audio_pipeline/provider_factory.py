@@ -4,6 +4,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from src.audio_pipeline.translation_provider_mode import resolve_translation_provider_mode
 from src.audio_pipeline.providers import (
     CaptionFallbackSttProvider,
     PlaceholderVietnameseTranslationProvider,
@@ -142,8 +143,8 @@ def _make_llm_client(
     env_settings: Any,
     prefer_env_key_when_empty: bool,
 ) -> Any | None:
-    mode = provider.strip().lower()
-    if mode == "auto":
+    raw = provider.strip().lower()
+    if raw == "auto":
         # Prefer Gemini env, then Ollama when workspace says auto.
         gemini = _make_llm_client(
             provider="gemini",
@@ -166,6 +167,7 @@ def _make_llm_client(
             prefer_env_key_when_empty=prefer_env_key_when_empty,
         )
 
+    mode = resolve_translation_provider_mode(raw)
     if mode == "gemini":
         key = api_key or (
             (getattr(env_settings, "gemini_api_key", None) or "").strip() if prefer_env_key_when_empty else ""
@@ -177,7 +179,7 @@ def _make_llm_client(
             return None
         return GeminiHttpClient(api_key=key, model=chosen_model, timeout_seconds=timeout_seconds)
 
-    if mode in {"ollama", "qwen"}:
+    if mode == "ollama":
         chosen_base = base_url or str(
             getattr(env_settings, "ollama_base_url", "http://127.0.0.1:11434") or "http://127.0.0.1:11434"
         )
@@ -199,6 +201,7 @@ def _make_llm_client(
             model=model,
             base_url=chosen_base,
             timeout_seconds=timeout_seconds,
+            provider_name=raw or "openai_compatible",
         )
 
     return None
@@ -208,9 +211,14 @@ def probe_translation_ai_client(workspace_ai: Any, *, settings: Any | None = Non
     """
     Smoke-test the primary LLM client.
     Returns (ok, provider_name, detail).
+
+    Ops Test Connection always probes the provided draft credentials. The
+    workspace ``enabled`` flag only gates runtime pipeline use of the override
+    (see ``build_default_translation_provider``); it must not redirect Test to
+    env Gemini when the operator is validating an Off draft form.
     """
     cfg = settings or get_settings()
-    if workspace_ai is None or not bool(getattr(workspace_ai, "enabled", False)):
+    if workspace_ai is None:
         provider = build_default_translation_provider(settings=cfg, workspace_ai=None)
     else:
         provider = _build_from_workspace_ai(workspace_ai, env_settings=cfg)

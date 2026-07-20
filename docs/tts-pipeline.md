@@ -38,9 +38,11 @@ Production default is resolved by `AUDIO_TTS_PROVIDER` / Ops **TTS settings**:
 - Ops **Preview speech** (`POST /ops/tts-ai/preview`): short sample text → one synthesize → base64 audio for in-page playback (not a durable Generate TTS job).
 - `placeholder` → tone WAV for tests.
 
-Workspace authority: enable override at `/ops/tts-ai` (same pattern as Translation AI). Secrets are masked on GET.
+Workspace authority: active profile at `/ops/tts-ai` drives Generate TTS (Preview parity), regardless of the Enabled toggle. Secrets are masked on GET. Env vars are fallbacks when Ops voice/provider fields are empty.
 
-When workspace TTS is **enabled**, Generate TTS (`POST /tts` / `SYNTHESIZE_TTS`) uses Ops `voice_id` / speaking rate / language (and provider via factory) — client defaults such as `vi-VN-HoaiMyNeural` must not override. Web `createTtsJob` sends empty `voice_id` so Ops/env resolve authority.
+Ops supports **multiple named setups** under `tts_ai.profiles` with one `active_profile_id`. The Ops page is **list-first**: overview shows all setups with On/Off and Set active; **New** / **Edit** open the connection form. Save only persists connection fields (does not change active or On/Off). Legacy flat `tts_ai` blobs migrate to a single `Default` profile. Generate TTS / Test / Install / Preview use the active setup (editor Test/Install target the setup being edited via `profile_id`).
+
+Generate TTS (`POST /tts` / `SYNTHESIZE_TTS`) always uses the active Ops profile for provider + `voice_id` / speaking rate / language (and related factory fields). Client defaults such as `vi-VN-HoaiMyNeural` must not override. Web `createTtsJob` sends empty `voice_id` so Ops/env resolve authority.
 
 Operator requirements for real speech: install the chosen SDK (`edge-tts` and/or `vieneu`) via Ops **Install** or CLI, and keep ffmpeg on PATH for edge. Disable Ops install with `AUDIO_TTS_ALLOW_INSTALL=false`. Missing SDKs fail the job with an actionable `TtsPipelineError` (or use configured fallback).
 

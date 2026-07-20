@@ -1,3 +1,6 @@
+/**
+ * Pipeline Dashboard — next-work triage (no duplicate attention side column).
+ */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -11,31 +14,9 @@ const apiSource = readFileSync(resolve(webSrcDir, "lib/api.ts"), "utf8");
 const operationsTypesSource = readFileSync(resolve(webSrcDir, "types/operations.ts"), "utf8");
 const navSource = readFileSync(resolve(webSrcDir, "lib/navigationConfig.ts"), "utf8");
 const globalCssSource = readFileSync(resolve(webSrcDir, "app/globals.css"), "utf8");
-
-const requiredStageLabels = ["Capture", "Review", "Reup Queue", "Export Package", "Publish Handoff", "Publish progress"];
-const requiredLinks = [
-  "/ops/extensions/douyin/capture-inbox",
-  "/selection/review-board",
-  "/selection/reup-queue",
-  "/publishing/export-packages",
-  "/publishing/publish-handoffs",
-  "/publishing/drafts",
-  "/ops/publish-health",
-  "/ops/publish-attempts",
-  "/ops/reconciliation"
-];
-const requiredPrimitives = [
-  "OperatorStudioShell",
-  "OpsWorkflowContext",
-  "OpsNextActionBanner",
-  "OpsSummaryCards",
-  "OpsDetailPanel",
-  "OpsDetailSection",
-  "OpsItemCard",
-  "OpsStatePanel",
-  "OpsMetadataList",
-  "OpsActionRow"
-];
+const en = readFileSync(resolve(webSrcDir, "lib/i18n/en.json"), "utf8");
+const vi = readFileSync(resolve(webSrcDir, "lib/i18n/vi.json"), "utf8");
+const pkg = readFileSync(resolve(webSrcDir, "../package.json"), "utf8");
 
 assert.match(routeSource, /PipelineDashboardPage/, "The /ops/pipeline route must render PipelineDashboardPage");
 assert.match(apiSource, /fetchPipelineDashboard/, "API client must expose fetchPipelineDashboard");
@@ -46,33 +27,82 @@ assert.match(operationsTypesSource, /PipelineStageKey/, "Operations types must d
 assert.match(navSource, /\/ops\/pipeline/, "Navigation config must expose the pipeline dashboard route");
 assert.match(navSource, /nav\.pipelineDashboard/, "Navigation config must include a stable pipeline dashboard label key");
 
-for (const primitive of requiredPrimitives) {
-  assert.match(pageSource, new RegExp(primitive), `Pipeline Dashboard must reuse ${primitive}`);
-}
+assert.match(pageSource, /OperatorStudioShell/, "Pipeline must keep OperatorStudioShell");
+assert.match(pageSource, /TopbarRefreshButton/, "Pipeline must put Refresh in the Topbar");
+assert.match(pageSource, /ops-pipeline-page/, "Pipeline must use scoped ops-pipeline-page shell");
+assert.match(pageSource, /ops-pipeline-freshness[\s\S]*ops-pipeline-kpis[\s\S]*ops-pipeline-toolbar[\s\S]*ops-pipeline-next/, "Freshness must render first, then KPI + triage, then Next work");
+assert.match(pageSource, /slice\(0,\s*3\)|NEXT_WORK_LIMIT/, "Next work must cap to top 3 attention items");
+assert.match(pageSource, /severity === "critical"|critical/, "Next work must prioritize critical severity");
+assert.match(pageSource, /ops-pipeline-kpis/, "Pipeline must render scoped KPI band");
+assert.match(pageSource, /ops-pipeline-kpi/, "Pipeline must use scoped KPI cards");
+assert.match(pageSource, /active_backlog|attention_items|published/, "Pipeline must keep high-signal KPIs");
+assert.doesNotMatch(pageSource, /summary_metrics\.map/, "Pipeline must not dump all summary_metrics as KPIs");
+assert.match(pageSource, /ops-pipeline-toolbar|ops-pipeline-actions/, "Pipeline must render triage toolbar");
+assert.match(pageSource, /ops-pipeline-stages|ops-pipeline-stage/, "Pipeline must render stages sheet");
+assert.match(pageSource, /attentionByStage|inlineAttention/, "Stages must still receive attention grouping for hot/blocked tint");
+assert.doesNotMatch(pageSource, /opsPipeline\.attentionCount/, "Stages must not keep a duplicate Attention count column");
+assert.doesNotMatch(pageSource, /ops-pipeline-attention/, "Pipeline must not keep a duplicate attention side panel");
+assert.doesNotMatch(pageSource, /has-attention/, "Pipeline must not split layout for attention side column");
+assert.match(pageSource, /ops-pipeline-activity|recent_activity/, "Pipeline must surface recent activity");
+assert.match(pageSource, /humanizeStatus|humanizeDetail/, "Activity detail must humanize raw status strings");
+assert.match(pageSource, /ops-pipeline-footnote|readOnlyFootnote/, "Pipeline must footnote read-only honesty");
+assert.match(pageSource, /stage\.href/, "Stage rows must deep-link via authority href");
+assert.match(pageSource, /item\.href/, "Next work / activity must keep authority hrefs");
+assert.match(pageSource, /\/ops\/extensions\/douyin\/capture-inbox/, "Toolbar must link Capture Inbox");
+assert.match(pageSource, /\/selection\/review-board/, "Toolbar must link Review Board");
+assert.match(pageSource, /\/selection\/reup-queue/, "Toolbar must link Reup Queue");
+assert.match(pageSource, /\/publishing\/drafts/, "Toolbar must link Publish Drafts (not Ops publish-health)");
+assert.doesNotMatch(pageSource, /\/ops\/publish-health/, "Pipeline must not deep-link Ops Publish Health");
+assert.doesNotMatch(pageSource, /OpsNextActionBanner/, "Pipeline must not use OpsNextActionBanner");
+assert.doesNotMatch(pageSource, /OpsSummaryCards/, "Pipeline must not use OpsSummaryCards");
+assert.doesNotMatch(pageSource, /OpsWorkflowContext/, "Pipeline must not use OpsWorkflowContext");
+assert.doesNotMatch(pageSource, /OpsItemCard/, "Pipeline must not use OpsItemCard stage soup");
+assert.doesNotMatch(pageSource, /pipeline-stage-strip/, "Pipeline must not use legacy stage strip");
+assert.doesNotMatch(pageSource, /pipeline-quick-link-grid/, "Pipeline must not dump quick-link grid");
+assert.doesNotMatch(pageSource, /<OpsMetricCard/, "Pipeline must not use OpsMetricCard");
+assert.doesNotMatch(pageSource, /health-table/, "Pipeline must not use health-table");
+assert.doesNotMatch(pageSource, /PageShell/, "Pipeline must not nest PageShell under OperatorStudioShell");
+assert.doesNotMatch(pageSource, /cookie|secret|token/i, "Pipeline UI must not expose secrets, cookies, or tokens");
 
-for (const label of requiredStageLabels) {
-  assert.match(pageSource, new RegExp(label), `Pipeline Dashboard must show the ${label} stage`);
-}
+assert.match(globalCssSource, /\.ops-pipeline-page/, "CSS must define Pipeline page shell");
+assert.match(globalCssSource, /\.ops-pipeline-kpis/, "CSS must define Pipeline KPI grid");
+assert.match(globalCssSource, /\.ops-pipeline-next/, "CSS must define Next work strip");
+assert.match(globalCssSource, /\.ops-pipeline-chip\s*\{[^}]*font-weight:\s*400/, "Pipeline chips must not use bold weight");
+assert.doesNotMatch(globalCssSource, /\.ops-pipeline-main\.has-attention/, "CSS must not keep attention side split");
+assert.match(globalCssSource, /\.ops-pipeline-footnote/, "CSS must define footnote");
+assert.match(globalCssSource, /\.ops-pipeline-kpi strong\s*\{[^}]*font-size:\s*1\.[5-8]/, "KPI values must stay compact display type (not oversized)");
+assert.match(globalCssSource, /\.ops-pipeline-num/, "Stage/next-work numeric values must use ops-pipeline-num");
+assert.match(pageSource, /ops-pipeline-num/, "Pipeline must mark numeric figures for emphasis");
+assert.match(pageSource, /ops-pipeline-next__body/, "Next work items must use compact body layout");
+assert.match(globalCssSource, /\.ops-pipeline-next__item\s*\{[^}]*grid-template-columns/, "Next work rows must use compact grid arrangement");
+assert.match(globalCssSource, /\.ops-pipeline-stage\s*\{[^}]*padding:\s*0\.[35]/, "Stage worklist rows must stay compact");
+assert.match(globalCssSource, /\.ops-pipeline-stage__primary\s*\{[^}]*flex-direction:\s*row|\.ops-pipeline-stage__primary,\s*\n\.ops-pipeline-stage__secondary\s*\{[^}]*display:\s*flex/, "Stage metrics must stay inline for density");
+assert.doesNotMatch(globalCssSource, /\.ops-pipeline-kpi strong\s*\{[^}]*font-size:\s*2\./, "KPI values must not rely on oversized display type");
+assert.match(pageSource, /PipelineOpenIcon|ops-pipeline-open-icon/, "Open actions must render an icon glyph");
+assert.match(pageSource, /aria-label=\{label\}/, "Open icon links must keep accessible label");
+assert.match(pageSource, /label=\{t\("opsPipeline\.open"\)\}/, "Open icon links must use opsPipeline.open for accessibility");
+assert.doesNotMatch(pageSource, />\{t\("opsPipeline\.open"\)\}</, "Open actions must not show text label inside the link");
+assert.doesNotMatch(pageSource, /ops-pipeline-stage__meter|ops-pipeline-stage__bar|stageFillPercent|maxPrimary/, "Stage rows must not use fake relative progress meters");
+assert.match(pageSource, /ops-pipeline-stage__primary/, "Stage rows must emphasize primary count + label");
+assert.match(pageSource, /ops-pipeline-stage__secondary/, "Stage rows must keep secondary signal");
+assert.match(pageSource, /ops-pipeline-stage__identity/, "Stage rows must keep name + status identity cluster");
+assert.doesNotMatch(pageSource, /ops-pipeline-stage is-head|is-head" aria-hidden/, "Stage sheet must not keep multi-column table headers");
+assert.match(pageSource, /ops-pipeline-activity__body/, "Activity items must use compact body layout");
+assert.match(pageSource, /ops-pipeline-activity__trail/, "Activity must cluster timestamp + open action");
+assert.match(globalCssSource, /\.ops-pipeline-activity__item\s*\{[^}]*grid-template-columns/, "Activity rows must use compact grid arrangement");
+assert.match(globalCssSource, /\.ops-pipeline-activity__item\s*\{[^}]*border-bottom|\.ops-pipeline-activity__item \+|\.ops-pipeline-activity__item:not\(:last-child\)/, "Activity sheet must use divider rows instead of separate cards");
+assert.match(pageSource, /activityStageTone|toneForStageKey/, "Activity stage chips must use soft per-stage tones");
+assert.match(globalCssSource, /\.ops-pipeline-stage\.tone-|\.ops-pipeline-stage\.is-blocked|border-left/, "Stage rows must use status accent instead of full wash noise");
+assert.match(pageSource, /stage\.status === "blocked"/, "Stage hot tint must include blocked status");
+assert.doesNotMatch(pageSource, /attention_count > 0/, "Stage row tint must not light up for every attention_count");
+assert.match(pageSource, /M9 6l6 6-6 6|M10 6l6 6-6 6/, "Open icon must be an internal chevron, not external-link");
+assert.match(pageSource, /ops-pipeline-next__trail/, "Next work must cluster stage + count beside the open action");
+assert.match(pageSource, /formatCompactActivityTime|toLocaleTimeString/, "Activity timestamps must use a compact formatter");
 
-for (const href of requiredLinks) {
-  assert.match(pageSource, new RegExp(href.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), `Pipeline Dashboard must link to ${href}`);
-}
-
-assert.match(pageSource, /Attention and blockers/, "Pipeline Dashboard must include an attention/blocker panel");
-assert.match(pageSource, /Recent activity/, "Pipeline Dashboard must include recent activity");
-assert.match(pageSource, /Quick actions and drill-downs/, "Pipeline Dashboard must include quick actions and drill-down links");
-assert.match(pageSource, /PipelineStepMarker/, "Pipeline Dashboard must include stage-by-stage visual markers");
-assert.doesNotMatch(pageSource, /cookie|secret|token/i, "Pipeline Dashboard UI must not expose secrets, cookies, or tokens");
-
-assert.match(pageSource, /pipeline-dashboard/, "Pipeline Dashboard must use a scoped layout wrapper class");
-assert.match(pageSource, /pipeline-stage-strip/, "Pipeline Dashboard must render stages in a compact stage strip");
-assert.match(pageSource, /pipeline-split-panels/, "Pipeline Dashboard must place attention and activity in a split layout");
-assert.match(pageSource, /pipeline-quick-link-grid/, "Pipeline Dashboard must use a compact quick-link grid");
-assert.match(pageSource, /pipeline-list-row/, "Attention and activity must use compact list-row styling");
-assert.doesNotMatch(pageSource, /PageShell/, "Pipeline Dashboard must not nest PageShell under OperatorStudioShell");
-assert.match(pageSource, /TopbarRefreshButton/, "Pipeline Dashboard must put Refresh in the Topbar");
-assert.match(globalCssSource, /\.pipeline-dashboard\s*\{/, "globals.css must define scoped .pipeline-dashboard styles");
-assert.match(globalCssSource, /\.pipeline-stage-strip\s*\{/, "globals.css must style the stage strip");
-assert.match(globalCssSource, /\.pipeline-quick-link-grid\s*\{/, "globals.css must style compact quick links");
+assert.match(en, /"opsPipeline"/, "en.json must define opsPipeline namespace");
+assert.match(en, /"nextWork"|"stages"|"recentActivity"/, "en.json must define next-work labels");
+assert.match(vi, /"opsPipeline"/, "vi.json must define opsPipeline namespace");
+assert.match(vi, /"nextWork"|"stages"|"recentActivity"/, "vi.json must define next-work labels");
+assert.match(pkg, /reup-pipeline-dashboard\.test\.ts|ops-pipeline-ui\.test\.ts/, "package.json must run pipeline UI test");
 
 console.log("reup pipeline dashboard source tests passed");

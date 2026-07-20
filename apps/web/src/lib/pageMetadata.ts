@@ -224,15 +224,21 @@ export const rootMetadata: Metadata = {
   },
   description: DEFAULT_DESCRIPTION,
   applicationName: SITE_NAME,
+  icons: {
+    icon: [{ url: "/brand/logo-loop-r.svg", type: "image/svg+xml" }, { url: "/brand/logo-loop-r.png", sizes: "512x512", type: "image/png" }],
+    apple: [{ url: "/brand/logo-loop-r.png", sizes: "180x180", type: "image/png" }]
+  },
   openGraph: {
     title: SITE_NAME,
     description: DEFAULT_DESCRIPTION,
     siteName: SITE_NAME,
-    type: "website"
+    type: "website",
+    images: [{ url: "/brand/logo-loop-r.png", width: 512, height: 512, alt: SITE_NAME }]
   },
   twitter: {
     card: "summary",
     title: SITE_NAME,
-    description: DEFAULT_DESCRIPTION
+    description: DEFAULT_DESCRIPTION,
+    images: ["/brand/logo-loop-r.png"]
   }
 };

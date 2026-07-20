@@ -1,3 +1,5 @@
+import { WorkItemActionIcon } from "../shared/WorkItemActionIcon";
+
 type ReviewBoardTileActionsProps = {
   approvedForQueue: boolean;
   inReupQueue: boolean;
@@ -39,19 +41,23 @@ export function ReviewBoardTileActions({
         <div className="review-board-tile-action-primary">
           {approvedForQueue ? (
             <button className="review-board-tile-btn is-primary" disabled={disabled} onClick={onSendToQueue} type="button">
+              <WorkItemActionIcon kind="send" />
               Send to queue
             </button>
           ) : (
             <button className="review-board-tile-btn is-primary" disabled={disabled} onClick={onApprove} type="button">
+              <WorkItemActionIcon kind="approve" />
               Approve
             </button>
           )}
         </div>
         <div className="review-board-tile-action-row is-split">
           <button className="review-board-tile-btn is-muted" disabled={disabled} onClick={onLater} type="button">
+            <WorkItemActionIcon kind="later" />
             Later
           </button>
           <button className="review-board-tile-btn is-danger" disabled={disabled} onClick={onReject} type="button">
+            <WorkItemActionIcon kind="reject" />
             Reject
           </button>
         </div>
@@ -68,6 +74,7 @@ export function ReviewBoardTileActions({
             href="/selection/reup-queue"
             title="Open this clip in Reup Queue"
           >
+            <WorkItemActionIcon kind="open" />
             Open in Reup Queue
           </a>
         </div>
@@ -81,6 +88,7 @@ export function ReviewBoardTileActions({
           href="/selection/reup-queue"
           title="Open this clip in Reup Queue"
         >
+          <WorkItemActionIcon kind="open" />
           {variant === "inspector" ? "Open in Reup Queue" : "Open queue"}
         </a>
         <button
@@ -90,6 +98,7 @@ export function ReviewBoardTileActions({
           title="Inspect candidate details"
           type="button"
         >
+          <WorkItemActionIcon kind="details" />
           Details
         </button>
       </div>
@@ -101,10 +110,12 @@ export function ReviewBoardTileActions({
       <div className="review-board-tile-action-primary">
         {approvedForQueue ? (
           <button className="review-board-tile-btn is-primary" disabled={disabled} onClick={onSendToQueue} type="button">
+            <WorkItemActionIcon kind="send" />
             Send to queue
           </button>
         ) : (
           <button className="review-board-tile-btn is-primary" disabled={disabled} onClick={onApproveAndSend} type="button">
+            <WorkItemActionIcon kind="send" />
             Approve & send
           </button>
         )}
@@ -113,6 +124,7 @@ export function ReviewBoardTileActions({
       {!approvedForQueue && onApprove ? (
         <div className="review-board-tile-action-row is-secondary">
           <button className="review-board-tile-btn is-secondary" disabled={disabled} onClick={onApprove} type="button">
+            <WorkItemActionIcon kind="approve" />
             Approve only
           </button>
         </div>
@@ -120,15 +132,18 @@ export function ReviewBoardTileActions({
 
       <div className="review-board-tile-action-row is-split">
         <button className="review-board-tile-btn is-muted" disabled={disabled} onClick={onLater} type="button">
+          <WorkItemActionIcon kind="later" />
           Later
         </button>
         <button className="review-board-tile-btn is-danger" disabled={disabled} onClick={onReject} type="button">
+          <WorkItemActionIcon kind="reject" />
           Reject
         </button>
       </div>
 
       <div className="review-board-tile-action-row is-tertiary">
         <button className="review-board-tile-btn is-ghost" disabled={disabled} onClick={onDetails} type="button">
+          <WorkItemActionIcon kind="details" />
           View details
         </button>
       </div>

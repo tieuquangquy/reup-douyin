@@ -8,6 +8,7 @@ from typing import Any
 from src.tts_pipeline.catalog import discover_tts_catalog
 from src.tts_pipeline.edge_tts_provider import EdgeTtsProvider
 from src.tts_pipeline.errors import TtsPipelineError, TtsPipelineErrorCode
+from src.tts_pipeline.omnivoice_tts_provider import OmniVoiceTtsProvider
 from src.tts_pipeline.providers import PlaceholderToneTtsProvider, TtsProvider
 from src.tts_pipeline.types import TtsProviderInput, TtsProviderOutput, VoiceConfig
 from src.tts_pipeline.vieneu_tts_provider import VieNeuTtsProvider
@@ -36,6 +37,13 @@ def light_tts_import_ready(provider: str) -> bool | None:
     if name == "vieneu":
         try:
             import vieneu  # noqa: F401
+
+            return True
+        except ImportError:
+            return False
+    if name in {"omnivoice", "omnivoice_studio", "omnivoice-studio"}:
+        try:
+            import omnivoice  # noqa: F401
 
             return True
         except ImportError:
@@ -130,22 +138,28 @@ def build_default_tts_provider(
     workspace_tts: Any | None = None,
     edge_provider_factory: Callable[[], TtsProvider] | None = None,
     vieneu_provider_factory: Callable[[], TtsProvider] | None = None,
+    omnivoice_provider_factory: Callable[[], TtsProvider] | None = None,
 ) -> TtsProvider:
     """
-    Resolve TTS provider from workspace TTS AI settings (when enabled) or env.
+    Resolve TTS provider from workspace TTS AI settings (active Ops profile) or env.
 
-    Providers: auto | edge | vieneu | google | azure | elevenlabs | openai |
+    When ``workspace_tts`` is provided (Generate TTS / Preview), the active Ops profile
+    is authority regardless of ``enabled`` — Preview parity. Env is used only when
+    ``workspace_tts`` is omitted.
+
+    Providers: auto | edge | vieneu | omnivoice | google | azure | elevenlabs | openai |
     openai_compatible | http_custom | cli | placeholder
     """
     from src.core.settings import get_settings
 
     settings = get_settings()
-    if workspace_tts is not None and bool(getattr(workspace_tts, "enabled", False)):
+    if workspace_tts is not None:
         return _build_from_workspace_tts(
             workspace_tts,
             env_settings=settings,
             edge_provider_factory=edge_provider_factory,
             vieneu_provider_factory=vieneu_provider_factory,
+            omnivoice_provider_factory=omnivoice_provider_factory,
         )
 
     name = (provider_name or settings.audio_tts_provider or "auto").strip().lower()
@@ -164,6 +178,7 @@ def build_default_tts_provider(
         options={},
         edge_provider_factory=edge_provider_factory,
         vieneu_provider_factory=vieneu_provider_factory,
+        omnivoice_provider_factory=omnivoice_provider_factory,
         fallback_name=(getattr(settings, "audio_tts_fallback_provider", None) or "none").strip().lower(),
         fallback_voice_id=(getattr(settings, "audio_tts_fallback_voice_id", None) or "").strip(),
     )
@@ -175,6 +190,7 @@ def _build_from_workspace_tts(
     env_settings: Any,
     edge_provider_factory: Callable[[], TtsProvider] | None,
     vieneu_provider_factory: Callable[[], TtsProvider] | None,
+    omnivoice_provider_factory: Callable[[], TtsProvider] | None,
 ) -> TtsProvider:
     name = str(getattr(workspace_tts, "provider", "auto") or "auto").strip().lower()
     return _build_named_provider(
@@ -192,6 +208,7 @@ def _build_from_workspace_tts(
         options=dict(getattr(workspace_tts, "options_json", None) or {}),
         edge_provider_factory=edge_provider_factory,
         vieneu_provider_factory=vieneu_provider_factory,
+        omnivoice_provider_factory=omnivoice_provider_factory,
         fallback_name=str(getattr(workspace_tts, "fallback_provider", "none") or "none").strip().lower(),
         fallback_voice_id=str(getattr(workspace_tts, "fallback_voice_id", "") or "").strip(),
     )
@@ -213,6 +230,7 @@ def _build_named_provider(
     options: dict[str, Any],
     edge_provider_factory: Callable[[], TtsProvider] | None,
     vieneu_provider_factory: Callable[[], TtsProvider] | None,
+    omnivoice_provider_factory: Callable[[], TtsProvider] | None,
     fallback_name: str,
     fallback_voice_id: str,
 ) -> TtsProvider:
@@ -230,6 +248,7 @@ def _build_named_provider(
         options=options,
         edge_provider_factory=edge_provider_factory,
         vieneu_provider_factory=vieneu_provider_factory,
+        omnivoice_provider_factory=omnivoice_provider_factory,
     )
     if fallback_name in {"", "none"}:
         return primary
@@ -247,6 +266,7 @@ def _build_named_provider(
         options=options,
         edge_provider_factory=edge_provider_factory,
         vieneu_provider_factory=vieneu_provider_factory,
+        omnivoice_provider_factory=omnivoice_provider_factory,
     )
     return FallbackTtsProvider(primary, fallback, fallback_voice_id=fallback_voice_id or None)
 
@@ -266,8 +286,9 @@ def _make_provider(
     options: dict[str, Any],
     edge_provider_factory: Callable[[], TtsProvider] | None,
     vieneu_provider_factory: Callable[[], TtsProvider] | None,
+    omnivoice_provider_factory: Callable[[], TtsProvider] | None,
 ) -> TtsProvider:
-    _ = (timeout_seconds, device)
+    _ = (timeout_seconds, voice_id)
 
     if name in {"placeholder", "off", "none"}:
         return PlaceholderToneTtsProvider()
@@ -285,6 +306,15 @@ def _make_provider(
             device=device,
             model_id=model_id,
             base_url=base_url,
+            options=options,
+        )
+
+    if name in {"omnivoice", "omnivoice_studio", "omnivoice-studio"}:
+        if omnivoice_provider_factory is not None:
+            return omnivoice_provider_factory()
+        return OmniVoiceTtsProvider(
+            model_id=model_id,
+            device=device,
             options=options,
         )
 
@@ -371,19 +401,23 @@ def _make_provider(
 def probe_tts_ai_client(workspace_tts: Any, *, settings: Any | None = None) -> TtsProbeResult:
     """Lightweight readiness check for Ops Test Connection (no long synthesis).
 
+    Always probes the draft ``workspace_tts`` provider/fields when a config object is
+    provided — ``enabled`` does not switch the probe to ENV (Enabled only gates jobs).
+    When ``workspace_tts`` is None, falls back to ENV defaults.
     When ok for edge/vieneu/auto, attaches a voices/styles/models catalog (sdk or curated).
     """
     from src.core.settings import get_settings
 
     cfg = workspace_tts
     env = settings or get_settings()
-    if cfg is None or not bool(getattr(cfg, "enabled", False)):
+    if cfg is None:
         name = str(getattr(env, "audio_tts_provider", "auto") or "auto").strip().lower()
         language = str(getattr(env, "audio_tts_language_code", "vi") or "vi")
         result = _probe_named(
             name,
             api_key=getattr(env, "audio_tts_api_key", None),
             base_url=getattr(env, "audio_tts_base_url", ""),
+            cli_binary=getattr(env, "audio_tts_cli_binary", "") or "",
         )
         return _attach_catalog(result, language_code=language)
 
@@ -393,21 +427,31 @@ def probe_tts_ai_client(workspace_tts: Any, *, settings: Any | None = None) -> T
         name,
         api_key=getattr(cfg, "api_key", None),
         base_url=getattr(cfg, "base_url", ""),
+        cli_binary=getattr(cfg, "cli_binary", "") or "",
     )
     return _attach_catalog(result, language_code=language)
 
 
 def _attach_catalog(result: TtsProbeResult, *, language_code: str) -> TtsProbeResult:
-    if not result.ok or result.provider not in {"edge", "vieneu", "auto"}:
+    catalog_providers = {"edge", "vieneu", "auto", "omnivoice", "omnivoice_studio", "omnivoice-studio"}
+    if not result.ok or result.provider not in catalog_providers:
         return result
-    catalog = discover_tts_catalog(result.provider, language_code=language_code)
+    # Curated catalog key is omnivoice for all OmniVoice Studio slugs
+    catalog_key = "omnivoice" if result.provider.startswith("omnivoice") else result.provider
+    catalog = discover_tts_catalog(catalog_key, language_code=language_code)
     result.catalog = catalog.to_dict()
     if catalog.warning and catalog.source == "curated":
         result.detail = f"{result.detail} · {catalog.warning}"
     return result
 
 
-def _probe_named(name: str, *, api_key: str | None, base_url: str) -> TtsProbeResult:
+def _probe_named(
+    name: str,
+    *,
+    api_key: str | None,
+    base_url: str,
+    cli_binary: str = "",
+) -> TtsProbeResult:
     if name in {"placeholder", "off", "none"}:
         return TtsProbeResult(True, "placeholder", "Placeholder tone provider ready (test-only).")
 
@@ -425,18 +469,31 @@ def _probe_named(name: str, *, api_key: str | None, base_url: str) -> TtsProbeRe
             return TtsProbeResult(False, "vieneu", "vieneu not installed. Run: pip install vieneu")
         return TtsProbeResult(True, "vieneu", "vieneu import ready")
 
+    if name in {"omnivoice", "omnivoice_studio", "omnivoice-studio"}:
+        try:
+            import omnivoice  # noqa: F401
+        except ImportError:
+            return TtsProbeResult(
+                False,
+                "omnivoice",
+                "omnivoice not installed. Install OmniVoice-Studio / omnivoice via Ops.",
+            )
+        return TtsProbeResult(True, "omnivoice", "omnivoice import ready (k2-fsa synthesize adapter)")
+
     if name == "cli":
+        if not (cli_binary or "").strip():
+            return TtsProbeResult(False, "cli", "cli requires cli_binary")
         return TtsProbeResult(True, "cli", "CLI provider settings accepted (runtime adapter pending).")
 
-    if name in {"openai", "openai_compatible", "http_custom"}:
-        if name != "openai" and not (base_url or "").strip():
+    if name in {"openai_compatible", "http_custom"}:
+        if not (base_url or "").strip():
             return TtsProbeResult(False, name, f"{name} requires base_url")
         return TtsProbeResult(
             True, name, f"{name} settings look valid (HTTP adapter pending for synthesis)."
         )
 
-    if name in {"google", "azure", "elevenlabs"}:
-        if name in {"azure", "elevenlabs"} and not (api_key or "").strip():
+    if name in {"google", "azure", "elevenlabs", "openai"}:
+        if not (api_key or "").strip():
             return TtsProbeResult(False, name, f"{name} requires api_key")
         return TtsProbeResult(
             True, name, f"{name} settings accepted (cloud adapter pending for synthesis)."
@@ -444,10 +501,10 @@ def _probe_named(name: str, *, api_key: str | None, base_url: str) -> TtsProbeRe
 
     if name != "auto":
         return TtsProbeResult(
-            True,
+            False,
             name,
-            f"Custom provider '{name}' settings accepted. Set fallback_provider=edge/vieneu until "
-            "a dedicated synthesize adapter exists.",
+            f"Unknown local provider '{name}' — Install a known slug (edge/vieneu/omnivoice/cli) "
+            "or use a Cloud/HTTP provider from the catalog.",
         )
 
     try:

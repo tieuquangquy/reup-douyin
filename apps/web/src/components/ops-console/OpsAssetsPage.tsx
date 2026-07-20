@@ -1,12 +1,77 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import Link from "next/link";
+import { useEffect, useState, type ReactNode } from "react";
 import { fetchOperationalMetrics } from "../../lib/api";
 import { useT } from "../../lib/i18n";
-import type { OperationalMetrics } from "../../types/operations";
+import type { OperationalMetrics, OpsAssetReuseSummary } from "../../types/operations";
 import { OpsConsoleShell } from "../app-shell/OpsConsoleShell";
 import { TopbarRefreshButton } from "../app-shell/TopbarRefreshButton";
-import { OpsMetricCard, OpsPanel, OpsState } from "./OpsShared";
+import { OpsState, formatDateTime, type OpsTone } from "./OpsShared";
+
+type AssetRow = OpsAssetReuseSummary & {
+  total: number;
+  staleShare: number;
+  needsCurrent: boolean;
+};
+
+function buildAssetRows(items: OpsAssetReuseSummary[]): AssetRow[] {
+  return items
+    .map((item) => {
+      const total = item.current_count + item.historical_count;
+      const staleShare = total > 0 ? item.historical_count / total : 0;
+      return {
+        ...item,
+        total,
+        staleShare,
+        needsCurrent: item.current_count === 0 && total > 0,
+      };
+    })
+    .sort((a, b) => {
+      if (a.needsCurrent !== b.needsCurrent) return a.needsCurrent ? -1 : 1;
+      return b.total - a.total || a.asset_type.localeCompare(b.asset_type);
+    });
+}
+
+function AssetsKpi({
+  label,
+  value,
+  detail,
+  tone = "muted",
+}: {
+  label: string;
+  value: string;
+  detail: string;
+  tone?: OpsTone;
+}) {
+  return (
+    <article className={`ops-assets-kpi tone-${tone}`} title={detail}>
+      <em>{label}</em>
+      <strong>{value}</strong>
+      <span>{detail}</span>
+    </article>
+  );
+}
+
+function AssetsPanel({
+  title,
+  action,
+  children,
+}: {
+  title: string;
+  action?: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <section className="ops-assets-panel">
+      <div className="ops-assets-panel__head">
+        <h2>{title}</h2>
+        {action}
+      </div>
+      <div className="ops-assets-panel__body">{children}</div>
+    </section>
+  );
+}
 
 export function OpsAssetsPage() {
   const t = useT();
@@ -30,8 +95,11 @@ export function OpsAssetsPage() {
     void load();
   }, [t]);
 
-  const currentTotal = metrics?.asset_reuse_by_type.reduce((total, item) => total + item.current_count, 0) ?? 0;
-  const historicalTotal = metrics?.asset_reuse_by_type.reduce((total, item) => total + item.historical_count, 0) ?? 0;
+  const rows = buildAssetRows(metrics?.asset_reuse_by_type ?? []);
+  const currentTotal = rows.reduce((sum, row) => sum + row.current_count, 0);
+  const historicalTotal = rows.reduce((sum, row) => sum + row.historical_count, 0);
+  const needsCurrentRows = rows.filter((row) => row.needsCurrent);
+  const needsCurrentCount = needsCurrentRows.length;
 
   const refreshAction = (
     <TopbarRefreshButton busy={loading && Boolean(metrics)} disabled={loading && !metrics} onClick={() => void load()} />
@@ -55,43 +123,91 @@ export function OpsAssetsPage() {
 
   return (
     <OpsConsoleShell actions={refreshAction} description={t("opsAssets.description")} title={t("opsAssets.title")}>
-      <main className="ops-page">
+      <main className="ops-page ops-assets-page">
         {error ? <div className="inline-error">{error}</div> : null}
 
-        <section className="health-overview-grid">
-          <OpsMetricCard label={t("opsAssets.currentAssets")} value={String(currentTotal)} detail={t("opsAssets.isCurrentRecords")} tone="good" />
-          <OpsMetricCard label={t("opsAssets.historicalAssets")} value={String(historicalTotal)} detail={t("opsAssets.olderVersionsRetained")} />
-          <OpsMetricCard label={t("opsAssets.assetTypes")} value={String(metrics?.asset_reuse_by_type.length ?? 0)} detail={t("opsAssets.trackedInDbMetrics")} />
-          <OpsMetricCard label={t("opsAssets.missingOrCorrupt")} value={t("opsAssets.notScanned")} detail={t("opsAssets.requiresFileValidation")} />
+        <p className="ops-assets-freshness">
+          {t("opsAssets.metricsGenerated")}{" "}
+          <time dateTime={metrics?.generated_at}>{formatDateTime(metrics?.generated_at)}</time>
+        </p>
+
+        <section className="ops-assets-kpis" aria-label={t("opsAssets.title")}>
+          <AssetsKpi
+            label={t("opsAssets.currentAssets")}
+            value={String(currentTotal)}
+            detail={t("opsAssets.isCurrentRecords")}
+            tone="good"
+          />
+          <AssetsKpi
+            label={t("opsAssets.historicalAssets")}
+            value={String(historicalTotal)}
+            detail={t("opsAssets.olderVersionsRetained")}
+            tone="muted"
+          />
+          <AssetsKpi
+            label={t("opsAssets.assetTypes")}
+            value={String(rows.length)}
+            detail={t("opsAssets.trackedInDbMetrics")}
+            tone="muted"
+          />
+          <AssetsKpi
+            label={t("opsAssets.needsCurrent")}
+            value={String(needsCurrentCount)}
+            detail={t("opsAssets.needsCurrentDetail")}
+            tone={needsCurrentCount > 0 ? "warn" : "good"}
+          />
         </section>
 
-        <section className="ops-grid">
-          <OpsPanel title={t("opsAssets.assetCurrentStaleByType")}>
-            <table className="health-table">
-              <thead>
-                <tr><th>{t("opsAssets.assetType")}</th><th>{t("opsAssets.current")}</th><th>{t("opsAssets.historical")}</th><th>{t("opsAssets.signal")}</th></tr>
-              </thead>
-              <tbody>
-                {metrics?.asset_reuse_by_type.length === 0 ? <tr><td colSpan={4}>{t("opsAssets.noMediaAssetsRecorded")}</td></tr> : null}
-                {metrics?.asset_reuse_by_type.map((item) => (
-                  <tr key={item.asset_type}>
-                    <td>{item.asset_type}</td>
-                    <td>{item.current_count}</td>
-                    <td>{item.historical_count}</td>
-                    <td>{item.current_count === 0 ? t("opsAssets.noCurrentAsset") : t("opsAssets.currentExists")}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </OpsPanel>
+        <div className="ops-assets-toolbar">
+          <nav className="ops-assets-actions" aria-label={t("opsAssets.triage")}>
+            <Link href="/ops/health">{t("opsAssets.openHealth")}</Link>
+            <Link href="/ops/tools">{t("opsAssets.openTools")}</Link>
+          </nav>
+        </div>
 
-          <OpsPanel title={t("opsAssets.operationalNotes")}>
-            <ul className="compact-list">
-              <li>{t("opsAssets.noteManifest")}</li>
-              <li>{t("opsAssets.noteLocalStorage")}</li>
-              <li>{t("opsAssets.noteCorrupt")}</li>
-            </ul>
-          </OpsPanel>
+        <section className={`ops-assets-main${needsCurrentRows.length > 0 ? " has-attention" : ""}`}>
+          <AssetsPanel title={t("opsAssets.byType")}>
+            {rows.length === 0 ? (
+              <p className="ops-assets-empty">{t("opsAssets.noMediaAssetsRecorded")}</p>
+            ) : (
+              <ul className="ops-assets-by-type">
+                <li className="ops-assets-row is-head" aria-hidden="true">
+                  <span>{t("opsAssets.assetType")}</span>
+                  <span>{t("opsAssets.current")}</span>
+                  <span>{t("opsAssets.historical")}</span>
+                  <span>{t("opsAssets.staleShare")}</span>
+                  <span>{t("opsAssets.signal")}</span>
+                </li>
+                {rows.map((row) => (
+                  <li className={`ops-assets-row${row.needsCurrent ? " is-gap" : ""}`} key={row.asset_type}>
+                    <code>{row.asset_type}</code>
+                    <strong>{row.current_count}</strong>
+                    <span>{row.historical_count}</span>
+                    <span>{Math.round(row.staleShare * 100)}%</span>
+                    <span className={`ops-assets-signal tone-${row.needsCurrent ? "warn" : "good"}`}>
+                      {row.needsCurrent ? t("opsAssets.noCurrentAsset") : t("opsAssets.currentExists")}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <p className="ops-assets-footnote">{t("opsAssets.fileScanDeferred")}</p>
+          </AssetsPanel>
+
+          {needsCurrentRows.length > 0 ? (
+            <AssetsPanel title={t("opsAssets.attention")}>
+              <ul className="ops-assets-attention">
+                {needsCurrentRows.map((row) => (
+                  <li key={row.asset_type}>
+                    <code>{row.asset_type}</code>
+                    <span>
+                      {t("opsAssets.historical")} <strong>{row.historical_count}</strong>
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </AssetsPanel>
+          ) : null}
         </section>
       </main>
     </OpsConsoleShell>

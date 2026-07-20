@@ -39,6 +39,18 @@ function isPublicPath(pathname: string): boolean {
   return PUBLIC_PATH_PREFIXES.some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`));
 }
 
+function AuthBootScreen({ message }: { message: string }) {
+  return (
+    <div className="auth-boot" role="status" aria-live="polite">
+      <div className="auth-boot__card">
+        <span className="auth-boot__spinner" aria-hidden="true" />
+        <span className="auth-boot__brand">reup-douyin</span>
+        <p className="auth-boot__message">{message}</p>
+      </div>
+    </div>
+  );
+}
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const pathname = usePathname() || "/";
   const router = useRouter();
@@ -155,15 +167,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   );
 
   if (!isReady) {
-    return <div className="auth-loading">{t("auth.loading")}</div>;
+    return <AuthBootScreen message={t("auth.loading")} />;
   }
 
   if (!token && !isPublicPath(pathname)) {
-    return <div className="auth-loading">{t("auth.redirecting")}</div>;
+    return <AuthBootScreen message={t("auth.redirecting")} />;
   }
 
   if (token && surface && !isPublicPath(pathname) && surfaceForPath(pathname) !== surface) {
-    return <div className="auth-loading">{t("auth.redirecting")}</div>;
+    return <AuthBootScreen message={t("auth.redirecting")} />;
   }
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

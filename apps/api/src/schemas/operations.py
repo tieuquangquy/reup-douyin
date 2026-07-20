@@ -5,14 +5,68 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 
 
+class PromptProfileSummary(BaseModel):
+    id: str
+    name: str
+    prompt: str = ""
+    is_active: bool = False
+
+
+class PromptProfileCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+
+
+class PromptProfileUpdateRequest(BaseModel):
+    prompt: str = Field(default="", description="Prompt text for this profile; empty clears text")
+
+
+class PromptProfilePatchRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+
+
 class TranslationPromptResponse(BaseModel):
     prompt: str = ""
     source: str = Field(description="workspace_db | empty")
     updated: bool = False
+    active_profile_id: str = ""
+    active_profile_name: str = "Default"
+    profiles: list[PromptProfileSummary] = Field(default_factory=list)
+    focus_profile_id: str | None = None
 
 
 class TranslationPromptUpdateRequest(BaseModel):
-    prompt: str = Field(default="", description="Operator system prompt; empty clears DB override")
+    prompt: str = Field(default="", description="Operator system prompt; empty clears active profile text")
+
+
+class TranslationAiProfileSummary(BaseModel):
+    id: str
+    name: str
+    enabled: bool = False
+    provider: str = "auto"
+    model: str = ""
+    api_key_set: bool = False
+    api_key_masked: str = ""
+    api_key: str = ""
+    base_url: str = ""
+    timeout_seconds: float = 90.0
+    fallback_provider: str = "none"
+    fallback_model: str = ""
+    is_active: bool = False
+
+
+class TranslationAiProfileCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+
+
+class TranslationAiProfilePatchRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    enabled: bool | None = None
+
+
+class ProfileReorderRequest(BaseModel):
+    """Ordered profile ids — must be a permutation of the current setups list."""
+
+    profile_ids: list[str] = Field(min_length=1)
 
 
 class TranslationAiResponse(BaseModel):
@@ -21,12 +75,20 @@ class TranslationAiResponse(BaseModel):
     model: str = ""
     api_key_set: bool = False
     api_key_masked: str = ""
+    api_key: str = Field(
+        default="",
+        description="Plaintext key for Ops console (Phase 1 local operator). Prefer masked field in logs.",
+    )
     base_url: str = ""
     timeout_seconds: float = 90.0
     fallback_provider: str = "none"
     fallback_model: str = ""
     source: str = Field(description="workspace_db | env")
     updated: bool = False
+    active_profile_id: str = ""
+    active_profile_name: str = "Default"
+    profiles: list[TranslationAiProfileSummary] = Field(default_factory=list)
+    focus_profile_id: str | None = None
 
 
 class TranslationAiUpdateRequest(BaseModel):
@@ -56,6 +118,7 @@ class TranslationAiTestRequest(BaseModel):
     timeout_seconds: float | None = None
     fallback_provider: str | None = None
     fallback_model: str | None = None
+    profile_id: str | None = Field(default=None, description="LLM setup id to use as saved base")
 
 
 class TranslationAiTestResponse(BaseModel):
@@ -72,6 +135,7 @@ class TranslationAiModelsRequest(BaseModel):
     clear_api_key: bool = False
     base_url: str | None = None
     timeout_seconds: float | None = None
+    profile_id: str | None = None
 
 
 class TranslationAiModelsResponse(BaseModel):
@@ -86,6 +150,16 @@ class TtsAiVoiceOption(BaseModel):
     label: str = ""
 
 
+class TtsAiFieldCapabilities(BaseModel):
+    voice: bool = False
+    model: bool = False
+    styles: bool = False
+    api_key: bool = False
+    base_url: bool = False
+    local_backend: bool = False
+    cli_binary: bool = False
+
+
 class TtsAiCatalog(BaseModel):
     source: str = "none"
     voices: list[TtsAiVoiceOption] = Field(default_factory=list)
@@ -95,6 +169,7 @@ class TtsAiCatalog(BaseModel):
     warning: str = ""
     sample_rate: int | None = None
     backends: list[str] = Field(default_factory=list)
+    capabilities: TtsAiFieldCapabilities | None = None
 
 
 class TtsAiLastInstall(BaseModel):
@@ -104,6 +179,7 @@ class TtsAiLastInstall(BaseModel):
     package: str = ""
     detail: str = ""
     already_satisfied: bool = False
+    status: str = ""
 
 
 class TtsAiLastProbe(BaseModel):
@@ -117,6 +193,37 @@ class TtsAiLastProbe(BaseModel):
 class TtsAiRuntime(BaseModel):
     last_install: TtsAiLastInstall | None = None
     last_probe: TtsAiLastProbe | None = None
+
+
+class TtsAiProfileSummary(BaseModel):
+    id: str
+    name: str
+    provider: str = "auto"
+    enabled: bool = False
+    voice_id: str = ""
+    speaking_rate: float = 1.0
+    language_code: str = "vi"
+    model_id: str = ""
+    api_key_set: bool = False
+    api_key_masked: str = ""
+    base_url: str = ""
+    timeout_seconds: float = 120.0
+    fallback_provider: str = "none"
+    fallback_voice_id: str = ""
+    local_backend: str = "auto"
+    device: str = "auto"
+    cli_binary: str = ""
+    is_active: bool = False
+    runtime: TtsAiRuntime = Field(default_factory=TtsAiRuntime)
+
+
+class TtsAiProfileCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+
+
+class TtsAiProfilePatchRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    enabled: bool | None = None
 
 
 class TtsAiResponse(BaseModel):
@@ -140,6 +247,10 @@ class TtsAiResponse(BaseModel):
     live_import_ok: bool | None = None
     source: str = Field(description="workspace_db | env")
     updated: bool = False
+    active_profile_id: str = ""
+    active_profile_name: str = "Default"
+    profiles: list[TtsAiProfileSummary] = Field(default_factory=list)
+    focus_profile_id: str | None = None
 
 
 class TtsAiUpdateRequest(BaseModel):
@@ -187,6 +298,7 @@ class TtsAiTestRequest(BaseModel):
     device: str | None = None
     cli_binary: str | None = None
     options_json: dict | None = None
+    profile_id: str | None = Field(default=None, description="Setup id to probe/persist runtime on")
 
 
 class TtsAiTestResponse(BaseModel):
@@ -210,10 +322,16 @@ class TtsAiInstallRequest(BaseModel):
     timeout_seconds: float = 300.0
     # Optional: which provider to probe after install (defaults to saved workspace provider)
     provider: str | None = None
+    profile_id: str | None = Field(default=None, description="Setup id to persist install/probe runtime on")
+    force_reinstall: bool = Field(
+        default=False,
+        description="When true, run pip install --upgrade even if the package is already present",
+    )
 
 
 class TtsAiInstallResponse(BaseModel):
     ok: bool
+    status: str = ""  # running | succeeded | failed
     detail: str = ""
     command: str = ""
     log_tail: str = ""
@@ -247,10 +365,12 @@ class TtsAiPreviewRequest(BaseModel):
     device: str | None = None
     cli_binary: str | None = None
     options_json: dict | None = None
+    profile_id: str | None = None
 
 
 class TtsAiPreviewResponse(BaseModel):
     ok: bool
+    status: str = ""  # running | succeeded | failed
     provider: str = ""
     detail: str = ""
     mime_type: str = "audio/wav"

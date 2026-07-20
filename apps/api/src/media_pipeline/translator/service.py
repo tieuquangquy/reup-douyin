@@ -28,6 +28,8 @@ USER_INSTRUCTION = (
     "Dưới đây là JSON object: khóa = id ô chữ (ms#index), giá trị = nhãn/UI hoặc "
     "phụ đề tiếng Trung trên khung hình. "
     "Hãy dịch sang tiếng Việt RÚT GỌN để vừa đúng ô chữ (ưu tiên 1–4 từ). "
+    "Bắt buộc tiếng Việt có dấu đầy đủ (ví dụ: Bữa trưa, Cơm, Trứng) — "
+    "không bỏ dấu, không viết ASCII không dấu. "
     "Giữ nguyên số và đơn vị quen thuộc (g, kcal, %, ngày tháng). "
     "Trả về ĐÚNG một JSON object với CÙNG các khóa, giá trị là tiếng Việt. "
     "Không thêm khóa khác, không markdown."

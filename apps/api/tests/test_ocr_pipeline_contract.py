@@ -56,7 +56,7 @@ class OcrPipelineContractTests(unittest.TestCase):
         frame_sampler_source = inspect.getsource(
             __import__("src.ocr_pipeline.frame_sampler", fromlist=["sample_video_frames"]).sample_video_frames
         )
-        self.assertIn("extract_video_frames_detailed", frame_sampler_source)
+        self.assertIn("extract_phase1_frames", frame_sampler_source)
         self.assertIn("normalize_sample_fps", frame_sampler_source)
         clean_source = inspect.getsource(
             __import__("src.ocr_pipeline.clean_hardsub", fromlist=["blur_hard_sub_band"]).blur_hard_sub_band

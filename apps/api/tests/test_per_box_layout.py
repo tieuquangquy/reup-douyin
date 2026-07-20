@@ -64,12 +64,13 @@ class PerBoxOverlayTests(unittest.TestCase):
         self.assertEqual(len(panels), 1)
         self.assertEqual(len(labels), 6)
         self.assertEqual(panels[0].text_vi, "")
-        self.assertLessEqual(panels[0].y + panels[0].height, 0.68)
+        self.assertGreaterEqual(panels[0].y + panels[0].height, 0.90)
         self.assertEqual(labels[0].text_vi, "Bua trua")
         self.assertEqual(labels[3].text_vi, "Com")
         self.assertLess(labels[0].width, 0.50)
 
-    def test_late_clip_also_gets_dense_panel_to_eof(self) -> None:
+    def test_dense_nutrition_frame_still_gets_panel_to_eof(self) -> None:
+        """Truly dense endcard (many CJK boxes) still uses hybrid panel + labels."""
         payload = {"frames": [_nutrition_ui_frame(time_ms=25000)]}
         vi = {f"25000#{i}": f"VI{i}" for i in range(6)}
         overlays = overlays_from_ocr_payload(

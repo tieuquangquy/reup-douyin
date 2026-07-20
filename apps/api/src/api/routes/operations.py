@@ -1,16 +1,26 @@
 from uuid import UUID
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from src.audio_pipeline.provider_factory import probe_translation_ai_client
-from src.audio_pipeline.translation_ai_models import list_translation_ai_models
+from src.audio_pipeline.translation_ai_models import list_models_timeout_seconds, list_translation_ai_models
 from src.core.auth import get_current_workspace
 from src.db.session import get_db_session
 from src.schemas.operations import (
     OperationalMetricsResponse,
+    ProfileReorderRequest,
+    PromptProfileCreateRequest,
+    PromptProfilePatchRequest,
+    PromptProfileSummary,
+    PromptProfileUpdateRequest,
     TranslationAiModelsRequest,
     TranslationAiModelsResponse,
+    TranslationAiProfileCreateRequest,
+    TranslationAiProfilePatchRequest,
+    TranslationAiProfileSummary,
     TranslationAiResponse,
     TranslationAiTestRequest,
     TranslationAiTestResponse,
@@ -22,6 +32,9 @@ from src.schemas.operations import (
     TtsAiInstallResponse,
     TtsAiPreviewRequest,
     TtsAiPreviewResponse,
+    TtsAiProfileCreateRequest,
+    TtsAiProfilePatchRequest,
+    TtsAiProfileSummary,
     TtsAiResponse,
     TtsAiRuntime,
     TtsAiTestRequest,
@@ -30,19 +43,60 @@ from src.schemas.operations import (
 )
 from src.services.operational_metrics import OperationalMetricsService
 from src.services.workspace_settings_service import TranslationAiConfig, TtsAiConfig, WorkspaceSettingsService
-from src.tts_pipeline.errors import TtsPipelineError
-from src.tts_pipeline.install_runner import TtsInstallError, build_tts_install_plan, run_tts_install
-from src.tts_pipeline.preview import PreviewTtsError, preview_tts_speech
+from src.tts_pipeline.install_job import (
+    complete_tts_use_installed,
+    get_tts_install_job,
+    start_tts_install_job,
+)
+from src.tts_pipeline.install_runner import (
+    TtsInstallError,
+    build_tts_install_plan,
+    is_tts_package_installed,
+)
+from src.tts_pipeline.preview_job import (
+    cancel_tts_preview_job,
+    get_tts_preview_job,
+    start_tts_preview_job,
+)
 from src.tts_pipeline.provider_factory import probe_tts_ai_client
 from src.tts_pipeline.runtime_snapshot import (
-    build_last_install,
     build_last_probe,
-    detect_already_satisfied,
     normalize_runtime,
 )
 from src.core.settings import get_settings
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/ops", tags=["operations"])
+
+
+def _tts_install_response_from_job(job) -> TtsAiInstallResponse:
+    catalog = None
+    if job.catalog:
+        try:
+            catalog = TtsAiCatalog.model_validate(job.catalog)
+        except Exception:  # noqa: BLE001
+            catalog = None
+    runtime = None
+    if job.runtime:
+        try:
+            runtime = TtsAiRuntime.model_validate(job.runtime)
+        except Exception:  # noqa: BLE001
+            runtime = TtsAiRuntime()
+    status = job.status
+    return TtsAiInstallResponse(
+        ok=status == "succeeded",
+        status=status,
+        detail=job.detail,
+        command=job.command,
+        log_tail=job.log_tail,
+        already_satisfied=job.already_satisfied,
+        probe_ok=job.probe_ok,
+        probe_detail=job.probe_detail,
+        provider=job.provider,
+        catalog=catalog,
+        runtime=runtime,
+    )
 
 
 def get_operational_metrics_service(
@@ -59,16 +113,34 @@ def get_operational_metrics(
     return service.get_metrics()
 
 
+def _prompt_response(
+    public: dict, *, updated: bool = False, focus_profile_id: str | None = None
+) -> TranslationPromptResponse:
+    profiles_raw = public.get("profiles") or []
+    profiles = [PromptProfileSummary.model_validate(item) for item in profiles_raw]
+    focus = focus_profile_id if focus_profile_id is not None else public.get("focus_profile_id")
+    return TranslationPromptResponse(
+        prompt=str(public.get("prompt") or ""),
+        source=str(public.get("source") or "empty"),
+        updated=updated,
+        active_profile_id=str(public.get("active_profile_id") or ""),
+        active_profile_name=str(public.get("active_profile_name") or "Default"),
+        profiles=profiles,
+        focus_profile_id=str(focus) if focus else None,
+    )
+
+
+def _prompt_value_error_code(detail: str) -> int:
+    return status.HTTP_404_NOT_FOUND if detail == "profile_not_found" else status.HTTP_400_BAD_REQUEST
+
+
 @router.get("/translation-prompt", response_model=TranslationPromptResponse)
 def get_translation_prompt(
     workspace_id: UUID = Depends(get_current_workspace),
     db: Session = Depends(get_db_session),
 ) -> TranslationPromptResponse:
-    prompt = WorkspaceSettingsService(db).get_translation_user_prompt(workspace_id) or ""
-    return TranslationPromptResponse(
-        prompt=prompt,
-        source="workspace_db" if prompt else "empty",
-    )
+    public = WorkspaceSettingsService(db).get_translation_prompt_public(workspace_id)
+    return _prompt_response(public)
 
 
 @router.put("/translation-prompt", response_model=TranslationPromptResponse)
@@ -77,31 +149,176 @@ def put_translation_prompt(
     workspace_id: UUID = Depends(get_current_workspace),
     db: Session = Depends(get_db_session),
 ) -> TranslationPromptResponse:
+    service = WorkspaceSettingsService(db)
     try:
-        saved = WorkspaceSettingsService(db).set_translation_user_prompt(workspace_id, body.prompt)
+        service.set_translation_user_prompt(workspace_id, body.prompt)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    public = service.get_translation_prompt_public(workspace_id)
+    return _prompt_response(public, updated=True)
+
+
+@router.post("/translation-prompt/profiles", response_model=TranslationPromptResponse)
+def create_translation_prompt_profile(
+    body: PromptProfileCreateRequest,
+    workspace_id: UUID = Depends(get_current_workspace),
+    db: Session = Depends(get_db_session),
+) -> TranslationPromptResponse:
+    service = WorkspaceSettingsService(db)
+    try:
+        created = service.create_translation_prompt_profile(workspace_id, name=body.name)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    public = service.get_translation_prompt_public(workspace_id)
+    return _prompt_response(public, updated=True, focus_profile_id=str(created.get("id") or ""))
+
+
+@router.put("/translation-prompt/profiles/reorder", response_model=TranslationPromptResponse)
+def reorder_translation_prompt_profiles(
+    body: ProfileReorderRequest,
+    workspace_id: UUID = Depends(get_current_workspace),
+    db: Session = Depends(get_db_session),
+) -> TranslationPromptResponse:
+    service = WorkspaceSettingsService(db)
+    try:
+        public = service.reorder_translation_prompt_profiles(workspace_id, body.profile_ids)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return _prompt_response(public, updated=True)
+
+
+@router.get("/translation-prompt/profiles/{profile_id}", response_model=TranslationPromptResponse)
+def get_translation_prompt_profile(
+    profile_id: str,
+    workspace_id: UUID = Depends(get_current_workspace),
+    db: Session = Depends(get_db_session),
+) -> TranslationPromptResponse:
+    service = WorkspaceSettingsService(db)
+    try:
+        public = service.get_translation_prompt_profile_public(workspace_id, profile_id)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    return TranslationPromptResponse(
-        prompt=saved,
-        source="workspace_db" if saved else "empty",
-        updated=True,
-    )
+    return _prompt_response(public)
 
 
-def _translation_ai_response(public: dict, *, updated: bool = False) -> TranslationAiResponse:
+@router.put("/translation-prompt/profiles/{profile_id}", response_model=TranslationPromptResponse)
+def put_translation_prompt_profile(
+    profile_id: str,
+    body: PromptProfileUpdateRequest,
+    workspace_id: UUID = Depends(get_current_workspace),
+    db: Session = Depends(get_db_session),
+) -> TranslationPromptResponse:
+    service = WorkspaceSettingsService(db)
+    try:
+        service.set_translation_prompt_profile(workspace_id, profile_id, prompt=body.prompt)
+    except ValueError as exc:
+        detail = str(exc)
+        raise HTTPException(status_code=_prompt_value_error_code(detail), detail=detail) from exc
+    public = service.get_translation_prompt_profile_public(workspace_id, profile_id)
+    return _prompt_response(public, updated=True, focus_profile_id=profile_id)
+
+
+@router.patch("/translation-prompt/profiles/{profile_id}", response_model=TranslationPromptResponse)
+def patch_translation_prompt_profile(
+    profile_id: str,
+    body: PromptProfilePatchRequest,
+    workspace_id: UUID = Depends(get_current_workspace),
+    db: Session = Depends(get_db_session),
+) -> TranslationPromptResponse:
+    service = WorkspaceSettingsService(db)
+    try:
+        if body.name is None:
+            raise ValueError("empty_patch")
+        service.rename_translation_prompt_profile(workspace_id, profile_id, name=body.name)
+    except ValueError as exc:
+        detail = str(exc)
+        raise HTTPException(status_code=_prompt_value_error_code(detail), detail=detail) from exc
+    public = service.get_translation_prompt_profile_public(workspace_id, profile_id)
+    return _prompt_response(public, updated=True, focus_profile_id=profile_id)
+
+
+@router.post(
+    "/translation-prompt/profiles/{profile_id}/activate",
+    response_model=TranslationPromptResponse,
+)
+def activate_translation_prompt_profile(
+    profile_id: str,
+    workspace_id: UUID = Depends(get_current_workspace),
+    db: Session = Depends(get_db_session),
+) -> TranslationPromptResponse:
+    service = WorkspaceSettingsService(db)
+    try:
+        service.activate_translation_prompt_profile(workspace_id, profile_id)
+    except ValueError as exc:
+        detail = str(exc)
+        raise HTTPException(status_code=_prompt_value_error_code(detail), detail=detail) from exc
+    public = service.get_translation_prompt_public(workspace_id)
+    return _prompt_response(public, updated=True)
+
+
+@router.delete(
+    "/translation-prompt/profiles/{profile_id}", response_model=TranslationPromptResponse
+)
+def delete_translation_prompt_profile(
+    profile_id: str,
+    workspace_id: UUID = Depends(get_current_workspace),
+    db: Session = Depends(get_db_session),
+) -> TranslationPromptResponse:
+    service = WorkspaceSettingsService(db)
+    try:
+        service.delete_translation_prompt_profile(workspace_id, profile_id)
+    except ValueError as exc:
+        detail = str(exc)
+        raise HTTPException(status_code=_prompt_value_error_code(detail), detail=detail) from exc
+    public = service.get_translation_prompt_public(workspace_id)
+    return _prompt_response(public, updated=True)
+
+
+def _translation_ai_response(
+    public: dict, *, updated: bool = False, focus_profile_id: str | None = None
+) -> TranslationAiResponse:
+    profiles_raw = public.get("profiles") or []
+    profiles = [TranslationAiProfileSummary.model_validate(item) for item in profiles_raw]
+    focus = focus_profile_id if focus_profile_id is not None else public.get("focus_profile_id")
     return TranslationAiResponse(
         enabled=bool(public.get("enabled")),
         provider=str(public.get("provider") or "auto"),
         model=str(public.get("model") or ""),
         api_key_set=bool(public.get("api_key_set")),
         api_key_masked=str(public.get("api_key_masked") or ""),
+        api_key=str(public.get("api_key") or ""),
         base_url=str(public.get("base_url") or ""),
         timeout_seconds=float(public.get("timeout_seconds") or 90.0),
         fallback_provider=str(public.get("fallback_provider") or "none"),
         fallback_model=str(public.get("fallback_model") or ""),
         source=str(public.get("source") or "env"),
         updated=updated,
+        active_profile_id=str(public.get("active_profile_id") or ""),
+        active_profile_name=str(public.get("active_profile_name") or "Default"),
+        profiles=profiles,
+        focus_profile_id=str(focus) if focus else None,
     )
+
+
+def _resolve_translation_ai_saved(
+    service: WorkspaceSettingsService,
+    workspace_id: UUID,
+    profile_id: str | None,
+    settings_key: str,
+) -> TranslationAiConfig:
+    """Load saved config either from a specific profile or the active profile."""
+    pid = (profile_id or "").strip()
+    if pid:
+        workspace = service._resolve_workspace(workspace_id)
+        raw = (workspace.settings_json or {}).get(settings_key)
+        _aid, profiles = service._normalize_llm_ai_profiles(raw)
+        target = service._find_tts_profile(profiles, pid)
+        if target is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="profile_not_found")
+        return service._parse_translation_ai(target)
+    if settings_key == "caption_ai":
+        return service.get_caption_ai(workspace_id)
+    return service.get_translation_ai(workspace_id)
 
 
 @router.get("/translation-ai", response_model=TranslationAiResponse)
@@ -135,6 +352,132 @@ def put_translation_ai(
     return _translation_ai_response(public, updated=True)
 
 
+@router.post("/translation-ai/profiles", response_model=TranslationAiResponse)
+def create_translation_ai_profile(
+    body: TranslationAiProfileCreateRequest,
+    workspace_id: UUID = Depends(get_current_workspace),
+    db: Session = Depends(get_db_session),
+) -> TranslationAiResponse:
+    service = WorkspaceSettingsService(db)
+    try:
+        created = service.create_translation_ai_profile(workspace_id, name=body.name)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    public = service.get_translation_ai_public(workspace_id)
+    return _translation_ai_response(public, updated=True, focus_profile_id=str(created.get("id") or ""))
+
+
+@router.put("/translation-ai/profiles/reorder", response_model=TranslationAiResponse)
+def reorder_translation_ai_profiles(
+    body: ProfileReorderRequest,
+    workspace_id: UUID = Depends(get_current_workspace),
+    db: Session = Depends(get_db_session),
+) -> TranslationAiResponse:
+    service = WorkspaceSettingsService(db)
+    try:
+        public = service.reorder_translation_ai_profiles(workspace_id, body.profile_ids)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return _translation_ai_response(public, updated=True)
+
+
+@router.get("/translation-ai/profiles/{profile_id}", response_model=TranslationAiResponse)
+def get_translation_ai_profile(
+    profile_id: str,
+    workspace_id: UUID = Depends(get_current_workspace),
+    db: Session = Depends(get_db_session),
+) -> TranslationAiResponse:
+    service = WorkspaceSettingsService(db)
+    try:
+        public = service.get_translation_ai_profile_public(workspace_id, profile_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return _translation_ai_response(public)
+
+
+@router.put("/translation-ai/profiles/{profile_id}", response_model=TranslationAiResponse)
+def put_translation_ai_profile(
+    profile_id: str,
+    body: TranslationAiUpdateRequest,
+    workspace_id: UUID = Depends(get_current_workspace),
+    db: Session = Depends(get_db_session),
+) -> TranslationAiResponse:
+    service = WorkspaceSettingsService(db)
+    keep_key = body.api_key is None and not body.clear_api_key
+    payload = body.model_dump()
+    try:
+        service.set_translation_ai_profile(
+            workspace_id,
+            profile_id,
+            payload,
+            keep_existing_api_key=keep_key,
+            clear_api_key=body.clear_api_key,
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        code = status.HTTP_404_NOT_FOUND if detail == "profile_not_found" else status.HTTP_400_BAD_REQUEST
+        raise HTTPException(status_code=code, detail=detail) from exc
+    public = service.get_translation_ai_public(workspace_id)
+    return _translation_ai_response(public, updated=True, focus_profile_id=profile_id)
+
+
+@router.patch("/translation-ai/profiles/{profile_id}", response_model=TranslationAiResponse)
+def patch_translation_ai_profile(
+    profile_id: str,
+    body: TranslationAiProfilePatchRequest,
+    workspace_id: UUID = Depends(get_current_workspace),
+    db: Session = Depends(get_db_session),
+) -> TranslationAiResponse:
+    service = WorkspaceSettingsService(db)
+    try:
+        if body.name is not None:
+            service.rename_translation_ai_profile(workspace_id, profile_id, name=body.name)
+        if body.enabled is not None:
+            service.set_translation_ai_profile_enabled(workspace_id, profile_id, enabled=body.enabled)
+        if body.name is None and body.enabled is None:
+            raise ValueError("empty_patch")
+    except ValueError as exc:
+        detail = str(exc)
+        code = status.HTTP_404_NOT_FOUND if detail == "profile_not_found" else status.HTTP_400_BAD_REQUEST
+        raise HTTPException(status_code=code, detail=detail) from exc
+    public = service.get_translation_ai_public(workspace_id)
+    return _translation_ai_response(public, updated=True, focus_profile_id=profile_id)
+
+
+@router.post("/translation-ai/profiles/{profile_id}/activate", response_model=TranslationAiResponse)
+def activate_translation_ai_profile(
+    profile_id: str,
+    workspace_id: UUID = Depends(get_current_workspace),
+    db: Session = Depends(get_db_session),
+) -> TranslationAiResponse:
+    service = WorkspaceSettingsService(db)
+    try:
+        service.activate_translation_ai_profile(workspace_id, profile_id)
+    except ValueError as exc:
+        detail = str(exc)
+        code = status.HTTP_404_NOT_FOUND if detail == "profile_not_found" else status.HTTP_400_BAD_REQUEST
+        raise HTTPException(status_code=code, detail=detail) from exc
+    public = service.get_translation_ai_public(workspace_id)
+    return _translation_ai_response(public)
+
+
+@router.delete("/translation-ai/profiles/{profile_id}", response_model=TranslationAiResponse)
+def delete_translation_ai_profile(
+    profile_id: str,
+    workspace_id: UUID = Depends(get_current_workspace),
+    db: Session = Depends(get_db_session),
+) -> TranslationAiResponse:
+    service = WorkspaceSettingsService(db)
+    try:
+        service.delete_translation_ai_profile(workspace_id, profile_id)
+    except ValueError as exc:
+        detail = str(exc)
+        code = status.HTTP_404_NOT_FOUND if detail == "profile_not_found" else status.HTTP_400_BAD_REQUEST
+        raise HTTPException(status_code=code, detail=detail) from exc
+    public = service.get_translation_ai_public(workspace_id)
+    return _translation_ai_response(public, updated=True)
+
+
 @router.post("/translation-ai/test", response_model=TranslationAiTestResponse)
 def test_translation_ai(
     body: TranslationAiTestRequest,
@@ -142,8 +485,8 @@ def test_translation_ai(
     db: Session = Depends(get_db_session),
 ) -> TranslationAiTestResponse:
     service = WorkspaceSettingsService(db)
-    saved = service.get_translation_ai(workspace_id)
-    draft = body.model_dump(exclude_none=True)
+    saved = _resolve_translation_ai_saved(service, workspace_id, body.profile_id, "translation_ai")
+    draft = body.model_dump(exclude_none=True, exclude={"profile_id"})
     if not draft and not body.clear_api_key:
         cfg = saved
     else:
@@ -192,7 +535,7 @@ def list_translation_ai_models_route(
     db: Session = Depends(get_db_session),
 ) -> TranslationAiModelsResponse:
     service = WorkspaceSettingsService(db)
-    saved = service.get_translation_ai(workspace_id)
+    saved = _resolve_translation_ai_saved(service, workspace_id, body.profile_id, "translation_ai")
     provider = str(body.provider or saved.provider or "auto").strip().lower()
     api_key = _resolve_translation_ai_draft_key(
         saved=saved,
@@ -205,7 +548,7 @@ def list_translation_ai_models_route(
         provider=provider,
         api_key=api_key or "",
         base_url=base_url,
-        timeout_seconds=min(timeout, 60.0),
+        timeout_seconds=list_models_timeout_seconds(timeout),
     )
     return TranslationAiModelsResponse(ok=ok, provider=provider, models=models, detail=detail)
 
@@ -218,11 +561,8 @@ def get_caption_prompt(
     workspace_id: UUID = Depends(get_current_workspace),
     db: Session = Depends(get_db_session),
 ) -> TranslationPromptResponse:
-    prompt = WorkspaceSettingsService(db).get_caption_prompt(workspace_id) or ""
-    return TranslationPromptResponse(
-        prompt=prompt,
-        source="workspace_db" if prompt else "empty",
-    )
+    public = WorkspaceSettingsService(db).get_caption_prompt_public(workspace_id)
+    return _prompt_response(public)
 
 
 @router.put("/caption-prompt", response_model=TranslationPromptResponse)
@@ -231,15 +571,127 @@ def put_caption_prompt(
     workspace_id: UUID = Depends(get_current_workspace),
     db: Session = Depends(get_db_session),
 ) -> TranslationPromptResponse:
+    service = WorkspaceSettingsService(db)
     try:
-        saved = WorkspaceSettingsService(db).set_caption_prompt(workspace_id, body.prompt)
+        service.set_caption_prompt(workspace_id, body.prompt)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    public = service.get_caption_prompt_public(workspace_id)
+    return _prompt_response(public, updated=True)
+
+
+@router.post("/caption-prompt/profiles", response_model=TranslationPromptResponse)
+def create_caption_prompt_profile(
+    body: PromptProfileCreateRequest,
+    workspace_id: UUID = Depends(get_current_workspace),
+    db: Session = Depends(get_db_session),
+) -> TranslationPromptResponse:
+    service = WorkspaceSettingsService(db)
+    try:
+        created = service.create_caption_prompt_profile(workspace_id, name=body.name)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    public = service.get_caption_prompt_public(workspace_id)
+    return _prompt_response(public, updated=True, focus_profile_id=str(created.get("id") or ""))
+
+
+@router.put("/caption-prompt/profiles/reorder", response_model=TranslationPromptResponse)
+def reorder_caption_prompt_profiles(
+    body: ProfileReorderRequest,
+    workspace_id: UUID = Depends(get_current_workspace),
+    db: Session = Depends(get_db_session),
+) -> TranslationPromptResponse:
+    service = WorkspaceSettingsService(db)
+    try:
+        public = service.reorder_caption_prompt_profiles(workspace_id, body.profile_ids)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return _prompt_response(public, updated=True)
+
+
+@router.get("/caption-prompt/profiles/{profile_id}", response_model=TranslationPromptResponse)
+def get_caption_prompt_profile(
+    profile_id: str,
+    workspace_id: UUID = Depends(get_current_workspace),
+    db: Session = Depends(get_db_session),
+) -> TranslationPromptResponse:
+    service = WorkspaceSettingsService(db)
+    try:
+        public = service.get_caption_prompt_profile_public(workspace_id, profile_id)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    return TranslationPromptResponse(
-        prompt=saved,
-        source="workspace_db" if saved else "empty",
-        updated=True,
-    )
+    return _prompt_response(public)
+
+
+@router.put("/caption-prompt/profiles/{profile_id}", response_model=TranslationPromptResponse)
+def put_caption_prompt_profile(
+    profile_id: str,
+    body: PromptProfileUpdateRequest,
+    workspace_id: UUID = Depends(get_current_workspace),
+    db: Session = Depends(get_db_session),
+) -> TranslationPromptResponse:
+    service = WorkspaceSettingsService(db)
+    try:
+        service.set_caption_prompt_profile(workspace_id, profile_id, prompt=body.prompt)
+    except ValueError as exc:
+        detail = str(exc)
+        raise HTTPException(status_code=_prompt_value_error_code(detail), detail=detail) from exc
+    public = service.get_caption_prompt_profile_public(workspace_id, profile_id)
+    return _prompt_response(public, updated=True, focus_profile_id=profile_id)
+
+
+@router.patch("/caption-prompt/profiles/{profile_id}", response_model=TranslationPromptResponse)
+def patch_caption_prompt_profile(
+    profile_id: str,
+    body: PromptProfilePatchRequest,
+    workspace_id: UUID = Depends(get_current_workspace),
+    db: Session = Depends(get_db_session),
+) -> TranslationPromptResponse:
+    service = WorkspaceSettingsService(db)
+    try:
+        if body.name is None:
+            raise ValueError("empty_patch")
+        service.rename_caption_prompt_profile(workspace_id, profile_id, name=body.name)
+    except ValueError as exc:
+        detail = str(exc)
+        raise HTTPException(status_code=_prompt_value_error_code(detail), detail=detail) from exc
+    public = service.get_caption_prompt_profile_public(workspace_id, profile_id)
+    return _prompt_response(public, updated=True, focus_profile_id=profile_id)
+
+
+@router.post(
+    "/caption-prompt/profiles/{profile_id}/activate",
+    response_model=TranslationPromptResponse,
+)
+def activate_caption_prompt_profile(
+    profile_id: str,
+    workspace_id: UUID = Depends(get_current_workspace),
+    db: Session = Depends(get_db_session),
+) -> TranslationPromptResponse:
+    service = WorkspaceSettingsService(db)
+    try:
+        service.activate_caption_prompt_profile(workspace_id, profile_id)
+    except ValueError as exc:
+        detail = str(exc)
+        raise HTTPException(status_code=_prompt_value_error_code(detail), detail=detail) from exc
+    public = service.get_caption_prompt_public(workspace_id)
+    return _prompt_response(public, updated=True)
+
+
+@router.delete("/caption-prompt/profiles/{profile_id}", response_model=TranslationPromptResponse)
+def delete_caption_prompt_profile(
+    profile_id: str,
+    workspace_id: UUID = Depends(get_current_workspace),
+    db: Session = Depends(get_db_session),
+) -> TranslationPromptResponse:
+    service = WorkspaceSettingsService(db)
+    try:
+        service.delete_caption_prompt_profile(workspace_id, profile_id)
+    except ValueError as exc:
+        detail = str(exc)
+        raise HTTPException(status_code=_prompt_value_error_code(detail), detail=detail) from exc
+    public = service.get_caption_prompt_public(workspace_id)
+    return _prompt_response(public, updated=True)
 
 
 @router.get("/caption-ai", response_model=TranslationAiResponse)
@@ -273,6 +725,132 @@ def put_caption_ai(
     return _translation_ai_response(public, updated=True)
 
 
+@router.post("/caption-ai/profiles", response_model=TranslationAiResponse)
+def create_caption_ai_profile(
+    body: TranslationAiProfileCreateRequest,
+    workspace_id: UUID = Depends(get_current_workspace),
+    db: Session = Depends(get_db_session),
+) -> TranslationAiResponse:
+    service = WorkspaceSettingsService(db)
+    try:
+        created = service.create_caption_ai_profile(workspace_id, name=body.name)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    public = service.get_caption_ai_public(workspace_id)
+    return _translation_ai_response(public, updated=True, focus_profile_id=str(created.get("id") or ""))
+
+
+@router.put("/caption-ai/profiles/reorder", response_model=TranslationAiResponse)
+def reorder_caption_ai_profiles(
+    body: ProfileReorderRequest,
+    workspace_id: UUID = Depends(get_current_workspace),
+    db: Session = Depends(get_db_session),
+) -> TranslationAiResponse:
+    service = WorkspaceSettingsService(db)
+    try:
+        public = service.reorder_caption_ai_profiles(workspace_id, body.profile_ids)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return _translation_ai_response(public, updated=True)
+
+
+@router.get("/caption-ai/profiles/{profile_id}", response_model=TranslationAiResponse)
+def get_caption_ai_profile(
+    profile_id: str,
+    workspace_id: UUID = Depends(get_current_workspace),
+    db: Session = Depends(get_db_session),
+) -> TranslationAiResponse:
+    service = WorkspaceSettingsService(db)
+    try:
+        public = service.get_caption_ai_profile_public(workspace_id, profile_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return _translation_ai_response(public)
+
+
+@router.put("/caption-ai/profiles/{profile_id}", response_model=TranslationAiResponse)
+def put_caption_ai_profile(
+    profile_id: str,
+    body: TranslationAiUpdateRequest,
+    workspace_id: UUID = Depends(get_current_workspace),
+    db: Session = Depends(get_db_session),
+) -> TranslationAiResponse:
+    service = WorkspaceSettingsService(db)
+    keep_key = body.api_key is None and not body.clear_api_key
+    payload = body.model_dump()
+    try:
+        service.set_caption_ai_profile(
+            workspace_id,
+            profile_id,
+            payload,
+            keep_existing_api_key=keep_key,
+            clear_api_key=body.clear_api_key,
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        code = status.HTTP_404_NOT_FOUND if detail == "profile_not_found" else status.HTTP_400_BAD_REQUEST
+        raise HTTPException(status_code=code, detail=detail) from exc
+    public = service.get_caption_ai_public(workspace_id)
+    return _translation_ai_response(public, updated=True, focus_profile_id=profile_id)
+
+
+@router.patch("/caption-ai/profiles/{profile_id}", response_model=TranslationAiResponse)
+def patch_caption_ai_profile(
+    profile_id: str,
+    body: TranslationAiProfilePatchRequest,
+    workspace_id: UUID = Depends(get_current_workspace),
+    db: Session = Depends(get_db_session),
+) -> TranslationAiResponse:
+    service = WorkspaceSettingsService(db)
+    try:
+        if body.name is not None:
+            service.rename_caption_ai_profile(workspace_id, profile_id, name=body.name)
+        if body.enabled is not None:
+            service.set_caption_ai_profile_enabled(workspace_id, profile_id, enabled=body.enabled)
+        if body.name is None and body.enabled is None:
+            raise ValueError("empty_patch")
+    except ValueError as exc:
+        detail = str(exc)
+        code = status.HTTP_404_NOT_FOUND if detail == "profile_not_found" else status.HTTP_400_BAD_REQUEST
+        raise HTTPException(status_code=code, detail=detail) from exc
+    public = service.get_caption_ai_public(workspace_id)
+    return _translation_ai_response(public, updated=True, focus_profile_id=profile_id)
+
+
+@router.post("/caption-ai/profiles/{profile_id}/activate", response_model=TranslationAiResponse)
+def activate_caption_ai_profile(
+    profile_id: str,
+    workspace_id: UUID = Depends(get_current_workspace),
+    db: Session = Depends(get_db_session),
+) -> TranslationAiResponse:
+    service = WorkspaceSettingsService(db)
+    try:
+        service.activate_caption_ai_profile(workspace_id, profile_id)
+    except ValueError as exc:
+        detail = str(exc)
+        code = status.HTTP_404_NOT_FOUND if detail == "profile_not_found" else status.HTTP_400_BAD_REQUEST
+        raise HTTPException(status_code=code, detail=detail) from exc
+    public = service.get_caption_ai_public(workspace_id)
+    return _translation_ai_response(public)
+
+
+@router.delete("/caption-ai/profiles/{profile_id}", response_model=TranslationAiResponse)
+def delete_caption_ai_profile(
+    profile_id: str,
+    workspace_id: UUID = Depends(get_current_workspace),
+    db: Session = Depends(get_db_session),
+) -> TranslationAiResponse:
+    service = WorkspaceSettingsService(db)
+    try:
+        service.delete_caption_ai_profile(workspace_id, profile_id)
+    except ValueError as exc:
+        detail = str(exc)
+        code = status.HTTP_404_NOT_FOUND if detail == "profile_not_found" else status.HTTP_400_BAD_REQUEST
+        raise HTTPException(status_code=code, detail=detail) from exc
+    public = service.get_caption_ai_public(workspace_id)
+    return _translation_ai_response(public, updated=True)
+
+
 @router.post("/caption-ai/test", response_model=TranslationAiTestResponse)
 def test_caption_ai(
     body: TranslationAiTestRequest,
@@ -280,8 +858,8 @@ def test_caption_ai(
     db: Session = Depends(get_db_session),
 ) -> TranslationAiTestResponse:
     service = WorkspaceSettingsService(db)
-    saved = service.get_caption_ai(workspace_id)
-    draft = body.model_dump(exclude_none=True)
+    saved = _resolve_translation_ai_saved(service, workspace_id, body.profile_id, "caption_ai")
+    draft = body.model_dump(exclude_none=True, exclude={"profile_id"})
     if not draft and not body.clear_api_key:
         cfg = saved
     else:
@@ -316,7 +894,7 @@ def list_caption_ai_models_route(
     db: Session = Depends(get_db_session),
 ) -> TranslationAiModelsResponse:
     service = WorkspaceSettingsService(db)
-    saved = service.get_caption_ai(workspace_id)
+    saved = _resolve_translation_ai_saved(service, workspace_id, body.profile_id, "caption_ai")
     provider = str(body.provider or saved.provider or "auto").strip().lower()
     api_key = _resolve_translation_ai_draft_key(
         saved=saved,
@@ -329,14 +907,17 @@ def list_caption_ai_models_route(
         provider=provider,
         api_key=api_key or "",
         base_url=base_url,
-        timeout_seconds=min(timeout, 60.0),
+        timeout_seconds=list_models_timeout_seconds(timeout),
     )
     return TranslationAiModelsResponse(ok=ok, provider=provider, models=models, detail=detail)
 
 
-def _tts_ai_response(public: dict, *, updated: bool = False) -> TtsAiResponse:
+def _tts_ai_response(public: dict, *, updated: bool = False, focus_profile_id: str | None = None) -> TtsAiResponse:
     runtime_raw = public.get("runtime") or {}
     runtime = TtsAiRuntime.model_validate(normalize_runtime(runtime_raw))
+    profiles_raw = public.get("profiles") or []
+    profiles = [TtsAiProfileSummary.model_validate(item) for item in profiles_raw]
+    focus = focus_profile_id if focus_profile_id is not None else public.get("focus_profile_id")
     return TtsAiResponse(
         enabled=bool(public.get("enabled")),
         provider=str(public.get("provider") or "auto"),
@@ -358,6 +939,10 @@ def _tts_ai_response(public: dict, *, updated: bool = False) -> TtsAiResponse:
         live_import_ok=public.get("live_import_ok"),
         source=str(public.get("source") or "env"),
         updated=updated,
+        active_profile_id=str(public.get("active_profile_id") or ""),
+        active_profile_name=str(public.get("active_profile_name") or "Default"),
+        profiles=profiles,
+        focus_profile_id=str(focus) if focus else None,
     )
 
 
@@ -392,6 +977,138 @@ def put_tts_ai(
     return _tts_ai_response(public, updated=True)
 
 
+@router.post("/tts-ai/profiles", response_model=TtsAiResponse)
+def create_tts_ai_profile(
+    body: TtsAiProfileCreateRequest,
+    workspace_id: UUID = Depends(get_current_workspace),
+    db: Session = Depends(get_db_session),
+) -> TtsAiResponse:
+    """Create a blank TTS setup without changing the active setup."""
+    service = WorkspaceSettingsService(db)
+    try:
+        created = service.create_tts_ai_profile(workspace_id, name=body.name)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    public = service.get_tts_ai_public(workspace_id)
+    return _tts_ai_response(public, updated=True, focus_profile_id=str(created.get("id") or ""))
+
+
+@router.put("/tts-ai/profiles/reorder", response_model=TtsAiResponse)
+def reorder_tts_ai_profiles(
+    body: ProfileReorderRequest,
+    workspace_id: UUID = Depends(get_current_workspace),
+    db: Session = Depends(get_db_session),
+) -> TtsAiResponse:
+    service = WorkspaceSettingsService(db)
+    try:
+        public = service.reorder_tts_ai_profiles(workspace_id, body.profile_ids)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return _tts_ai_response(public, updated=True)
+
+
+@router.get("/tts-ai/profiles/{profile_id}", response_model=TtsAiResponse)
+def get_tts_ai_profile(
+    profile_id: str,
+    workspace_id: UUID = Depends(get_current_workspace),
+    db: Session = Depends(get_db_session),
+) -> TtsAiResponse:
+    service = WorkspaceSettingsService(db)
+    try:
+        public = service.get_tts_ai_profile_public(workspace_id, profile_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return _tts_ai_response(public)
+
+
+@router.put("/tts-ai/profiles/{profile_id}", response_model=TtsAiResponse)
+def put_tts_ai_profile(
+    profile_id: str,
+    body: TtsAiUpdateRequest,
+    workspace_id: UUID = Depends(get_current_workspace),
+    db: Session = Depends(get_db_session),
+) -> TtsAiResponse:
+    """Save connection fields for one setup. Does not change active or overview on/off."""
+    service = WorkspaceSettingsService(db)
+    keep_key = body.api_key is None and not body.clear_api_key
+    payload = body.model_dump()
+    try:
+        service.set_tts_ai_profile(
+            workspace_id,
+            profile_id,
+            payload,
+            keep_existing_api_key=keep_key,
+            clear_api_key=body.clear_api_key,
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        code = status.HTTP_404_NOT_FOUND if detail == "profile_not_found" else status.HTTP_400_BAD_REQUEST
+        raise HTTPException(status_code=code, detail=detail) from exc
+    public = service.get_tts_ai_public(workspace_id)
+    return _tts_ai_response(public, updated=True, focus_profile_id=profile_id)
+
+
+@router.patch("/tts-ai/profiles/{profile_id}", response_model=TtsAiResponse)
+def patch_tts_ai_profile(
+    profile_id: str,
+    body: TtsAiProfilePatchRequest,
+    workspace_id: UUID = Depends(get_current_workspace),
+    db: Session = Depends(get_db_session),
+) -> TtsAiResponse:
+    """Rename and/or toggle enabled from the overview list."""
+    service = WorkspaceSettingsService(db)
+    try:
+        if body.name is not None:
+            service.rename_tts_ai_profile(workspace_id, profile_id, name=body.name)
+        if body.enabled is not None:
+            service.set_tts_ai_profile_enabled(workspace_id, profile_id, enabled=body.enabled)
+        if body.name is None and body.enabled is None:
+            raise ValueError("empty_patch")
+    except ValueError as exc:
+        detail = str(exc)
+        code = status.HTTP_404_NOT_FOUND if detail == "profile_not_found" else status.HTTP_400_BAD_REQUEST
+        raise HTTPException(status_code=code, detail=detail) from exc
+    public = service.get_tts_ai_public(workspace_id)
+    return _tts_ai_response(public, updated=True, focus_profile_id=profile_id)
+
+
+@router.post("/tts-ai/profiles/{profile_id}/activate", response_model=TtsAiResponse)
+def activate_tts_ai_profile(
+    profile_id: str,
+    workspace_id: UUID = Depends(get_current_workspace),
+    db: Session = Depends(get_db_session),
+) -> TtsAiResponse:
+    service = WorkspaceSettingsService(db)
+    try:
+        service.activate_tts_ai_profile(workspace_id, profile_id)
+    except ValueError as exc:
+        detail = str(exc)
+        code = status.HTTP_404_NOT_FOUND if detail == "profile_not_found" else status.HTTP_400_BAD_REQUEST
+        raise HTTPException(status_code=code, detail=detail) from exc
+    public = service.get_tts_ai_public(workspace_id)
+    return _tts_ai_response(public)
+
+
+@router.delete("/tts-ai/profiles/{profile_id}", response_model=TtsAiResponse)
+def delete_tts_ai_profile(
+    profile_id: str,
+    workspace_id: UUID = Depends(get_current_workspace),
+    db: Session = Depends(get_db_session),
+) -> TtsAiResponse:
+    service = WorkspaceSettingsService(db)
+    try:
+        service.delete_tts_ai_profile(workspace_id, profile_id)
+    except ValueError as exc:
+        detail = str(exc)
+        if detail == "profile_not_found":
+            code = status.HTTP_404_NOT_FOUND
+        else:
+            code = status.HTTP_400_BAD_REQUEST
+        raise HTTPException(status_code=code, detail=detail) from exc
+    public = service.get_tts_ai_public(workspace_id)
+    return _tts_ai_response(public, updated=True)
+
+
 @router.post("/tts-ai/test", response_model=TtsAiTestResponse)
 def test_tts_ai(
     body: TtsAiTestRequest,
@@ -399,8 +1116,17 @@ def test_tts_ai(
     db: Session = Depends(get_db_session),
 ) -> TtsAiTestResponse:
     service = WorkspaceSettingsService(db)
-    saved = service.get_tts_ai(workspace_id)
-    draft = body.model_dump(exclude_none=True)
+    profile_id = (body.profile_id or "").strip() or None
+    if profile_id:
+        raw = (service._resolve_workspace(workspace_id).settings_json or {}).get("tts_ai")
+        _aid, profiles = service._normalize_tts_profiles(raw)
+        target = service._find_tts_profile(profiles, profile_id)
+        if target is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="profile_not_found")
+        saved = service._parse_tts_ai(target)
+    else:
+        saved = service.get_tts_ai(workspace_id)
+    draft = body.model_dump(exclude_none=True, exclude={"profile_id"})
     if not draft and not body.clear_api_key:
         cfg = saved
     else:
@@ -447,6 +1173,7 @@ def test_tts_ai(
         catalog = TtsAiCatalog.model_validate(result.catalog)
     runtime = service.patch_tts_ai_runtime(
         workspace_id,
+        profile_id=profile_id,
         last_probe=build_last_probe(
             ok=result.ok,
             provider=result.provider,
@@ -469,6 +1196,7 @@ def install_tts_ai_package(
     workspace_id: UUID = Depends(get_current_workspace),
     db: Session = Depends(get_db_session),
 ) -> TtsAiInstallResponse:
+    """Start allowlisted pip install in a background thread; poll GET /tts-ai/install/status."""
     settings = get_settings()
     if not bool(getattr(settings, "audio_tts_allow_install", True)):
         raise HTTPException(
@@ -484,77 +1212,83 @@ def install_tts_ai_package(
     except TtsInstallError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
-    result = run_tts_install(plan, timeout_seconds=body.timeout_seconds)
-    already = detect_already_satisfied(result.log_tail, result.detail)
     package_name = (body.package or "").strip()
-    if not package_name and result.command.startswith("pip install "):
-        package_name = result.command.replace("pip install ", "", 1).strip()
+    force = bool(body.force_reinstall)
+    if not force and is_tts_package_installed(plan):
+        job = complete_tts_use_installed(
+            workspace_id=workspace_id,
+            plan=plan,
+            package_name=package_name,
+            provider=body.provider,
+            profile_id=(body.profile_id or "").strip() or None,
+        )
+        _ = db
+        return _tts_install_response_from_job(job)
+
+    try:
+        job = start_tts_install_job(
+            workspace_id=workspace_id,
+            plan=plan,
+            package_name=package_name,
+            provider=body.provider,
+            profile_id=(body.profile_id or "").strip() or None,
+            timeout_seconds=body.timeout_seconds,
+            force_reinstall=force,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    # Touch db dependency so auth/workspace resolution stays consistent with other ops routes.
+    _ = db
+    return _tts_install_response_from_job(job)
+
+
+@router.get("/tts-ai/install/status", response_model=TtsAiInstallResponse)
+def get_tts_ai_install_status(
+    workspace_id: UUID = Depends(get_current_workspace),
+    db: Session = Depends(get_db_session),
+) -> TtsAiInstallResponse:
+    """Poll background TTS install job for the current workspace."""
+    job = get_tts_install_job(workspace_id)
+    if job is not None:
+        return _tts_install_response_from_job(job)
 
     service = WorkspaceSettingsService(db)
-    runtime = service.patch_tts_ai_runtime(
-        workspace_id,
-        last_install=build_last_install(
-            ok=result.ok,
-            command=result.command,
-            package=package_name,
-            detail=result.detail,
-            already_satisfied=already,
-        ),
+    runtime_raw = service.get_tts_ai(workspace_id).runtime
+    runtime = TtsAiRuntime.model_validate(normalize_runtime(runtime_raw))
+    last = runtime.last_install
+    if last is None:
+        return TtsAiInstallResponse(
+            ok=False,
+            status="",
+            detail="No TTS install job for this workspace",
+            runtime=runtime,
+        )
+    status_value = (last.status or "").strip()
+    if not status_value:
+        status_value = "succeeded" if last.ok else "failed"
+    return TtsAiInstallResponse(
+        ok=bool(last.ok),
+        status=status_value,
+        detail=last.detail,
+        command=last.command,
+        log_tail="",
+        already_satisfied=bool(last.already_satisfied),
+        runtime=runtime,
     )
 
-    probe_ok: bool | None = None
-    probe_detail = ""
-    provider_name = ""
-    catalog = None
-    if result.ok:
-        saved = service.get_tts_ai(workspace_id)
-        probe_provider = (body.provider or saved.provider or "auto").strip().lower()
-        # Probe using saved connection fields but the provider we just installed for.
-        probe_cfg = TtsAiConfig(
-            enabled=True,
-            provider=probe_provider,
-            voice_id=saved.voice_id,
-            speaking_rate=saved.speaking_rate,
-            language_code=saved.language_code,
-            model_id=saved.model_id,
-            api_key=saved.api_key,
-            base_url=saved.base_url,
-            timeout_seconds=saved.timeout_seconds,
-            fallback_provider=saved.fallback_provider,
-            fallback_voice_id=saved.fallback_voice_id,
-            local_backend=saved.local_backend,
-            device=saved.device,
-            cli_binary=saved.cli_binary,
-            options_json=dict(saved.options_json or {}),
-            runtime=saved.runtime,
-        )
-        probe = probe_tts_ai_client(probe_cfg)
-        probe_ok = probe.ok
-        probe_detail = probe.detail
-        provider_name = probe.provider
-        if probe.catalog:
-            catalog = TtsAiCatalog.model_validate(probe.catalog)
-        runtime = service.patch_tts_ai_runtime(
-            workspace_id,
-            last_probe=build_last_probe(
-                ok=probe.ok,
-                provider=probe.provider,
-                detail=probe.detail,
-                catalog=probe.catalog,
-            ),
-        )
 
-    return TtsAiInstallResponse(
-        ok=result.ok,
-        detail=result.detail,
-        command=result.command,
-        log_tail=result.log_tail,
-        already_satisfied=already,
-        probe_ok=probe_ok,
-        probe_detail=probe_detail,
-        provider=provider_name,
-        catalog=catalog,
-        runtime=TtsAiRuntime.model_validate(runtime),
+def _tts_preview_response_from_job(job) -> TtsAiPreviewResponse:
+    return TtsAiPreviewResponse(
+        ok=bool(job.ok),
+        status=job.status,
+        provider=job.provider,
+        detail=job.detail,
+        mime_type=job.mime_type or "audio/wav",
+        duration_seconds=float(job.duration_seconds or 0.0),
+        audio_base64=job.audio_base64 or "",
+        warnings=list(job.warnings or []),
+        text=job.text or "",
     )
 
 
@@ -564,7 +1298,11 @@ def preview_tts_ai_speech(
     workspace_id: UUID = Depends(get_current_workspace),
     db: Session = Depends(get_db_session),
 ) -> TtsAiPreviewResponse:
-    """One-shot synthesize of short sample text using the Ops draft connection."""
+    """Start background speech preview; poll GET /tts-ai/preview/status.
+
+    Local models (OmniVoice) may download weights on first run — keeping the
+    Next.js /api rewrite open that long previously returned an opaque HTTP 500.
+    """
     service = WorkspaceSettingsService(db)
     saved = service.get_tts_ai(workspace_id)
     api_key = saved.api_key
@@ -606,14 +1344,47 @@ def preview_tts_ai_speech(
         runtime=saved.runtime,
     )
     try:
-        result = preview_tts_speech(
+        job = start_tts_preview_job(
+            workspace_id=workspace_id,
             workspace_tts=cfg,
             text=body.text,
             max_chars=body.max_chars,
         )
-    except PreviewTtsError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    except TtsPipelineError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.message) from exc
-    return TtsAiPreviewResponse(**result)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    return _tts_preview_response_from_job(job)
+
+
+@router.get("/tts-ai/preview/status", response_model=TtsAiPreviewResponse)
+def get_tts_ai_preview_status(
+    workspace_id: UUID = Depends(get_current_workspace),
+    db: Session = Depends(get_db_session),
+) -> TtsAiPreviewResponse:
+    """Poll background TTS preview job for the current workspace."""
+    _ = db
+    job = get_tts_preview_job(workspace_id)
+    if job is None:
+        return TtsAiPreviewResponse(
+            ok=False,
+            status="",
+            detail="No TTS preview job for this workspace",
+        )
+    return _tts_preview_response_from_job(job)
+
+
+@router.post("/tts-ai/preview/cancel", response_model=TtsAiPreviewResponse)
+def cancel_tts_ai_preview(
+    workspace_id: UUID = Depends(get_current_workspace),
+    db: Session = Depends(get_db_session),
+) -> TtsAiPreviewResponse:
+    """Cancel a running preview so the operator can start again."""
+    _ = db
+    job = cancel_tts_preview_job(workspace_id)
+    if job is None:
+        return TtsAiPreviewResponse(
+            ok=False,
+            status="cancelled",
+            detail="No TTS preview job for this workspace",
+        )
+    return _tts_preview_response_from_job(job)
 

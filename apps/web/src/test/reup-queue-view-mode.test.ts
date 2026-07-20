@@ -51,7 +51,7 @@ assert.match(pageSource, /reup-queue-worklist is-rail is-dense is-soft/, "Workli
 assert.match(pageSource, /worklistStageLabel/, "Worklist must use short stage labels");
 assert.match(pageSource, /worklistTranscriptHref/, "Worklist must deep-link Analyzed rows to Transcript");
 assert.match(pageSource, /worklistNoDialogueHint/, "Worklist must surface Skip dubbing when analyze finds no speech");
-assert.match(pageSource, /shouldShowWorklistOpenJobLink/, "Worklist must hide Open job after analyze completes");
+assert.doesNotMatch(pageSource, /\/ops\/jobs/, "Worklist must not deep-link Ops job monitor");
 assert.match(pageSource, /primaryQueueActionLabel/, "Worklist must share Gallery primary CTA labels");
 assert.doesNotMatch(
   worklistSource,
@@ -67,8 +67,9 @@ assert.doesNotMatch(
   "Worklist must not duplicate progress as a linear bar plus percent text"
 );
 assert.match(worklistSource, /reup-queue-worklist-title-text/, "Worklist titles must clamp on an inner text node");
-assert.match(worklistSource, /reup-queue-worklist-icon-action/, "Worklist secondary actions must use icon-circle controls");
-assert.match(worklistSource, /WorklistActionIcon/, "Worklist must render SVG icons for Pause/Resume/Details");
+assert.match(worklistSource, /is-with-icon/, "Worklist actions must use icon+text controls");
+assert.match(worklistSource, /WorkItemActionIcon/, "Worklist must render shared WorkItemActionIcon SVGs");
+assert.doesNotMatch(worklistSource, /reup-queue-worklist-icon-action/, "Worklist must leave circular icon-only action controls");
 assert.doesNotMatch(worklistSource, /downloadJobErrorLine|downloadError/, "Worklist must keep job errors out of the dense rail");
 assert.doesNotMatch(worklistSource, /queueTileScoreBadge|worklist-score/, "Worklist must not show score chips in the rail");
 assert.doesNotMatch(worklistSource, /queueTilePostedLabel|queueTileViewsLabel|queueTileDurationLabel/, "Worklist rail must not show posted/views/duration meta");
@@ -95,7 +96,7 @@ assert.match(
   /grid-template-columns:\s*auto\s+52px\s+minmax\(0,\s*1fr\)\s+10\.5rem\s+auto/,
   "Soft worklist must use mock-aligned ops grid"
 );
-assert.match(cssSource, /\.reup-queue-worklist-icon-action/, "Soft worklist must style circular icon actions");
+assert.match(cssSource, /\.reup-queue-worklist-action\.is-with-icon/, "Soft worklist must style icon+text actions");
 assert.match(cssSource, /\.reup-queue-worklist-status\.is-active/, "Soft worklist must support active/downloading blue tone");
 assert.match(cssSource, /\.reup-queue-worklist-progress-ring/, "Soft worklist must style the circular progress ring");
 assert.doesNotMatch(

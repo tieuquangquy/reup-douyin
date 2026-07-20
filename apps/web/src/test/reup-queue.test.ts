@@ -46,13 +46,13 @@ assert.match(typeSource, /job_progress_percent/, "Reup Queue types must include 
 assert.match(typeSource, /job_error_message/, "Reup Queue types must include job error message");
 assert.match(
   globalCssSource,
-  /\.reup-queue-media-tile[\s\S]*\.review-board-tile-status-chip[\s\S]*max-width:\s*none/,
-  "Reup Queue status chips must not clip labels with a narrow max-width"
+  /\.work-media-tile-overlay\.is-compact[\s\S]*min-height:\s*32px/,
+  "Compact overlay must use a thinner scrim rail"
 );
 assert.match(
   globalCssSource,
-  /\.reup-queue-media-tile[\s\S]*\.review-board-tile-status-chip[\s\S]*white-space:\s*normal/,
-  "Reup Queue status chips must allow full multi-word labels without ellipsis"
+  /\.reup-queue-media-tile[\s\S]*\.work-media-tile-overlay\.is-compact[\s\S]*text-overflow:\s*ellipsis/,
+  "Reup Queue compact tiles must ellipsis long stage labels"
 );
 assert.match(studioSource, /isDownloadReadyForConfirm/, "Job chip must defer when download is ready for confirm");
 assert.match(globalCssSource, /\.reup-queue-download-progress/, "Download progress bar must have dedicated CSS");
@@ -92,7 +92,8 @@ assert.doesNotMatch(pageSource, /capture-inbox-gallery-summary/, "Reup Queue mus
 assert.match(pageSource, /OpsFilterBar/, "Reup Queue must use shared search and sort controls");
 assert.match(pageSource, /capture-inbox-media-tile/, "Reup Queue must render Capture Inbox-style media tiles");
 assert.match(pageSource, /capture-inbox-command-bar/, "Reup Queue must use sticky capture-inbox bulk command bar");
-assert.match(pageSource, /capture-inbox-right-inspector/, "Reup Queue must use Capture Inbox sticky right inspector");
+assert.match(pageSource, /WorkItemDetailsDrawer/, "Reup Queue must open details in WorkItemDetailsDrawer");
+assert.doesNotMatch(pageSource, /capture-inbox-review-side/, "Reup Queue must not reserve sticky right inspector column");
 assert.match(pageSource, /OpsDetailPanel/, "Reup Queue must keep shared detail panel sections");
 assert.match(pageSource, /OpsStatePanel/, "Reup Queue must use shared state panels");
 
@@ -142,10 +143,10 @@ assert.match(globalCssSource, /\.reup-queue-hero-panel/, "Reup Queue hero panel 
 assert.match(globalCssSource, /\.reup-queue-studio-workspace/, "Reup Queue studio must have dedicated CSS hooks");
 assert.match(globalCssSource, /\.capture-inbox-status-pill[\s\S]*border-radius: 999px/, "Status strip must inherit Capture Inbox pill styling");
 
-assert.match(exportPackagesIndexSource, /Export Packages/, "Export Package index page must exist");
-assert.match(publishHandoffsIndexSource, /Publish Handoffs/, "Publish Handoff index page must exist");
+assert.match(exportPackagesIndexSource, /ops-export-page|opsExportPackages/, "Export Package index page must exist");
+assert.match(publishHandoffsIndexSource, /ops-handoffs-page|opsPublishHandoffs/, "Publish Handoff index page must exist");
 assert.match(exportPackageDetailSource, /OpsDetailPanel/, "Export Package detail must use shared detail panel");
-assert.match(publishHandoffDetailSource, /does not call platform APIs or auto-publish/, "Publish Handoff detail must preserve manual publishing boundary");
+assert.match(publishHandoffDetailSource, /do(?:es)? not call platform APIs or auto-publish/, "Publish Handoff detail must preserve manual publishing boundary");
 assert.match(pageSource, /is-promoted-pair/, "Queue tiles must use promoted action pair layout when Details is shown");
 assert.match(globalCssSource, /\.reup-queue-tile-action-bar/, "Reup Queue tile actions must have dedicated spacing hook");
 assert.match(pageSource, /reup-queue-tile-quick-links/, "Queue tiles must expose compact workflow shortcut links");

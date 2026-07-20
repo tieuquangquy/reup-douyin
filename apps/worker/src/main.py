@@ -1,5 +1,6 @@
 import logging
 import os
+from pathlib import Path
 
 # Must run before JobRunner/OCR imports paddleocr (Paddle 3.3.x oneDNN/PIR crash on Windows).
 os.environ["FLAGS_use_mkldnn"] = "0"
@@ -8,6 +9,30 @@ os.environ["FLAGS_enable_pir_api"] = "0"
 os.environ["FLAGS_enable_pir_in_executor"] = "0"
 os.environ["PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT"] = "0"
 os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
+
+
+def _load_worker_dotenv() -> None:
+    """Put apps/worker/.env into os.environ (pydantic Settings alone ignores OCR_*)."""
+    worker_root = Path(__file__).resolve().parents[1]
+    env_path = worker_root / ".env"
+    if not env_path.is_file():
+        return
+    try:
+        text = env_path.read_text(encoding="utf-8")
+    except OSError:
+        return
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if not key or key in os.environ:
+            continue
+        os.environ[key] = value.strip().strip('"').strip("'")
+
+
+_load_worker_dotenv()
 
 try:
     from .handlers.mock_handlers import build_mock_handler_registry

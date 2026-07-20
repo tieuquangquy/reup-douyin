@@ -21,6 +21,8 @@ class TranslationAiListModelsTests(unittest.TestCase):
         self.assertTrue(model_list_ready("ollama", api_key="", base_url="http://127.0.0.1:11434"))
         self.assertFalse(model_list_ready("ollama", api_key="", base_url=""))
         self.assertFalse(model_list_ready("auto", api_key="x", base_url="https://x"))
+        self.assertTrue(model_list_ready("openrouter", api_key="sk", base_url="https://openrouter.ai/api/v1"))
+        self.assertFalse(model_list_ready("openrouter", api_key="sk", base_url=""))
 
     def test_list_openai_compatible_parses_ids(self) -> None:
         captured: dict = {}
@@ -131,6 +133,54 @@ class TranslationAiListModelsTests(unittest.TestCase):
         self.assertEqual(models, [])
         self.assertIn("credentials", detail.lower())
         self.assertFalse(called)
+
+    def test_gemini_connection_failure_returns_fallback_models(self) -> None:
+        def boom(*_a, **_k):
+            raise OSError(
+                "[WinError 10060] A connection attempt failed because the connected party "
+                "did not properly respond after a period of time"
+            )
+
+        ok, models, detail = list_translation_ai_models(
+            provider="gemini",
+            api_key="gk-test",
+            base_url="",
+            timeout_seconds=12,
+            opener=boom,
+        )
+        self.assertFalse(ok)
+        self.assertIn("gemini-2.5-flash", models)
+        self.assertTrue(
+            "10060" in detail or "connection" in detail.lower(),
+            detail,
+        )
+
+    def test_gemini_key_is_url_encoded(self) -> None:
+        captured: dict = {}
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return json.dumps({"models": [{"name": "models/gemini-2.5-flash"}]}).encode("utf-8")
+
+        def fake_open(request, timeout=None):
+            captured["url"] = request.full_url
+            return FakeResponse()
+
+        ok, models, detail = list_translation_ai_models(
+            provider="gemini",
+            api_key="abc+/=def",
+            base_url="",
+            opener=fake_open,
+        )
+        self.assertTrue(ok)
+        self.assertEqual(models, ["gemini-2.5-flash"])
+        self.assertIn("key=abc%2B%2F%3Ddef", captured["url"])
 
 
 if __name__ == "__main__":

@@ -1,14 +1,62 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import Link from "next/link";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { fetchAllPlatformAccounts, fetchPublishControlQueue } from "../../lib/api";
 import { useT } from "../../lib/i18n";
 import type { PlatformAccount } from "../../types/publish-draft";
 import type { PublishControlQueue } from "../../types/publish-control";
 import { OpsConsoleShell } from "../app-shell/OpsConsoleShell";
 import { TopbarRefreshButton } from "../app-shell/TopbarRefreshButton";
-import { StatusBadge } from "../app-shell/StatusBadge";
-import { OpsMetricCard, OpsPanel, OpsState, formatDateTime, statusTone } from "./OpsShared";
+import { OpsState, formatDateTime, statusTone, type OpsTone } from "./OpsShared";
+
+type AccountRow = PlatformAccount & {
+  healthStatus: string | null;
+  needsAttention: boolean;
+};
+
+function formatChipLabel(value: string): string {
+  return value
+    .split(/[_-]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0) + part.slice(1).toLowerCase())
+    .join(" ");
+}
+
+function AccountsKpi({
+  label,
+  value,
+  detail,
+  tone = "muted",
+}: {
+  label: string;
+  value: string;
+  detail: string;
+  tone?: OpsTone;
+}) {
+  return (
+    <article className={`ops-accounts-kpi tone-${tone}`} title={detail}>
+      <em>{label}</em>
+      <strong>{value}</strong>
+      <span>{detail}</span>
+    </article>
+  );
+}
+
+function AccountsPanel({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <section className="ops-accounts-panel">
+      <div className="ops-accounts-panel__head">
+        <h2>{title}</h2>
+      </div>
+      <div className="ops-accounts-panel__body">{children}</div>
+    </section>
+  );
+}
+
+function AccountsChip({ label, tone }: { label: string; tone: OpsTone }) {
+  return <span className={`ops-accounts-chip tone-${tone}`}>{formatChipLabel(label)}</span>;
+}
 
 export function OpsAccountsPage() {
   const t = useT();
@@ -16,6 +64,7 @@ export function OpsAccountsPage() {
   const [queue, setQueue] = useState<PublishControlQueue | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [loadedAt, setLoadedAt] = useState<string | null>(null);
 
   async function load() {
     setLoading(true);
@@ -24,6 +73,7 @@ export function OpsAccountsPage() {
       const [accountPayload, queuePayload] = await Promise.all([fetchAllPlatformAccounts(), fetchPublishControlQueue()]);
       setAccounts(accountPayload);
       setQueue(queuePayload);
+      setLoadedAt(new Date().toISOString());
     } catch (err) {
       setError(err instanceof Error ? err.message : t("opsAccounts.unavailableTitle"));
     } finally {
@@ -34,6 +84,37 @@ export function OpsAccountsPage() {
   useEffect(() => {
     void load();
   }, [t]);
+
+  const unhealthyIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const item of queue?.accounts ?? []) {
+      if (item.health_status === "UNHEALTHY") ids.add(item.platform_account_id);
+    }
+    return ids;
+  }, [queue]);
+
+  const rows = useMemo<AccountRow[]>(
+    () =>
+      accounts
+        .map((account) => {
+          const unhealthy = unhealthyIds.has(account.id);
+          return {
+            ...account,
+            healthStatus: unhealthy ? "UNHEALTHY" : null,
+            needsAttention: account.is_on_hold || unhealthy,
+          };
+        })
+        .sort((a, b) => {
+          if (a.needsAttention !== b.needsAttention) return a.needsAttention ? -1 : 1;
+          return a.display_name.localeCompare(b.display_name);
+        }),
+    [accounts, unhealthyIds],
+  );
+
+  const attentionRows = rows.filter((row) => row.needsAttention);
+  const activeCount = accounts.filter((item) => item.status === "ACTIVE").length;
+  const onHoldCount = accounts.filter((item) => item.is_on_hold).length;
+  const unhealthyCount = unhealthyIds.size;
 
   const refreshAction = (
     <TopbarRefreshButton busy={loading && accounts.length > 0} disabled={loading && accounts.length === 0} onClick={() => void load()} />
@@ -57,41 +138,109 @@ export function OpsAccountsPage() {
 
   return (
     <OpsConsoleShell actions={refreshAction} description={t("opsAccounts.description")} title={t("opsAccounts.title")}>
-      <main className="ops-page">
-        <div className="actions-row">
-          <a href="/ops/publish-control">{t("opsAccounts.openPublishControl")}</a>
-        </div>
+      <main className="ops-page ops-accounts-page">
         {error ? <div className="inline-error">{error}</div> : null}
 
-        <section className="health-overview-grid">
-          <OpsMetricCard label={t("opsAccounts.accounts")} value={String(accounts.length)} detail={t("opsAccounts.configuredRecords")} />
-          <OpsMetricCard label={t("opsAccounts.active")} value={String(accounts.filter((item) => item.status === "ACTIVE").length)} detail={t("opsAccounts.readyForRouting")} tone="good" />
-          <OpsMetricCard label={t("opsAccounts.onHold")} value={String(accounts.filter((item) => item.is_on_hold).length)} detail={t("opsAccounts.manualHoldFlag")} tone={accounts.some((item) => item.is_on_hold) ? "warn" : "good"} />
-          <OpsMetricCard label={t("opsAccounts.unhealthy")} value={String(queue?.accounts.filter((item) => item.health_status === "UNHEALTHY").length ?? 0)} detail={t("opsAccounts.healthModelOutput")} tone={(queue?.accounts.some((item) => item.health_status === "UNHEALTHY") ?? false) ? "danger" : "good"} />
+        <p className="ops-accounts-freshness">
+          {t("opsAccounts.loadedAt")}{" "}
+          <time dateTime={loadedAt ?? undefined}>{formatDateTime(loadedAt)}</time>
+        </p>
+
+        <section className="ops-accounts-kpis" aria-label={t("opsAccounts.title")}>
+          <AccountsKpi
+            label={t("opsAccounts.accounts")}
+            value={String(accounts.length)}
+            detail={t("opsAccounts.configuredRecords")}
+            tone="muted"
+          />
+          <AccountsKpi
+            label={t("opsAccounts.active")}
+            value={String(activeCount)}
+            detail={t("opsAccounts.readyForRouting")}
+            tone="good"
+          />
+          <AccountsKpi
+            label={t("opsAccounts.onHold")}
+            value={String(onHoldCount)}
+            detail={t("opsAccounts.manualHoldFlag")}
+            tone={onHoldCount > 0 ? "warn" : "good"}
+          />
+          <AccountsKpi
+            label={t("opsAccounts.unhealthy")}
+            value={String(unhealthyCount)}
+            detail={t("opsAccounts.healthModelOutput")}
+            tone={unhealthyCount > 0 ? "danger" : "good"}
+          />
         </section>
 
-        <section className="ops-grid">
-          <OpsPanel title={t("opsAccounts.platformAccounts")}>
-            <table className="health-table">
-              <thead>
-                <tr><th>{t("opsAccounts.account")}</th><th>{t("opsAccounts.platform")}</th><th>{t("opsAccounts.status")}</th><th>{t("opsAccounts.pageId")}</th><th>{t("opsAccounts.priority")}</th><th>{t("opsAccounts.hold")}</th><th>{t("opsAccounts.updated")}</th></tr>
-              </thead>
-              <tbody>
-                {accounts.length === 0 ? <tr><td colSpan={7}>{t("opsAccounts.noPlatformAccountsConfigured")}</td></tr> : null}
-                {accounts.map((account) => (
-                  <tr key={account.id}>
-                    <td>{account.display_name}</td>
-                    <td>{account.platform}</td>
-                    <td><StatusBadge label={account.status} tone={statusTone(account.status)} /></td>
-                    <td>{account.external_account_id}</td>
-                    <td>{account.priority}</td>
-                    <td>{account.is_on_hold ? t("opsAccounts.yes") : t("opsAccounts.no")}</td>
-                    <td>{formatDateTime(account.updated_at)}</td>
-                  </tr>
+        <div className="ops-accounts-toolbar">
+          <nav className="ops-accounts-actions" aria-label={t("opsAccounts.triage")}>
+            <Link href="/ops/publish-control">{t("opsAccounts.openPublishControl")}</Link>
+          </nav>
+        </div>
+
+        <section className={`ops-accounts-main${attentionRows.length > 0 ? " has-attention" : ""}`}>
+          <AccountsPanel title={t("opsAccounts.platformAccounts")}>
+            {rows.length === 0 ? (
+              <p className="ops-accounts-empty">{t("opsAccounts.noPlatformAccountsConfigured")}</p>
+            ) : (
+              <ul className="ops-accounts-sheet">
+                <li className="ops-accounts-row is-head" aria-hidden="true">
+                  <span>{t("opsAccounts.account")}</span>
+                  <span>{t("opsAccounts.platform")}</span>
+                  <span>{t("opsAccounts.status")}</span>
+                  <span>{t("opsAccounts.pageId")}</span>
+                  <span>{t("opsAccounts.priority")}</span>
+                  <span>{t("opsAccounts.hold")}</span>
+                  <span>{t("opsAccounts.updated")}</span>
+                </li>
+                {rows.map((account) => (
+                  <li className={`ops-accounts-row${account.needsAttention ? " is-hot" : ""}`} key={account.id}>
+                    <strong className="ops-accounts-row__title" title={account.display_name}>
+                      {account.display_name}
+                    </strong>
+                    <span>{account.platform}</span>
+                    <span className="ops-accounts-row__badges">
+                      <AccountsChip label={account.status} tone={statusTone(account.status)} />
+                      {account.healthStatus ? (
+                        <AccountsChip label={account.healthStatus} tone="danger" />
+                      ) : null}
+                    </span>
+                    <span className="ops-accounts-row__id" title={account.external_account_id}>
+                      {account.external_account_id}
+                    </span>
+                    <span>{account.priority}</span>
+                    <AccountsChip
+                      label={account.is_on_hold ? t("opsAccounts.yes") : t("opsAccounts.no")}
+                      tone={account.is_on_hold ? "warn" : "muted"}
+                    />
+                    <time dateTime={account.updated_at}>{formatDateTime(account.updated_at)}</time>
+                  </li>
                 ))}
-              </tbody>
-            </table>
-          </OpsPanel>
+              </ul>
+            )}
+            <p className="ops-accounts-footnote">{t("opsAccounts.editsInPublishControl")}</p>
+          </AccountsPanel>
+
+          {attentionRows.length > 0 ? (
+            <AccountsPanel title={t("opsAccounts.attention")}>
+              <ul className="ops-accounts-attention">
+                {attentionRows.map((account) => (
+                  <li key={account.id}>
+                    <div>
+                      <strong>{account.display_name}</strong>
+                      <em>
+                        {account.is_on_hold ? t("opsAccounts.onHold") : null}
+                        {account.is_on_hold && account.healthStatus ? " · " : null}
+                        {account.healthStatus ? formatChipLabel(account.healthStatus) : null}
+                      </em>
+                    </div>
+                    <Link href="/ops/publish-control">{t("opsAccounts.openPublishControl")}</Link>
+                  </li>
+                ))}
+              </ul>
+            </AccountsPanel>
+          ) : null}
         </section>
       </main>
     </OpsConsoleShell>

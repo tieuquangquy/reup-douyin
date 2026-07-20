@@ -1,40 +1,33 @@
 "use client";
 
-import { StatusBadge } from "../app-shell/StatusBadge";
 import { useT } from "../../lib/i18n";
 import type { ContinueItem } from "../../lib/operatorHomeState";
+import { OperatorHomeChip, OperatorHomeOpenLink, OperatorHomePanel } from "./OperatorHomeShared";
 
 export function ContinuePanel({ items }: { items: ContinueItem[] }) {
   const t = useT();
 
   return (
-    <section className="operator-panel">
-      <div className="operator-panel-heading">
-        <div>
-          <h2>{t("operatorHome.continuePanelHeading")}</h2>
-          <p>{t("operatorHome.continuePanelDesc")}</p>
-        </div>
-      </div>
-
+    <OperatorHomePanel title={t("operatorHome.continuePanelHeading")} description={t("operatorHome.continuePanelDesc")}>
       {items.length === 0 ? (
-        <div className="operator-empty-state">
-          <h3>{t("common.noActiveContext")}</h3>
-          <p>{t("operatorHome.noActiveContextBody")}</p>
+        <div className="operator-home-empty">
+          <strong>{t("common.noActiveContext")}</strong>
+          <span>{t("operatorHome.noActiveContextBody")}</span>
         </div>
       ) : (
-        <div className="operator-action-list">
+        <ul className="operator-home-continue">
           {items.map((item) => (
-            <a className="operator-action-row compact" href={item.href} key={item.key}>
-              <span className="operator-action-count">{t("common.go")}</span>
-              <span>
+            <li className="operator-home-row operator-home-continue__item" key={item.key}>
+              <OperatorHomeChip label={t("common.go")} tone={item.tone} />
+              <div className="operator-home-row__body">
                 <strong>{item.title}</strong>
-                <small>{item.description}</small>
-              </span>
-              <StatusBadge label={t("common.continue")} tone={item.tone} />
-            </a>
+                <span title={item.description}>{item.description}</span>
+              </div>
+              <OperatorHomeOpenLink href={item.href} label={t("common.continue")} />
+            </li>
           ))}
-        </div>
+        </ul>
       )}
-    </section>
+    </OperatorHomePanel>
   );
 }

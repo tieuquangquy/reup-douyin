@@ -114,9 +114,10 @@ class OcrPipelineService:
             )
         video_path = self._absolute_path_for_asset(source_asset)
 
-        self._clear_previous_ocr_rows(source_video.id)
-        # Keep prior CLEANED_VIDEO current until a new cleaned plate is written.
-        self._mark_previous_ocr_assets_non_current(source_video.id, include_cleaned=False)
+        # Do NOT clear OCR rows / mark events stale here — a mid-pipeline failure
+        # (e.g. Windows asyncio EINVAL after a long Cloud Run batch) would leave
+        # the video with zero detections. Clear only after E2E succeeds, right
+        # before writing the new plate.
 
         if request.clean_hardsub:
             return self._run_media_e2e_pipeline(
@@ -222,6 +223,12 @@ class OcrPipelineService:
                 warnings.append("no_hardsub_detected")
 
             _progress("persist_detections", 90)
+            # Replace prior OCR plate only after a successful Phase 1–4 run.
+            self._clear_previous_ocr_rows(source_video.id)
+            self._mark_previous_ocr_assets_non_current(
+                source_video.id,
+                include_cleaned=False,
+            )
             detection_count = self._persist_detections(
                 source_video,
                 frame_results,
@@ -399,6 +406,11 @@ class OcrPipelineService:
                 warnings.extend(str(item) for item in provider_warnings if item)
 
             _progress("persist_detections", 90)
+            self._clear_previous_ocr_rows(source_video.id)
+            self._mark_previous_ocr_assets_non_current(
+                source_video.id,
+                include_cleaned=False,
+            )
             detection_count = self._persist_detections(
                 source_video,
                 frame_results,

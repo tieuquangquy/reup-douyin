@@ -58,7 +58,7 @@ gcloud run deploy paddle-ocr-api \
   --cpu 4 \
   --concurrency 2 \
   --min-instances 0 \
-  --max-instances 3 \
+  --max-instances 5 \
   --allow-unauthenticated \
   --port 8080 \
   --timeout 300
@@ -77,7 +77,7 @@ gcloud run deploy paddle-ocr-api \
   --cpu 4 \
   --concurrency 2 \
   --min-instances 1 \
-  --max-instances 3 \
+  --max-instances 5 \
   --allow-unauthenticated \
   --port 8080 \
   --timeout 300
@@ -91,15 +91,17 @@ Hết session → redeploy với `--min-instances 0` để tiết kiệm idle.
 |------|---------|
 | `--region asia-southeast1` | Singapore — gần VN hơn `us-central1` (RTT thấp hơn; chất lượng OCR không đổi) |
 | `--source .` | Cloud Build build image từ Dockerfile thư mục hiện tại |
-| `--memory 8Gi` | 8GB RAM — PaddleOCR + JPEG ≤1280px dense UI; tránh OOM khi batch |
+| `--memory 8Gi` | **Bắt buộc ≥8Gi** — PaddleOCR vượt ~4.2Gi → OOM/503 nếu chỉ 4Gi |
 | `--cpu 4` | 4 vCPU — đủ cho 1–2 predict nặng/instance |
-| `--concurrency 2` | Tối đa **2 request đồng thời / instance** (Paddle CPU-bound; mặc định Cloud Run ~80 sẽ xếp hàng → timeout client) |
+| `--concurrency 2` | Tối đa **2 request đồng thời / instance** (Paddle CPU-bound) |
 | `--min-instances 0` | Scale to Zero — tiết kiệm idle; cold start lần đầu chậm |
-| `--min-instances 1` | **Batch session:** giữ instance ấm — tránh ~30–90s cold/retry giữa các video |
-| `--max-instances 3` | Trần scale-out (chi phí Phase 1) |
+| `--min-instances 1` | **Batch session:** giữ instance ấm |
+| `--max-instances 5` | Trần scale-out trong quota ~20 vCPU + ~40Gi (5×4CPU/8Gi) |
 | `--allow-unauthenticated` | Public URL, không cần identity token |
 | `--port 8080` | Khớp `EXPOSE` / `CMD` trong Dockerfile |
 | `--timeout 300` | Request timeout 300s — cold start + download model + OCR |
+
+**Quota note:** Muốn `max-instances 10` với **8Gi** phải xin tăng `MemAllocPerProjectRegion` (+ CPU). Đừng hạ memory xuống 4Gi chỉ để tăng max — sẽ OOM.
 
 Sau khi deploy xong, CLI in ra URL dạng:
 
@@ -137,14 +139,15 @@ OCR_ENDPOINT_URL=https://YOUR_SERVICE_URL/predict
 Client Phase 2 (tối ưu hiện tại):
 
 - Full-frame OCR + preprocess local: max edge **1280px**, JPEG **q80** (BytesIO)
-- `asyncio.Semaphore(3)` hardcap — khớp `--concurrency 2` + scale-out nhẹ
-- `ClientTimeout(total=120)` + tenacity retry (timeout / 502 / 503 / 504)
+- `asyncio.Semaphore` default **8** (`OCR_ASYNC_CONCURRENCY`) — khớp scale-out `max-instances 5` × `--concurrency 2`
+- `ClientTimeout(total=300)` + tenacity retry (timeout / 502 / 503 / 504)
 - Optional: `OCR_PREPROCESS_MAX_EDGE=720` (nhanh hơn) hoặc `960` (nhẹ hơn mặc định)
+- Optional: `OCR_ASYNC_CONCURRENCY=2` để hạ song song (tiết kiệm / debug)
 
 ## Ghi chú chi phí / throughput batch
 
 - Cold start lần đầu sau idle có thể chậm (download/load model).
 - **Idle / tiết kiệm:** `--min-instances 0` + client retry.
-- **Analyze OCR hàng loạt:** `python deploy/hf-paddle-ocr/auto_deploy.py --warm` (`--min-instances 1`, memory **8Gi**). Hết session: deploy lại không `--warm`.
-- Đừng tăng Cloud Run concurrency cao; tăng `max-instances` nếu cần throughput (và chấp nhận $$).
+- **Analyze OCR hàng loạt:** `python deploy/hf-paddle-ocr/auto_deploy.py --warm` (`--min-instances 1`, **8Gi / 4 CPU / max 5**). Hết session: deploy lại không `--warm`.
+- Đừng hạ memory xuống 4Gi để tăng `max-instances` — PaddleOCR OOM → `OCR HTTP 503`. Muốn 10×8Gi: xin tăng quota region trước.
 - Phase sau (ngoài scope): GPU Cloud Run, LaMa inpaint, hoặc queue job (HTTP dài → async).

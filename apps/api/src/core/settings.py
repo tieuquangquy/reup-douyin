@@ -100,7 +100,7 @@ class Settings(BaseSettings):
     # Bounded parallelism for BUILD_TRANSLATION_DRAFT (one LLM call per beat).
     # Lower if Gemini returns 429; raise carefully (5–8) for faster drafts.
     audio_translation_max_concurrency: int = 4
-    # TTS: workspace Ops TTS AI overrides when enabled; else these env defaults.
+    # TTS: workspace Ops active profile is authority for Generate TTS; these are env fallbacks.
     # Providers: auto | edge | vieneu | google | azure | elevenlabs | openai |
     # openai_compatible | http_custom | cli | placeholder
     audio_tts_provider: str = "auto"

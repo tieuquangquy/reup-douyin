@@ -1,0 +1,104 @@
+/**
+ * Ops Health page — soft KPI cards + dense sheet panels (Health-scoped).
+ */
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const testDir = dirname(fileURLToPath(import.meta.url));
+const webSrc = resolve(testDir, "..");
+
+const page = readFileSync(resolve(webSrc, "components/ops-console/OpsHealthPage.tsx"), "utf8");
+const css = readFileSync(resolve(webSrc, "app/globals.css"), "utf8");
+const en = readFileSync(resolve(webSrc, "lib/i18n/en.json"), "utf8");
+const vi = readFileSync(resolve(webSrc, "lib/i18n/vi.json"), "utf8");
+
+assert.match(page, /ops-health-page is-dense|ops-health-page/, "Health page must use scoped ops-health-page shell");
+assert.match(page, /ops-health-kpis/, "Health page must render soft KPI band");
+assert.match(page, /ops-health-card/, "Health page must use scoped health KPI cards");
+assert.match(page, /ops-health-card__badge/, "KPI cards must use soft status badges");
+assert.match(page, /ops-health-panels is-dense/, "Health panels must use dense two-column layout");
+assert.match(page, /ops-health-panel__head/, "Panels must expose a spaced heading region");
+assert.match(page, /ops-health-statstrip|ops-health-stat/, "Queue metrics must render as compact stat strip");
+assert.match(page, /ops-health-chips|ops-health-chip/, "Pipeline outputs must render status chips");
+assert.match(page, /render_counts_by_status/, "Pipeline chips must read render_counts_by_status");
+assert.match(page, /publish_draft_counts_by_status/, "Pipeline chips must read publish_draft_counts_by_status");
+assert.match(page, /opsHealth\.badgeHealthy|badgeHealthy/, "Health badges must use i18n labels");
+assert.match(page, /generated_at/, "Health page must surface metrics freshness");
+assert.match(page, /ops-health-freshness|opsHealth\.metricsGenerated/, "Health page must render metrics generated timestamp");
+assert.match(page, /common_failure_categories/, "Health page must surface common failure categories");
+assert.match(page, /ops-health-failures|opsHealth\.commonFailures/, "Health page must render failure categories");
+assert.match(page, /douyin_fetch_health/, "Health page must surface Douyin fetch health");
+assert.match(page, /ops-health-fetch|opsHealth\.fetchHealth/, "Health page must render fetch health");
+assert.match(page, /open_risk_counts_by_severity/, "Health page must surface risk severity breakdown");
+assert.match(page, /ops-health-risk|opsHealth\.riskBySeverity/, "Health page must render risk severity");
+assert.match(page, /average_processing_seconds_per_source_video|job_failure_rate_percent_by_type/, "Health page must surface processing or failure-rate signal");
+assert.match(page, /opsHealth\.workload|opsHealth\.signals/, "Dense layout must merge into workload/signals panels");
+assert.doesNotMatch(page, /opsHealth\.failureRates(?!Short)/, "Dense layout must fold failure rates into signals (no standalone panel)");
+assert.doesNotMatch(page, /health-overview-grid/, "Health page must leave shared health-overview-grid");
+assert.doesNotMatch(page, /<OpsMetricCard/, "Health page must not use shared OpsMetricCard");
+assert.doesNotMatch(page, /<OpsPanel/, "Health page must not use shared OpsPanel");
+assert.match(page, /fetchOperationalMetrics/, "Health page must keep metrics authority");
+assert.match(page, /fetchPublishHealthDashboard/, "Health page must keep publish health authority");
+assert.match(page, /by_day|publishHealth\.by_day/, "Health page must chart publish by_day authority");
+assert.match(page, /ops-health-week|ops-health-daybar/, "Health page must render publish week bar chart");
+assert.match(page, /ops-health-meters|ops-health-meter/, "Health page must render proportion meters");
+assert.match(page, /ops-health-queue-mix|queue_backlog/, "Health page must visualize queue mix from backlog");
+assert.match(page, /success_rate_percent|opsHealth\.publishSuccessRate/, "Health page must surface publish overview success rate");
+assert.match(page, /overview\.|publishHealth\.overview/, "Health page must read publishHealth.overview");
+assert.match(page, /href=.*\/ops\/risk|\/ops\/risk/, "Health page must deep-link to risk");
+assert.match(page, /href=.*\/ops\/jobs|\/ops\/jobs\?status=/, "Health page must deep-link to jobs with status");
+assert.match(page, /\/ops\/publish-health/, "Health page must deep-link to publish health");
+assert.match(page, /ops-health-actions|opsHealth\.openJobs|opsHealth\.openRisk/, "Health page must render triage action links");
+assert.match(page, /asset_reuse_by_type/, "Health page must surface asset reuse rows");
+assert.match(page, /ops-health-assets|current_count|historical_count/, "Health page must render asset reuse detail");
+assert.match(page, /by_account/, "Health page must surface fetch health by_account");
+assert.match(page, /ops-health-accounts|opsHealth\.fetchByAccount/, "Health page must render top fetch accounts");
+assert.match(page, /job_counts_by_type_status/, "Health page must surface job type/status matrix");
+assert.match(page, /ops-health-matrix|opsHealth\.jobMatrix/, "Health page must render job counts matrix");
+
+assert.match(css, /\.ops-health-page/, "CSS must define Health page shell");
+assert.match(css, /\.ops-health-page\.is-dense|\.ops-health-panels\.is-dense/, "CSS must define dense Health layout");
+assert.match(css, /\.ops-health-kpis/, "CSS must define Health KPI grid");
+assert.match(css, /\.ops-health-card__badge/, "CSS must define soft Health badges");
+assert.match(css, /\.ops-health-chip/, "CSS must define pipeline status chips");
+assert.match(css, /\.ops-health-freshness/, "CSS must define metrics freshness strip");
+assert.match(css, /\.ops-health-statstrip|\.ops-health-stat\b/, "CSS must define compact stat strip");
+assert.match(css, /\.ops-health-failures/, "CSS must define failure categories list");
+assert.match(css, /\.ops-health-fetch/, "CSS must define fetch health layout");
+assert.match(css, /\.ops-health-week|\.ops-health-daybar/, "CSS must define publish week chart");
+assert.match(css, /\.ops-health-meter/, "CSS must define proportion meters");
+assert.match(css, /\.ops-health-queue-mix/, "CSS must define queue mix bar");
+assert.match(css, /\.ops-health-actions/, "CSS must define triage action links");
+assert.match(css, /\.ops-health-assets|\.ops-health-asset/, "CSS must define asset reuse list");
+assert.match(css, /\.ops-health-accounts|\.ops-health-account/, "CSS must define fetch-by-account list");
+assert.match(css, /\.ops-health-matrix/, "CSS must define job matrix table");
+
+assert.match(en, /"badgeHealthy"/, "en.json must define badgeHealthy");
+assert.match(en, /"metricsGenerated"/, "en.json must define metricsGenerated");
+assert.match(en, /"commonFailures"/, "en.json must define commonFailures");
+assert.match(en, /"fetchHealth"/, "en.json must define fetchHealth");
+assert.match(en, /"riskBySeverity"/, "en.json must define riskBySeverity");
+assert.match(en, /"workload"/, "en.json must define workload");
+assert.match(en, /"signals"/, "en.json must define signals");
+assert.match(en, /"publishWeek"|"publishTrend"/, "en.json must define publish week chart label");
+assert.match(en, /"publishSuccessRate"/, "en.json must define publishSuccessRate");
+assert.match(en, /"queueMix"/, "en.json must define queueMix");
+assert.match(en, /"openRisk"|"openJobs"/, "en.json must define triage link labels");
+assert.match(en, /"assetReuse"|"assetsShort"/, "en.json must define asset reuse label");
+assert.match(en, /"fetchByAccount"/, "en.json must define fetchByAccount");
+assert.match(en, /"jobMatrix"/, "en.json must define jobMatrix");
+assert.match(vi, /"badgeHealthy"/, "vi.json must define badgeHealthy");
+assert.match(vi, /"metricsGenerated"/, "vi.json must define metricsGenerated");
+assert.match(vi, /"workload"/, "vi.json must define workload");
+assert.match(vi, /"signals"/, "vi.json must define signals");
+assert.match(vi, /"publishWeek"|"publishTrend"/, "vi.json must define publish week chart label");
+assert.match(vi, /"publishSuccessRate"/, "vi.json must define publishSuccessRate");
+assert.match(vi, /"queueMix"/, "vi.json must define queueMix");
+assert.match(vi, /"openRisk"|"openJobs"/, "vi.json must define triage link labels");
+assert.match(vi, /"assetReuse"|"assetsShort"/, "vi.json must define asset reuse label");
+assert.match(vi, /"fetchByAccount"/, "vi.json must define fetchByAccount");
+assert.match(vi, /"jobMatrix"/, "vi.json must define jobMatrix");
+
+console.log("ops-health-ui tests passed");

@@ -1,12 +1,14 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useT } from "../../lib/i18n";
 import {
   createAudioAnalysis,
   createTtsJob,
+  cancelJob,
   fetchAudioAnalysisSummary,
   fetchJob,
+  fetchJobs,
   fetchTranscript,
   fetchTranslationDraft,
   fetchTtsSummary,
@@ -26,12 +28,22 @@ import {
   updateSegment,
   validateTranscriptSegments
 } from "../../lib/transcriptEditorState";
-import { pollAnalyzeJobUntilSettled } from "../../lib/transcriptEditorReanalyze";
+import {
+  pickActiveTranscriptJob,
+  transcriptJobKindFromType,
+  type TranscriptActiveJobKind
+} from "../../lib/transcriptEditorJobReattach";
+import {
+  pollAnalyzeJobUntilSettled,
+  type AnalyzeJobPollResult
+} from "../../lib/transcriptEditorReanalyze";
 import type { AudioAnalysisSummaryResponse, EditableSegment, TranscriptEditorState, TranslationPreset } from "../../types/transcript-editor";
 import { TranscriptActionBar } from "./TranscriptActionBar";
 import { TranscriptBeatRail } from "./TranscriptBeatRail";
 import { TranscriptEditorHeader } from "./TranscriptEditorHeader";
 import { TranscriptFocusEditor } from "./TranscriptFocusEditor";
+import { TranscriptJobBusyBanner } from "./TranscriptJobBusyBanner";
+import { TranscriptInlineNotice, TRANSCRIPT_CANCELLED_NOTICE_AUTO_DISMISS_MS, TRANSCRIPT_SUCCESS_NOTICE_AUTO_DISMISS_MS } from "./TranscriptInlineNotice";
 import { TranscriptMediaPreview } from "./TranscriptMediaPreview";
 import {
   isNoDialogueAnalysisSummary,
@@ -55,7 +67,14 @@ export function TranscriptEditorPage({ sourceVideoId }: { sourceVideoId: string 
   const [joinedTtsAssetId, setJoinedTtsAssetId] = useState<string | null>(null);
   const [ttsSummary, setTtsSummary] = useState<TtsSummaryResponse | null>(null);
   const [analyzeJobId, setAnalyzeJobId] = useState<string | null>(null);
+  const [jobProgressPercent, setJobProgressPercent] = useState<number | null>(null);
+  const [cancellingJob, setCancellingJob] = useState(false);
+  const cancelRequestedRef = useRef(false);
+  const resumeAttemptedRef = useRef(false);
+  const jobBusyRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [cancelledMessage, setCancelledMessage] = useState<string | null>(null);
   const [playRequestId, setPlayRequestId] = useState(0);
 
   const loadData = useCallback(async () => {
@@ -90,6 +109,10 @@ export function TranscriptEditorPage({ sourceVideoId }: { sourceVideoId: string 
     void loadData();
   }, [loadData]);
 
+  useEffect(() => {
+    resumeAttemptedRef.current = false;
+  }, [sourceVideoId]);
+
   const warnings = useMemo(() => validateTranscriptSegments(state?.segments ?? []), [state]);
   const clipFitsByTranslationId = useMemo(
     () => indexTtsClipFitsByTranslationId(ttsSummary),
@@ -106,6 +129,15 @@ export function TranscriptEditorPage({ sourceVideoId }: { sourceVideoId: string 
   const blockingWarnings = warnings.filter((warning) =>
     ["negative_timing", "invalid_timing", "overlapping_timing"].includes(warning.code)
   );
+  const jobBusyKind = synthesizingTts
+    ? ("tts" as const)
+    : translating
+      ? ("translate" as const)
+      : reanalyzing
+        ? ("reanalyze" as const)
+        : null;
+  const jobBusy = jobBusyKind !== null;
+  jobBusyRef.current = jobBusy;
 
   async function saveDraft() {
     if (!state) return;
@@ -180,25 +212,55 @@ export function TranscriptEditorPage({ sourceVideoId }: { sourceVideoId: string 
         const job = await fetchJob(jobId);
         return {
           status: job.status,
+          progress_percent: job.progress_percent,
           error_message: job.error_message,
           error_code: job.error_code
         };
-      }
+      },
+      onSnapshot: (snapshot) => {
+        if (typeof snapshot.progress_percent === "number") {
+          setJobProgressPercent(Math.max(0, Math.min(100, Math.round(snapshot.progress_percent))));
+        }
+      },
+      shouldStop: () => cancelRequestedRef.current
     });
   }
 
-  async function translateLiteral(preset: TranslationPreset) {
-    if (state && hasUnsavedChanges(state) && !window.confirm(t("transcriptEditorPage.translateUnsavedConfirm"))) {
-      return;
-    }
-    setTranslating(true);
+  function beginJobRun(existingJobId?: string | null, existingProgress?: number | null) {
     setError(null);
+    setSuccessMessage(null);
+    setCancelledMessage(null);
+    setAnalyzeJobId(existingJobId ?? null);
+    setJobProgressPercent(
+      typeof existingProgress === "number" ? Math.max(0, Math.min(100, Math.round(existingProgress))) : 0
+    );
+    setCancellingJob(false);
+    cancelRequestedRef.current = false;
+  }
+
+  function endJobRun() {
     setAnalyzeJobId(null);
-    try {
-      const created = await rerunTranslationDraft(sourceVideoId, preset);
-      setAnalyzeJobId(created.job_id);
-      const settled = await pollJob(created.job_id);
-      if (settled.outcome === "success") {
+    setJobProgressPercent(null);
+    setCancellingJob(false);
+    cancelRequestedRef.current = false;
+  }
+
+  function setBusyForKind(kind: TranscriptActiveJobKind, busy: boolean) {
+    if (kind === "tts") setSynthesizingTts(busy);
+    else if (kind === "translate") setTranslating(busy);
+    else setReanalyzing(busy);
+  }
+
+  async function applySettledJob(kind: TranscriptActiveJobKind, settled: AnalyzeJobPollResult) {
+    if (settled.outcome === "success") {
+      if (kind === "tts") {
+        const nextTtsSummary = await fetchTtsSummary(sourceVideoId);
+        setTtsSummary(nextTtsSummary);
+        setJoinedTtsAssetId(findJoinedTtsAssetId(nextTtsSummary));
+        setSuccessMessage(t("transcriptEditorPage.ttsSuccess"));
+        return;
+      }
+      if (kind === "translate") {
         const [transcript, translation, nextSummary] = await Promise.all([
           fetchTranscript(sourceVideoId),
           fetchTranslationDraft(sourceVideoId),
@@ -215,18 +277,94 @@ export function TranscriptEditorPage({ sourceVideoId }: { sourceVideoId: string 
           setError(
             `${t("transcriptEditorPage.translatePartialAfterJob")} (${filled}/${nextState.segments.length})`
           );
+        } else {
+          setSuccessMessage(t("transcriptEditorPage.translateSuccess"));
         }
         return;
       }
-      if (settled.outcome === "failed") {
-        setError(`${t("transcriptEditorPage.translateFailed")}: ${settled.errorMessage ?? settled.status}`);
-        return;
-      }
-      setError(t("transcriptEditorPage.translateTimeout"));
+      await loadData();
+      setSuccessMessage(t("transcriptEditorPage.reanalyzeSuccess"));
+      return;
+    }
+    if (settled.outcome === "cancelled") {
+      setCancelledMessage(t("transcriptEditorPage.jobCancelled"));
+      return;
+    }
+    if (settled.outcome === "failed") {
+      const prefix =
+        kind === "tts"
+          ? t("transcriptEditorPage.ttsFailed")
+          : kind === "translate"
+            ? t("transcriptEditorPage.translateFailed")
+            : t("transcriptEditorPage.reanalyzeFailed");
+      setError(`${prefix}: ${settled.errorMessage ?? settled.status}`);
+      return;
+    }
+    setError(
+      kind === "tts"
+        ? t("transcriptEditorPage.ttsTimeout")
+        : kind === "translate"
+          ? t("transcriptEditorPage.translateTimeout")
+          : t("transcriptEditorPage.reanalyzeTimeout")
+    );
+  }
+
+  async function trackJob(kind: TranscriptActiveJobKind, jobId: string, progressPercent?: number | null) {
+    setBusyForKind(kind, true);
+    beginJobRun(jobId, progressPercent);
+    try {
+      const settled = await pollJob(jobId);
+      await applySettledJob(kind, settled);
+    } catch (err) {
+      const fallback =
+        kind === "tts"
+          ? t("transcriptEditorPage.ttsError")
+          : kind === "translate"
+            ? t("transcriptEditorPage.translateError")
+            : t("transcriptEditorPage.reanalyzeError");
+      setError(err instanceof Error ? err.message : fallback);
+    } finally {
+      setBusyForKind(kind, false);
+      endJobRun();
+    }
+  }
+
+  async function resumeActiveTranscriptJob() {
+    if (jobBusyRef.current) return;
+    try {
+      const listed = await fetchJobs(undefined, { sourceVideoId, limit: 30 });
+      const active = pickActiveTranscriptJob(listed.jobs);
+      if (!active) return;
+      const kind = transcriptJobKindFromType(active.job_type);
+      if (!kind || jobBusyRef.current) return;
+      await trackJob(kind, active.id, active.progress_percent);
+    } catch {
+      // Re-attach is best-effort; page remains usable without the banner.
+    }
+  }
+
+  async function cancelRunningJob() {
+    if (!analyzeJobId || cancellingJob) return;
+    setCancellingJob(true);
+    cancelRequestedRef.current = true;
+    try {
+      await cancelJob(analyzeJobId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t("transcriptEditorPage.jobCancelError"));
+      setCancellingJob(false);
+      cancelRequestedRef.current = false;
+    }
+  }
+
+  async function translateLiteral(preset: TranslationPreset) {
+    if (state && hasUnsavedChanges(state) && !window.confirm(t("transcriptEditorPage.translateUnsavedConfirm"))) {
+      return;
+    }
+    try {
+      const created = await rerunTranslationDraft(sourceVideoId, preset);
+      await trackJob("translate", created.job_id);
     } catch (err) {
       setError(err instanceof Error ? err.message : t("transcriptEditorPage.translateError"));
-    } finally {
-      setTranslating(false);
     }
   }
 
@@ -234,26 +372,11 @@ export function TranscriptEditorPage({ sourceVideoId }: { sourceVideoId: string 
     if (state && hasUnsavedChanges(state) && !window.confirm(t("transcriptEditorPage.reanalyzeUnsavedConfirm"))) {
       return;
     }
-    setReanalyzing(true);
-    setError(null);
-    setAnalyzeJobId(null);
     try {
       const created = await createAudioAnalysis(sourceVideoId, preset, true, true);
-      setAnalyzeJobId(created.job_id);
-      const settled = await pollJob(created.job_id);
-      if (settled.outcome === "success") {
-        await loadData();
-        return;
-      }
-      if (settled.outcome === "failed") {
-        setError(`${t("transcriptEditorPage.reanalyzeFailed")}: ${settled.errorMessage ?? settled.status}`);
-        return;
-      }
-      setError(t("transcriptEditorPage.reanalyzeTimeout"));
+      await trackJob("reanalyze", created.job_id);
     } catch (err) {
       setError(err instanceof Error ? err.message : t("transcriptEditorPage.reanalyzeError"));
-    } finally {
-      setReanalyzing(false);
     }
   }
 
@@ -267,30 +390,19 @@ export function TranscriptEditorPage({ sourceVideoId }: { sourceVideoId: string 
     if (hasUnsavedChanges(state) && !window.confirm(t("transcriptEditorPage.ttsUnsavedConfirm"))) {
       return;
     }
-    setSynthesizingTts(true);
-    setError(null);
-    setAnalyzeJobId(null);
     try {
       const created = await createTtsJob(sourceVideoId);
-      setAnalyzeJobId(created.job_id);
-      const settled = await pollJob(created.job_id);
-      if (settled.outcome === "success") {
-        const nextTtsSummary = await fetchTtsSummary(sourceVideoId);
-        setTtsSummary(nextTtsSummary);
-        setJoinedTtsAssetId(findJoinedTtsAssetId(nextTtsSummary));
-        return;
-      }
-      if (settled.outcome === "failed") {
-        setError(`${t("transcriptEditorPage.ttsFailed")}: ${settled.errorMessage ?? settled.status}`);
-        return;
-      }
-      setError(t("transcriptEditorPage.ttsTimeout"));
+      await trackJob("tts", created.job_id);
     } catch (err) {
       setError(err instanceof Error ? err.message : t("transcriptEditorPage.ttsError"));
-    } finally {
-      setSynthesizingTts(false);
     }
   }
+
+  useEffect(() => {
+    if (loading || !state || state.segments.length === 0 || resumeAttemptedRef.current) return;
+    resumeAttemptedRef.current = true;
+    void resumeActiveTranscriptJob();
+  }, [loading, state, sourceVideoId]);
 
   if (loading) return <TranscriptLoadingState />;
   if (error && !state) return <TranscriptErrorState message={error} onRetry={loadData} />;
@@ -303,7 +415,7 @@ export function TranscriptEditorPage({ sourceVideoId }: { sourceVideoId: string 
 
   return (
     <main className="transcript-editor">
-      <UnsavedChangesGuard enabled={dirtyCount > 0 && !reanalyzing && !translating && !synthesizingTts} />
+      <UnsavedChangesGuard enabled={dirtyCount > 0 || jobBusy} />
       <TranscriptEditorHeader
         state={state}
         summary={summary}
@@ -313,15 +425,46 @@ export function TranscriptEditorPage({ sourceVideoId }: { sourceVideoId: string 
         reanalyzing={reanalyzing}
         translating={translating}
         synthesizingTts={synthesizingTts}
-        analyzeJobId={analyzeJobId}
         onSave={() => void saveDraft()}
         onDiscard={discardChanges}
         onTranslateLiteral={(preset) => void translateLiteral(preset)}
         onReanalyze={(preset) => void reanalyzeAudio(preset)}
         onGenerateTts={() => void generateTts()}
       />
-      {error ? <div className="inline-error">{error}</div> : null}
-      <section className="transcript-bench">
+      {jobBusyKind ? (
+        <div className="transcript-job-strip">
+          <TranscriptJobBusyBanner
+            kind={jobBusyKind}
+            jobId={analyzeJobId}
+            progressPercent={jobProgressPercent}
+            cancelling={cancellingJob}
+            onCancel={() => void cancelRunningJob()}
+          />
+        </div>
+      ) : null}
+      {successMessage ? (
+        <TranscriptInlineNotice
+          tone="success"
+          onDismiss={() => setSuccessMessage(null)}
+          autoDismissMs={TRANSCRIPT_SUCCESS_NOTICE_AUTO_DISMISS_MS}
+        >
+          {successMessage}
+        </TranscriptInlineNotice>
+      ) : null}
+      {cancelledMessage ? (
+        <TranscriptInlineNotice
+          tone="cancelled"
+          onDismiss={() => setCancelledMessage(null)}
+          autoDismissMs={TRANSCRIPT_CANCELLED_NOTICE_AUTO_DISMISS_MS}
+        >
+          {cancelledMessage}
+        </TranscriptInlineNotice>
+      ) : null}
+      {error ? <TranscriptInlineNotice tone="error">{error}</TranscriptInlineNotice> : null}
+      <section
+        className={`transcript-bench${jobBusy ? " is-job-busy" : ""}`}
+        aria-busy={jobBusy}
+      >
         <aside className="transcript-bench__side">
           <TranscriptMediaPreview
             summary={summary}
@@ -378,6 +521,7 @@ export function TranscriptEditorPage({ sourceVideoId }: { sourceVideoId: string 
         warningCount={warnings.length}
         blockingCount={blockingWarnings.length}
         saving={saving}
+        jobBusy={jobBusy}
         onSave={() => void saveDraft()}
         onDiscard={discardChanges}
       />
