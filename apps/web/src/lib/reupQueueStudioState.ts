@@ -4,20 +4,35 @@ import { formatExactEngagementMetric } from "./captureInboxCanonical";
 import { buildCapturedItemFromReupQueueItem } from "./operatorReupScore";
 import { getOperatorTileScoreBadge, type OperatorTileScoreBadge } from "./operatorTileScore";
 
-export type ReupQueueOperatorFilter = "all" | "needs_start" | "in_production" | "export" | "handoff" | "attention" | "done";
+export type ReupQueueOperatorFilter =
+  | "all"
+  | "download"
+  | "transcript"
+  | "render"
+  | "export"
+  | "handoff"
+  | "attention"
+  | "done";
 export type ReupQueueSortMode = "active-first" | "newest" | "ready-first" | "needs-attention-first" | "export-ready-first";
 
-export type ReupQueueStudioSummary = Record<ReupQueueOperatorFilter, number>;
+export type ReupQueueStudioSummary = Record<ReupQueueOperatorFilter, number> & {
+  /** Count for Start-all-ready CTA — not a pipeline chip. */
+  needs_start: number;
+};
 
 export const REUP_QUEUE_STATUS_FILTERS: Array<{ key: ReupQueueOperatorFilter; label: string }> = [
   { key: "all", label: "All" },
-  { key: "needs_start", label: "Needs start" },
-  { key: "in_production", label: "In production" },
+  { key: "download", label: "Download" },
+  { key: "transcript", label: "Transcript" },
+  { key: "render", label: "Render" },
   { key: "export", label: "Export" },
   { key: "handoff", label: "Handoff" },
   { key: "attention", label: "Attention" },
   { key: "done", label: "Done" }
 ];
+
+export const REUP_QUEUE_PIPELINE_FILTERS: ReupQueueOperatorFilter[] = ["all", "download", "transcript", "render", "export"];
+export const REUP_QUEUE_ATTENTION_FILTERS: ReupQueueOperatorFilter[] = ["handoff", "attention", "done"];
 
 export const REUP_QUEUE_SORT_LABELS: Record<ReupQueueSortMode, string> = {
   "active-first": "Active first",
@@ -30,22 +45,23 @@ export const REUP_QUEUE_SORT_LABELS: Record<ReupQueueSortMode, string> = {
 export function buildReupQueueSummary(items: ReupQueueItem[]): ReupQueueStudioSummary {
   return {
     all: items.length,
-    needs_start: items.filter((item) => item.status === "READY_FOR_PROCESSING").length,
-    in_production: items.filter((item) =>
-      item.status === "WAITING_FOR_MEDIA" || item.status === "WAITING_FOR_METADATA" || item.status === "PROCESSING"
-    ).length,
-    export: items.filter((item) => item.status === "READY_TO_EXPORT" || item.status === "EXPORT_PACKAGE_CREATED").length,
-    handoff: items.filter((item) => item.status === "READY_TO_PUBLISH" || item.status === "PUBLISH_HANDOFF_CREATED").length,
-    attention: items.filter((item) => item.status === "FAILED_NEEDS_ATTENTION" || Boolean(item.blocked_reason)).length,
-    done: items.filter((item) => item.status === "COMPLETED" || item.status === "CANCELLED").length
+    download: items.filter((item) => matchesReupQueueFilter(item, "download")).length,
+    transcript: items.filter((item) => matchesReupQueueFilter(item, "transcript")).length,
+    render: items.filter((item) => matchesReupQueueFilter(item, "render")).length,
+    export: items.filter((item) => matchesReupQueueFilter(item, "export")).length,
+    handoff: items.filter((item) => matchesReupQueueFilter(item, "handoff")).length,
+    attention: items.filter((item) => matchesReupQueueFilter(item, "attention")).length,
+    done: items.filter((item) => matchesReupQueueFilter(item, "done")).length,
+    needs_start: items.filter((item) => item.status === "READY_FOR_PROCESSING").length
   };
 }
 
 export function statusesForReupQueueFilter(filter: ReupQueueOperatorFilter): ReupQueueStatus[] | undefined {
   if (filter === "all") return undefined;
-  if (filter === "needs_start") return ["READY_FOR_PROCESSING"];
-  if (filter === "in_production") return ["WAITING_FOR_MEDIA", "WAITING_FOR_METADATA", "PROCESSING"];
-  if (filter === "export") return ["READY_TO_EXPORT", "EXPORT_PACKAGE_CREATED"];
+  if (filter === "download") return ["READY_FOR_PROCESSING", "WAITING_FOR_MEDIA"];
+  if (filter === "transcript") return ["WAITING_FOR_METADATA"];
+  if (filter === "render") return ["PROCESSING"];
+  if (filter === "export") return ["READY_TO_EXPORT"];
   if (filter === "handoff") return ["READY_TO_PUBLISH", "PUBLISH_HANDOFF_CREATED"];
   if (filter === "attention") return ["FAILED_NEEDS_ATTENTION"];
   if (filter === "done") return ["COMPLETED", "CANCELLED"];
@@ -55,34 +71,46 @@ export function statusesForReupQueueFilter(filter: ReupQueueOperatorFilter): Reu
 export function buildReupQueueSummaryFromStatusCounts(statusCounts: Record<string, number> | null | undefined): ReupQueueStudioSummary {
   const count = (status: ReupQueueStatus) => Number(statusCounts?.[status] ?? 0);
   const needsStart = count("READY_FOR_PROCESSING");
-  const inProduction = count("WAITING_FOR_MEDIA") + count("WAITING_FOR_METADATA") + count("PROCESSING");
-  const exportReady = count("READY_TO_EXPORT") + count("EXPORT_PACKAGE_CREATED");
+  const download = needsStart + count("WAITING_FOR_MEDIA");
+  const transcript = count("WAITING_FOR_METADATA");
+  const render = count("PROCESSING");
+  const exportReady = count("READY_TO_EXPORT");
   const handoff = count("READY_TO_PUBLISH") + count("PUBLISH_HANDOFF_CREATED");
   const attention = count("FAILED_NEEDS_ATTENTION");
   const done = count("COMPLETED") + count("CANCELLED");
   const all = Object.values(statusCounts ?? {}).reduce((sum, value) => sum + Number(value || 0), 0);
   return {
     all,
-    needs_start: needsStart,
-    in_production: inProduction,
+    download,
+    transcript,
+    render,
     export: exportReady,
     handoff,
     attention,
-    done
+    done,
+    needs_start: needsStart
   };
 }
 
 export function matchesReupQueueFilter(item: ReupQueueItem, filter: ReupQueueOperatorFilter): boolean {
   if (filter === "all") return true;
-  if (filter === "needs_start") return item.status === "READY_FOR_PROCESSING";
-  if (filter === "in_production") {
-    return item.status === "WAITING_FOR_MEDIA" || item.status === "WAITING_FOR_METADATA" || item.status === "PROCESSING";
+  if (filter === "download" || filter === "transcript" || filter === "render" || filter === "export") {
+    return matchesPipelineStageFilter(item, filter);
   }
-  if (filter === "export") return item.status === "READY_TO_EXPORT" || item.status === "EXPORT_PACKAGE_CREATED";
   if (filter === "handoff") return item.status === "READY_TO_PUBLISH" || item.status === "PUBLISH_HANDOFF_CREATED";
   if (filter === "attention") return item.status === "FAILED_NEEDS_ATTENTION" || Boolean(item.blocked_reason);
   if (filter === "done") return item.status === "COMPLETED" || item.status === "CANCELLED";
   return true;
+}
+
+/** Items currently focused on a tile pipeline stage (active/failed), plus Needs-start under Download. */
+export function matchesPipelineStageFilter(
+  item: ReupQueueItem,
+  stageKey: "download" | "transcript" | "render" | "export"
+): boolean {
+  if (stageKey === "download" && item.status === "READY_FOR_PROCESSING") return true;
+  const stage = buildPipelineStages(item).find((entry) => entry.key === stageKey);
+  return stage?.state === "active" || stage?.state === "failed";
 }
 
 export function matchesReupQueueSearch(item: ReupQueueItem, query: string): boolean {
@@ -218,31 +246,15 @@ export function secondaryBulkEligibilityTotal(eligibility: ReupQueueSelectionEli
 export function formatQuickPathPipelineMeta(summary: ReupQueueStudioSummary, sortLabel: string, visibleCount: number): string {
   return [
     `${visibleCount} in view`,
-    `${summary.needs_start} needs start`,
-    `${summary.in_production} in production`,
+    `${summary.download} download`,
+    `${summary.transcript} transcript`,
+    `${summary.render} render`,
     `${summary.export} export`,
     `${summary.handoff} handoff`,
     `${summary.attention} attention`,
     `${summary.done} done`,
     `Sort: ${sortLabel}`
   ].join(" · ");
-}
-
-export function quickPathGuidanceTone(summary: ReupQueueStudioSummary): "danger" | "warn" | "success" | "info" {
-  if (summary.attention > 0) return "danger";
-  if (summary.needs_start > 0) return "success";
-  if (summary.in_production > 0) return "warn";
-  return "info";
-}
-
-export function quickPathSuggestedFilter(summary: ReupQueueStudioSummary, activeFilter: ReupQueueOperatorFilter): ReupQueueOperatorFilter | null {
-  if (summary.needs_start > 0 && activeFilter !== "needs_start") return "needs_start";
-  if (summary.attention > 0 && activeFilter !== "attention") return "attention";
-  if (summary.in_production > 0 && activeFilter !== "in_production") return "in_production";
-  if (summary.export > 0 && activeFilter !== "export") return "export";
-  if (summary.handoff > 0 && activeFilter !== "handoff") return "handoff";
-  if (summary.done > 0 && activeFilter !== "done" && summary.needs_start === 0 && summary.in_production === 0) return "done";
-  return null;
 }
 
 export type ReupQueueHeroStat = {
@@ -262,38 +274,14 @@ export function buildQuickPathHeroStats(summary: ReupQueueStudioSummary): ReupQu
 }
 
 function heroStatTone(key: ReupQueueOperatorFilter, summary: ReupQueueStudioSummary): ReupQueueHeroStat["tone"] {
-  if (key === "needs_start") return summary.needs_start > 0 ? "good" : "muted";
-  if (key === "in_production") return summary.in_production > 0 ? "warn" : "muted";
+  if (summary[key] === 0) return "muted";
+  if (key === "all" || key === "handoff") return "neutral";
+  if (key === "download") return summary.download > 0 ? "good" : "muted";
+  if (key === "transcript" || key === "render") return summary[key] > 0 ? "warn" : "muted";
   if (key === "export") return summary.export > 0 ? "good" : "muted";
   if (key === "attention") return summary.attention > 0 ? "danger" : "muted";
-  if (key === "handoff") return summary.handoff > 0 ? "neutral" : "muted";
+  if (key === "done") return "good";
   return "muted";
-}
-
-export function quickPathGuidance(summary: ReupQueueStudioSummary, activeFilter: ReupQueueOperatorFilter): string | null {
-  if (summary.all === 0) return null;
-  if (summary.needs_start > 0 && activeFilter !== "needs_start") {
-    return "Clips are ready to start — open Needs start or use Start all ready.";
-  }
-  if (summary.in_production > 0 && activeFilter !== "in_production") {
-    return "Clips are in production — open In production to track progress.";
-  }
-  if (summary.export > 0 && activeFilter !== "export") {
-    return "Clips are ready for export — open Export to package them.";
-  }
-  if (summary.attention > 0 && activeFilter !== "attention") {
-    return "Some clips need attention — open Attention to retry or cancel safely.";
-  }
-  if (summary.handoff > 0 && summary.needs_start === 0 && summary.in_production === 0 && activeFilter !== "handoff") {
-    return "Clips are in handoff — open Handoff to inspect payloads.";
-  }
-  if (summary.done === summary.all) {
-    return "All queue items are done or cancelled. Open Review Board to send new approved clips.";
-  }
-  if (summary.needs_start === 0 && activeFilter === "all") {
-    return "No clips are waiting to start — use the stage chips above to find handoff or completed work.";
-  }
-  return null;
 }
 
 export function bulkSelectionGuidance(selectedCount: number, eligibility: ReupQueueSelectionEligibility): string | null {
@@ -304,7 +292,7 @@ export function bulkSelectionGuidance(selectedCount: number, eligibility: ReupQu
   return "None of the selected clips match a bulk action in their current state. Clear selection, change the status filter, or open Details on one tile.";
 }
 
-export type InspectorLifecycleActionGroup = "primary" | "neutral" | "danger";
+export type InspectorLifecycleActionGroup = "primary" | "neutral" | "danger" | "quiet";
 
 const INSPECTOR_SPOTLIGHT_ACTIONS: ReupQueueAction[] = [
   "START_PROCESSING",
@@ -315,8 +303,22 @@ const INSPECTOR_SPOTLIGHT_ACTIONS: ReupQueueAction[] = [
   "MARK_COMPLETED"
 ];
 
+/** Recover/forward first, pause next, dismiss last within a group. */
+const INSPECTOR_LIFECYCLE_ACTION_ORDER: ReupQueueAction[] = [
+  "RESUME",
+  "START_PROCESSING",
+  "MARK_MEDIA_READY",
+  "RETRY",
+  "HOLD",
+  "MARK_COMPLETED",
+  "CANCEL",
+  "MARK_BLOCKED",
+  "DISMISS"
+];
+
 export function inspectorLifecycleActionGroup(action: ReupQueueAction): InspectorLifecycleActionGroup {
   if (action === "CANCEL" || action === "MARK_BLOCKED") return "danger";
+  if (action === "DISMISS") return "quiet";
   if (action === "HOLD") return "neutral";
   return "primary";
 }
@@ -329,21 +331,39 @@ export function pickInspectorSpotlightAction(actions: ReupQueueAvailableAction[]
   return null;
 }
 
+function sortInspectorLifecycleActions(actions: ReupQueueAvailableAction[]): ReupQueueAvailableAction[] {
+  return [...actions].sort((left, right) => {
+    const leftRank = INSPECTOR_LIFECYCLE_ACTION_ORDER.indexOf(left.action);
+    const rightRank = INSPECTOR_LIFECYCLE_ACTION_ORDER.indexOf(right.action);
+    const safeLeft = leftRank === -1 ? Number.MAX_SAFE_INTEGER : leftRank;
+    const safeRight = rightRank === -1 ? Number.MAX_SAFE_INTEGER : rightRank;
+    return safeLeft - safeRight;
+  });
+}
+
 export function groupInspectorLifecycleActions(actions: ReupQueueAvailableAction[]): {
   primary: ReupQueueAvailableAction[];
   neutral: ReupQueueAvailableAction[];
   danger: ReupQueueAvailableAction[];
+  quiet: ReupQueueAvailableAction[];
 } {
   const primary: ReupQueueAvailableAction[] = [];
   const neutral: ReupQueueAvailableAction[] = [];
   const danger: ReupQueueAvailableAction[] = [];
+  const quiet: ReupQueueAvailableAction[] = [];
   for (const entry of actions) {
     const group = inspectorLifecycleActionGroup(entry.action);
     if (group === "danger") danger.push(entry);
+    else if (group === "quiet") quiet.push(entry);
     else if (group === "neutral") neutral.push(entry);
     else primary.push(entry);
   }
-  return { primary, neutral, danger };
+  return {
+    primary: sortInspectorLifecycleActions(primary),
+    neutral: sortInspectorLifecycleActions(neutral),
+    danger: sortInspectorLifecycleActions(danger),
+    quiet: sortInspectorLifecycleActions(quiet)
+  };
 }
 
 export type InspectorWorkflowLink = {
@@ -356,14 +376,56 @@ export function buildInspectorWorkflowLinks(item: ReupQueueItem): InspectorWorkf
   const exportPackageId = metadataString(item.metadata_json, "export_package_id");
   const publishHandoffId = metadataString(item.metadata_json, "publish_handoff_id");
   const sourceUrl = item.source_video?.source_url ?? null;
-  const links: InspectorWorkflowLink[] = [
-    { href: `/production/transcript-editor/${item.source_video_id}`, label: "Transcript" },
-    { href: `/production/final-review/${item.source_video_id}`, label: "Final review" }
-  ];
+  const links: InspectorWorkflowLink[] = [];
+
+  // Gate checkpoints with the same stage authority as worklist CTAs — avoid premature empty editors.
+  // Skip Transcript chip when Open Transcript is already the details primary CTA.
+  const transcriptHref = worklistTranscriptHref(item);
+  if (transcriptHref && !queueTileTranscriptCta(item)) {
+    links.push({ href: transcriptHref, label: "Transcript" });
+  }
+  if (canOpenFinalReview(item)) {
+    links.push({ href: `/production/final-review/${item.source_video_id}`, label: "Final review" });
+  }
   if (exportPackageId) links.push({ href: `/publishing/export-packages/${exportPackageId}`, label: "Export package" });
   if (publishHandoffId) links.push({ href: `/publishing/publish-handoffs/${publishHandoffId}`, label: "Handoff" });
   if (sourceUrl) links.push({ href: sourceUrl, label: "Source", external: true });
   return links;
+}
+
+/**
+ * Details companions must follow stage intent — do not dump every API-allowed action.
+ * Mark media ready is only a confirm/retry-analyze control, never a Transcript-ready CTA.
+ */
+export function shouldShowInspectorMarkMediaReady(item: ReupQueueItem): boolean {
+  if (!item.available_actions.some((entry) => entry.action === "MARK_MEDIA_READY")) return false;
+  if (isDownloadReadyForConfirm(item)) return true;
+  if (isAnalyzeAudioFailed(item)) return true;
+  return false;
+}
+
+export function filterInspectorCompanionActions(
+  item: ReupQueueItem,
+  actions: ReupQueueAvailableAction[]
+): ReupQueueAvailableAction[] {
+  return actions
+    .filter((entry) => {
+      if (entry.action === "MARK_MEDIA_READY") return shouldShowInspectorMarkMediaReady(item);
+      return true;
+    })
+    .map((entry) => {
+      if (entry.action === "MARK_MEDIA_READY" && isAnalyzeAudioFailed(item)) {
+        return { ...entry, label: "Retry analyze" };
+      }
+      return entry;
+    });
+}
+
+/** Final review is only useful once a render output exists (or export/handoff stages that imply it). */
+function canOpenFinalReview(item: ReupQueueItem): boolean {
+  if (!item.source_video_id) return false;
+  if (item.render_output_id) return true;
+  return item.status === "READY_TO_EXPORT" || isPastExport(item.status);
 }
 
 export function isTerminalQueueItem(item: ReupQueueItem): boolean {
@@ -371,8 +433,9 @@ export function isTerminalQueueItem(item: ReupQueueItem): boolean {
 }
 
 export function resolveInitialReupQueueFilter(summary: ReupQueueStudioSummary): ReupQueueOperatorFilter {
-  if (summary.needs_start > 0) return "needs_start";
-  if (summary.in_production > 0) return "in_production";
+  if (summary.needs_start > 0 || summary.download > 0) return "download";
+  if (summary.transcript > 0) return "transcript";
+  if (summary.render > 0) return "render";
   if (summary.export > 0) return "export";
   if (summary.attention > 0) return "attention";
   if (summary.handoff > 0) return "handoff";
@@ -389,7 +452,7 @@ export type PipelineStage = {
 
 export function buildPipelineStages(item: ReupQueueItem): PipelineStage[] {
   const exportPackageId = metadataString(item.metadata_json, "export_package_id");
-  const failed = item.status === "FAILED_NEEDS_ATTENTION";
+  const failed = item.status === "FAILED_NEEDS_ATTENTION" || isAnalyzeAudioFailed(item);
   return [
     pipelineStage("download", "Download", downloadStageState(item, failed)),
     pipelineStage("transcript", "Transcript", transcriptStageState(item, failed)),
@@ -398,11 +461,96 @@ export function buildPipelineStages(item: ReupQueueItem): PipelineStage[] {
   ];
 }
 
+/** Single readable focus line under the compact tile stepper (full labels stay in Details). */
+export function pipelineTileFocusLabel(stages: PipelineStage[]): string {
+  const failed = stages.find((stage) => stage.state === "failed");
+  if (failed) return failed.label;
+  const active = stages.find((stage) => stage.state === "active");
+  if (active) return `Now: ${active.label}`;
+  if (stages.length > 0 && stages.every((stage) => stage.state === "done")) return "Pipeline complete";
+  const pending = stages.find((stage) => stage.state === "pending");
+  return pending ? `Next: ${pending.label}` : "Pipeline";
+}
+
+export type PipelineStageInteraction =
+  | { kind: "reveal-download"; title: string }
+  | { kind: "href"; href: string; title: string }
+  | { kind: "disabled"; title: string };
+
+/** Gated tile stepper actions: reveal local download, or deep-link later checkpoints. */
+export function pipelineStageInteraction(item: ReupQueueItem, stage: PipelineStage): PipelineStageInteraction {
+  if (stage.key === "download") {
+    if (stage.state === "failed") {
+      return { kind: "disabled", title: "Download failed — open Details for context" };
+    }
+    const downloadReady =
+      stage.state === "done"
+      || Boolean(item.media_ready_at)
+      || isDownloadReadyForConfirm(item)
+      || item.metadata_json?.download_job_completed === true;
+    if (downloadReady) {
+      return { kind: "reveal-download", title: "Open downloaded video in Explorer" };
+    }
+    return { kind: "disabled", title: "Download is not ready yet" };
+  }
+
+  if (stage.key === "transcript") {
+    const href = worklistTranscriptHref(item);
+    if (href) return { kind: "href", href, title: "Open transcript editor" };
+    return { kind: "disabled", title: transcriptStageDisabledTitle(item) };
+  }
+
+  if (stage.key === "render") {
+    if (canOpenFinalReview(item)) {
+      return {
+        kind: "href",
+        href: `/production/final-review/${item.source_video_id}`,
+        title: "Open final review"
+      };
+    }
+    return { kind: "disabled", title: "Render output is not ready yet" };
+  }
+
+  if (stage.key === "export") {
+    const exportPackageId = metadataString(item.metadata_json, "export_package_id");
+    if (exportPackageId) {
+      return {
+        kind: "href",
+        href: `/publishing/export-packages/${exportPackageId}`,
+        title: "Open export package"
+      };
+    }
+    return { kind: "disabled", title: "Export package is not ready yet" };
+  }
+
+  return { kind: "disabled", title: "Not available" };
+}
+
 export function isAnalyzeAudioJob(item: ReupQueueItem): boolean {
   const type = (item.job_type ?? "").toUpperCase();
   if (type === "ANALYZE_AUDIO") return true;
+  // Explicit non-analyze type (e.g. stale DOWNLOAD after pause) must not masquerade as analyze.
+  if (type) return false;
   // After Confirm, linked job is audio analysis even if older payloads omit job_type.
   return item.status === "WAITING_FOR_METADATA" && Boolean(item.job_id);
+}
+
+function isActiveAnalyzeJobStatus(status: string | null | undefined): boolean {
+  const normalized = (status ?? "").toUpperCase();
+  return (
+    normalized === "QUEUED"
+    || normalized === "RUNNING"
+    || normalized === "IN_PROGRESS"
+    || normalized === "PROCESSING"
+    || normalized === "RETRYABLE"
+  );
+}
+
+/** Source-video dialogue fields written by ANALYZE_AUDIO (authority when linked job_id is stale). */
+export function hasPersistedAnalyzeOutcome(item: ReupQueueItem): boolean {
+  if (item.dialogue_phase != null && String(item.dialogue_phase).length > 0) return true;
+  if (item.has_speech != null) return true;
+  return typeof item.transcript_count === "number";
 }
 
 /** Short activity label for the linked worker job (analyze / download). */
@@ -424,9 +572,40 @@ export function linkedJobActivityLabel(item: ReupQueueItem): string | null {
 }
 
 export function isAudioAnalysisCompleted(item: ReupQueueItem): boolean {
-  if (!item.job_id || !isAnalyzeAudioJob(item)) return false;
-  const status = (item.job_status ?? "").toUpperCase();
-  return status === "COMPLETED" || status === "SUCCEEDED";
+  if (isAnalyzeAudioJob(item)) {
+    const status = (item.job_status ?? "").toUpperCase();
+    if (status === "COMPLETED" || status === "SUCCEEDED") return true;
+    // Active analyze wins over any leftover dialogue fields from a prior run.
+    if (isActiveAnalyzeJobStatus(status)) return false;
+  }
+  // Stale/non-analyze linked job (pause/resume): trust persisted analyze outcome.
+  return hasPersistedAnalyzeOutcome(item);
+}
+
+/** ANALYZE_AUDIO job finished in FAILED while the tile is still on Transcript stage. */
+export function isAnalyzeAudioFailed(item: ReupQueueItem): boolean {
+  if (item.status !== "WAITING_FOR_METADATA") return false;
+  if (!isAnalyzeAudioJob(item)) return false;
+  return (item.job_status ?? "").toUpperCase() === "FAILED";
+}
+
+/** Analyze failed because SOURCE_VIDEO_RAW / SOURCE_AUDIO_EXTRACT is missing. */
+export function isMissingSourceAssetAnalyzeFailure(item: ReupQueueItem): boolean {
+  if (!isAnalyzeAudioFailed(item)) return false;
+  const blob = [
+    item.job_error_code,
+    item.job_error_message,
+    item.last_error_code,
+    item.last_error_message
+  ]
+    .filter((value): value is string => typeof value === "string" && value.length > 0)
+    .join(" ")
+    .toUpperCase();
+  return (
+    blob.includes("MISSING_SOURCE_ASSET")
+    || blob.includes("SOURCE_AUDIO_EXTRACT")
+    || blob.includes("SOURCE_VIDEO_RAW")
+  );
 }
 
 /** ANALYZE_AUDIO finished with zero DialogueBeats (skip dubbing / caption-only video). */
@@ -438,11 +617,90 @@ export function isNoDialogueAnalyzeResult(item: ReupQueueItem): boolean {
   return false;
 }
 
+/** Operator-facing reason when the Transcript stepper is not clickable. */
+export function transcriptStageDisabledTitle(item: ReupQueueItem): string {
+  if (isNoDialogueAnalyzeResult(item)) {
+    return "No spoken dialogue — skip dubbing";
+  }
+  if (isMissingSourceAssetAnalyzeFailure(item)) {
+    return "Raw video missing — check Download, then Retry from start";
+  }
+  if (isAnalyzeAudioFailed(item)) {
+    return "Analyze failed — Retry analyze after fixing the cause";
+  }
+  if (isAnalyzeAudioJob(item) && isActiveAnalyzeJobStatus(item.job_status)) {
+    return "Analyze still running";
+  }
+  return "Transcript is not ready yet";
+}
+
 /** Worklist deep-link to Checkpoint #1 only when analyze produced spoken beats. */
 export function worklistTranscriptHref(item: ReupQueueItem): string | null {
   if (!item.source_video_id || !isAudioAnalysisCompleted(item)) return null;
   if (isNoDialogueAnalyzeResult(item)) return null;
   return `/production/transcript-editor/${item.source_video_id}`;
+}
+
+/** Gallery primary CTA when Transcript editor is ready (stepper stays as secondary deep-link). */
+export function queueTileTranscriptCta(item: ReupQueueItem): { href: string; label: string } | null {
+  const href = worklistTranscriptHref(item);
+  if (!href) return null;
+  return { href, label: "Open Transcript" };
+}
+
+/** Compact gallery failure copy — long recovery stays in title/tooltip / Details. */
+export type QueueTileFailureAlert = {
+  detail: string;
+  message: string;
+};
+
+export function queueTileFailureAlert(item: ReupQueueItem): QueueTileFailureAlert | null {
+  if (isMissingSourceAssetAnalyzeFailure(item)) {
+    return {
+      message: "Raw video missing",
+      detail: "Click Download to check the file. If missing: Retry from start → Start processing → Mark media ready."
+    };
+  }
+  if (isAnalyzeAudioFailed(item)) {
+    const detail =
+      item.job_error_message?.trim()
+      || item.last_error_message?.trim()
+      || "Open Details for context, then Retry analyze.";
+    return { message: "Analyze failed", detail };
+  }
+  const downloadError = downloadJobErrorLine(item);
+  if (downloadError) {
+    return {
+      message: downloadError.length > 72 ? `${downloadError.slice(0, 69)}…` : downloadError,
+      detail: downloadError
+    };
+  }
+  return null;
+}
+
+/** Visible next-step copy when gallery primary CTA is wait/inspect (not Confirm/Start). */
+export function queueTileNextStepHint(item: ReupQueueItem): string | null {
+  // Failure tiles use queueTileFailureAlert — avoid stacked error + long hint.
+  if (queueTileFailureAlert(item)) return null;
+  if (item.status === "WAITING_FOR_MEDIA") {
+    if (isDownloadReadyForConfirm(item)) return null;
+    if (isProgressPaused(item)) return "Paused — Resume from Details";
+    if (hasActiveDownloadJob(item)) {
+      const jobStatus = (item.job_status ?? "").toUpperCase();
+      if (jobStatus === "RUNNING" || jobStatus === "IN_PROGRESS" || jobStatus === "PROCESSING") {
+        return "Downloading — wait, then Confirm ready";
+      }
+      return "Download queued — worker will start soon";
+    }
+    return "Waiting for download job — open Details if stuck";
+  }
+  if (item.status !== "WAITING_FOR_METADATA") return null;
+  if (worklistTranscriptHref(item)) return null;
+  if (isNoDialogueAnalyzeResult(item)) return worklistNoDialogueHint(item);
+  if (isAnalyzeAudioJob(item) && isActiveAnalyzeJobStatus(item.job_status)) {
+    return "Analyze still running — Transcript opens when done";
+  }
+  return "Waiting for audio analysis";
 }
 
 /** Secondary note when analyze found no speech — do not open empty Transcript. */
@@ -473,7 +731,7 @@ export function markMediaReadyNotice(item: ReupQueueItem): string {
 
 export function formatJobChipLabel(item: ReupQueueItem): string | null {
   if (!item.job_id) return null;
-  // Stage chip already says "Confirm media ready" once download finished.
+  // Stage chip already says "Confirm ready" once download finished.
   if (isDownloadReadyForConfirm(item)) return null;
   const analyzeLabel = linkedJobActivityLabel(item);
   if (analyzeLabel) {
@@ -557,6 +815,7 @@ function downloadStageState(item: ReupQueueItem, failed: boolean): PipelineStage
 }
 
 function transcriptStageState(item: ReupQueueItem, failed: boolean): PipelineStageState {
+  if (isAnalyzeAudioFailed(item)) return "failed";
   if (failed && item.status === "WAITING_FOR_METADATA") return "failed";
   if (item.media_prep_status === "READY_FOR_EXPORT" || isPastProduction(item.status)) return "done";
   if (item.status === "WAITING_FOR_METADATA") return "active";
@@ -679,14 +938,20 @@ export function queueStageLabel(item: ReupQueueItem): string {
   if (item.status === "READY_FOR_PROCESSING") return "Needs start";
   if (isProgressPaused(item)) return "Paused";
   if (item.status === "WAITING_FOR_MEDIA") {
-    if (isDownloadReadyForConfirm(item)) return "Confirm media ready";
+    if (isDownloadReadyForConfirm(item)) return "Confirm ready";
     const jobStatus = (item.job_status ?? "").toUpperCase();
     if (jobStatus === "RUNNING" || jobStatus === "IN_PROGRESS" || jobStatus === "PROCESSING") return "Downloading";
     if (jobStatus === "QUEUED") return "Queued";
     if (jobStatus === "RETRYABLE") return "Retrying";
     return "Waiting for media";
   }
-  if (item.status === "WAITING_FOR_METADATA") return "Waiting for metadata";
+  if (item.status === "WAITING_FOR_METADATA") {
+    if (isNoDialogueAnalyzeResult(item)) return "No dialogue";
+    if (isAnalyzeAudioFailed(item)) return "Analyze failed";
+    if (isAnalyzeAudioJob(item) && isActiveAnalyzeJobStatus(item.job_status)) return "Analyzing";
+    if (worklistTranscriptHref(item)) return "Transcript ready";
+    return "Transcript";
+  }
   if (item.status === "PROCESSING") return "Processing";
   if (item.status === "FAILED_NEEDS_ATTENTION") {
     return isDownloadFailureAttention(item) ? "Download failed" : "Needs attention";
@@ -696,26 +961,23 @@ export function queueStageLabel(item: ReupQueueItem): string {
   return operatorStatusLabel(item.status);
 }
 
-/** Short labels for dense Worklist rail — keep Gallery wording unchanged. */
+/** Short labels for dense Worklist rail — align with Pipeline stage chips; Gallery keeps queueStageLabel. */
 export function worklistStageLabel(item: ReupQueueItem): string {
   if (isProgressPaused(item)) return "Paused";
-  if (item.status === "WAITING_FOR_MEDIA") {
-    if (isDownloadReadyForConfirm(item)) return "Ready";
-    const jobStatus = (item.job_status ?? "").toUpperCase();
-    if (jobStatus === "RUNNING" || jobStatus === "IN_PROGRESS" || jobStatus === "PROCESSING") return "Downloading";
-    if (jobStatus === "QUEUED") return "Queued";
-    if (jobStatus === "RETRYABLE") return "Retrying";
-    return "Waiting";
-  }
-  if (item.status === "READY_FOR_PROCESSING") return "Needs start";
+  if (item.status === "READY_FOR_PROCESSING" || item.status === "WAITING_FOR_MEDIA") return "Download";
   if (item.status === "WAITING_FOR_METADATA") {
-    return linkedJobActivityLabel(item) ?? "Metadata";
+    if (isNoDialogueAnalyzeResult(item)) return "No dialogue";
+    if (isAnalyzeAudioFailed(item)) return "Analyze failed";
+    if (isAnalyzeAudioJob(item) && isActiveAnalyzeJobStatus(item.job_status)) return "Analyzing";
+    if (worklistTranscriptHref(item)) return "Transcript ready";
+    return "Transcript";
   }
+  if (item.status === "PROCESSING") return "Render";
   if (item.status === "FAILED_NEEDS_ATTENTION") {
     return isDownloadFailureAttention(item) ? "Failed" : "Attention";
   }
-  if (item.status === "READY_TO_EXPORT") return "Export";
-  if (item.status === "READY_TO_PUBLISH") return "Handoff";
+  if (item.status === "READY_TO_EXPORT" || item.status === "EXPORT_PACKAGE_CREATED") return "Export";
+  if (item.status === "READY_TO_PUBLISH" || item.status === "PUBLISH_HANDOFF_CREATED") return "Handoff";
   if (item.status === "COMPLETED") return "Done";
   if (item.status === "CANCELLED") return "Cancelled";
   return queueStageLabel(item);
@@ -760,7 +1022,13 @@ export function queueStageTone(item: ReupQueueItem): "good" | "warn" | "danger" 
   if (item.status === "FAILED_NEEDS_ATTENTION") return "danger";
   if (item.status === "CANCELLED") return "muted";
   if (isDownloadReadyForConfirm(item)) return "good";
-  if (item.status === "WAITING_FOR_MEDIA" || item.status === "WAITING_FOR_METADATA" || item.status === "PROCESSING") return "warn";
+  if (item.status === "WAITING_FOR_METADATA") {
+    if (isNoDialogueAnalyzeResult(item)) return "muted";
+    if (isAnalyzeAudioFailed(item)) return "danger";
+    if (worklistTranscriptHref(item)) return "good";
+    return "warn";
+  }
+  if (item.status === "WAITING_FOR_MEDIA" || item.status === "PROCESSING") return "warn";
   return "muted";
 }
 
@@ -878,17 +1146,44 @@ export function queueTileMetric(
   return formatExactEngagementMetric(typeof count === "number" ? count : null, text);
 }
 
+export type QueueInspectorEngagementStat = {
+  icon: "perf-views" | "perf-engagement" | "stat-comments" | "stat-shares";
+  label: string;
+  value: string;
+};
+
+/** Source social metrics for Details — keep gallery tiles production-focused. */
+export function buildQueueInspectorEngagementStats(item: ReupQueueItem): QueueInspectorEngagementStat[] {
+  return [
+    { icon: "perf-views", label: "Est. Views", value: queueTileViewsLabel(item) },
+    { icon: "perf-engagement", label: "Likes", value: queueInspectorEngagementMetric(item, "like_count_text", "like_count") },
+    { icon: "stat-comments", label: "Comments", value: queueInspectorEngagementMetric(item, "comment_count_text", "comment_count") },
+    { icon: "stat-shares", label: "Shares", value: queueInspectorEngagementMetric(item, "share_count_text", "share_count") }
+  ];
+}
+
+function queueInspectorEngagementMetric(item: ReupQueueItem, textKey: string, countKey: string): string {
+  const nested = queueTileSourceMetadata(item);
+  const top = metadataRecord(item.source_video?.metadata_json);
+  const fromNested = queueTileMetric(nested, textKey, countKey);
+  if (fromNested !== "—") return fromNested;
+  return queueTileMetric(top, textKey, countKey);
+}
+
 export function primaryQueueAction(item: ReupQueueItem): ReupQueueAction | ReupQueueBatchAction | "inspect" | null {
   if (item.available_actions.some((entry) => entry.action === "START_PROCESSING")) return "START_PROCESSING";
   if (item.status === "READY_TO_EXPORT" && item.media_prep_status === "READY_FOR_EXPORT") return "CREATE_EXPORT_PACKAGE";
   if (item.status === "READY_TO_PUBLISH") return "CREATE_PUBLISH_HANDOFF";
   if (item.available_actions.some((entry) => entry.action === "RETRY")) return "RETRY";
   if (item.status === "FAILED_NEEDS_ATTENTION") return "inspect";
-  if (isDownloadReadyForConfirm(item) && item.available_actions.some((entry) => entry.action === "MARK_MEDIA_READY")) {
-    return "MARK_MEDIA_READY";
-  }
   if (isProgressPaused(item) && item.available_actions.some((entry) => entry.action === "RESUME")) {
     return "RESUME";
+  }
+  if (isAnalyzeAudioFailed(item) && item.available_actions.some((entry) => entry.action === "MARK_MEDIA_READY")) {
+    return "MARK_MEDIA_READY";
+  }
+  if (isDownloadReadyForConfirm(item) && item.available_actions.some((entry) => entry.action === "MARK_MEDIA_READY")) {
+    return "MARK_MEDIA_READY";
   }
   if (hasActiveDownloadJob(item) && item.available_actions.some((entry) => entry.action === "HOLD")) {
     return "HOLD";
@@ -948,8 +1243,14 @@ export function primaryQueueActionLabel(item: ReupQueueItem): string {
   if (action === "CREATE_EXPORT_PACKAGE") return "Create export package";
   if (action === "CREATE_PUBLISH_HANDOFF") return "Create publish handoff";
   if (action === "START_PROCESSING") return "Start processing";
-  if (action === "MARK_MEDIA_READY") return "Mark media ready";
-  if (action === "RETRY") return "Retry";
+  if (action === "MARK_MEDIA_READY") {
+    return isAnalyzeAudioFailed(item) ? "Retry analyze" : "Mark media ready";
+  }
+  if (action === "RETRY") {
+    return isMissingSourceAssetAnalyzeFailure(item) || isAnalyzeAudioFailed(item)
+      ? "Retry from start"
+      : "Retry";
+  }
   if (action === "HOLD") return "Pause";
   if (action === "RESUME") return "Resume";
   if (action === "DISMISS") return "Dismiss";
@@ -961,8 +1262,9 @@ export function worklistPrimaryActionLabel(item: ReupQueueItem): string {
 }
 
 export function shouldShowQueueTileDetailsButton(item: ReupQueueItem): boolean {
-  const action = primaryQueueAction(item);
-  return action !== "inspect" && action !== null;
+  // Quiet CTA only when download-wait has no forward action (primary === inspect).
+  if (item.status !== "WAITING_FOR_MEDIA") return false;
+  return primaryQueueAction(item) === "inspect";
 }
 
 export function queueTilePrimaryButtonClassName(item: ReupQueueItem): string {
@@ -986,9 +1288,6 @@ export function buildQueueTileSecondaryLinks(item: ReupQueueItem): QueueTileSeco
   const links: QueueTileSecondaryLink[] = [];
   if (exportPackageId) links.push({ href: `/publishing/export-packages/${exportPackageId}`, label: "Export" });
   if (publishHandoffId) links.push({ href: `/publishing/publish-handoffs/${publishHandoffId}`, label: "Handoff" });
-  if (!isTerminalQueueItem(item)) {
-    links.push({ href: `/production/transcript-editor/${item.source_video_id}`, label: "Transcript" });
-  }
   return links;
 }
 

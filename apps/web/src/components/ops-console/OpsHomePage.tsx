@@ -4,11 +4,13 @@ import Link from "next/link";
 import { useEffect, useState, type ReactNode } from "react";
 import { fetchOperationalMetrics, fetchPublishControlQueue, fetchPublishHealthDashboard } from "../../lib/api";
 import { useT } from "../../lib/i18n";
+import { useLatestRequest, type LatestRequestMode } from "../../lib/useLatestRequest";
 import type { PublishDayStats, PublishHealthDashboard } from "../../types/analytics";
 import type { OperationalMetrics, OpsFailureCategory } from "../../types/operations";
 import type { AccountHealthSummary, PublishControlQueue } from "../../types/publish-control";
 import { OpsConsoleShell } from "../app-shell/OpsConsoleShell";
 import { TopbarRefreshButton } from "../app-shell/TopbarRefreshButton";
+import { AsyncContentBoundary } from "../shared/AsyncContentBoundary";
 import { OpsState, formatDateTime, sumRecord, type OpsTone } from "./OpsShared";
 
 type OpsHomeState = {
@@ -289,51 +291,43 @@ function AccountsCareList({ accounts, emptyLabel }: { accounts: AccountHealthSum
 export function OpsHomePage() {
   const t = useT();
   const [state, setState] = useState<OpsHomeState | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const request = useLatestRequest();
 
-  async function load() {
-    setLoading(true);
-    setError(null);
-    try {
-      const [metrics, publishHealth, queue] = await Promise.all([
+  async function load(mode: LatestRequestMode = state ? "refresh" : "initial") {
+    await request.run(
+      async () => Promise.all([
         fetchOperationalMetrics(),
         fetchPublishHealthDashboard("last_7_days"),
         fetchPublishControlQueue(),
-      ]);
-      setState({ metrics, publishHealth, queue });
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("operatorHome.loadError"));
-    } finally {
-      setLoading(false);
-    }
+      ]),
+      ([metrics, publishHealth, queue]) => setState({ metrics, publishHealth, queue }),
+      mode
+    ).catch(() => undefined);
   }
 
   useEffect(() => {
-    void load();
+    void load("initial");
   }, [t]);
 
   const refreshAction = (
-    <TopbarRefreshButton busy={loading && Boolean(state)} disabled={loading && !state} onClick={() => void load()} />
+    <TopbarRefreshButton busy={request.refreshing} disabled={request.initialLoading} onClick={() => void load("refresh")} />
   );
 
-  if (loading && !state) {
+  if (!state) {
+    const boundaryStatus = request.initialLoading ? "loading" : request.error ? "error" : "empty";
     return (
       <OpsConsoleShell actions={refreshAction} description={t("ops.description")} title={t("ops.title")}>
-        <OpsState title={t("ops.loadingTitle")} detail={t("ops.loadingDetail")} />
+        <AsyncContentBoundary
+          refreshing={request.refreshing}
+          status={boundaryStatus}
+          skeleton={<OpsState title={t("ops.loadingTitle")} detail={t("ops.loadingDetail")} />}
+          errorState={<OpsState title={t("ops.unavailableTitle")} detail={request.error?.message ?? t("operatorHome.loadError")} retry={() => void load("initial")} />}
+        >
+          {null}
+        </AsyncContentBoundary>
       </OpsConsoleShell>
     );
   }
-
-  if (error && !state) {
-    return (
-      <OpsConsoleShell actions={refreshAction} description={t("ops.description")} title={t("ops.title")}>
-        <OpsState title={t("ops.unavailableTitle")} detail={error} retry={() => void load()} />
-      </OpsConsoleShell>
-    );
-  }
-
-  if (!state) return null;
 
   const { metrics, publishHealth, queue } = state;
   const riskOpen = sumRecord(metrics.open_risk_counts_by_severity);
@@ -354,8 +348,9 @@ export function OpsHomePage() {
 
   return (
     <OpsConsoleShell actions={refreshAction} description={t("ops.description")} title={t("ops.title")}>
+      <AsyncContentBoundary refreshing={request.refreshing} status="success">
       <main className="ops-page ops-home-page">
-        {error ? <div className="inline-error">{error}</div> : null}
+        {request.error ? <div className="inline-error">{request.error.message}</div> : null}
 
         <p className="ops-home-freshness">
           <span>{t("ops.lastGenerated")}</span>
@@ -579,6 +574,7 @@ export function OpsHomePage() {
           </HomePanel>
         </section>
       </main>
+      </AsyncContentBoundary>
     </OpsConsoleShell>
   );
 }

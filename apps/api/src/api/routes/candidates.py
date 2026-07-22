@@ -79,6 +79,21 @@ def _filter_response(result) -> CandidateFilterResponse:
     )
 
 
+def _candidate_detail_response(candidate, *, reup_queue_membership=None) -> CandidateDetailResponse:
+    membership = reup_queue_membership
+    return CandidateDetailResponse.model_validate(candidate).model_copy(
+        update={
+            "in_reup_queue": bool(getattr(membership, "in_reup_queue", False)),
+            "reup_queue_item_id": getattr(membership, "reup_queue_item_id", None),
+            "reup_queue_status": (
+                membership.reup_queue_status.value
+                if getattr(membership, "reup_queue_status", None) is not None
+                else None
+            ),
+        }
+    )
+
+
 @router.post("/candidates/filter/preview", response_model=CandidateFilterResponse)
 def preview_candidates(
     request: CandidateFilterRequest,
@@ -138,6 +153,16 @@ def list_candidates(
             source_profile_id=source_profile_id,
             search=search,
         )
+    status_counts = service.count_candidates_by_status(
+        min_score=min_score,
+        max_score=max_score,
+        source_profile_id=source_profile_id,
+        search=search,
+    )
+    if status_filter is None:
+        total_count = sum(status_counts.values())
+    else:
+        total_count = status_counts.get(status_filter.value, total_count)
     candidates = service.list_candidates(
         status=status_filter,
         min_score=min_score,
@@ -148,19 +173,23 @@ def list_candidates(
         offset=offset,
         hydrate_from_capture_inbox=hydrate_from_capture_inbox,
     )
+    memberships = reup_queue_service.membership_for_candidates([candidate.id for candidate in candidates])
     if view == "summary":
-        memberships = reup_queue_service.membership_for_candidates([candidate.id for candidate in candidates])
         serialized_candidates = [
             CandidateSummaryResponse.from_candidate(candidate, reup_queue_membership=memberships.get(candidate.id))
             for candidate in candidates
         ]
         hydration_summary = None
     else:
-        serialized_candidates = [CandidateDetailResponse.model_validate(candidate) for candidate in candidates]
+        serialized_candidates = [
+            _candidate_detail_response(candidate, reup_queue_membership=memberships.get(candidate.id))
+            for candidate in candidates
+        ]
         hydration_summary = service.hydration_summary(candidates)
     return CandidateListResponse(
         view=view,  # type: ignore[arg-type]
         total_count=total_count,
+        status_counts=status_counts,
         offset=offset,
         limit=limit,
         candidates=serialized_candidates,
@@ -204,9 +233,12 @@ def bulk_update_candidate_status(
 def get_candidate(
     candidate_id: UUID,
     service: CandidateEvaluationService = Depends(get_candidate_service),
+    reup_queue_service: ReupQueueService = Depends(get_reup_queue_service),
 ) -> CandidateDetailResponse:
     try:
-        return CandidateDetailResponse.model_validate(service.get_candidate(candidate_id))
+        candidate = service.get_candidate(candidate_id)
+        membership = reup_queue_service.membership_for_candidates([candidate.id]).get(candidate.id)
+        return _candidate_detail_response(candidate, reup_queue_membership=membership)
     except CandidateNotFound as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 

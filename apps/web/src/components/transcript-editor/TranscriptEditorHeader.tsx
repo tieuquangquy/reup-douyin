@@ -2,17 +2,26 @@
 
 import Link from "next/link";
 import { useT } from "../../lib/i18n";
-import type { AudioAnalysisSummaryResponse, TranscriptEditorState, TranslationPreset } from "../../types/transcript-editor";
+import {
+  isTranscriptPipelineActionUnlocked,
+  resolveTranscriptPipelineGuide,
+  transcriptPipelineActionLabelKey,
+  transcriptPipelineStepLabelKey,
+  type TranscriptPipelinePrimaryAction
+} from "../../lib/transcriptEditorPipeline";
+import type { TranscriptEditorState, TranslationPreset } from "../../types/transcript-editor";
+import { AsyncButton } from "../shared/AsyncButton";
 
 type Props = {
   state: TranscriptEditorState;
-  summary?: AudioAnalysisSummaryResponse | null;
   dirtyCount: number;
   blockingCount: number;
   saving: boolean;
   reanalyzing: boolean;
   translating: boolean;
   synthesizingTts: boolean;
+  hasJoinedTts: boolean;
+  ttsSourceFingerprint?: string | null;
   onSave: () => void;
   onDiscard: () => void;
   onTranslateLiteral: (preset: TranslationPreset) => void;
@@ -127,6 +136,30 @@ function CommandIcon({ kind }: { kind: CommandIconKind }) {
   );
 }
 
+function PipelineLockIcon() {
+  return (
+    <svg className="editor-command__pipeline-lock" viewBox="0 0 20 20" aria-hidden="true">
+      <path
+        d="M6.5 9.2V7.4a3.5 3.5 0 0 1 7 0v1.8"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinecap="round"
+      />
+      <rect
+        x="5.2"
+        y="9.2"
+        width="9.6"
+        height="6.6"
+        rx="1.4"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.7"
+      />
+    </svg>
+  );
+}
+
 export function TranscriptEditorHeader({
   state,
   dirtyCount,
@@ -135,6 +168,8 @@ export function TranscriptEditorHeader({
   reanalyzing,
   translating,
   synthesizingTts,
+  hasJoinedTts,
+  ttsSourceFingerprint = null,
   onSave,
   onDiscard,
   onTranslateLiteral,
@@ -143,95 +178,234 @@ export function TranscriptEditorHeader({
 }: Props) {
   const t = useT();
   const busy = saving || reanalyzing || translating || synthesizingTts;
+  const guide = resolveTranscriptPipelineGuide(state, { hasJoinedTts, ttsSourceFingerprint });
+  const ttsBlocked = !guide.hasVietnamese;
+  const primary = guide.primaryAction;
+  const translateUnlocked = isTranscriptPipelineActionUnlocked("translate", guide.currentStep);
+  const ttsUnlocked = isTranscriptPipelineActionUnlocked("tts", guide.currentStep);
+  const finalUnlocked = isTranscriptPipelineActionUnlocked("final", guide.currentStep);
 
-  function runTranslate() {
-    if (window.confirm(t("transcriptEditorHeader.translateLiteralConfirm"))) {
+  function runTranslate(isPrimary: boolean) {
+    const confirmKey = isPrimary
+      ? "transcriptEditorHeader.translateLiteralConfirm"
+      : "transcriptEditorHeader.translateAgainCascadeConfirm";
+    if (window.confirm(t(confirmKey))) {
       onTranslateLiteral("literal_safe");
     }
   }
 
+  function runTts(isPrimary: boolean) {
+    if (!ttsUnlocked || ttsBlocked) return;
+    const regenerating = !isPrimary || guide.hasJoinedTts || guide.ttsOutdated;
+    const confirmKey = regenerating
+      ? "transcriptEditorHeader.regenerateTtsConfirm"
+      : "transcriptEditorHeader.generateTtsConfirm";
+    if (window.confirm(t(confirmKey))) {
+      onGenerateTts();
+    }
+  }
+
+  function actionClass(action: TranscriptPipelinePrimaryAction, base: string): string {
+    const role = primary === action ? `${base} editor-command__primary` : `${base} editor-command__quiet`;
+    if (action === "tts" && guide.ttsOutdated) return `${role} editor-command__tts--stale`;
+    return role;
+  }
+
   return (
     <header className="transcript-header transcript-header--command">
-      <div className="transcript-header__identity">
-        <Link className="transcript-header__back" href="/selection/review-board">
-          {t("transcriptEditorHeader.backToReviewBoard")}
-        </Link>
-        <p className="transcript-header__bench-kicker">{t("transcriptEditorBench.workspaceKicker")}</p>
-      </div>
+      <div className="transcript-header__bar">
+        <div className="transcript-header__lead">
+          <Link className="transcript-header__back" href="/selection/review-board">
+            <svg className="transcript-header__back-icon" viewBox="0 0 20 20" aria-hidden="true">
+              <path
+                d="M11.8 4.8 6.6 10l5.2 5.2M6.8 10h7.6"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.7"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+            <span>{t("transcriptEditorHeader.backToReviewBoard")}</span>
+          </Link>
+          <ol className="editor-command__pipeline" aria-label={t("transcriptEditorHeader.pipelineLabel")}>
+            {guide.steps.map((step, index) => {
+              const locked = step.state === "pending";
+              const showConnector = index < guide.steps.length - 1;
+              const connectorReached = step.state === "done" || step.state === "active";
+              return (
+                <li
+                  className={`editor-command__pipeline-step is-${step.state}`}
+                  key={step.key}
+                  title={locked ? t("transcriptEditorHeader.pipelineLocked") : undefined}
+                  aria-current={step.state === "active" ? "step" : undefined}
+                >
+                  <span className="editor-command__pipeline-badge">
+                    <span className="editor-command__pipeline-index" aria-hidden="true">
+                      {step.state === "done" ? "✓" : locked ? <PipelineLockIcon /> : index + 1}
+                    </span>
+                    <span className="editor-command__pipeline-label">{t(transcriptPipelineStepLabelKey(step.key))}</span>
+                  </span>
+                  {showConnector ? (
+                    <span
+                      className={`editor-command__pipeline-connector${connectorReached ? " is-reached" : ""}`}
+                      aria-hidden="true"
+                    >
+                      <svg className="editor-command__pipeline-connector-icon" viewBox="0 0 20 20">
+                        <path
+                          d="M7.2 4.8 12.4 10 7.2 15.2"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="1.8"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      </svg>
+                    </span>
+                  ) : null}
+                </li>
+              );
+            })}
+          </ol>
+          {guide.ttsFreshness !== "hidden" ? (
+            <span
+              className={`editor-command__freshness${guide.ttsFreshness === "outdated" ? " is-outdated" : " is-current"}`}
+              title={
+                guide.ttsFreshness === "outdated"
+                  ? t("transcriptEditorHeader.freshnessTtsOutdated")
+                  : t("transcriptEditorHeader.freshnessTtsCurrent")
+              }
+            >
+              {guide.ttsFreshness === "outdated"
+                ? t("transcriptEditorHeader.freshnessTtsOutdated")
+                : t("transcriptEditorHeader.freshnessTtsCurrent")}
+            </span>
+          ) : null}
+        </div>
 
-      <div className="editor-command" role="toolbar" aria-label={t("transcriptEditorHeader.toolbarLabel")}>
-        <div className="editor-command__core">
-          <button
-            type="button"
-            className={`editor-command__save${saving ? " is-busy" : ""}`}
+        <div className="editor-command" role="toolbar" aria-label={t("transcriptEditorHeader.toolbarLabel")}>
+          <AsyncButton
+            className="editor-command__save"
+            pending={saving}
+            pendingLabel={t("transcriptEditorHeader.saving")}
+            leadingIcon={<CommandIcon kind="save" />}
             onClick={onSave}
             disabled={dirtyCount === 0 || busy || blockingCount > 0}
           >
-            <CommandIcon kind="save" />
-            <span>{saving ? t("transcriptEditorHeader.saving") : t("transcriptEditorHeader.saveDraft")}</span>
+            <span>{t("transcriptEditorHeader.saveDraft")}</span>
             {dirtyCount > 0 ? <span className="editor-command__dot" aria-hidden /> : null}
-          </button>
+          </AsyncButton>
 
-          <button
-            type="button"
-            className={`editor-command__translate${translating ? " is-busy" : ""}`}
-            disabled={busy}
-            onClick={runTranslate}
-          >
-            <CommandIcon kind="translate" />
-            <span>
-              {translating ? t("transcriptEditorHeader.translating") : t("transcriptEditorHeader.translateMenu")}
-            </span>
-          </button>
+          <div className="editor-command__focus">
+            {primary === "translate" ? (
+              <AsyncButton
+                className={actionClass("translate", "editor-command__translate")}
+                pending={translating}
+                pendingLabel={t("transcriptEditorHeader.translating")}
+                leadingIcon={<CommandIcon kind="translate" />}
+                disabled={busy}
+                title={t("transcriptEditorHeader.pipelineNowTranslate")}
+                onClick={() => runTranslate(true)}
+              >
+                <span>{t(transcriptPipelineActionLabelKey("translate", { isPrimary: true }))}</span>
+              </AsyncButton>
+            ) : null}
 
-          <button
-            type="button"
-            className={`editor-command__tts${synthesizingTts ? " is-busy" : ""}`}
-            disabled={busy}
-            onClick={() => {
-              if (window.confirm(t("transcriptEditorHeader.generateTtsConfirm"))) {
-                onGenerateTts();
+            {primary === "tts" ? (
+              <AsyncButton
+                className={actionClass("tts", "editor-command__tts")}
+                pending={synthesizingTts}
+                pendingLabel={t("transcriptEditorHeader.generatingTtsShort")}
+                leadingIcon={<CommandIcon kind="tts" />}
+                disabled={busy || ttsBlocked}
+                title={ttsBlocked ? t("transcriptEditorHeader.ttsRequiresVi") : t("transcriptEditorHeader.pipelineNowTts")}
+                onClick={() => runTts(true)}
+              >
+                <span>{t(transcriptPipelineActionLabelKey("tts", { isPrimary: true, ttsOutdated: guide.ttsOutdated }))}</span>
+              </AsyncButton>
+            ) : null}
+
+            {primary === "final" ? (
+              <Link
+                className={actionClass("final", "editor-command__final")}
+                href={`/production/final-review/${state.sourceVideoId}`}
+                title={t("transcriptEditorHeader.pipelineNowFinal")}
+              >
+                <CommandIcon kind="final" />
+                <span>{t(transcriptPipelineActionLabelKey("final", { isPrimary: true }))}</span>
+              </Link>
+            ) : null}
+          </div>
+
+          {translateUnlocked && primary !== "translate" ? (
+            <AsyncButton
+              className="editor-command__translate editor-command__quiet"
+              pending={translating}
+              pendingLabel={t("transcriptEditorHeader.translating")}
+              leadingIcon={<CommandIcon kind="translate" />}
+              disabled={busy}
+              onClick={() => runTranslate(false)}
+            >
+              <span>{t(transcriptPipelineActionLabelKey("translate", { isPrimary: false }))}</span>
+            </AsyncButton>
+          ) : null}
+          {ttsUnlocked && primary !== "tts" ? (
+            <AsyncButton
+              className={actionClass("tts", "editor-command__tts")}
+              pending={synthesizingTts}
+              pendingLabel={t("transcriptEditorHeader.generatingTtsShort")}
+              leadingIcon={<CommandIcon kind="tts" />}
+              disabled={busy || ttsBlocked}
+              title={
+                ttsBlocked
+                  ? t("transcriptEditorHeader.ttsRequiresVi")
+                  : guide.ttsOutdated
+                    ? t("transcriptEditorHeader.freshnessTtsOutdated")
+                    : undefined
               }
-            }}
-          >
-            <CommandIcon kind="tts" />
-            <span>
-              {synthesizingTts
-                ? t("transcriptEditorHeader.generatingTtsShort")
-                : t("transcriptEditorHeader.generateTts")}
-            </span>
-          </button>
-        </div>
+              onClick={() => runTts(false)}
+            >
+              <span>
+                {t(transcriptPipelineActionLabelKey("tts", { isPrimary: false, ttsOutdated: guide.ttsOutdated }))}
+              </span>
+            </AsyncButton>
+          ) : null}
+          {finalUnlocked && primary !== "final" ? (
+            <Link
+              className="editor-command__final editor-command__quiet"
+              href={`/production/final-review/${state.sourceVideoId}`}
+            >
+              <CommandIcon kind="final" />
+              <span>{t(transcriptPipelineActionLabelKey("final", { isPrimary: false }))}</span>
+            </Link>
+          ) : null}
 
-        <nav className="editor-command__rail" aria-label={t("transcriptEditorHeader.secondaryNav")}>
-          <Link href={`/production/final-review/${state.sourceVideoId}`}>
-            <CommandIcon kind="final" />
-            <span>{t("transcriptEditorHeader.finalReviewShort")}</span>
-          </Link>
-          <button
-            type="button"
-            className={reanalyzing ? "is-busy" : undefined}
+          <AsyncButton
+            className="editor-command__reasr editor-command__quiet"
+            pending={reanalyzing}
+            pendingLabel={t("transcriptEditorHeader.reanalyzingShort")}
+            leadingIcon={<CommandIcon kind="reasr" />}
             disabled={busy}
             title={t("transcriptEditorHeader.reanalyzeAudio")}
             onClick={() => {
-              if (window.confirm(t("transcriptEditorHeader.reanalyzeConfirm"))) {
+              if (window.confirm(t("transcriptEditorHeader.reanalyzeCascadeConfirm"))) {
                 onReanalyze("literal_safe");
               }
             }}
           >
-            <CommandIcon kind="reasr" />
-            <span>
-              {reanalyzing
-                ? t("transcriptEditorHeader.reanalyzingShort")
-                : t("transcriptEditorHeader.reanalyzeShort")}
-            </span>
-          </button>
-        </nav>
+            <span>{t("transcriptEditorHeader.reanalyzeShort")}</span>
+          </AsyncButton>
 
-        <button type="button" className="editor-command__discard" onClick={onDiscard} disabled={dirtyCount === 0 || busy}>
-          <CommandIcon kind="discard" />
-          <span>{t("transcriptEditorHeader.discard")}</span>
-        </button>
+          <button
+            type="button"
+            className="editor-command__discard"
+            onClick={onDiscard}
+            disabled={dirtyCount === 0 || busy}
+          >
+            <CommandIcon kind="discard" />
+            <span>{t("transcriptEditorHeader.discard")}</span>
+          </button>
+        </div>
       </div>
     </header>
   );

@@ -3,17 +3,20 @@
 import { useState } from "react";
 import { useT } from "../../lib/i18n";
 import type { EditablePublishDraft, PublishTarget, PublishTargetPlatform } from "../../types/publish-draft";
+import { AsyncButton } from "../shared/AsyncButton";
 
 export function PublishTargetSelector({
   targets,
   editable,
   disabled,
+  createPending,
   onChange,
   onCreate
 }: {
   targets: PublishTarget[];
   editable: EditablePublishDraft | null;
   disabled: boolean;
+  createPending: boolean;
   onChange: (patch: Partial<EditablePublishDraft>) => void;
   onCreate: (platform: PublishTargetPlatform) => void;
 }) {
@@ -52,9 +55,14 @@ export function PublishTargetSelector({
         </label>
       </div>
       {!editable ? (
-        <button className="primary" onClick={() => onCreate(selected)} disabled={disabled || targets.length === 0}>
+        <AsyncButton
+          className="primary"
+          pending={createPending}
+          onClick={() => onCreate(selected)}
+          disabled={disabled || targets.length === 0}
+        >
           {t("publishTargetSelector.createPublishDraft")}
-        </button>
+        </AsyncButton>
       ) : null}
     </section>
   );

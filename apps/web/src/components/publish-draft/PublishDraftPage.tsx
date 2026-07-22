@@ -30,6 +30,7 @@ import {
   validatePublishDraft
 } from "../../lib/publishDraftState";
 import { humanizeStatus } from "../../lib/statusLabels";
+import { useAsyncAction } from "../../lib/useAsyncAction";
 import type { RenderOutput, SourceVideoAssetManifest } from "../../types/final-review";
 import type {
   EditablePublishDraft,
@@ -42,10 +43,13 @@ import type {
 } from "../../types/publish-draft";
 import type { OperatorRiskDecisionType, RiskFlag, RiskSummary } from "../../types/risk";
 import { RiskSummaryCard } from "../risk/RiskSummaryCard";
+import { AsyncButton } from "../shared/AsyncButton";
+import { AsyncContentBoundary } from "../shared/AsyncContentBoundary";
+import { useNotice } from "../shared/NoticeCenter";
 import { CaptionEditor } from "./CaptionEditor";
 import { HashtagEditor } from "./HashtagEditor";
 import { PublishDraftHeader } from "./PublishDraftHeader";
-import { PublishDraftErrorState, PublishDraftLoadingState } from "./PublishDraftStates";
+import { PublishDraftErrorState } from "./PublishDraftStates";
 import { PublishMediaSummary } from "./PublishMediaSummary";
 import { PublishPreviewPanel } from "./PublishPreviewPanel";
 import { PublishSchedulePanel } from "./PublishSchedulePanel";
@@ -53,6 +57,8 @@ import { PublishTargetSelector } from "./PublishTargetSelector";
 
 export function PublishDraftPage({ sourceVideoId, initialDraftId }: { sourceVideoId: string; initialDraftId?: string }) {
   const t = useT();
+  const asyncAction = useAsyncAction();
+  const { notify } = useNotice();
   const [draft, setDraft] = useState<PublishDraft | null>(null);
   const [editable, setEditable] = useState<EditablePublishDraft | null>(null);
   const [savedEditable, setSavedEditable] = useState<EditablePublishDraft | null>(null);
@@ -140,6 +146,7 @@ export function PublishDraftPage({ sourceVideoId, initialDraftId }: { sourceVide
       setPublicationSummary(history.summary);
       setSelectedAccountId(accounts[0]?.id ?? "");
       setMessage(t("publishDraftPage.createSuccess"));
+      notify({ id: `publish-draft-create-${sourceVideoId}`, message: t("publishDraftPage.createSuccess"), tone: "success" });
     } catch (err) {
       setError(err instanceof Error ? err.message : t("publishDraftPage.createError"));
     } finally {
@@ -158,6 +165,7 @@ export function PublishDraftPage({ sourceVideoId, initialDraftId }: { sourceVide
       setEditable(nextEditable);
       setSavedEditable(nextEditable);
       setMessage(t("publishDraftPage.saveSuccess"));
+      notify({ id: `publish-draft-save-${draft.id}`, message: t("publishDraftPage.saveSuccess"), tone: "success" });
     } catch (err) {
       setError(err instanceof Error ? err.message : t("publishDraftPage.saveError"));
     } finally {
@@ -176,6 +184,7 @@ export function PublishDraftPage({ sourceVideoId, initialDraftId }: { sourceVide
       setEditable(nextEditable);
       setSavedEditable(nextEditable);
       setMessage(t("publishDraftPage.scheduleSuccess"));
+      notify({ id: `publish-draft-schedule-${draft.id}`, message: t("publishDraftPage.scheduleSuccess"), tone: "success" });
     } catch (err) {
       setError(err instanceof Error ? err.message : t("publishDraftPage.scheduleError"));
     } finally {
@@ -194,6 +203,7 @@ export function PublishDraftPage({ sourceVideoId, initialDraftId }: { sourceVide
       setEditable(nextEditable);
       setSavedEditable(nextEditable);
       setMessage(t("publishDraftPage.unscheduleSuccess"));
+      notify({ id: `publish-draft-unschedule-${draft.id}`, message: t("publishDraftPage.unscheduleSuccess"), tone: "success" });
     } catch (err) {
       setError(err instanceof Error ? err.message : t("publishDraftPage.unscheduleError"));
     } finally {
@@ -227,6 +237,7 @@ export function PublishDraftPage({ sourceVideoId, initialDraftId }: { sourceVide
       setEditable(nextEditable);
       setSavedEditable(nextEditable);
       setMessage(t("publishDraftPage.markReadySuccess"));
+      notify({ id: `publish-draft-ready-${draft.id}`, message: t("publishDraftPage.markReadySuccess"), tone: "success" });
     } catch (err) {
       setError(err instanceof Error ? err.message : t("publishDraftPage.markReadyError"));
     } finally {
@@ -280,7 +291,13 @@ export function PublishDraftPage({ sourceVideoId, initialDraftId }: { sourceVide
       const history = await fetchPublishHistory(draft.id);
       setPublishAttempts(history.attempts);
       setPublicationSummary(history.summary);
-      setMessage(attempt.status === "SUCCEEDED" ? t("publishDraftPage.publishSuccess") : `Publish attempt finished with status ${humanizeStatus(attempt.status)}.`);
+      const message = attempt.status === "SUCCEEDED" ? t("publishDraftPage.publishSuccess") : `Publish attempt finished with status ${humanizeStatus(attempt.status)}.`;
+      setMessage(message);
+      notify({
+        id: `publish-attempt-${attempt.id}`,
+        message,
+        tone: attempt.status === "SUCCEEDED" ? "success" : "warning"
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : t("publishDraftPage.publishError"));
     } finally {
@@ -298,6 +315,11 @@ export function PublishDraftPage({ sourceVideoId, initialDraftId }: { sourceVide
       setPublishAttempts(history.attempts);
       setPublicationSummary(history.summary);
       setMessage(`Facebook status refreshed: ${humanizeStatus(attempt.external_status ?? attempt.status)}.`);
+      notify({
+        id: `publish-attempt-refresh-${attempt.id}`,
+        message: `Facebook status refreshed: ${humanizeStatus(attempt.external_status ?? attempt.status)}.`,
+        tone: "info"
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : t("publishDraftPage.refreshError"));
     } finally {
@@ -314,6 +336,7 @@ export function PublishDraftPage({ sourceVideoId, initialDraftId }: { sourceVide
       setPublishAttempts(history.attempts);
       setPublicationSummary(history.summary);
       setMessage(t("publishDraftPage.reconcileSuccess"));
+      notify({ id: `publish-draft-reconcile-${draft.id}`, message: t("publishDraftPage.reconcileSuccess"), tone: "success" });
     } catch (err) {
       setError(err instanceof Error ? err.message : t("publishDraftPage.reconcileError"));
     } finally {
@@ -321,7 +344,15 @@ export function PublishDraftPage({ sourceVideoId, initialDraftId }: { sourceVide
     }
   }
 
-  if (loading) return <PublishDraftLoadingState />;
+  if (loading) {
+    return (
+      <main className="publish-page">
+        <AsyncContentBoundary status="loading" skeletonVariant="form" loadingLabel={t("publishDraftStates.loading")}>
+          {null}
+        </AsyncContentBoundary>
+      </main>
+    );
+  }
   if (error && !targets.length) return <PublishDraftErrorState message={error} onRetry={loadData} />;
 
   return (
@@ -331,10 +362,12 @@ export function PublishDraftPage({ sourceVideoId, initialDraftId }: { sourceVide
         editable={editable}
         dirty={dirty}
         saving={saving}
+        savePending={asyncAction.isPending("save-draft")}
+        readyPending={asyncAction.isPending("mark-ready")}
         errors={validationErrors}
-        onSave={() => void handleSave()}
+        onSave={() => void asyncAction.run("save-draft", handleSave)}
         onDiscard={() => setEditable(savedEditable)}
-        onMarkReady={() => void handleMarkReady()}
+        onMarkReady={() => void asyncAction.run("mark-ready", handleMarkReady)}
       />
       {error ? <div className="inline-error">{error}</div> : null}
       {message ? <div className="publish-ready-banner">{message}</div> : null}
@@ -344,8 +377,9 @@ export function PublishDraftPage({ sourceVideoId, initialDraftId }: { sourceVide
             targets={targets}
             editable={editable}
             disabled={saving}
+            createPending={asyncAction.isPending("create-draft")}
             onChange={patchEditable}
-            onCreate={(platform) => void handleCreate(platform)}
+            onCreate={(platform) => void asyncAction.run("create-draft", () => handleCreate(platform))}
           />
           {editable ? (
             <>
@@ -356,9 +390,11 @@ export function PublishDraftPage({ sourceVideoId, initialDraftId }: { sourceVide
                   draft={draft}
                   editable={editable}
                   disabled={saving}
+                  schedulePending={asyncAction.isPending("schedule")}
+                  unschedulePending={asyncAction.isPending("unschedule")}
                   onChange={patchEditable}
-                  onSchedule={() => void handleSchedule()}
-                  onUnschedule={() => void handleUnschedule()}
+                  onSchedule={() => void asyncAction.run("schedule", handleSchedule)}
+                  onUnschedule={() => void asyncAction.run("unschedule", handleUnschedule)}
                 />
               ) : null}
             </>
@@ -409,25 +445,27 @@ export function PublishDraftPage({ sourceVideoId, initialDraftId }: { sourceVide
                   </option>
                 ))}
               </select>
-              <button
+              <AsyncButton
                 className="primary-action"
-                type="button"
-                disabled={saving || draft.status !== "READY" || !selectedAccountId}
-                onClick={() => void handlePublishNow()}
+                pending={asyncAction.isPending("publish-now")}
+                pendingLabel={t("publishDraftPage.publishNow")}
+                disabled={draft.status !== "READY" || !selectedAccountId}
+                onClick={() => void asyncAction.run("publish-now", handlePublishNow)}
               >
                 {t("publishDraftPage.publishNow")}
-              </button>
+              </AsyncButton>
               <div className="small-meta">
                 {draft.status !== "READY" ? t("publishDraftPage.draftMustBeReady") : t("publishDraftPage.publishesApprovedRender")}
               </div>
-              <button
+              <AsyncButton
                 className="secondary-action"
-                type="button"
-                disabled={reconcilingDraft || publishAttempts.length === 0}
-                onClick={() => void handleReconcileDraft()}
+                pending={reconcilingDraft}
+                pendingLabel={t("publishDraftPage.reconciling")}
+                disabled={publishAttempts.length === 0}
+                onClick={() => void asyncAction.run("reconcile", handleReconcileDraft)}
               >
-                {reconcilingDraft ? t("publishDraftPage.reconciling") : t("publishDraftPage.reconcileDraft")}
-              </button>
+                {t("publishDraftPage.reconcileDraft")}
+              </AsyncButton>
               <h3>{t("publishDraftPage.attempts")}</h3>
               {publishAttempts.length === 0 ? (
                 <div className="small-meta">{t("publishDraftPage.noAttemptsYet")}</div>
@@ -448,14 +486,14 @@ export function PublishDraftPage({ sourceVideoId, initialDraftId }: { sourceVide
                         </a>
                       ) : null}
                       {attempt.reconciliation_required || attempt.status === "NEEDS_RECONCILIATION" ? (
-                        <button
+                        <AsyncButton
                           className="secondary-action"
-                          type="button"
-                          disabled={refreshingAttemptId === attempt.id}
-                          onClick={() => void handleRefreshAttempt(attempt.id)}
+                          pending={refreshingAttemptId === attempt.id}
+                          pendingLabel={t("publishDraftPage.refreshing")}
+                          onClick={() => void asyncAction.run(`refresh-${attempt.id}`, () => handleRefreshAttempt(attempt.id))}
                         >
-                          {refreshingAttemptId === attempt.id ? t("publishDraftPage.refreshing") : t("publishDraftPage.refreshStatus")}
-                        </button>
+                          {t("publishDraftPage.refreshStatus")}
+                        </AsyncButton>
                       ) : null}
                       {attempt.error_code ? ` - ${attempt.error_code}` : ""}
                     </li>

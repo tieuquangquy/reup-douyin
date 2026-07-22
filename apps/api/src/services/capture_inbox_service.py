@@ -12,7 +12,7 @@ from urllib.request import Request, urlopen
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import Select, Text, cast, distinct, func, inspect, or_, select, String
+from sqlalchemy import Select, String, Text, and_, case, cast, distinct, func, inspect, or_, select, true
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 
@@ -23,7 +23,7 @@ from src.enums import CandidateStatus, CaptureSessionStatus, CapturedItemStatus,
 from src.models.capture_inbox import CapturedItem, CaptureSession
 from src.models.ingestion import SourceVideo
 from src.models.review import VideoCandidate
-from src.schemas.capture_inbox import CaptureInboxAdvancedFilterRequest, CaptureSessionCountsResponse
+from src.schemas.capture_inbox import CaptureInboxAdvancedFilterRequest, CaptureInboxStudioStatus, CaptureSessionCountsResponse
 from src.schemas.douyin_extension import DouyinExtensionCaptureRequest
 from src.services.candidate_filter import apply_candidate_filter
 from src.services.candidate_service import CandidateEvaluationService
@@ -231,6 +231,8 @@ class CaptureInboxService:
             "profile_external_id": session_context.get("profile_external_id") or identity.source_profile_external_id,
             "captured_at": session_context.get("captured_at") or (request.captured_at.isoformat() if request.captured_at else None),
         }
+        if request.profile is not None and request.profile.follower_count is not None:
+            session_context["follower_count"] = request.profile.follower_count
         session_context = {key: value for key, value in session_context.items() if value is not None}
         session = CaptureSession(
             workspace_id=workspace_id,
@@ -552,6 +554,7 @@ class CaptureInboxService:
         capture_session_id: UUID | None = None,
         profile_url: str | None = None,
         status: CapturedItemStatus | None = None,
+        studio_status: CaptureInboxStudioStatus | None = None,
         search: str | None = None,
         advanced_filter: CaptureInboxAdvancedFilterRequest | None = None,
         limit: int = 100,
@@ -575,6 +578,8 @@ class CaptureInboxService:
             ]
             if status is not None:
                 base_filters.append(CapturedItem.status == status)
+            if studio_status is not None and studio_status != "all":
+                base_filters.append(self._studio_status_clause(studio_status))
             if has_client_filters:
                 stmt = (
                     select(CapturedItem)
@@ -607,6 +612,8 @@ class CaptureInboxService:
         base_filters = [CapturedItem.capture_session_id == capture_session_id]
         if status is not None:
             base_filters.append(CapturedItem.status == status)
+        if studio_status is not None and studio_status != "all":
+            base_filters.append(self._studio_status_clause(studio_status))
         if has_client_filters:
             stmt = select(CapturedItem).where(*base_filters).order_by(*_CAPTURED_ITEM_LIST_ORDER)
             scoped_items = list(self.db.scalars(stmt))
@@ -622,6 +629,94 @@ class CaptureInboxService:
             .limit(limit)
         )
         return list(self.db.scalars(items_stmt)), total_count
+
+    @staticmethod
+    def _studio_status_clause(studio_status: CaptureInboxStudioStatus):
+        ready_clause = and_(
+            CapturedItem.status.in_((CapturedItemStatus.READY, CapturedItemStatus.ENRICHED)),
+            CapturedItem.matches_intake.is_(True),
+        )
+        promoted_clause = CapturedItem.status == CapturedItemStatus.PROMOTED
+        duplicate_clause = CapturedItem.status == CapturedItemStatus.DUPLICATE
+        failed_clause = and_(
+            CapturedItem.status.notin_(
+                (CapturedItemStatus.PROMOTED, CapturedItemStatus.DUPLICATE, CapturedItemStatus.EXCLUDED)
+            ),
+            or_(
+                CapturedItem.status == CapturedItemStatus.FAILED,
+                CapturedItem.intake_evaluation_status.in_(
+                    (IntakeEvaluationStatus.FILTERED_OUT, IntakeEvaluationStatus.EVALUATION_ERROR)
+                ),
+                CapturedItem.matches_intake.is_(False),
+            ),
+        )
+        needs_action_clause = and_(
+            CapturedItem.status.notin_(
+                (CapturedItemStatus.PROMOTED, CapturedItemStatus.DUPLICATE, CapturedItemStatus.EXCLUDED)
+            ),
+            ~ready_clause,
+            ~failed_clause,
+        )
+        clauses = {
+            "all": true(),
+            "ready": ready_clause,
+            "promoted": promoted_clause,
+            "duplicate": duplicate_clause,
+            "needs_action": needs_action_clause,
+            "failed": failed_clause,
+        }
+        return clauses[studio_status]
+
+    def count_items_by_studio_status(
+        self,
+        *,
+        capture_session_id: UUID | None = None,
+        profile_url: str | None = None,
+    ) -> dict[str, int]:
+        if capture_session_id is None and profile_url is None:
+            raise CaptureInboxError(
+                "capture_session_id_required",
+                "Capture Inbox status counts require an explicit capture session or profile URL.",
+            )
+
+        status_keys: tuple[CaptureInboxStudioStatus, ...] = (
+            "ready",
+            "promoted",
+            "duplicate",
+            "needs_action",
+            "failed",
+        )
+        stmt = select(
+            func.count().label("all"),
+            *[
+                func.sum(case((self._studio_status_clause(status_key), 1), else_=0)).label(status_key)
+                for status_key in status_keys
+            ],
+        ).select_from(CapturedItem)
+
+        if profile_url is not None:
+            try:
+                identity = DouyinProfileAdapter().normalize_profile_identity(profile_url)
+            except SourceAdapterError as exc:
+                raise CaptureInboxError("invalid_profile_url", str(exc)) from exc
+            stmt = stmt.join(
+                CaptureSession,
+                CapturedItem.capture_session_id == CaptureSession.id,
+            ).where(
+                CapturedItem.source_platform == SourcePlatformEnum.DOUYIN,
+                or_(
+                    CapturedItem.source_profile_external_id == identity.source_profile_external_id,
+                    CaptureSession.normalized_profile_identifier == identity.source_profile_external_id,
+                ),
+            )
+        else:
+            stmt = stmt.where(CapturedItem.capture_session_id == capture_session_id)
+
+        row = self.db.execute(stmt).one()._mapping
+        return {
+            "all": int(row["all"] or 0),
+            **{status_key: int(row[status_key] or 0) for status_key in status_keys},
+        }
 
     def _profile_unique_video_count(self, base_filters: list) -> int:
         distinct_aweme_count = int(
@@ -1060,11 +1155,14 @@ class CaptureInboxService:
         capture_context = _capture_context_dict(raw_item.get("capture_context"))
         session_metadata = getattr(session, "metadata_json", None) or {}
         context_mismatch_codes = _string_list_or_none(raw_item.get("context_mismatch_codes")) or []
+        capture_context = capture_context or (session_metadata.get("capture_context") if isinstance(session_metadata.get("capture_context"), dict) else {})
+        follower_count = _resolve_follower_count_for_capture_item(metadata={}, raw=raw_item, session_metadata=session_metadata)
         metadata_json = {
             "capture_id": session.capture_id,
             "schema_version": request.schema_version,
             "capture_context": capture_context or session_metadata.get("capture_context"),
             "context_mismatch_codes": context_mismatch_codes,
+            "follower_count": follower_count,
             "thumbnail_url": thumbnail_url,
             "poster_aspect_ratio": poster_aspect_ratio,
             "duration_text": normalized.duration_text,
@@ -1967,6 +2065,8 @@ def mapCaptureInboxItemToReviewCandidateMetadata(item: CapturedItem, *, session:
         "share_count_text": _first_present(metadata.get("share_count_text"), raw.get("share_count_text")),
         "favorite_count": _first_present(metadata.get("favorite_count"), raw.get("favorite_count"), stats.get("favorite_count"), stats.get("collect_count")),
         "favorite_count_text": _first_present(metadata.get("favorite_count_text"), raw.get("favorite_count_text")),
+        "follower_count": _resolve_follower_count_for_capture_item(metadata=metadata, raw=raw, session_metadata=(session.metadata_json if session is not None else None)),
+        "follower_count_text": _first_present(metadata.get("follower_count_text"), raw.get("follower_count_text")),
         "engagement_score": reup_score.get("engagement_score"),
         "engagement_rate": reup_score.get("engagement_rate"),
         "engagement_rate_basis": reup_score.get("engagement_rate_basis"),
@@ -2147,26 +2247,11 @@ def _canonical_estimated_views_for_capture_item(item: CapturedItem, *, metadata:
 
 
 def _canonical_reup_score_for_capture_item(item: CapturedItem, *, metadata: dict[str, Any], raw: dict[str, Any], stats: dict[str, Any], estimated_views: dict[str, Any]) -> dict[str, Any]:
-    existing_score = _float_or_none(_first_present(metadata.get("reup_score"), raw.get("reup_score")))
-    existing_components = _first_present(metadata.get("reup_score_components"), raw.get("reup_score_components"))
-    existing_label = _first_present(metadata.get("reup_score_label"), raw.get("reup_score_label"))
-    existing_level = _first_present(metadata.get("reup_score_level"), raw.get("reup_score_level"))
-    if existing_score is not None:
-        return {
-            "reup_score": round(max(0, min(100, existing_score))),
-            "reup_score_label": existing_label,
-            "reup_score_level": existing_level,
-            "reup_score_components": existing_components,
-            "reup_score_reasons": _first_present(metadata.get("reup_score_reasons"), raw.get("reup_score_reasons")),
-            "engagement_score": _first_present(metadata.get("engagement_score"), raw.get("engagement_score")),
-            "engagement_rate": _first_present(metadata.get("engagement_rate"), raw.get("engagement_rate")),
-            "engagement_rate_basis": _first_present(metadata.get("engagement_rate_basis"), raw.get("engagement_rate_basis")),
-        }
-
     like_count = _int_or_none(_first_present(metadata.get("like_count"), raw.get("like_count"), stats.get("like_count"), stats.get("digg_count")))
     comment_count = _int_or_none(_first_present(metadata.get("comment_count"), raw.get("comment_count"), stats.get("comment_count")))
     share_count = _int_or_none(_first_present(metadata.get("share_count"), raw.get("share_count"), stats.get("share_count")))
     favorite_count = _int_or_none(_first_present(metadata.get("favorite_count"), raw.get("favorite_count"), stats.get("favorite_count"), stats.get("collect_count")))
+    follower_count = _resolve_follower_count_for_capture_item(metadata=metadata, raw=raw)
     engagement_score = sum(value or 0 for value in (like_count, comment_count, share_count, favorite_count))
     views_mid = _int_or_none(estimated_views.get("estimated_views_mid"))
     view_count = _int_or_none(_first_present(metadata.get("view_count"), raw.get("view_count"), stats.get("view_count"), stats.get("play_count")))
@@ -2197,19 +2282,36 @@ def _canonical_reup_score_for_capture_item(item: CapturedItem, *, metadata: dict
     if share_count is None:
         missing.append("shares")
 
+    outlier_bonus = _score_outlier_bonus(views_mid, follower_count)
     components = {
         "performance": _score_performance(views_mid),
-        "engagement": _score_engagement(existing_engagement_rate, engagement_score if engagement_score > 0 else None),
-        "shareability": _score_shareability(share_count),
+        "engagement": _score_engagement(views_mid, like_count, comment_count),
+        "virality_retention": _score_virality_retention(views_mid, share_count, favorite_count),
         "duration_fit": _score_duration_fit(duration_seconds),
         "recency": _score_recency(posted_at),
         "metadata_quality": max(0, 10 - len(missing) * 2),
-        "penalty": _score_penalty(item, has_thumbnail, duration_seconds is not None, has_posted, has_views, has_any_metric),
+        "penalty": _score_penalty(item, has_thumbnail, duration_seconds is not None, has_posted, has_views, has_any_metric, metadata=metadata),
+        "outlier_bonus": outlier_bonus,
     }
     almost_no_metadata = not has_thumbnail and duration_seconds is None and not has_posted and not has_views and not has_any_metric
-    score = 0 if almost_no_metadata else round(max(0, min(100, sum(components.values()))))
+    base_score = sum(value for key, value in components.items() if key != "outlier_bonus")
+    score = 0 if almost_no_metadata else round(max(0, min(100, base_score + outlier_bonus)))
     label, level = _label_for_score(score, missing)
-    reasons = _score_reasons(label=label, views=views_mid, engagement_rate=engagement_rate, share_count=share_count, duration_seconds=duration_seconds, missing=missing, has_thumbnail=has_thumbnail, has_posted=has_posted)
+    reasons = _score_reasons(
+        label=label,
+        views=views_mid,
+        like_count=like_count,
+        comment_count=comment_count,
+        share_count=share_count,
+        favorite_count=favorite_count,
+        follower_count=follower_count,
+        duration_seconds=duration_seconds,
+        missing=missing,
+        has_thumbnail=has_thumbnail,
+        has_posted=has_posted,
+        has_views=has_views,
+        outlier_bonus=outlier_bonus,
+    )
     return {
         "reup_score": score,
         "reup_score_label": label,
@@ -2232,65 +2334,91 @@ def _format_compact_number(value: int) -> str:
     return str(value)
 
 
+def _resolve_follower_count_for_capture_item(
+    *,
+    metadata: dict[str, Any] | None = None,
+    raw: dict[str, Any] | None = None,
+    session_metadata: dict[str, Any] | None = None,
+) -> int | None:
+    metadata = metadata or {}
+    raw = raw or {}
+    session_metadata = session_metadata or {}
+    capture_context = session_metadata.get("capture_context") if isinstance(session_metadata.get("capture_context"), dict) else {}
+    author = metadata.get("author") if isinstance(metadata.get("author"), dict) else {}
+    profile = metadata.get("profile") if isinstance(metadata.get("profile"), dict) else {}
+    return _int_or_none(
+        _first_present(
+            metadata.get("follower_count"),
+            raw.get("follower_count"),
+            capture_context.get("follower_count"),
+            session_metadata.get("follower_count"),
+            author.get("follower_count"),
+            profile.get("follower_count"),
+        )
+    )
+
+
 def _score_performance(views: int | None) -> int:
-    if views is None:
+    if views is None or views <= 0:
         return 0
-    if views >= 500_000:
-        return 25
-    if views >= 100_000:
-        return 22
-    if views >= 50_000:
-        return 18
-    if views >= 10_000:
-        return 14
-    if views >= 3_000:
-        return 9
-    return 5
-
-
-def _score_engagement(rate: float | None, score: int | None) -> int:
-    if rate is not None:
-        if rate >= 0.08:
-            return 25
-        if rate >= 0.05:
-            return 21
-        if rate >= 0.03:
-            return 17
-        if rate >= 0.015:
-            return 12
-        if rate > 0:
-            return 7
-    if score is not None and score > 0:
-        import math
-
-        return min(12, max(4, round(math.log10(score + 1) * 4)))
+    if 100_000 <= views <= 3_000_000:
+        return 20
+    if 10_000 <= views < 100_000:
+        return 15
+    if 3_000_000 < views <= 10_000_000:
+        return 10
+    if views > 10_000_000:
+        return 5
+    if views < 10_000:
+        return 2
     return 0
 
 
-def _score_shareability(shares: int | None) -> int:
-    if shares is None:
+def _score_engagement(views: int | None, like_count: int | None, comment_count: int | None) -> int:
+    if views is None or views <= 0:
         return 0
-    if shares >= 5000:
+    rate = ((like_count or 0) + (comment_count or 0)) / views
+    points = 2
+    if rate >= 0.08:
+        points = 20
+    elif rate >= 0.05:
+        points = 15
+    elif rate >= 0.03:
+        points = 10
+    elif rate >= 0.015:
+        points = 5
+    if views < 10_000:
+        return min(10, points)
+    return points
+
+
+def _score_virality_retention(views: int | None, share_count: int | None, favorite_count: int | None) -> int:
+    if views is None or views <= 0:
+        return 0
+    viral_rate = ((share_count or 0) * 1.5 + (favorite_count or 0) * 2.0) / views
+    if viral_rate >= 0.03:
+        return 20
+    if viral_rate >= 0.015:
         return 15
-    if shares >= 1000:
-        return 13
-    if shares >= 250:
+    if viral_rate >= 0.005:
         return 10
-    if shares >= 50:
-        return 7
-    if shares > 0:
-        return 4
-    return 1
+    return 5
+
+
+def _score_outlier_bonus(views: int | None, follower_count: int | None) -> int:
+    if views is None or views <= 0:
+        return 0
+    if follower_count is None or follower_count <= 0:
+        return 0
+    return 15 if views / follower_count > 10 else 0
 
 
 def _score_duration_fit(duration: float | None) -> int:
     if duration is None:
         return 0
     if 12 <= duration <= 75:
-        return 15
+        return 10
     if 6 <= duration <= 120:
-        return 11
-    if 3 <= duration <= 180:
         return 7
     return 3
 
@@ -2298,19 +2426,28 @@ def _score_duration_fit(duration: float | None) -> int:
 def _score_recency(posted_at: datetime | None) -> int:
     if posted_at is None:
         return 0
-    age_days = max(0, (datetime.now(UTC) - posted_at).total_seconds() / 86400)
+    age_ms = max(0, (datetime.now(UTC) - posted_at).total_seconds() * 1000)
+    age_hours = age_ms / 3_600_000
+    if age_hours <= 48:
+        return 20
+    age_days = age_hours / 24
     if age_days <= 7:
-        return 10
+        return 15
     if age_days <= 30:
-        return 8
-    if age_days <= 90:
-        return 6
-    if age_days <= 180:
-        return 4
-    return 2
+        return 10
+    return 5
 
 
-def _score_penalty(item: CapturedItem, has_thumbnail: bool, has_duration: bool, has_posted: bool, has_views: bool, has_any_metric: bool) -> int:
+def _score_penalty(
+    item: CapturedItem,
+    has_thumbnail: bool,
+    has_duration: bool,
+    has_posted: bool,
+    has_views: bool,
+    has_any_metric: bool,
+    *,
+    metadata: dict[str, Any] | None = None,
+) -> int:
     penalty = 0
     if not has_thumbnail:
         penalty -= 8
@@ -2323,9 +2460,63 @@ def _score_penalty(item: CapturedItem, has_thumbnail: bool, has_duration: bool, 
     item_status = getattr(item, "status", None)
     if item_status in {CapturedItemStatus.DUPLICATE, CapturedItemStatus.FAILED} or getattr(item, "duplicate_of_item_id", None) or getattr(item, "existing_source_video_id", None):
         penalty -= 20
+    metadata = metadata or {}
+    if metadata.get("metadata_status") == "failed":
+        penalty -= 20
+    if item_status in {CapturedItemStatus.RAW, CapturedItemStatus.NEEDS_ENRICHMENT, CapturedItemStatus.PREVIEW_MISSING}:
+        penalty -= 8
     if not has_views:
         penalty -= 5
     return max(-30, penalty)
+
+
+def _score_reasons(
+    *,
+    label: str,
+    views: int | None,
+    like_count: int | None,
+    comment_count: int | None,
+    share_count: int | None,
+    favorite_count: int | None,
+    follower_count: int | None,
+    duration_seconds: float | None,
+    missing: list[str],
+    has_thumbnail: bool,
+    has_posted: bool,
+    has_views: bool,
+    outlier_bonus: int,
+) -> list[str]:
+    reasons: list[str] = []
+    engagement_rate = ((like_count or 0) + (comment_count or 0)) / views if views and views > 0 else None
+    if label == "Needs metadata":
+        reasons.append("Needs metadata")
+    if views is not None and 100_000 <= views <= 3_000_000:
+        reasons.append("Sweet-spot view range")
+    if views is not None and views > 10_000_000:
+        reasons.append("Saturated mega-views")
+    if engagement_rate is not None and engagement_rate >= 0.03 and (views or 0) >= 10_000:
+        reasons.append("Good engagement rate")
+    if share_count is not None and favorite_count is not None and views and views > 0:
+        viral_rate = ((share_count or 0) * 1.5 + (favorite_count or 0) * 2.0) / views
+        if viral_rate >= 0.015:
+            reasons.append("Strong share/save signal")
+    if duration_seconds is not None and 12 <= duration_seconds <= 75:
+        reasons.append("Duration fits review range")
+    if outlier_bonus > 0:
+        reasons.append("Outlier reach vs followers")
+    if not has_posted or "posted" in missing:
+        reasons.append("Missing posted date")
+    if not has_thumbnail or "thumbnail" in missing:
+        reasons.append("Missing thumbnail")
+    if not has_views or "views" in missing:
+        reasons.append("Needs estimated views")
+    if follower_count is None and views is not None and views >= 100_000:
+        reasons.append("Follower count unavailable")
+    deduped: list[str] = []
+    for reason in reasons:
+        if reason not in deduped:
+            deduped.append(reason)
+    return deduped[:4]
 
 
 def _label_for_score(score: int, missing: list[str]) -> tuple[str, str]:
@@ -2339,27 +2530,6 @@ def _label_for_score(score: int, missing: list[str]) -> tuple[str, str]:
     if score >= 40:
         return "Average", "average"
     return "Low", "low"
-
-
-def _score_reasons(*, label: str, views: int | None, engagement_rate: float | None, share_count: int | None, duration_seconds: float | None, missing: list[str], has_thumbnail: bool, has_posted: bool) -> list[str]:
-    reasons: list[str] = []
-    if label == "Needs metadata":
-        reasons.append("Needs metadata")
-    if views is not None and views >= 50_000:
-        reasons.append("Strong estimated views")
-    if engagement_rate is not None and engagement_rate >= 0.03:
-        reasons.append("Good engagement rate")
-    if share_count is not None and share_count >= 50:
-        reasons.append("High share count")
-    if duration_seconds is not None and 12 <= duration_seconds <= 75:
-        reasons.append("Duration fits review range")
-    if not has_posted or "posted" in missing:
-        reasons.append("Missing posted date")
-    if not has_thumbnail or "thumbnail" in missing:
-        reasons.append("Missing thumbnail")
-    if "views" in missing:
-        reasons.append("Estimated views derived from likes")
-    return reasons[:4]
 
 
 def _string_or_none(value: Any) -> str | None:

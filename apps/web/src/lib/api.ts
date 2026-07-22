@@ -102,7 +102,8 @@ import type {
   CaptureSessionItemsBySessionResponse,
   CaptureSessionListResponse,
   CaptureSessionStatus,
-  CapturedItemStatus
+  CapturedItemStatus,
+  StudioItemStatusFilter
 } from "../types/capture-inbox";
 import type {
   ReupQueueActionRequest,
@@ -700,6 +701,7 @@ export async function rotateWorkspaceInvite(
 
 export type CandidateListResult = {
   candidates: Candidate[];
+  statusCounts: CandidateListResponse["status_counts"];
   totalCount: number;
   view: "summary" | "detail";
 };
@@ -755,6 +757,7 @@ export async function fetchCandidates(
   options?: { limit?: number; offset?: number }
 ): Promise<CandidateListResult> {
   const params = new URLSearchParams();
+  if (filters.status) params.set("status", filters.status);
   if (filters.minScore) params.set("min_score", filters.minScore);
   if (filters.maxScore) params.set("max_score", filters.maxScore);
   if (filters.sourceProfileId) params.set("source_profile_id", filters.sourceProfileId);
@@ -775,6 +778,7 @@ export async function fetchCandidates(
   const summaries = payload.candidates as CandidateSummary[];
   return {
     candidates: summaries.map(summaryToCandidate),
+    statusCounts: payload.status_counts ?? {},
     totalCount: payload.total_count,
     view: payload.view
   };
@@ -1049,6 +1053,7 @@ export async function fetchCaptureInboxItems(filters: {
   captureSessionId?: string;
   profileUrl?: string;
   status?: CapturedItemStatus;
+  studioStatus?: StudioItemStatusFilter;
   limit?: number;
   offset?: number;
 } = {}): Promise<CapturedItemListResponse> {
@@ -1056,6 +1061,7 @@ export async function fetchCaptureInboxItems(filters: {
   if (filters.captureSessionId) params.set("capture_session_id", filters.captureSessionId);
   if (filters.profileUrl) params.set("profile_url", filters.profileUrl);
   if (filters.status) params.set("status", filters.status);
+  if (filters.studioStatus) params.set("studio_status", filters.studioStatus);
   params.set("limit", String(filters.limit ?? 100));
   params.set("offset", String(filters.offset ?? 0));
   const response = await apiFetch(`${API_BASE_URL}/capture-inbox/items?${params.toString()}`, { cache: "no-store" });
@@ -2723,6 +2729,26 @@ export async function fetchSourceVideoAssetManifest(sourceVideoId: string): Prom
     throw new Error(`Failed to load asset manifest: ${response.status}`);
   }
   return (await response.json()) as SourceVideoAssetManifest;
+}
+
+/** Ask the local API to open Explorer on the current SOURCE_VIDEO_RAW file (no path in response). */
+export async function revealSourceVideoLocalAsset(sourceVideoId: string): Promise<void> {
+  const response = await apiFetch(`${API_BASE_URL}/source-videos/${encodeURIComponent(sourceVideoId)}/reveal-local-asset`, {
+    method: "POST"
+  });
+  if (!response.ok) {
+    let message = `Failed to open downloaded media (${response.status})`;
+    try {
+      const body = (await response.json()) as { detail?: { message?: string } | string };
+      if (typeof body.detail === "string" && body.detail.trim()) message = body.detail;
+      else if (body.detail && typeof body.detail === "object" && typeof body.detail.message === "string") {
+        message = body.detail.message;
+      }
+    } catch {
+      // keep status fallback
+    }
+    throw new Error(message);
+  }
 }
 
 export function mediaAssetContentUrl(assetId: string): string {

@@ -36,7 +36,17 @@ const testDir = dirname(fileURLToPath(import.meta.url));
 const pageSource = readFileSync(resolve(testDir, "../components/reup-queue/ReupQueuePage.tsx"), "utf8");
 const cssSource = readFileSync(resolve(testDir, "../app/globals.css"), "utf8");
 
-assert.match(pageSource, /reup-queue-view-toggle/, "Reup Queue must expose Gallery/Worklist toggle");
+assert.match(pageSource, /WorkViewToggle/, "Reup Queue must expose Gallery/Worklist toggle in shared Work chrome");
+assert.match(
+  pageSource,
+  /<WorkGalleryHeader[\s\S]*WorkViewToggle/,
+  "View mode toggle must sit on the gallery/worklist content header"
+);
+assert.doesNotMatch(
+  pageSource.slice(pageSource.indexOf("function ReupQueueStudioFilters"), pageSource.indexOf("function ReupQueueGalleryPreloading")),
+  /WorkViewToggle/,
+  "View mode must not remain in the search/sort filter deck"
+);
 assert.match(pageSource, /ReupQueueWorklistRow/, "Reup Queue must render dense worklist rows");
 assert.match(pageSource, /readReupQueueViewMode/, "Reup Queue must restore view mode preference");
 assert.match(pageSource, /writeReupQueueViewMode/, "Reup Queue must persist view mode preference");
@@ -47,10 +57,22 @@ const worklistSource = pageSource.slice(
   pageSource.indexOf("function ReupQueueMediaTile")
 );
 
-assert.match(pageSource, /reup-queue-worklist is-rail is-dense is-soft/, "Worklist must use spaced soft-row chrome");
+assert.match(pageSource, /reup-queue-worklist work-studio-worklist/, "Worklist must use shared Work studio list chrome");
+assert.match(worklistSource, /work-studio-worklist-row/, "Each Worklist item must use shared Work studio row chrome");
 assert.match(pageSource, /worklistStageLabel/, "Worklist must use short stage labels");
 assert.match(pageSource, /worklistTranscriptHref/, "Worklist must deep-link Analyzed rows to Transcript");
-assert.match(pageSource, /worklistNoDialogueHint/, "Worklist must surface Skip dubbing when analyze finds no speech");
+assert.match(worklistSource, /worklistNoDialogueHint/, "Worklist must keep Skip dubbing context for No dialogue rows");
+assert.match(
+  worklistSource,
+  /className=\{`reup-queue-worklist-status is-\$\{stageTone\}`\}[\s\S]*?title=\{\s*noDialogueHint/,
+  "No-dialogue guidance must live on the status chip title, not a fake CTA"
+);
+assert.doesNotMatch(worklistSource, /reup-queue-worklist-no-dialogue/, "Worklist must not keep a dedicated no-dialogue action chip");
+assert.doesNotMatch(
+  worklistSource.slice(worklistSource.indexOf("reup-queue-worklist-actions")),
+  /\{noDialogueHint\}/,
+  "Worklist actions must not render the long Skip dubbing hint as a button label"
+);
 assert.doesNotMatch(pageSource, /\/ops\/jobs/, "Worklist must not deep-link Ops job monitor");
 assert.match(pageSource, /primaryQueueActionLabel/, "Worklist must share Gallery primary CTA labels");
 assert.doesNotMatch(
@@ -75,10 +97,10 @@ assert.doesNotMatch(worklistSource, /queueTileScoreBadge|worklist-score/, "Workl
 assert.doesNotMatch(worklistSource, /queueTilePostedLabel|queueTileViewsLabel|queueTileDurationLabel/, "Worklist rail must not show posted/views/duration meta");
 assert.doesNotMatch(worklistSource, /capture-inbox-reup-score-badge|tierLabel/, "Worklist must not reuse gallery score badges");
 
-assert.match(cssSource, /\.reup-queue-worklist\.is-rail\.is-dense\.is-soft/, "Soft dense rail must have dedicated CSS hook");
+assert.match(cssSource, /\.work-studio-worklist/, "Shared Worklist surface must have dedicated CSS");
 assert.match(
   cssSource,
-  /\.reup-queue-worklist\.is-rail\.is-dense\.is-soft[\s\S]*gap:\s*0\.75rem/,
+  /\.work-studio-worklist[\s\S]*gap:\s*0\.75rem/,
   "Soft worklist must space rows apart for item separation"
 );
 assert.match(
@@ -93,8 +115,8 @@ assert.doesNotMatch(
 );
 assert.match(
   cssSource,
-  /grid-template-columns:\s*auto\s+52px\s+minmax\(0,\s*1fr\)\s+10\.5rem\s+auto/,
-  "Soft worklist must use mock-aligned ops grid"
+  /grid-template-columns:\s*auto\s+52px\s+minmax\(0,\s*1fr\)\s+10\.5rem\s+minmax\(12\.5rem,\s*auto\)/,
+  "Soft worklist must reserve a fixed CTA column so Ready/Waiting rows share one right edge"
 );
 assert.match(cssSource, /\.reup-queue-worklist-action\.is-with-icon/, "Soft worklist must style icon+text actions");
 assert.match(cssSource, /\.reup-queue-worklist-status\.is-active/, "Soft worklist must support active/downloading blue tone");

@@ -19,7 +19,9 @@ assert.match(overlaySource, /export function WorkMediaTileOverlay/, "Shared over
 assert.match(overlaySource, /density = "compact"/, "Work tiles must default to compact micro rail");
 assert.match(overlaySource, /is-compact/, "Compact overlay must expose is-compact class");
 assert.match(overlaySource, /statusChips\.slice\(0, 1\)/, "Compact overlay must show only one status chip on tile");
-assert.match(overlaySource, /work-media-tile-score-inline/, "Compact score badge must render inline score · tier");
+assert.match(overlaySource, /<strong>\{badge\.valueLabel\}<\/strong>/, "Compact score badge must render the numeric score only");
+assert.doesNotMatch(overlaySource, /work-media-tile-score-inline/, "Compact score badge must not keep an inline score · tier wrapper");
+assert.doesNotMatch(overlaySource, /<small>\{badge\.tierLabel\}<\/small>/, "Compact score badge must not render tier text in the badge");
 
 assert.match(cssSource, /\.work-media-tile-overlay\.is-compact/, "CSS must style compact micro rail");
 assert.match(cssSource, /\.work-media-tile-score-badge\.is-inline/, "CSS must style inline score badge");

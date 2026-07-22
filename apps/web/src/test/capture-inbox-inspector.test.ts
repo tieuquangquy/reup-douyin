@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   formatMetadataGroupStatus,
@@ -6,6 +9,10 @@ import {
   itemNeedsInspectorHydration
 } from "../lib/captureInboxInspector";
 import type { CapturedItem } from "../types/capture-inbox";
+
+const testDir = dirname(fileURLToPath(import.meta.url));
+const pageSource = readFileSync(resolve(testDir, "../components/capture-inbox/CaptureInboxPage.tsx"), "utf8");
+const actionsSource = readFileSync(resolve(testDir, "../components/capture-inbox/CaptureInboxTileActions.tsx"), "utf8");
 
 const slimProfileItem = {
   id: "item-slim",
@@ -87,5 +94,29 @@ assert.equal(derivedByLabel["Performance status"], "Captured");
 assert.match(derivedByLabel["Duration source"], /Captured \(source not recorded\)|profile card/);
 assert.equal(formatMetadataGroupStatus("captured"), "Captured");
 assert.equal(formatMetadataGroupStatus(null), "Not captured");
+
+assert.match(
+  pageSource,
+  /WorkItemDetailsDrawer[\s\S]*footer=\{[\s\S]*CaptureInboxTileActions/,
+  "Item details drawer must expose status-gated actions in the footer"
+);
+assert.match(
+  actionsSource,
+  /variant\s*=\s*"tile"\s*\|\s*"inspector"|variant\?:\s*"tile"\s*\|\s*"inspector"/,
+  "Capture inbox tile actions must support inspector variant like Review Board"
+);
+assert.match(
+  actionsSource,
+  /captureInboxDetailsActionModel|PROMOTED[\s\S]*Open candidate|status === "PROMOTED"/,
+  "Promoted items must show Open candidate"
+);
+assert.match(actionsSource, /promote_now/, "Non-promoted items must keep Promote when eligible");
+assert.match(actionsSource, /re_evaluate_intake/, "Non-promoted items must keep Re-check");
+assert.match(actionsSource, /delete_items/, "Non-promoted items must keep Delete");
+assert.match(
+  actionsSource,
+  /captureInboxDetailsActionModel/,
+  "Details footer must gate actions with the stage-aware Capture Inbox model"
+);
 
 console.log("capture-inbox-inspector.test.ts passed");

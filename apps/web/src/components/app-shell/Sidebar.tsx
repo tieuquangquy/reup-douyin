@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { usePathname } from "next/navigation";
 import type { NavSection as NavSectionConfig, NavSurface } from "../../lib/navigationConfig";
 import { extractSourceVideoIdFromPath } from "../../lib/navigationConfig";
@@ -12,6 +12,7 @@ const CURRENT_SOURCE_VIDEO_KEY = "reup-douyin-current-source-video-id";
 export function Sidebar({ surface, sections }: { surface: NavSurface; sections: NavSectionConfig[] }) {
   const pathname = usePathname() || "/";
   const t = useT();
+  const sidebarRef = useRef<HTMLElement>(null);
   const [currentSourceVideoId, setCurrentSourceVideoId] = useState<string | null>(null);
 
   useEffect(() => {
@@ -24,8 +25,17 @@ export function Sidebar({ surface, sections }: { surface: NavSurface; sections: 
     setCurrentSourceVideoId(localStorage.getItem(CURRENT_SOURCE_VIDEO_KEY));
   }, [pathname]);
 
+  useEffect(() => {
+    const frameId = window.requestAnimationFrame(() => {
+      const activeItem = sidebarRef.current?.querySelector<HTMLElement>('[aria-current="page"]');
+      activeItem?.scrollIntoView({ behavior: "auto", block: "center", inline: "nearest" });
+    });
+
+    return () => window.cancelAnimationFrame(frameId);
+  }, [pathname]);
+
   return (
-    <aside className="app-sidebar">
+    <aside className="app-sidebar" ref={sidebarRef}>
       <a className="app-brand" href={surface === "operator" ? "/" : "/ops"}>
         <span className="app-brand__mark">
           <img alt="" height={28} src="/brand/logo-loop-r.svg" width={28} />

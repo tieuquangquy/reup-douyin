@@ -22,11 +22,15 @@ import {
   type TranslationPromptResponse
 } from "../../lib/api";
 import { useT } from "../../lib/i18n";
+import { useAsyncAction } from "../../lib/useAsyncAction";
 import { isSetupTableInteractiveDragTarget, moveItemIndex, profileIdsOf } from "../../lib/opsProfileReorder";
 import { OpsConsoleShell } from "../app-shell/OpsConsoleShell";
 import { TopbarRefreshButton } from "../app-shell/TopbarRefreshButton";
+import { AsyncButton } from "../shared/AsyncButton";
+import { AsyncContentBoundary } from "../shared/AsyncContentBoundary";
+import { useNotice } from "../shared/NoticeCenter";
 import { OpsCaptionSettingsTabs } from "./OpsCaptionSettingsTabs";
-import { OpsPanel, OpsState } from "./OpsShared";
+import { OpsPanel } from "./OpsShared";
 import { OpsTranslationSettingsTabs } from "./OpsTranslationSettingsTabs";
 
 export type PromptVariant = "translation" | "caption";
@@ -186,6 +190,8 @@ function previewFrom(prompt: string): string {
 
 export function OpsPromptSetupsPage({ variant }: { variant: PromptVariant }) {
   const t = useT();
+  const asyncAction = useAsyncAction();
+  const { notify } = useNotice();
   const api = apiForVariant(variant);
   const i18n = variant === "caption" ? "opsCaptionPrompt" : "opsTranslationPrompt";
   const navTitle = variant === "caption" ? t("nav.captionPrompt") : t("nav.translationPrompt");
@@ -324,6 +330,7 @@ export function OpsPromptSetupsPage({ variant }: { variant: PromptVariant }) {
       }
       const data = await api.saveProfile(profileId, promptDraft);
       applyEditorResponse(data);
+      notify({ id: `${idPrefix}-saved`, message: t(`${i18n}.saved`), tone: "success" });
     } catch (err) {
       setError(err instanceof Error ? err.message : t(`${i18n}.saveError`));
     } finally {
@@ -436,7 +443,9 @@ export function OpsPromptSetupsPage({ variant }: { variant: PromptVariant }) {
   if (loading && profiles.length === 0 && viewMode === "list") {
     return (
       <OpsConsoleShell actions={refreshAction} description={navDesc} title={navTitle}>
-        <OpsState title={t("ops.loadingTitle")} detail={t(`${i18n}.loadingDetail`)} />
+        <AsyncContentBoundary status="loading" skeletonVariant="list" loadingLabel={t(`${i18n}.loadingDetail`)}>
+          {null}
+        </AsyncContentBoundary>
       </OpsConsoleShell>
     );
   }
@@ -673,19 +682,18 @@ export function OpsPromptSetupsPage({ variant }: { variant: PromptVariant }) {
                     {t(`${i18n}.actionBack`)}
                   </span>
                 </button>
-                <button
-                  type="button"
-                  className={`primary${saving ? " is-busy" : ""}`}
-                  onClick={() => void onSave()}
-                  disabled={saving || profileBusy}
+                <AsyncButton
+                  className="primary"
+                  pending={asyncAction.isPending("save")}
+                  pendingLabel={t(`${i18n}.saving`)}
+                  leadingIcon={<SetupActionIcon kind="save" />}
+                  onClick={() => void asyncAction.run("save", onSave)}
+                  disabled={profileBusy}
                   aria-label={t(`${i18n}.save`)}
                   title={t(`${i18n}.save`)}
                 >
-                  <SetupActionIcon kind="save" />
-                  <span className="ops-tts-editor-actions__label">
-                    {saving ? t(`${i18n}.saving`) : t(`${i18n}.actionSave`)}
-                  </span>
-                </button>
+                  <span className="ops-tts-editor-actions__label">{t(`${i18n}.actionSave`)}</span>
+                </AsyncButton>
               </div>
             </div>
           }

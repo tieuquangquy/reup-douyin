@@ -7,7 +7,10 @@ from pathlib import Path
 
 import numpy as np
 
-from src.media_pipeline.video_renderer.inpaint_render import process_frame_bgr
+from src.media_pipeline.video_renderer.inpaint_render import (
+    _segment_from_pixel_box,
+    process_frame_bgr,
+)
 from src.media_pipeline.video_renderer.overlays import (
     OverlaySegment,
     dense_ui_content_panel,
@@ -70,8 +73,72 @@ class DenseUiOverlayTests(unittest.TestCase):
         self.assertGreaterEqual(len(labels), 5)
         self.assertEqual(overlays[-1].end_ms, 29000)
 
+    def test_text_only_endcard_emits_each_text_box_without_panel(self) -> None:
+        frame = _nutrition_dense_frame()
+        frame["boxes"].append(
+            {
+                "x": 0.89,
+                "y": 0.71,
+                "width": 0.08,
+                "height": 0.02,
+                "text": "",
+                "cover_only": True,
+                "cover_bounds": [0.88, 0.70, 0.10, 0.04],
+            }
+        )
+        payload = {
+            "endcard_mode": "text_only",
+            "frames": [frame],
+        }
+        overlays = overlays_from_ocr_payload(
+            payload,
+            {f"25000#{i}": f"VI{i}" for i in range(8)},
+            hold_ms=500,
+            video_duration_ms=29000,
+        )
+
+        self.assertTrue(all(seg.kind != "dense_ui" for seg in overlays))
+        # Seven CJK labels plus the date box.
+        self.assertGreaterEqual(len(overlays), 8)
+        self.assertTrue(any(seg.text_vi == "" for seg in overlays))
+        self.assertTrue(
+            any(
+                seg.text_vi == ""
+                and abs(seg.x - 0.89) < 1e-6
+                and abs(seg.y - 0.71) < 1e-6
+                for seg in overlays
+            )
+        )
+        bounded = next(seg for seg in overlays if abs(seg.x - 0.89) < 1e-6)
+        self.assertEqual(bounded.authority_bounds, (0.88, 0.70, 0.10, 0.04))
+
 
 class DenseUiRenderTests(unittest.TestCase):
+    def test_v32_authority_bounds_clamp_ink_recovery(self) -> None:
+        seg = OverlaySegment(
+            0,
+            1000,
+            0.40,
+            0.40,
+            0.10,
+            0.05,
+            "",
+            kind="ui",
+            authority_bounds=(0.38, 0.38, 0.14, 0.09),
+        )
+        refined = _segment_from_pixel_box(
+            seg,
+            (10, 10, 190, 190),
+            frame_w=200,
+            frame_h=200,
+            clamp_to=(76, 76, 104, 94),
+        )
+        self.assertGreaterEqual(refined.x, 0.38)
+        self.assertGreaterEqual(refined.y, 0.38)
+        self.assertLessEqual(refined.x + refined.width, 0.52)
+        self.assertLessEqual(refined.y + refined.height, 0.47)
+        self.assertEqual(refined.authority_bounds, seg.authority_bounds)
+
     def test_dense_panel_wipes_chinese_outside_ocr_boxes(self) -> None:
         """Full-screen Chinese crumbs (no OCR box) must still be covered by the panel."""
         h, w = 400, 300

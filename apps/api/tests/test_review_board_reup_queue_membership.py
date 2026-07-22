@@ -94,6 +94,45 @@ class ReviewBoardReupQueueMembershipTests(unittest.TestCase):
         self.assertTrue(summary.in_reup_queue)
         self.assertEqual(summary.reup_queue_status, ReupQueueStatus.READY_FOR_PROCESSING.value)
 
+    def test_candidate_detail_exposes_the_same_reup_queue_membership(self) -> None:
+        from src.api.routes.candidates import _candidate_detail_response
+
+        candidate_id = uuid4()
+        item_id = uuid4()
+        timestamp = datetime(2026, 4, 1, tzinfo=UTC)
+        candidate = SimpleNamespace(
+            id=candidate_id,
+            source_video_id=uuid4(),
+            status=CandidateStatus.APPROVED,
+            score=75.0,
+            score_version="v1",
+            score_label="strong",
+            score_breakdown_json={},
+            score_reason=None,
+            preset_name="viral_discovery",
+            filter_config_json=None,
+            inclusion_reasons_json=[],
+            exclusion_reasons_json=[],
+            warnings_json=[],
+            evaluated_at=timestamp,
+            priority=75,
+            metadata_json={},
+            created_at=timestamp,
+            updated_at=timestamp,
+            source_video=None,
+        )
+        membership = ReupQueueCandidateMembership(
+            in_reup_queue=True,
+            reup_queue_item_id=item_id,
+            reup_queue_status=ReupQueueStatus.READY_FOR_PROCESSING,
+        )
+
+        detail = _candidate_detail_response(candidate, reup_queue_membership=membership)
+
+        self.assertTrue(detail.in_reup_queue)
+        self.assertEqual(detail.reup_queue_item_id, item_id)
+        self.assertEqual(detail.reup_queue_status, ReupQueueStatus.READY_FOR_PROCESSING.value)
+
 
 if __name__ == "__main__":
     unittest.main()

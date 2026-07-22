@@ -14,18 +14,98 @@ const cssSource = readFileSync(resolve(testDir, "../app/globals.css"), "utf8");
 
 assert.doesNotMatch(headerSource, /<h1>/, "Header must not duplicate Operator shell title with h1");
 assert.match(headerSource, /transcript-header--command/, "Header must use command-bar layout");
-assert.match(headerSource, /editor-command__core/, "Save + Translate must form the core action pair");
-assert.match(headerSource, /editor-command__translate/, "Translate must remain a core action");
-assert.match(headerSource, /editor-command__tts/, "Generate TTS must sit in the command core");
+assert.match(headerSource, /transcript-header__back-icon/, "Back to review board must show a leading icon");
+assert.match(headerSource, /resolveTranscriptPipelineGuide/, "Header must resolve guided pipeline stage");
+assert.match(headerSource, /editor-command__pipeline/, "Header must show Review→Translate→TTS→Final stepper");
+assert.match(headerSource, /editor-command__pipeline-badge/, "Pipeline steps must render as pill badges");
+assert.match(headerSource, /editor-command__pipeline-connector/, "Pipeline badges must show step-by-step connectors");
+assert.match(headerSource, /editor-command__primary/, "Header must promote a single primary pipeline CTA");
+assert.match(headerSource, /editor-command__save/, "Save draft must remain available beside the pipeline");
+assert.match(headerSource, /editor-command__translate/, "Translate must remain wired");
+assert.match(headerSource, /editor-command__tts/, "Generate TTS must remain wired");
 assert.match(headerSource, /generateTtsConfirm/, "Generate TTS must confirm before enqueue");
 assert.match(headerSource, /onGenerateTts/, "Header must wire Generate TTS handler");
-assert.match(headerSource, /editor-command__rail/, "Secondary actions must live in one muted rail");
-assert.match(headerSource, /editor-command__discard/, "Discard must be demoted visually");
+assert.match(headerSource, /hasVietnamese|ttsRequiresVi|!guide\.hasVietnamese/, "Generate TTS must soft-gate when VI is empty");
+assert.match(headerSource, /isTranscriptPipelineActionUnlocked/, "Toolbar CTAs must gate on pipeline unlock");
+assert.match(headerSource, /editor-command__pipeline-lock/, "Locked pipeline steps must show a lock affordance");
+assert.match(headerSource, /pipelineLocked/, "Locked steps must expose a locked title/hint");
+assert.doesNotMatch(headerSource, /editor-command__more|<details/, "Toolbar must not hide actions behind a More menu");
+assert.match(headerSource, /translateAgain|regenerateTts/, "Rework actions must use again/regenerate labels");
+assert.match(headerSource, /translateAgainCascadeConfirm|reanalyzeCascadeConfirm/, "Cascade confirms must warn about downstream invalidation");
+assert.match(headerSource, /editor-command__freshness|ttsFreshness/, "Header must surface TTS freshness when narration may be stale");
+assert.match(headerSource, /ttsFreshness\s*!==\s*["']hidden["']|ttsFreshness\s*===\s*["'](current|outdated)["']/, "Freshness chip must gate on resolved freshness, not bare hasJoinedTts");
+assert.match(headerSource, /transcriptPipelineActionLabelKey/, "Action labels must resolve through pipeline helper");
+assert.match(pageSource, /fingerprintVietnameseDraft|ttsSourceFingerprint|ttsViFp/, "Page must persist VI fingerprint used for TTS freshness");
 assert.match(headerSource, /editor-command__icon/, "Command actions must show icon + text");
 assert.match(headerSource, /literal_safe/, "Single Translate button must enqueue literal_safe");
-assert.doesNotMatch(headerSource, /<details[\s\S]*editor-command__translate|editor-command__menu/, "Translate must not be a dropdown menu");
+assert.match(headerSource, /reanalyzeShort|Re-ASR|reanalyzeAudio/, "Re-ASR must stay available as advanced action");
+assert.match(
+  headerSource,
+  /primary === "translate"[\s\S]*editor-command__translate/,
+  "When Translate is next, it must render as the single primary CTA"
+);
+assert.match(
+  headerSource,
+  /isTranscriptPipelineActionUnlocked\("tts"/,
+  "Generate TTS must stay hidden until Translate is passed"
+);
+assert.match(
+  headerSource,
+  /isTranscriptPipelineActionUnlocked\("final"/,
+  "Final must stay hidden until TTS is passed"
+);
+assert.match(
+  headerSource,
+  /editor-command__save[\s\S]*editor-command__focus[\s\S]*editor-command__reasr[\s\S]*editor-command__discard/,
+  "Toolbar order must be Save → primary/focus → Re-ASR → Discard"
+);
+assert.doesNotMatch(headerSource, /editor-command__menu/, "Legacy translate dropdown menu must stay removed");
 assert.doesNotMatch(headerSource, /natural_viral|translateNaturalShort|translateLiteralShort/, "Literal/Natural translate options must be removed");
 assert.doesNotMatch(headerSource, /editor-toolbar__btn--save/, "Legacy multi-color button stack must be gone");
+assert.match(cssSource, /\.editor-command__pipeline/, "CSS must style the transcript pipeline stepper");
+assert.match(
+  cssSource,
+  /\.editor-command__pipeline-badge\s*\{[^}]*border-radius:\s*999px/,
+  "Pipeline badges must use pill shape"
+);
+assert.match(
+  cssSource,
+  /@keyframes\s+editor-pipeline-active-pulse/,
+  "Active pipeline step must pulse so current stage is noticeable"
+);
+assert.match(
+  cssSource,
+  /@keyframes\s+editor-pipeline-connector-flow/,
+  "Reached connectors must animate to show step-by-step flow"
+);
+assert.match(
+  cssSource,
+  /prefers-reduced-motion:\s*reduce[\s\S]*editor-command__pipeline/,
+  "Pipeline motion must respect reduced-motion preference"
+);
+assert.match(
+  cssSource,
+  /\.editor-command__pipeline-connector/,
+  "CSS must style step-by-step connectors between pipeline badges"
+);
+assert.match(
+  cssSource,
+  /\.editor-command__pipeline-step\.is-active\s+\.editor-command__pipeline-index\s*\{[^}]*background:\s*var\(--accent-strong\)/,
+  "Active pipeline step must use a filled index so current stage is obvious"
+);
+assert.match(
+  cssSource,
+  /\.editor-command__pipeline-lock/,
+  "CSS must style lock icon on pending pipeline steps"
+);
+assert.match(
+  cssSource,
+  /\.transcript-header--command\s+\.transcript-header__back\s*\{[^}]*inline-flex/,
+  "Back link must render as an inline-flex control (icon + label)"
+);
+assert.match(cssSource, /\.editor-command__primary/, "CSS must emphasize the primary pipeline CTA");
+assert.match(cssSource, /\.editor-command__discard/, "CSS must style Discard as a danger toolbar control");
+assert.match(cssSource, /\.editor-command__quiet/, "Non-primary command buttons must stay quiet");
 
 assert.match(pageSource, /transcript-bench/, "Page must use Dialogue Bench workspace");
 assert.match(pageSource, /TranscriptBeatRail/, "Page must mount beat rail");
@@ -57,8 +137,8 @@ assert.match(
 );
 assert.match(
   cssSource,
-  /\.editor-command__rail a,\s*\.editor-command__rail button\s*\{[^}]*min-height:\s*0/,
-  "Command rail must override global button min-height so secondary actions stay compact"
+  /\.editor-command__discard\s*\{[^}]*color:\s*#b91c1c/,
+  "Discard on the toolbar must stay visually demoted as danger"
 );
 
 assert.match(focusSource, /transcript-dual-pane/, "Focus editor must use ZH|VI dual pane");
@@ -77,13 +157,20 @@ assert.match(
 );
 assert.match(focusSource, /segment-ops__btn--play/, "Play remains the primary segment op");
 assert.match(focusSource, /segment-ops__icon/, "Segment ops must use icon + text");
+assert.match(focusSource, /isPlaying|transcriptEditorRow\.pause|kind=\{isPlaying \? "pause"/, "Focus Play control must toggle to Pause while video is playing");
 assert.match(
   focusSource,
-  /segment-ops__btn--play[\s\S]*SegmentOpsIcon[\s\S]*play[\s\S]*segment-ops__btn[\s\S]*SegmentOpsIcon[\s\S]*split/,
-  "Play and Split must both render icon + text"
+  /segment-ops__btn--play[\s\S]*SegmentOpsIcon[\s\S]*(?:play|pause)[\s\S]*segment-ops__btn[\s\S]*SegmentOpsIcon[\s\S]*split/,
+  "Play/Pause and Split must both render icon + text"
 );
+assert.match(pageSource, /pauseRequestId|onPlayingChange/, "Page must wire preview pause + playing state into focus Play control");
 assert.match(cssSource, /\.transcript-focus-chrome\s*\{/, "CSS must style quiet focus chrome");
 assert.match(cssSource, /\.transcript-focus-chrome__toolbar\s*\{/, "CSS must style timing/ops toolbar strip");
+assert.match(
+  cssSource,
+  /\.transcript-focus-chrome__toolbar \.segment-ops__btn--play:hover:not\(:disabled\)\s*\{[^}]*color:\s*#fff/,
+  "Toolbar Play/Pause hover must keep white label on accent (not bleached white-on-white)"
+);
 assert.match(cssSource, /\.timing-editor--compact/, "CSS must define compact timing editor");
 
 assert.match(railSource, /segmentsList/, "Beat rail must use Segments list label");
@@ -129,15 +216,15 @@ assert.match(actionBarSource, /if \(dirtyCount === 0\) return null/, "Floating d
 assert.match(cssSource, /\.editor-command \{/, "CSS must define professional command bar");
 assert.match(cssSource, /\.editor-command__tts/, "CSS must style Generate TTS as secondary to Translate");
 assert.match(cssSource, /\.transcript-bench-media__tts/, "CSS must style joined TTS audio player");
-assert.match(cssSource, /\.editor-command__rail/, "CSS must style secondary action rail");
+assert.match(cssSource, /\.transcript-header__bar/, "Command header must use a flex bar (not competing 3-col grid)");
 assert.match(
   cssSource,
-  /\.transcript-header\.transcript-header--command\s*\{[\s\S]*?grid-template-columns:\s*minmax\([^,]+,\s*1fr\)\s+auto;/,
-  "Command header must beat base 3-col grid so actions stay in the right column"
+  /\.transcript-header\.transcript-header--command\s*\{[\s\S]*?display:\s*block;/,
+  "Command header must override base grid so the bar owns layout"
 );
 assert.match(
   cssSource,
-  /\.transcript-header--command\s+\.editor-command\s*\{[\s\S]*?justify-self:\s*end;/,
+  /\.transcript-header--command\s+\.editor-command\s*\{[\s\S]*?margin-left:\s*auto;/,
   "Command toolbar must pin to the far right of the header"
 );
 

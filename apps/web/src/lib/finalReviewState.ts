@@ -15,6 +15,33 @@ export const DEFAULT_FINAL_REVIEW_CHECKLIST: ChecklistState = {
   warnings_checked: false
 };
 
+/** Prep hub before first render: OCR/clean → start render → compare. */
+export type FinalReviewPrepFocus = "ocr" | "render";
+
+/**
+ * OCR prep is complete only when cleaned video exists, or OCR explicitly skipped clean
+ * (no hard-sub / clean skipped). Orphan OCR events alone must not unlock Start render.
+ */
+export function isFinalReviewOcrPrepComplete(
+  summary: {
+    cleaned_video_asset_id?: string | null;
+    ocr_events_asset_id?: string | null;
+    clean_produced?: boolean;
+    warnings?: string[] | null;
+  } | null
+): boolean {
+  if (!summary) return false;
+  if (summary.cleaned_video_asset_id) return true;
+  const warnings = summary.warnings ?? [];
+  return warnings.includes("no_hardsub_detected") || warnings.includes("clean_skipped_no_hardsub");
+}
+
+export function resolveFinalReviewPrepFocus(
+  summary: Parameters<typeof isFinalReviewOcrPrepComplete>[0]
+): FinalReviewPrepFocus {
+  return isFinalReviewOcrPrepComplete(summary) ? "render" : "ocr";
+}
+
 export function getRenderWarnings(render: RenderOutput | null): string[] {
   if (!render) return [];
   const warningSummary = render.warning_summary_json ?? {};

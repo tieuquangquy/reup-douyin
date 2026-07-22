@@ -4,9 +4,12 @@ import Link from "next/link";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { fetchPublishHandoffs } from "../../lib/api";
 import { useT } from "../../lib/i18n";
+import { useLatestRequest } from "../../lib/useLatestRequest";
 import type { PublishHandoff } from "../../types/export-handoff";
 import { OperatorStudioShell } from "../app-shell/OperatorStudioShell";
 import { TopbarRefreshButton } from "../app-shell/TopbarRefreshButton";
+import { AsyncContentBoundary } from "../shared/AsyncContentBoundary";
+import { useNotice } from "../shared/NoticeCenter";
 import { OpsState, formatDateTime, statusTone, type OpsTone } from "../ops-console/OpsShared";
 
 function HandoffKpi({ label, value, detail, tone = "muted" }: { label: string; value: string; detail: string; tone?: OpsTone }) {
@@ -35,21 +38,20 @@ export function PublishHandoffsIndexPage() {
   const [handoffs, setHandoffs] = useState<PublishHandoff[]>([]);
   const [total, setTotal] = useState(0);
   const [loadedAt, setLoadedAt] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const request = useLatestRequest();
+  const { notify } = useNotice();
 
   async function load() {
-    setLoading(true);
-    setError(null);
+    const mode = loadedAt ? "refresh" : "initial";
     try {
-      const payload = await fetchPublishHandoffs(100);
-      setHandoffs(payload.items);
-      setTotal(payload.total_count);
-      setLoadedAt(new Date().toISOString());
+      await request.run(() => fetchPublishHandoffs(100), (payload) => {
+        setHandoffs(payload.items);
+        setTotal(payload.total_count);
+        setLoadedAt(new Date().toISOString());
+      }, mode);
+      if (mode === "refresh") notify({ id: "publish-handoffs-refresh", message: "Publish handoffs refreshed.", tone: "success" });
     } catch (err) {
-      setError(err instanceof Error ? err.message : t("opsPublishHandoffs.loadError"));
-    } finally {
-      setLoading(false);
+      if (mode === "refresh") notify({ id: "publish-handoffs-refresh", message: err instanceof Error ? err.message : t("opsPublishHandoffs.loadError"), tone: "error" });
     }
   }
 
@@ -65,29 +67,29 @@ export function PublishHandoffsIndexPage() {
   const hasAttention = needsAttention.length > 0;
 
   const refreshAction = (
-    <TopbarRefreshButton busy={loading && handoffs.length > 0} disabled={loading && handoffs.length === 0} onClick={() => void load()} />
+    <TopbarRefreshButton busy={request.refreshing} disabled={request.initialLoading} onClick={() => void load()} />
   );
 
-  if (loading && handoffs.length === 0 && !error) {
+  if (!loadedAt && !request.error) {
     return (
       <OperatorStudioShell actions={refreshAction} description={t("opsPublishHandoffs.description")} title={t("opsPublishHandoffs.title")}>
-        <OpsState title={t("opsPublishHandoffs.loadingTitle")} detail={t("opsPublishHandoffs.loadingDetail")} />
+        <AsyncContentBoundary skeletonVariant="list" status="loading"><span /></AsyncContentBoundary>
       </OperatorStudioShell>
     );
   }
 
-  if (error && handoffs.length === 0) {
+  if (request.error && !loadedAt) {
     return (
       <OperatorStudioShell actions={refreshAction} description={t("opsPublishHandoffs.description")} title={t("opsPublishHandoffs.title")}>
-        <OpsState title={t("opsPublishHandoffs.unavailableTitle")} detail={error} retry={() => void load()} />
+        <AsyncContentBoundary errorState={<OpsState title={t("opsPublishHandoffs.unavailableTitle")} detail={request.error.message} retry={() => void load()} />} skeletonVariant="list" status="error"><span /></AsyncContentBoundary>
       </OperatorStudioShell>
     );
   }
 
   return (
     <OperatorStudioShell actions={refreshAction} description={t("opsPublishHandoffs.description")} title={t("opsPublishHandoffs.title")}>
+      <AsyncContentBoundary refreshing={request.refreshing} skeletonVariant="list" status="success">
       <main className="ops-page ops-handoffs-page">
-        {error ? <div className="inline-error">{error}</div> : null}
 
         <div className="ops-handoffs-freshness">
           <p>
@@ -170,6 +172,7 @@ export function PublishHandoffsIndexPage() {
           ) : null}
         </section>
       </main>
+      </AsyncContentBoundary>
     </OperatorStudioShell>
   );
 }

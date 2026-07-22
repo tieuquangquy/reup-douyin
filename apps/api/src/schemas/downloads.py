@@ -51,3 +51,9 @@ class SourceVideoAssetsResponse(BaseModel):
     assets: list[MediaAssetResponse]
     manifest: dict
 
+
+class LocalAssetRevealResponse(BaseModel):
+    revealed: bool
+    asset_type: str
+    source_video_id: UUID
+

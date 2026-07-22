@@ -21,6 +21,8 @@ class TimedBox:
     h: float
     text: str = ""
     confidence: float = 0.0
+    cover_only: bool = False
+    cover_bounds: tuple[float, float, float, float] | None = None
 
     def as_xyxy(self) -> tuple[float, float, float, float]:
         return (self.x, self.y, self.x + self.w, self.y + self.h)
@@ -33,6 +35,12 @@ class TimedBox:
             "h": round(float(self.h), 6),
             "text": self.text,
             "confidence": round(float(self.confidence), 4),
+            **({"cover_only": True} if self.cover_only else {}),
+            **(
+                {"cover_bounds": [round(float(value), 6) for value in self.cover_bounds]}
+                if self.cover_bounds is not None
+                else {}
+            ),
         }
 
 

@@ -38,6 +38,8 @@ import {
 } from "../../lib/opsLlmProviderCatalog";
 import { isSetupTableInteractiveDragTarget, moveItemIndex, profileIdsOf } from "../../lib/opsProfileReorder";
 import { useT } from "../../lib/i18n";
+import { useAsyncAction } from "../../lib/useAsyncAction";
+import { useLatestRequest } from "../../lib/useLatestRequest";
 import {
   formatLlmProbeSuccess,
   formatProviderError,
@@ -46,6 +48,9 @@ import {
 } from "../../lib/opsTranslationAiFormat";
 import { OpsConsoleShell } from "../app-shell/OpsConsoleShell";
 import { TopbarRefreshButton } from "../app-shell/TopbarRefreshButton";
+import { AsyncButton } from "../shared/AsyncButton";
+import { AsyncContentBoundary } from "../shared/AsyncContentBoundary";
+import { useNotice } from "../shared/NoticeCenter";
 import { OpsCaptionSettingsTabs } from "./OpsCaptionSettingsTabs";
 import { OpsPanel, OpsState } from "./OpsShared";
 import { OpsTranslationSettingsTabs } from "./OpsTranslationSettingsTabs";
@@ -326,8 +331,22 @@ function apiForVariant(variant: LlmAiVariant): ApiBundle {
   };
 }
 
+async function latestOnly<T>(signal: AbortSignal, request: () => Promise<T>): Promise<T> {
+  try {
+    const value = await request();
+    if (signal.aborted) throw new DOMException("Request superseded", "AbortError");
+    return value;
+  } catch (reason) {
+    if (signal.aborted) throw new DOMException("Request superseded", "AbortError");
+    throw reason;
+  }
+}
+
 export function OpsLlmAiSetupsPage({ variant }: { variant: LlmAiVariant }) {
   const t = useT();
+  const asyncAction = useAsyncAction();
+  const modelRequest = useLatestRequest();
+  const { notify } = useNotice();
   const api = apiForVariant(variant);
   const i18n = variant === "caption" ? "opsCaptionAi" : "opsTranslationAi";
   const navTitle = variant === "caption" ? t("nav.captionAiSettings") : t("nav.translationSettings");
@@ -344,7 +363,7 @@ export function OpsLlmAiSetupsPage({ variant }: { variant: LlmAiVariant }) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
-  const [loadingModels, setLoadingModels] = useState(false);
+  const loadingModels = modelRequest.pending;
   const [modelOptions, setModelOptions] = useState<string[]>([]);
   const [modelListError, setModelListError] = useState<ProviderErrorView | null>(null);
   const [manualModel, setManualModel] = useState(false);
@@ -363,7 +382,6 @@ export function OpsLlmAiSetupsPage({ variant }: { variant: LlmAiVariant }) {
   const [dragFromId, setDragFromId] = useState<string | null>(null);
   const [dragOverId, setDragOverId] = useState<string | null>(null);
   const renameInputRef = useRef<HTMLInputElement | null>(null);
-  const modelsRequestIdRef = useRef(0);
 
   function applyListResponse(data: TranslationAiResponse) {
     setProfiles(data.profiles || []);
@@ -449,8 +467,6 @@ export function OpsLlmAiSetupsPage({ variant }: { variant: LlmAiVariant }) {
 
   async function refreshModels() {
     if (!form || !readyForModels) return;
-    const requestId = ++modelsRequestIdRef.current;
-    setLoadingModels(true);
     setModelListError(null);
     try {
       const payload: Parameters<typeof api.listModels>[0] = {
@@ -465,28 +481,31 @@ export function OpsLlmAiSetupsPage({ variant }: { variant: LlmAiVariant }) {
       } else {
         payload.api_key = null;
       }
-      const result = await api.listModels(payload);
-      if (requestId !== modelsRequestIdRef.current) return;
-      if (result.models.length > 0) {
-        const next = form.model && !result.models.includes(form.model)
-          ? [form.model, ...result.models]
-          : result.models;
-        setModelOptions(next);
-        setManualModel(false);
-        setModelListError(
-          result.ok
-            ? null
-            : formatProviderError(result.detail || t(`${i18n}.modelsEmpty`), providerErrorLabels())
-        );
-      } else {
-        setModelOptions(form.model ? [form.model] : []);
-        setManualModel(true);
-        setModelListError(
-          formatProviderError(result.detail || t(`${i18n}.modelsEmpty`), providerErrorLabels())
-        );
-      }
+      await modelRequest.run(
+        (signal) => latestOnly(signal, () => api.listModels(payload)),
+        (result) => {
+          if (result.models.length > 0) {
+            const next = form.model && !result.models.includes(form.model)
+              ? [form.model, ...result.models]
+              : result.models;
+            setModelOptions(next);
+            setManualModel(false);
+            setModelListError(
+              result.ok
+                ? null
+                : formatProviderError(result.detail || t(`${i18n}.modelsEmpty`), providerErrorLabels())
+            );
+          } else {
+            setModelOptions(form.model ? [form.model] : []);
+            setManualModel(true);
+            setModelListError(
+              formatProviderError(result.detail || t(`${i18n}.modelsEmpty`), providerErrorLabels())
+            );
+          }
+        },
+        "refresh"
+      );
     } catch (err) {
-      if (requestId !== modelsRequestIdRef.current) return;
       setModelOptions(form.model ? [form.model] : []);
       setManualModel(true);
       setModelListError(
@@ -495,10 +514,6 @@ export function OpsLlmAiSetupsPage({ variant }: { variant: LlmAiVariant }) {
           providerErrorLabels()
         )
       );
-    } finally {
-      if (requestId === modelsRequestIdRef.current) {
-        setLoadingModels(false);
-      }
     }
   }
 
@@ -589,6 +604,7 @@ export function OpsLlmAiSetupsPage({ variant }: { variant: LlmAiVariant }) {
       }
       await api.saveProfile(profileId, payload);
       await loadList();
+      notify({ id: `${idPrefix}-saved`, message: t(`${i18n}.saved`), tone: "success" });
     } catch (err) {
       setError(err instanceof Error ? err.message : t(`${i18n}.saveError`));
     } finally {
@@ -722,6 +738,11 @@ export function OpsLlmAiSetupsPage({ variant }: { variant: LlmAiVariant }) {
         provider: result.provider,
         detail: result.detail
       });
+      notify({
+        id: `${idPrefix}-test`,
+        message: result.ok ? t(`${i18n}.testOk`) : t(`${i18n}.testFail`),
+        tone: result.ok ? "success" : "warning"
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : t(`${i18n}.testError`));
     } finally {
@@ -758,7 +779,9 @@ export function OpsLlmAiSetupsPage({ variant }: { variant: LlmAiVariant }) {
   if (loading && profiles.length === 0 && viewMode === "list") {
     return (
       <OpsConsoleShell actions={refreshAction} description={navDesc} title={navTitle}>
-        <OpsState title={t("ops.loadingTitle")} detail={t(`${i18n}.loadingDetail`)} />
+        <AsyncContentBoundary status="loading" skeletonVariant="list" loadingLabel={t(`${i18n}.loadingDetail`)}>
+          {null}
+        </AsyncContentBoundary>
       </OpsConsoleShell>
     );
   }
@@ -1175,32 +1198,29 @@ export function OpsLlmAiSetupsPage({ variant }: { variant: LlmAiVariant }) {
                   <SetupActionIcon kind="back" />
                   <span className="ops-tts-editor-actions__label">{t(`${i18n}.actionBack`)}</span>
                 </button>
-                <button
-                  type="button"
-                  className={testing ? "is-busy" : undefined}
-                  onClick={() => void onTest()}
-                  disabled={saving || testing || profileBusy}
+                <AsyncButton
+                  pending={asyncAction.isPending("test")}
+                  pendingLabel={t(`${i18n}.testing`)}
+                  leadingIcon={<SetupActionIcon kind="test" />}
+                  onClick={() => void asyncAction.run("test", onTest)}
+                  disabled={saving || profileBusy}
                   aria-label={t(`${i18n}.test`)}
                   title={t(`${i18n}.test`)}
                 >
-                  <SetupActionIcon kind="test" />
-                  <span className="ops-tts-editor-actions__label">
-                    {testing ? t(`${i18n}.testing`) : t(`${i18n}.actionTest`)}
-                  </span>
-                </button>
-                <button
-                  type="button"
-                  className={`primary${saving ? " is-busy" : ""}`}
-                  onClick={() => void onSave()}
-                  disabled={saving || testing || profileBusy}
+                  <span className="ops-tts-editor-actions__label">{t(`${i18n}.actionTest`)}</span>
+                </AsyncButton>
+                <AsyncButton
+                  className="primary"
+                  pending={asyncAction.isPending("save")}
+                  pendingLabel={t(`${i18n}.saving`)}
+                  leadingIcon={<SetupActionIcon kind="save" />}
+                  onClick={() => void asyncAction.run("save", onSave)}
+                  disabled={testing || profileBusy}
                   aria-label={t(`${i18n}.save`)}
                   title={t(`${i18n}.save`)}
                 >
-                  <SetupActionIcon kind="save" />
-                  <span className="ops-tts-editor-actions__label">
-                    {saving ? t(`${i18n}.saving`) : t(`${i18n}.actionSave`)}
-                  </span>
-                </button>
+                  <span className="ops-tts-editor-actions__label">{t(`${i18n}.actionSave`)}</span>
+                </AsyncButton>
               </div>
             </div>
           }
@@ -1335,15 +1355,16 @@ export function OpsLlmAiSetupsPage({ variant }: { variant: LlmAiVariant }) {
                   </select>
                 )}
                 <div className="ops-form-actions ops-ai-model-actions">
-                  <button
-                    type="button"
+                  <AsyncButton
                     className="ops-ai-model-action"
-                    onClick={() => void refreshModels()}
-                    disabled={loadingModels || !readyForModels}
+                    pending={loadingModels}
+                    pendingLabel={t(`${i18n}.loadingModels`)}
+                    leadingIcon={<SetupActionIcon kind="reload" />}
+                    onClick={() => void asyncAction.run("models", refreshModels, "replace")}
+                    disabled={!readyForModels}
                   >
-                    <SetupActionIcon kind="reload" />
-                    <span>{loadingModels ? t(`${i18n}.loadingModels`) : t(`${i18n}.loadModels`)}</span>
-                  </button>
+                    <span>{t(`${i18n}.loadModels`)}</span>
+                  </AsyncButton>
                   <button
                     type="button"
                     className="ops-ai-model-action"

@@ -14,9 +14,14 @@ import {
 } from "../../lib/api";
 import { useAuth } from "../../lib/auth";
 import { useT } from "../../lib/i18n";
+import { useAsyncAction } from "../../lib/useAsyncAction";
+import { useLatestRequest, type LatestRequestMode } from "../../lib/useLatestRequest";
 import { OpsConsoleShell } from "../app-shell/OpsConsoleShell";
 import { TopbarRefreshButton } from "../app-shell/TopbarRefreshButton";
 import { StatusBadge } from "../app-shell/StatusBadge";
+import { AsyncButton } from "../shared/AsyncButton";
+import { AsyncContentBoundary } from "../shared/AsyncContentBoundary";
+import { useNotice } from "../shared/NoticeCenter";
 import { OpsState, formatDateTime } from "./OpsShared";
 
 const ROLE_OPTIONS = ["owner", "admin", "operator", "viewer"] as const;
@@ -80,10 +85,7 @@ export function OpsUsersPage() {
   const { me } = useAuth();
   const [members, setMembers] = useState<WorkspaceMember[]>([]);
   const [invites, setInvites] = useState<WorkspaceInvite[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
-  const [busyId, setBusyId] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [roleFilter, setRoleFilter] = useState<string>("all");
   const [accessFilter, setAccessFilter] = useState<AccessFilter>("all");
@@ -101,23 +103,23 @@ export function OpsUsersPage() {
   const [lastInviteLink, setLastInviteLink] = useState<string | null>(null);
   const [rotatedLinkByInviteId, setRotatedLinkByInviteId] = useState<Record<string, string>>({});
   const [tempPassword, setTempPassword] = useState<string | null>(null);
+  const action = useAsyncAction();
+  const request = useLatestRequest();
+  const { notify } = useNotice();
 
-  async function load() {
-    setLoading(true);
-    setError(null);
-    try {
-      const [nextMembers, nextInvites] = await Promise.all([fetchWorkspaceMembers(), fetchWorkspaceInvites()]);
-      setMembers(nextMembers);
-      setInvites(nextInvites);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("opsUsers.loadError"));
-    } finally {
-      setLoading(false);
-    }
+  async function load(mode: LatestRequestMode = members.length || invites.length ? "refresh" : "initial") {
+    await request.run(
+      async () => Promise.all([fetchWorkspaceMembers(), fetchWorkspaceInvites()]),
+      ([nextMembers, nextInvites]) => {
+        setMembers(nextMembers);
+        setInvites(nextInvites);
+      },
+      mode
+    ).catch(() => undefined);
   }
 
   useEffect(() => {
-    void load();
+    void load("initial");
   }, [t]);
 
   const summary = useMemo(() => {
@@ -157,7 +159,7 @@ export function OpsUsersPage() {
     setInviteRole("operator");
     setLastInviteLink(null);
     setTempPassword(null);
-    setError(null);
+    setActionError(null);
   }
 
   function openEditDrawer(member: WorkspaceMember) {
@@ -170,7 +172,7 @@ export function OpsUsersPage() {
     setEditNotes(member.notes ?? "");
     setEditActive(member.isActive);
     setTempPassword(null);
-    setError(null);
+    setActionError(null);
   }
 
   function closeOverlay() {
@@ -181,23 +183,23 @@ export function OpsUsersPage() {
 
   async function handleInvite(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setBusyId("invite");
-    setError(null);
-    setMessage(null);
-    try {
-      const created = await createWorkspaceInvite({ email: inviteEmail.trim(), role: inviteRole });
-      const link = `${window.location.origin}/auth/invite?token=${encodeURIComponent(created.inviteToken)}`;
-      setLastInviteLink(link);
-      setMessage(t("opsUsers.inviteCreated"));
-      setInviteEmail("");
-      setInviteRole("operator");
-      setTab("pending");
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("opsUsers.inviteError"));
-    } finally {
-      setBusyId(null);
-    }
+    await action.run("invite", async () => {
+      setActionError(null);
+      try {
+        const created = await createWorkspaceInvite({ email: inviteEmail.trim(), role: inviteRole });
+        const link = `${window.location.origin}/auth/invite?token=${encodeURIComponent(created.inviteToken)}`;
+        setLastInviteLink(link);
+        notify({ message: t("opsUsers.inviteCreated"), tone: "success" });
+        setInviteEmail("");
+        setInviteRole("operator");
+        setTab("pending");
+        await load("refresh");
+      } catch (err) {
+        const message = err instanceof Error ? err.message : t("opsUsers.inviteError");
+        setActionError(message);
+        notify({ message, tone: "error" });
+      }
+    });
   }
 
   async function handleEdit(event: FormEvent<HTMLFormElement>) {
@@ -209,92 +211,96 @@ export function OpsUsersPage() {
       if (!confirmed) return;
     }
 
-    setBusyId(editingMember.operatorId);
-    setError(null);
-    setMessage(null);
-    try {
-      await updateWorkspaceMember(editingMember.operatorId, {
-        role: editRole,
-        isActive: editActive,
-        displayName: editDisplayName.trim() || null,
-        phone: editPhone.trim() || null,
-        address: editAddress.trim() || null,
-        notes: editNotes.trim() || null
-      });
-      setMessage(t("opsUsers.memberUpdated"));
-      closeOverlay();
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("opsUsers.updateError"));
-    } finally {
-      setBusyId(null);
-    }
+    await action.run(`member-${editingMember.operatorId}`, async () => {
+      setActionError(null);
+      try {
+        await updateWorkspaceMember(editingMember.operatorId, {
+          role: editRole,
+          isActive: editActive,
+          displayName: editDisplayName.trim() || null,
+          phone: editPhone.trim() || null,
+          address: editAddress.trim() || null,
+          notes: editNotes.trim() || null
+        });
+        notify({ message: t("opsUsers.memberUpdated"), tone: "success" });
+        closeOverlay();
+        await load("refresh");
+      } catch (err) {
+        const message = err instanceof Error ? err.message : t("opsUsers.updateError");
+        setActionError(message);
+        notify({ message, tone: "error" });
+      }
+    });
   }
 
   async function handleResetPassword() {
     if (!editingMember) return;
     const confirmed = window.confirm(t("opsUsers.resetPasswordConfirm").replace("{email}", editingMember.email));
     if (!confirmed) return;
-    setBusyId(`reset-${editingMember.operatorId}`);
-    setError(null);
-    setMessage(null);
-    try {
-      const reset = await resetWorkspaceMemberPassword(editingMember.operatorId);
-      setTempPassword(reset.temporaryPassword);
-      setMessage(t("opsUsers.resetPasswordDone"));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("opsUsers.resetPasswordError"));
-    } finally {
-      setBusyId(null);
-    }
+    await action.run(`reset-${editingMember.operatorId}`, async () => {
+      setActionError(null);
+      try {
+        const reset = await resetWorkspaceMemberPassword(editingMember.operatorId);
+        setTempPassword(reset.temporaryPassword);
+        notify({ message: t("opsUsers.resetPasswordDone"), tone: "success" });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : t("opsUsers.resetPasswordError");
+        setActionError(message);
+        notify({ message, tone: "error" });
+      }
+    });
   }
 
   async function copyTempPassword() {
     if (!tempPassword) return;
-    try {
-      await navigator.clipboard.writeText(tempPassword);
-      setMessage(t("opsUsers.tempPasswordCopied"));
-    } catch {
-      setError(t("opsUsers.copyFailed"));
-    }
+    await action.run("copy-temp-password", async () => {
+      try {
+        await navigator.clipboard.writeText(tempPassword);
+        notify({ message: t("opsUsers.tempPasswordCopied"), tone: "success" });
+      } catch {
+        setActionError(t("opsUsers.copyFailed"));
+        notify({ message: t("opsUsers.copyFailed"), tone: "error" });
+      }
+    });
   }
 
   async function handleRevoke(inviteId: string) {
-    setBusyId(inviteId);
-    setError(null);
-    setMessage(null);
-    try {
-      await revokeWorkspaceInvite(inviteId);
-      setMessage(t("opsUsers.inviteRevoked"));
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("opsUsers.revokeError"));
-    } finally {
-      setBusyId(null);
-    }
+    await action.run(`invite-${inviteId}`, async () => {
+      setActionError(null);
+      try {
+        await revokeWorkspaceInvite(inviteId);
+        notify({ message: t("opsUsers.inviteRevoked"), tone: "success" });
+        await load("refresh");
+      } catch (err) {
+        const message = err instanceof Error ? err.message : t("opsUsers.revokeError");
+        setActionError(message);
+        notify({ message, tone: "error" });
+      }
+    });
   }
 
   async function handleCopyNewInviteLink(inviteId: string) {
-    setBusyId(inviteId);
-    setError(null);
-    setMessage(null);
-    try {
-      const rotated = await rotateWorkspaceInvite(inviteId);
-      const link = `${window.location.origin}/auth/invite?token=${encodeURIComponent(rotated.inviteToken)}`;
-      setRotatedLinkByInviteId((current) => ({ ...current, [inviteId]: link }));
+    await action.run(`invite-${inviteId}`, async () => {
+      setActionError(null);
       try {
-        await navigator.clipboard.writeText(link);
-        setMessage(t("opsUsers.inviteLinkRotatedCopied"));
-      } catch {
-        setMessage(t("opsUsers.inviteLinkRotated"));
-        setError(t("opsUsers.copyFailed"));
+        const rotated = await rotateWorkspaceInvite(inviteId);
+        const link = `${window.location.origin}/auth/invite?token=${encodeURIComponent(rotated.inviteToken)}`;
+        setRotatedLinkByInviteId((current) => ({ ...current, [inviteId]: link }));
+        try {
+          await navigator.clipboard.writeText(link);
+          notify({ message: t("opsUsers.inviteLinkRotatedCopied"), tone: "success" });
+        } catch {
+          setActionError(t("opsUsers.copyFailed"));
+          notify({ message: t("opsUsers.inviteLinkRotated"), tone: "success" });
+          notify({ message: t("opsUsers.copyFailed"), tone: "error" });
+        }
+        await load("refresh");
+      } catch (err) {
+        const message = err instanceof Error ? err.message : t("opsUsers.rotateError");
+        setActionError(message);
+        notify({ message, tone: "error" });
       }
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("opsUsers.rotateError"));
-    } finally {
-      setBusyId(null);
-    }
+    });
   }
 
   async function handleStatusToggle(member: WorkspaceMember, nextActive: boolean) {
@@ -307,75 +313,63 @@ export function OpsUsersPage() {
   }
 
   async function handleEnable(member: WorkspaceMember) {
-    setBusyId(member.operatorId);
-    setError(null);
-    setMessage(null);
-    try {
-      await updateWorkspaceMember(member.operatorId, { isActive: true });
-      setMessage(t("opsUsers.memberEnabled"));
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("opsUsers.updateError"));
-    } finally {
-      setBusyId(null);
-    }
+    await updateMemberStatus(member, true, t("opsUsers.memberEnabled"));
   }
 
   async function handleRemove(member: WorkspaceMember) {
     const confirmed = window.confirm(t("opsUsers.removeConfirm").replace("{email}", member.email));
     if (!confirmed) return;
-    setBusyId(member.operatorId);
-    setError(null);
-    setMessage(null);
-    try {
-      await updateWorkspaceMember(member.operatorId, { isActive: false });
-      setMessage(t("opsUsers.memberRemoved"));
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("opsUsers.updateError"));
-    } finally {
-      setBusyId(null);
-    }
+    await updateMemberStatus(member, false, t("opsUsers.memberRemoved"));
+  }
+
+  async function updateMemberStatus(member: WorkspaceMember, isActive: boolean, successMessage: string) {
+    await action.run(`member-${member.operatorId}`, async () => {
+      setActionError(null);
+      try {
+        await updateWorkspaceMember(member.operatorId, { isActive });
+        notify({ message: successMessage, tone: "success" });
+        await load("refresh");
+      } catch (err) {
+        const message = err instanceof Error ? err.message : t("opsUsers.updateError");
+        setActionError(message);
+        notify({ message, tone: "error" });
+      }
+    });
   }
 
   async function copyInviteLink() {
     if (!lastInviteLink) return;
-    try {
-      await navigator.clipboard.writeText(lastInviteLink);
-      setMessage(t("opsUsers.inviteLinkCopied"));
-    } catch {
-      setError(t("opsUsers.copyFailed"));
-    }
+    await action.run("copy-invite-link", async () => {
+      try {
+        await navigator.clipboard.writeText(lastInviteLink);
+        notify({ message: t("opsUsers.inviteLinkCopied"), tone: "success" });
+      } catch {
+        setActionError(t("opsUsers.copyFailed"));
+        notify({ message: t("opsUsers.copyFailed"), tone: "error" });
+      }
+    });
   }
 
   const refreshAction = (
-    <TopbarRefreshButton busy={loading && members.length > 0} disabled={loading && members.length === 0} onClick={() => void load()} />
+    <TopbarRefreshButton busy={request.refreshing} disabled={request.initialLoading} onClick={() => void load("refresh")} />
   );
-
-  if (loading && members.length === 0) {
-    return (
-      <OpsConsoleShell actions={refreshAction} description={t("opsUsers.description")} title={t("opsUsers.title")}>
-        <OpsState title={t("opsUsers.loadingTitle")} detail={t("opsUsers.loadingDetail")} />
-      </OpsConsoleShell>
-    );
-  }
-
-  if (error && members.length === 0) {
-    return (
-      <OpsConsoleShell actions={refreshAction} description={t("opsUsers.description")} title={t("opsUsers.title")}>
-        <OpsState title={t("opsUsers.unavailableTitle")} detail={error} retry={() => void load()} />
-      </OpsConsoleShell>
-    );
-  }
+  const hasRosterData = members.length > 0 || invites.length > 0;
+  const boundaryStatus = request.initialLoading && !hasRosterData ? "loading" : request.error && !hasRosterData ? "error" : "success";
+  const inlineError = actionError ?? (hasRosterData ? request.error?.message ?? null : null);
 
   const viewActive: MetricKey =
     tab === "pending" ? "pending" : accessFilter === "active" ? "active" : accessFilter === "disabled" ? "disabled" : "total";
 
   return (
     <OpsConsoleShell actions={refreshAction} description={t("opsUsers.description")} title={t("opsUsers.title")}>
+      <AsyncContentBoundary
+        refreshing={request.refreshing}
+        status={boundaryStatus}
+        skeleton={<OpsState title={t("opsUsers.loadingTitle")} detail={t("opsUsers.loadingDetail")} />}
+        errorState={<OpsState title={t("opsUsers.unavailableTitle")} detail={request.error?.message ?? t("opsUsers.loadError")} retry={() => void load("initial")} />}
+      >
       <div className="ops-users ops-users-canvas ops-users-sheet-page">
-        {error ? <div className="inline-error">{error}</div> : null}
-        {message ? <div className="inline-success">{message}</div> : null}
+        {inlineError ? <div className="inline-error">{inlineError}</div> : null}
 
         <header className="ops-users-chrome">
           <div className="ops-users-chrome__lead">
@@ -509,7 +503,8 @@ export function OpsUsersPage() {
                               <input
                                 type="checkbox"
                                 checked={member.isActive}
-                                disabled={busyId === member.operatorId}
+                                disabled={action.isPending(`member-${member.operatorId}`)}
+                                aria-busy={action.isPending(`member-${member.operatorId}`) || undefined}
                                 aria-label={
                                   member.isActive ? t("opsUsers.active") : t("opsUsers.disabled")
                                 }
@@ -540,7 +535,7 @@ export function OpsUsersPage() {
                               <button
                                 type="button"
                                 className="ops-tts-setup-table__icon-btn"
-                                disabled={busyId === member.operatorId}
+                                disabled={action.isPending(`member-${member.operatorId}`)}
                                 aria-label={t("opsUsers.editMember")}
                                 title={t("opsUsers.editMember")}
                                 onClick={() => openEditDrawer(member)}
@@ -597,23 +592,23 @@ export function OpsUsersPage() {
                           </td>
                           <td>
                             <div className="ops-users-member-controls">
-                              <button
+                              <AsyncButton
                                 className="ops-users-quiet-btn is-accent"
-                                disabled={busyId === invite.inviteId}
+                                pending={action.isPending(`invite-${invite.inviteId}`)}
+                                pendingLabel={t("opsUsers.copyNewLink")}
                                 title={t("opsUsers.copyNewLinkHelp")}
-                                type="button"
                                 onClick={() => void handleCopyNewInviteLink(invite.inviteId)}
                               >
                                 {t("opsUsers.copyNewLink")}
-                              </button>
-                              <button
+                              </AsyncButton>
+                              <AsyncButton
                                 className="ops-users-quiet-btn"
-                                disabled={busyId === invite.inviteId}
-                                type="button"
+                                pending={action.isPending(`invite-${invite.inviteId}`)}
+                                pendingLabel={t("opsUsers.revoke")}
                                 onClick={() => void handleRevoke(invite.inviteId)}
                               >
                                 {t("opsUsers.revoke")}
-                              </button>
+                              </AsyncButton>
                             </div>
                             {rotatedLinkByInviteId[invite.inviteId] ? (
                               <div className="ops-users-invite-link is-inline">
@@ -671,18 +666,27 @@ export function OpsUsersPage() {
                 <button type="button" onClick={closeOverlay}>
                   {t("common.cancel")}
                 </button>
-                <button className="primary" disabled={busyId === "invite"} type="submit">
-                  {busyId === "invite" ? t("opsUsers.inviting") : t("opsUsers.sendInvite")}
-                </button>
+                <AsyncButton
+                  className="primary"
+                  pending={action.isPending("invite")}
+                  pendingLabel={t("opsUsers.inviting")}
+                  type="submit"
+                >
+                  {t("opsUsers.sendInvite")}
+                </AsyncButton>
               </div>
             </form>
             {lastInviteLink ? (
               <div className="ops-users-invite-link">
                 <p>{t("opsUsers.inviteLinkHelp")}</p>
                 <code>{lastInviteLink}</code>
-                <button type="button" onClick={() => void copyInviteLink()}>
+                <AsyncButton
+                  pending={action.isPending("copy-invite-link")}
+                  pendingLabel={t("opsUsers.copyInviteLink")}
+                  onClick={() => void copyInviteLink()}
+                >
                   {t("opsUsers.copyInviteLink")}
-                </button>
+                </AsyncButton>
               </div>
             ) : null}
           </div>
@@ -804,22 +808,26 @@ export function OpsUsersPage() {
                       <h3>{t("opsUsers.securitySection")}</h3>
                       <p>{t("opsUsers.resetPasswordHelp")}</p>
                     </div>
-                    <button
+                    <AsyncButton
                       className="ops-users-quiet-btn"
-                      disabled={busyId === `reset-${editingMember.operatorId}`}
-                      type="button"
+                      pending={action.isPending(`reset-${editingMember.operatorId}`)}
+                      pendingLabel={t("opsUsers.resetPassword")}
                       onClick={() => void handleResetPassword()}
                     >
                       {t("opsUsers.resetPassword")}
-                    </button>
+                    </AsyncButton>
                   </div>
                   {tempPassword ? (
                     <div className="ops-users-invite-link">
                       <p>{t("opsUsers.tempPasswordHelp")}</p>
                       <code>{tempPassword}</code>
-                      <button type="button" onClick={() => void copyTempPassword()}>
+                      <AsyncButton
+                        pending={action.isPending("copy-temp-password")}
+                        pendingLabel={t("opsUsers.copyTempPassword")}
+                        onClick={() => void copyTempPassword()}
+                      >
                         {t("opsUsers.copyTempPassword")}
-                      </button>
+                      </AsyncButton>
                     </div>
                   ) : null}
                 </section>
@@ -829,14 +837,20 @@ export function OpsUsersPage() {
                 <button type="button" onClick={closeOverlay}>
                   {t("common.cancel")}
                 </button>
-                <button className="primary" disabled={busyId === editingMember.operatorId} type="submit">
+                <AsyncButton
+                  className="primary"
+                  pending={action.isPending(`member-${editingMember.operatorId}`)}
+                  pendingLabel={t("opsUsers.saveChanges")}
+                  type="submit"
+                >
                   {t("opsUsers.saveChanges")}
-                </button>
+                </AsyncButton>
               </div>
             </form>
           </aside>
         </div>
       ) : null}
+      </AsyncContentBoundary>
     </OpsConsoleShell>
   );
 }

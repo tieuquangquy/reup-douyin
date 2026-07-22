@@ -4,9 +4,14 @@ import Link from "next/link";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { fetchPublishAttemptList, refreshPublishAttemptStatus } from "../../lib/api";
 import { useT } from "../../lib/i18n";
+import { useAsyncAction } from "../../lib/useAsyncAction";
+import { useLatestRequest, type LatestRequestMode } from "../../lib/useLatestRequest";
 import type { PublishAttempt } from "../../types/publish-draft";
 import { OpsConsoleShell } from "../app-shell/OpsConsoleShell";
 import { TopbarRefreshButton } from "../app-shell/TopbarRefreshButton";
+import { AsyncButton } from "../shared/AsyncButton";
+import { AsyncContentBoundary } from "../shared/AsyncContentBoundary";
+import { useNotice } from "../shared/NoticeCenter";
 import { OpsState, formatDateTime, statusTone, type OpsTone } from "./OpsShared";
 
 type StatusFilter = "ALL" | "NEEDS" | "RECONCILING";
@@ -68,48 +73,46 @@ function ReconChip({ label, tone }: { label: string; tone: OpsTone }) {
 export function OpsReconciliationPage() {
   const t = useT();
   const [attempts, setAttempts] = useState<PublishAttempt[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [savingId, setSavingId] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [loadedAt, setLoadedAt] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("NEEDS");
   const [page, setPage] = useState(1);
+  const action = useAsyncAction();
+  const request = useLatestRequest();
+  const { notify } = useNotice();
+  const savingIds = action.pendingKeys;
 
-  async function load() {
-    setLoading(true);
-    setError(null);
-    try {
-      const [needed, reconciling] = await Promise.all([
+  async function load(mode: LatestRequestMode = attempts.length ? "refresh" : "initial") {
+    await request.run(
+      async () => Promise.all([
         fetchPublishAttemptList("NEEDS_RECONCILIATION", 100),
         fetchPublishAttemptList("RECONCILING", 100),
-      ]);
-      setAttempts([...needed, ...reconciling]);
-      setLoadedAt(new Date().toISOString());
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("opsReconciliation.unavailableTitle"));
-    } finally {
-      setLoading(false);
-    }
+      ]),
+      ([needed, reconciling]) => {
+        setAttempts([...needed, ...reconciling]);
+        setLoadedAt(new Date().toISOString());
+      },
+      mode
+    ).catch(() => undefined);
   }
 
   async function refresh(attempt: PublishAttempt) {
-    setSavingId(attempt.id);
-    setError(null);
-    setMessage(null);
-    try {
-      await refreshPublishAttemptStatus(attempt.id);
-      setMessage(t("opsReconciliation.publishStatusRefreshed"));
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("opsReconciliation.failedToRefresh"));
-    } finally {
-      setSavingId(null);
-    }
+    await action.run(`refresh-${attempt.id}`, async () => {
+      setActionError(null);
+      try {
+        await refreshPublishAttemptStatus(attempt.id);
+        notify({ message: t("opsReconciliation.publishStatusRefreshed"), tone: "success" });
+        await load("refresh");
+      } catch (err) {
+        const message = err instanceof Error ? err.message : t("opsReconciliation.failedToRefresh");
+        setActionError(message);
+        notify({ message, tone: "error" });
+      }
+    });
   }
 
   useEffect(() => {
-    void load();
+    void load("initial");
   }, [t]);
 
   const needsCount = attempts.filter((item) => item.status === "NEEDS_RECONCILIATION").length;
@@ -146,30 +149,21 @@ export function OpsReconciliationPage() {
   ];
 
   const refreshAction = (
-    <TopbarRefreshButton busy={loading && attempts.length > 0} disabled={loading && attempts.length === 0} onClick={() => void load()} />
+    <TopbarRefreshButton busy={request.refreshing} disabled={request.initialLoading} onClick={() => void load("refresh")} />
   );
-
-  if (loading && attempts.length === 0) {
-    return (
-      <OpsConsoleShell actions={refreshAction} description={t("opsReconciliation.description")} title={t("opsReconciliation.title")}>
-        <OpsState title={t("opsReconciliation.loadingTitle")} detail={t("opsReconciliation.loadingDetail")} />
-      </OpsConsoleShell>
-    );
-  }
-
-  if (error && attempts.length === 0) {
-    return (
-      <OpsConsoleShell actions={refreshAction} description={t("opsReconciliation.description")} title={t("opsReconciliation.title")}>
-        <OpsState title={t("opsReconciliation.unavailableTitle")} detail={error} retry={() => void load()} />
-      </OpsConsoleShell>
-    );
-  }
+  const boundaryStatus = request.initialLoading ? "loading" : request.error && attempts.length === 0 ? "error" : "success";
+  const inlineError = actionError ?? (attempts.length > 0 ? request.error?.message ?? null : null);
 
   return (
     <OpsConsoleShell actions={refreshAction} description={t("opsReconciliation.description")} title={t("opsReconciliation.title")}>
+      <AsyncContentBoundary
+        refreshing={request.refreshing}
+        status={boundaryStatus}
+        skeleton={<OpsState title={t("opsReconciliation.loadingTitle")} detail={t("opsReconciliation.loadingDetail")} />}
+        errorState={<OpsState title={t("opsReconciliation.unavailableTitle")} detail={request.error?.message ?? t("opsReconciliation.unavailableTitle")} retry={() => void load("initial")} />}
+      >
       <main className="ops-page ops-recon-page">
-        {error ? <div className="inline-error">{error}</div> : null}
-        {message ? <div className="ops-recon-notice">{message}</div> : null}
+        {inlineError ? <div className="inline-error">{inlineError}</div> : null}
 
         <p className="ops-recon-freshness">
           {t("opsReconciliation.loadedAt")}{" "}
@@ -234,6 +228,7 @@ export function OpsReconciliationPage() {
                   </li>
                   {pagedAttempts.map((attempt) => (
                     <li
+                      aria-busy={savingIds.has(`refresh-${attempt.id}`) || undefined}
                       className={`ops-recon-row${isUnknownExternal(attempt) ? " is-hot" : ""}`}
                       key={attempt.id}
                     >
@@ -254,14 +249,14 @@ export function OpsReconciliationPage() {
                       <time dateTime={attempt.last_status_checked_at ?? undefined}>
                         {formatDateTime(attempt.last_status_checked_at) ?? t("opsReconciliation.noTimestamp")}
                       </time>
-                      <button
-                        type="button"
+                      <AsyncButton
                         className="ops-recon-row__action"
-                        disabled={savingId === attempt.id}
+                        pending={action.isPending(`refresh-${attempt.id}`)}
+                        pendingLabel={t("opsReconciliation.refreshing")}
                         onClick={() => void refresh(attempt)}
                       >
-                        {savingId === attempt.id ? t("opsReconciliation.refreshing") : t("opsReconciliation.refreshStatus")}
-                      </button>
+                        {t("opsReconciliation.refreshStatus")}
+                      </AsyncButton>
                     </li>
                   ))}
                 </ul>
@@ -296,21 +291,21 @@ export function OpsReconciliationPage() {
             <ReconPanel title={t("opsReconciliation.attention")}>
               <ul className="ops-recon-attention">
                 {attentionAttempts.map((attempt) => (
-                  <li key={attempt.id}>
+                  <li aria-busy={savingIds.has(`refresh-${attempt.id}`) || undefined} key={attempt.id}>
                     <div>
                       <strong>{shortId(attempt.id)}</strong>
                       <em>
                         {formatChipLabel(attempt.status)} · {t("opsReconciliation.externalUnknown")}
                       </em>
                     </div>
-                    <button
-                      type="button"
+                    <AsyncButton
                       className="ops-recon-row__action"
-                      disabled={savingId === attempt.id}
+                      pending={action.isPending(`refresh-${attempt.id}`)}
+                      pendingLabel={t("opsReconciliation.refreshing")}
                       onClick={() => void refresh(attempt)}
                     >
-                      {savingId === attempt.id ? t("opsReconciliation.refreshing") : t("opsReconciliation.refreshStatus")}
-                    </button>
+                      {t("opsReconciliation.refreshStatus")}
+                    </AsyncButton>
                   </li>
                 ))}
               </ul>
@@ -318,6 +313,7 @@ export function OpsReconciliationPage() {
           ) : null}
         </section>
       </main>
+      </AsyncContentBoundary>
     </OpsConsoleShell>
   );
 }

@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { fetchPipelineDashboard } from "../../lib/api";
 import { useT } from "../../lib/i18n";
+import { useLatestRequest } from "../../lib/useLatestRequest";
 import { humanizeStatus } from "../../lib/statusLabels";
 import type {
   PipelineDashboardActivityItem,
@@ -16,6 +17,8 @@ import type {
 } from "../../types/operations";
 import { OperatorStudioShell } from "../app-shell/OperatorStudioShell";
 import { TopbarRefreshButton } from "../app-shell/TopbarRefreshButton";
+import { AsyncContentBoundary } from "../shared/AsyncContentBoundary";
+import { useNotice } from "../shared/NoticeCenter";
 import { OpsState, formatDateTime, type OpsTone } from "../ops-console/OpsShared";
 
 const TRIAGE_LINKS = [
@@ -87,18 +90,16 @@ function PipelineOpenLink({ href, label }: { href: string; label: string }) {
 export function PipelineDashboardPage() {
   const t = useT();
   const [dashboard, setDashboard] = useState<PipelineDashboardResponse | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const request = useLatestRequest();
+  const { notify } = useNotice();
 
   async function load() {
-    setLoading(true);
-    setError(null);
+    const mode = dashboard ? "refresh" : "initial";
     try {
-      setDashboard(await fetchPipelineDashboard());
+      const result = await request.run(() => fetchPipelineDashboard(), setDashboard, mode);
+      if (mode === "refresh" && result) notify({ id: "pipeline-refresh", message: "Pipeline refreshed.", tone: "success" });
     } catch (err) {
-      setError(err instanceof Error ? err.message : t("opsPipeline.loadError"));
-    } finally {
-      setLoading(false);
+      if (mode === "refresh") notify({ id: "pipeline-refresh", message: err instanceof Error ? err.message : t("opsPipeline.loadError"), tone: "error" });
     }
   }
 
@@ -107,21 +108,21 @@ export function PipelineDashboardPage() {
   }, [t]);
 
   const refreshAction = (
-    <TopbarRefreshButton busy={loading && Boolean(dashboard)} disabled={loading && !dashboard} onClick={() => void load()} />
+    <TopbarRefreshButton busy={request.refreshing} disabled={request.initialLoading} onClick={() => void load()} />
   );
 
-  if (loading && !dashboard) {
+  if (!dashboard && !request.error) {
     return (
       <OperatorStudioShell actions={refreshAction} description={t("opsPipeline.description")} title={t("opsPipeline.title")}>
-        <OpsState title={t("opsPipeline.loadingTitle")} detail={t("opsPipeline.loadingDetail")} />
+        <AsyncContentBoundary skeletonVariant="detail" status="loading"><span /></AsyncContentBoundary>
       </OperatorStudioShell>
     );
   }
 
-  if (error && !dashboard) {
+  if (request.error && !dashboard) {
     return (
       <OperatorStudioShell actions={refreshAction} description={t("opsPipeline.description")} title={t("opsPipeline.title")}>
-        <OpsState title={t("opsPipeline.unavailableTitle")} detail={error} retry={() => void load()} />
+        <AsyncContentBoundary errorState={<OpsState title={t("opsPipeline.unavailableTitle")} detail={request.error.message} retry={() => void load()} />} skeletonVariant="detail" status="error"><span /></AsyncContentBoundary>
       </OperatorStudioShell>
     );
   }
@@ -136,7 +137,9 @@ export function PipelineDashboardPage() {
 
   return (
     <OperatorStudioShell actions={refreshAction} description={t("opsPipeline.description")} title={t("opsPipeline.title")}>
-      <PipelineDashboardBody dashboard={dashboard} error={error} t={t} />
+      <AsyncContentBoundary refreshing={request.refreshing} skeletonVariant="detail" status="success">
+        <PipelineDashboardBody dashboard={dashboard} error={null} t={t} />
+      </AsyncContentBoundary>
     </OperatorStudioShell>
   );
 }

@@ -22,6 +22,7 @@ from src.schemas.capture_inbox import (
     CaptureInboxProfileItemsResponse,
     CaptureInboxProfileSummaryResponse,
     CaptureInboxReconciliationResponse,
+    CaptureInboxStudioStatus,
     CaptureSessionCountsResponse,
     CaptureSessionDebugEventResponse,
     CaptureSessionDebugResponse,
@@ -99,6 +100,7 @@ def list_captured_items(
     capture_session_id: UUID | None = None,
     profile_url: str | None = None,
     status: CapturedItemStatus | None = None,
+    studio_status: CaptureInboxStudioStatus | None = None,
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     service: CaptureInboxService = Depends(get_capture_inbox_service),
@@ -108,6 +110,7 @@ def list_captured_items(
             capture_session_id=capture_session_id,
             profile_url=profile_url,
             status=status,
+            studio_status=studio_status,
             search=None,
             advanced_filter=None,
             limit=limit,
@@ -115,6 +118,10 @@ def list_captured_items(
         )
     except CaptureInboxError as exc:
         raise _http_error(exc) from exc
+    status_counts = service.count_items_by_studio_status(
+        capture_session_id=capture_session_id,
+        profile_url=profile_url,
+    )
     item_responses = [CapturedItemResponse.model_validate(item) for item in items]
     _log_capture_inbox_response_exposure(
         route="list_captured_items",
@@ -122,7 +129,7 @@ def list_captured_items(
         item_count=len(item_responses),
         items=item_responses,
     )
-    return CapturedItemListResponse(items=item_responses, total_count=total_count)
+    return CapturedItemListResponse(items=item_responses, total_count=total_count, status_counts=status_counts)
 
 
 @router.get("/capture-inbox/items/{item_id}", response_model=CapturedItemResponse)
@@ -165,6 +172,7 @@ def query_captured_items(
         items, total_count = service.list_items(
             capture_session_id=request.capture_session_id,
             status=request.status,
+            studio_status=request.studio_status,
             search=request.search,
             advanced_filter=request.advanced_filter,
             limit=request.limit,
@@ -172,6 +180,7 @@ def query_captured_items(
         )
     except CaptureInboxError as exc:
         raise _http_error(exc) from exc
+    status_counts = service.count_items_by_studio_status(capture_session_id=request.capture_session_id)
     item_responses = [CapturedItemResponse.model_validate(item) for item in items]
     _log_capture_inbox_response_exposure(
         route="query_captured_items",
@@ -179,7 +188,7 @@ def query_captured_items(
         item_count=len(item_responses),
         items=item_responses,
     )
-    return CapturedItemListResponse(items=item_responses, total_count=total_count)
+    return CapturedItemListResponse(items=item_responses, total_count=total_count, status_counts=status_counts)
 
 
 @router.get("/douyin-extension/capture-sessions/{capture_session_id}/items", response_model=CaptureSessionItemsBySessionResponse)

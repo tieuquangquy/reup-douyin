@@ -146,6 +146,11 @@ assert.equal(
 );
 assert.equal(resolveDuration(visibleProfileGridItem), "00:42", "Duration resolver must prefer canonical duration_text when available");
 assert.notEqual(resolvePosted(visibleProfileGridItem), "1 day ago", "Posted resolver must format canonical posted_at before posted_text");
+assert.equal(
+  resolvePosted({ ...visibleProfileGridItem, posted_at: "2026-07-10T19:30:29" }),
+  "19:30 10/7/2026",
+  "Posted datetime must use HH:mm D/M/YYYY without seconds"
+);
 assert.equal(resolveViewCount(visibleProfileGridItem), "123,456", "Views resolver must prefer canonical numeric view_count");
 assert.equal(resolveLikeCount(visibleProfileGridItem), "7,890", "Likes resolver must prefer canonical numeric like_count");
 assert.deepEqual(resolveEstimatedViews(visibleProfileGridItem), {

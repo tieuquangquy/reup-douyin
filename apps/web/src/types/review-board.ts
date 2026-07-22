@@ -210,6 +210,7 @@ export type CandidateSummary = {
 export type CandidateListResponse = {
   view: "summary" | "detail";
   total_count: number;
+  status_counts: Partial<Record<CandidateStatus, number>>;
   offset: number;
   limit: number;
   candidates: CandidateSummary[] | Candidate[];

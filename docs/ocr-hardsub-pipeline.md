@@ -8,8 +8,10 @@ Final Review **Analyze OCR / clean hard-sub** (`clean_hardsub=True`, default) ru
 
 1. `POST /ocr` → job `ANALYZE_OCR`
 2. `OcrPipelineService` → `run_hardsub_phases_1_to_4` (shared with CLI `main_pipeline`)
-3. Phase 1: sample frames (**STRICT 1 or 2 fps**)
-4. Phase 2: OCR via `OCR_ENDPOINT_URL` / mock; keep bottom-band boxes
+3. Phase 1: sample frames (**STRICT 1 or 2 fps**) — used for legacy OCR / render; **not** the V3.6 box timeline
+4. Phase 2: OCR
+   - `OCR_QUALITY_PROFILE=best` → Authority **V3.6 full-duration** (`run_per_frame_position_authority`, every frame)
+   - otherwise → `OCR_ENDPOINT_URL` / mock on Phase-1 samples; keep bottom-band boxes
 5. Phase 2.5: batch translate with Ops **Caption AI** (`caption_ai` / `caption_prompt` — not dialogue Translation settings)
 6. Phase 3+4: one FFmpeg pass → cleaned MP4
 7. Persist detections + `OCR_EVENTS` (includes `vi_texts`, `pipeline_backend=media_e2e_v1`) + `CLEANED_VIDEO` (`clean_method=single_pass_mask_vi_antihash`)
@@ -37,12 +39,40 @@ Final Review **Analyze OCR / clean hard-sub** (`clean_hardsub=True`, default) ru
 - HTTP timeout to Cloud Run: default **300s** (`OCR_HTTP_TIMEOUT_SECONDS`) — cold start can exceed 120s
 - Cold start: client polls `/health` up to **180s** (`OCR_WARMUP_DEADLINE_SECONDS`) before first `/predict`
 - When OCR finds **0 hard-sub boxes**, job stays `COMPLETED` but sets `error_code=OCR_NO_HARDSUB_OUTPUT` + message on the job (Ops Jobs Error column / warn badge). No new `CLEANED_VIDEO` is written; prior plate is restored if any.
-- **Perf (Phase 2 defaults):**
+- **Best profile (Authority V3.6 full-duration):** set `OCR_QUALITY_PROFILE=best`. Phase 2 then calls `run_per_frame_position_authority` over **every frame** (not Phase-1 sample fps). Local mid-title + hardsub gap-hold apply; Cloud OCR is sparse + cached.
+- **Perf (Phase 2 defaults, legacy/default profile):**
   - `OCR_CROP_BAND=1` — OCR only bottom subtitle band (smaller upload; boxes remapped to full frame)
   - `OCR_HTTP_CONCURRENCY=4` — parallel `/predict` calls (warmup is thread-safe)
   - `OCR_PROBE_STRIDE=2` — OCR every 2nd frame first; if probe empty → skip rest (`ocr_probe_empty_early_exit`)
   - `OCR_PROBE_EARLY_EXIT=1` — enable that skip (set `0` to always OCR every sampled frame)
 - **Batch throughput:** during multi-video sessions set Cloud Run `--min-instances 1` (keep warm); idle → `0` for cost. See `deploy/hf-paddle-ocr/README_DEPLOY.md`.
+
+## Authority V3.6 full-duration box QA (no blur)
+
+Operator path to scan an entire video and write authority boxes + per-frame overlays. Same engine as E2E when `OCR_QUALITY_PROFILE=best`.
+
+```powershell
+cd apps/api
+$env:PYTHONPATH = "src;."
+# Requires OCR_ENDPOINT_URL (and related OCR env) loaded — e.g. from apps/worker/.env
+
+python -m src.media_pipeline.ocr_filtering.per_frame_position_authority `
+  --video "C:\path\to\video.mp4" `
+  --out "tmp_ocr_v36_run\ocr-authority-v3.6.json" `
+  --ocr-cache "tmp_ocr_v36_run\ocr-cache.json" `
+  --overlay-dir "tmp_ocr_v36_run\overlays_full_duration" `
+  --overlay-all `
+  --concurrency 2 `
+  --ocr-batch-size 4
+```
+
+Outputs:
+
+- `ocr-authority-v3.6.json` — `authority: ocr_authority_v3.6`, one row per video frame
+- `ocr-cache.json` — resumable Cloud OCR cache
+- `overlays_full_duration\pfa_fXXXXXX_tTTTTTT_nN.jpg` — HUD `AUTHORITY v3.6` (box QA only; no blur/render)
+
+Do not confuse with local-only “setup” position reviews (`position_only_no_cloud`): those are CTC/DBNet QA, not blur authority.
 
 ## Related
 

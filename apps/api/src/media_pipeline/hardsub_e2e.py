@@ -76,6 +76,8 @@ def run_hardsub_phases_1_to_4(
     band_ratio: float | None = None,
     on_progress: ProgressCallback | None = None,
     render_progress: bool | Callable[[float | None, str], None] = True,
+    ocr_cache_path: str | Path | None = None,
+    force_refresh: bool = False,
 ) -> HardsubE2EResult:
     """
     Run Phase 1–4 into ``output_path``. Always deletes temp frames unless ``keep_temp``.
@@ -113,29 +115,58 @@ def run_hardsub_phases_1_to_4(
 
         _progress("phase2_ocr", 25)
         logger.info("Phase 2: OCR filtering...")
-        ocr_provider = build_default_ocr_provider(prefer_mock=prefer_mock_ocr)
-        ocr_kwargs: dict[str, Any] = {
-            "ocr_provider": ocr_provider,
-            "frame_time_ms": frame_time_ms,
-        }
-        if band_ratio is not None:
-            ocr_kwargs["band_ratio"] = float(band_ratio)
-        ocr_result = run_ocr_filtering(
-            frame_paths,
-            on_progress=_progress,
-            **ocr_kwargs,
-        )
-        ocr_payload = ocr_result.to_dict()
-        from src.media_pipeline.ocr_filtering.ocr_box_authority import apply_best_box_authority
         from src.media_pipeline.ocr_filtering.ocr_quality_profile import is_best_ocr_profile
 
-        if is_best_ocr_profile():
-            ocr_payload = apply_best_box_authority(
-                ocr_payload,
-                frame_paths=[Path(p) for p in frame_paths],
+        if is_best_ocr_profile() and not prefer_mock_ocr:
+            from src.media_pipeline.ocr_filtering.per_frame_position_authority import (
+                run_per_frame_position_authority,
             )
-        ocr_name = str(getattr(ocr_provider, "provider_name", ocr_result.provider) or "unknown")
-        logger.info("Phase 2 done: provider=%s frames=%s", ocr_name, ocr_result.frame_count)
+
+            cache_path = Path(ocr_cache_path) if ocr_cache_path is not None else (
+                temp_root / "ocr-authority-v3-cache.json"
+            )
+            if force_refresh and cache_path.is_file():
+                cache_path.unlink()
+            ocr_payload = run_per_frame_position_authority(
+                source,
+                out_json=temp_root / "ocr-authority-v3.6.json",
+                ocr_cache_path=cache_path,
+            )
+            ocr_name = str(ocr_payload.get("authority") or "ocr_authority_v3.6")
+            ocr_frame_count = int(ocr_payload.get("frame_count") or 0)
+        else:
+            ocr_provider = build_default_ocr_provider(prefer_mock=prefer_mock_ocr)
+            ocr_kwargs: dict[str, Any] = {
+                "ocr_provider": ocr_provider,
+                "frame_time_ms": frame_time_ms,
+            }
+            if band_ratio is not None:
+                ocr_kwargs["band_ratio"] = float(band_ratio)
+            ocr_result = run_ocr_filtering(
+                frame_paths,
+                on_progress=_progress,
+                **ocr_kwargs,
+            )
+            ocr_payload = ocr_result.to_dict()
+            from src.media_pipeline.ocr_filtering.ocr_box_authority import (
+                apply_best_box_authority,
+            )
+
+            if is_best_ocr_profile():
+                ocr_payload = apply_best_box_authority(
+                    ocr_payload,
+                    frame_paths=[Path(p) for p in frame_paths],
+                )
+            ocr_name = str(
+                getattr(ocr_provider, "provider_name", ocr_result.provider)
+                or "unknown"
+            )
+            ocr_frame_count = int(ocr_result.frame_count)
+        logger.info(
+            "Phase 2 done: provider=%s frames=%s",
+            ocr_name,
+            ocr_frame_count,
+        )
 
         if not _ocr_payload_has_boxes(ocr_payload):
             logger.info("Phase 2: no boxes — skip translate/render")

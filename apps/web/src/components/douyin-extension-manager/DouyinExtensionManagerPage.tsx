@@ -9,6 +9,8 @@ import {
   fetchDouyinExtensionStatus
 } from "../../lib/api";
 import { loginPathForSurface } from "../../lib/authSurface";
+import { useAsyncAction } from "../../lib/useAsyncAction";
+import { useLatestRequest, type LatestRequestMode } from "../../lib/useLatestRequest";
 import type { DouyinExtensionStatusResponse } from "../../types/douyin-extension-setup";
 import type {
   DouyinExtensionCaptureResponse,
@@ -19,6 +21,9 @@ import type {
   DouyinExtensionPageType
 } from "../../types/douyin-extension-manager";
 import { OpsConsoleShell } from "../app-shell/OpsConsoleShell";
+import { AsyncButton } from "../shared/AsyncButton";
+import { AsyncContentBoundary } from "../shared/AsyncContentBoundary";
+import { useNotice } from "../shared/NoticeCenter";
 
 const EXTENSION_SETUP_PATH = "/setup/douyin-extension";
 const EXTENSION_SETUP_HREF = `${loginPathForSurface("operator")}?next=${encodeURIComponent(EXTENSION_SETUP_PATH)}`;
@@ -62,111 +67,140 @@ export function DouyinExtensionManagerPage() {
   const [status, setStatus] = useState<DouyinExtensionStatusResponse | null>(null);
   const [history, setHistory] = useState<DouyinExtensionManagerHistoryResponse | null>(null);
   const [form, setForm] = useState<ManagerFormState>(INITIAL_FORM);
-  const [loading, setLoading] = useState(true);
-  const [working, setWorking] = useState<"status" | "detect" | "capture" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [detectResult, setDetectResult] = useState<DouyinExtensionDetectPageResponse | null>(null);
   const [captureResult, setCaptureResult] = useState<DouyinExtensionCaptureResponse | null>(null);
+  const action = useAsyncAction();
+  const request = useLatestRequest();
+  const { notify } = useNotice();
 
   useEffect(() => {
-    void loadManagerState();
+    void loadManagerState("initial");
   }, []);
 
   const troubleshooting = useMemo(() => buildTroubleshooting(status, detectResult, history?.items[0] ?? null), [status, detectResult, history]);
 
-  async function loadManagerState() {
-    setLoading(true);
+  async function loadManagerState(mode: LatestRequestMode = status || history ? "refresh" : "initial") {
     setError(null);
     try {
-      const [statusPayload, historyPayload] = await Promise.all([fetchDouyinExtensionStatus(), fetchDouyinExtensionHistory(10)]);
-      setStatus(statusPayload);
-      setHistory(historyPayload);
+      await request.run(
+        async () => Promise.all([fetchDouyinExtensionStatus(), fetchDouyinExtensionHistory(10)]),
+        ([statusPayload, historyPayload]) => {
+          setStatus(statusPayload);
+          setHistory(historyPayload);
+        },
+        mode
+      );
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load Douyin extension manager state.");
-    } finally {
-      setLoading(false);
+      const message = err instanceof Error ? err.message : "Failed to load Douyin extension manager state.";
+      if (status || history) {
+        setError(message);
+        notify({ message, tone: "error" });
+      }
     }
   }
 
   async function checkConnection() {
-    setWorking("status");
-    setError(null);
-    try {
-      const [statusPayload, historyPayload] = await Promise.all([checkDouyinExtensionStatus(), fetchDouyinExtensionHistory(10)]);
-      setStatus(statusPayload);
-      setHistory(historyPayload);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to check Douyin extension connection.");
-    } finally {
-      setWorking(null);
-    }
+    await action.run("check-connection", async () => {
+      setError(null);
+      try {
+        const result = await request.run(
+          async () => Promise.all([checkDouyinExtensionStatus(), fetchDouyinExtensionHistory(10)]),
+          ([statusPayload, historyPayload]) => {
+            setStatus(statusPayload);
+            setHistory(historyPayload);
+          },
+          "refresh"
+        );
+        if (result) notify({ message: "Douyin extension connection checked.", tone: "success" });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Failed to check Douyin extension connection.";
+        setError(message);
+        notify({ message, tone: "error" });
+      }
+    });
   }
 
   async function detect(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setWorking("detect");
-    setError(null);
-    try {
-      const response = await detectDouyinExtensionPage({ page: buildSnapshot(form), diagnostics: { extension_manager_source: "web_manager" } });
-      setDetectResult(response);
-      setHistory(await fetchDouyinExtensionHistory(10));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to detect current page.");
-      setHistory(await fetchDouyinExtensionHistory(10).catch(() => history));
-    } finally {
-      setWorking(null);
-    }
+    await action.run("detect", async () => {
+      setError(null);
+      try {
+        const response = await detectDouyinExtensionPage({ page: buildSnapshot(form), diagnostics: { extension_manager_source: "web_manager" } });
+        setDetectResult(response);
+        setHistory(await fetchDouyinExtensionHistory(10));
+        notify({ message: response.operator_message, tone: "success" });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Failed to detect current page.";
+        setError(message);
+        notify({ message, tone: "error" });
+        setHistory(await fetchDouyinExtensionHistory(10).catch(() => history));
+      }
+    });
   }
 
   async function capture() {
-    setWorking("capture");
-    setError(null);
-    try {
-      const response = await captureDouyinExtensionPage({
-        schema_version: "douyin_extension_capture.v1",
-        captured_at: new Date().toISOString(),
-        persist: true,
-        page: buildSnapshot(form),
-        profile: buildProfile(form),
-        videos: buildVideos(form),
-        diagnostics: { extension_manager_source: "web_manager" }
-      });
-      setCaptureResult(response);
-      setHistory(await fetchDouyinExtensionHistory(10));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to capture current page.");
-      setHistory(await fetchDouyinExtensionHistory(10).catch(() => history));
-    } finally {
-      setWorking(null);
-    }
+    await action.run("capture", async () => {
+      setError(null);
+      try {
+        const response = await captureDouyinExtensionPage({
+          schema_version: "douyin_extension_capture.v1",
+          captured_at: new Date().toISOString(),
+          persist: true,
+          page: buildSnapshot(form),
+          profile: buildProfile(form),
+          videos: buildVideos(form),
+          diagnostics: { extension_manager_source: "web_manager" }
+        });
+        setCaptureResult(response);
+        setHistory(await fetchDouyinExtensionHistory(10));
+        notify({
+          message: `Capture ${response.stage}: ${response.ready_item_count} ready, ${response.failed_count} failed.`,
+          tone: response.success ? "success" : "error"
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Failed to capture current page.";
+        setError(message);
+        notify({ message, tone: "error" });
+        setHistory(await fetchDouyinExtensionHistory(10).catch(() => history));
+      }
+    });
   }
 
   return (
     <OpsConsoleShell
-      actions={<button disabled={working === "status"} onClick={() => void checkConnection()} type="button">{working === "status" ? "Checking..." : "Check connection"}</button>}
+      actions={<AsyncButton pending={action.isPending("check-connection")} pendingLabel="Checking..." onClick={() => void checkConnection()} type="button">Check connection</AsyncButton>}
       description="Detect, capture, and troubleshoot the Douyin browser extension. Install lives in Operator Studio Setup."
       title="Douyin Extension Manager"
     >
         {error ? <section className="operator-panel intake-status danger"><strong>Manager error:</strong> {error}</section> : null}
-        <div className="intake-layout">
-          <div className="intake-form">
-            <SetupPointerSection />
-            <ConnectionSection loading={loading} status={status} />
-            <CaptureSection captureResult={captureResult} history={history} />
-            <CurrentPageToolsSection
-              detectResult={detectResult}
-              form={form}
-              onCapture={() => void capture()}
-              onDetect={(event) => void detect(event)}
-              setForm={setForm}
-              working={working}
-            />
+        <AsyncContentBoundary
+          errorState={<section className="operator-panel intake-status danger"><strong>Manager error:</strong> {request.error?.message ?? "Failed to load Douyin extension manager state."}</section>}
+          refreshing={request.refreshing}
+          skeletonVariant="detail"
+          status={request.initialLoading ? "loading" : request.error && !status && !history ? "error" : "success"}
+        >
+          <div className="intake-layout">
+            <div className="intake-form">
+              <SetupPointerSection />
+              <ConnectionSection status={status} />
+              <CaptureSection captureResult={captureResult} history={history} />
+              <CurrentPageToolsSection
+                detectPending={action.isPending("detect")}
+                detectResult={detectResult}
+                form={form}
+                onCapture={() => void capture()}
+                onDetect={(event) => void detect(event)}
+                setForm={setForm}
+                capturePending={action.isPending("capture")}
+              />
+            </div>
+            <aside className="intake-side">
+              <TroubleshootingSection items={troubleshooting} />
+              <HistorySection history={history} />
+            </aside>
           </div>
-          <aside className="intake-side">
-            <TroubleshootingSection items={troubleshooting} />
-            <HistorySection history={history} />
-          </aside>
-        </div>
+        </AsyncContentBoundary>
     </OpsConsoleShell>
   );
 }
@@ -190,13 +224,13 @@ function SetupPointerSection() {
   );
 }
 
-function ConnectionSection({ loading, status }: { loading: boolean; status: DouyinExtensionStatusResponse | null }) {
+function ConnectionSection({ status }: { status: DouyinExtensionStatusResponse | null }) {
   return (
     <section className={`operator-panel intake-status ${statusTone(status)}`}>
       <div className="operator-panel-heading">
         <div>
           <h2>Connection status</h2>
-          <p>{loading ? "Loading extension status..." : status?.operator_message ?? "No status loaded."}</p>
+          <p>{status?.operator_message ?? "No status loaded."}</p>
         </div>
       </div>
       {status ? (
@@ -215,19 +249,21 @@ function ConnectionSection({ loading, status }: { loading: boolean; status: Douy
 }
 
 function CurrentPageToolsSection({
+  capturePending,
+  detectPending,
   detectResult,
   form,
   onCapture,
   onDetect,
-  setForm,
-  working
+  setForm
 }: {
+  capturePending: boolean;
+  detectPending: boolean;
   detectResult: DouyinExtensionDetectPageResponse | null;
   form: ManagerFormState;
   onCapture: () => void;
   onDetect: (event: FormEvent<HTMLFormElement>) => void;
   setForm: (next: ManagerFormState) => void;
-  working: "status" | "detect" | "capture" | null;
 }) {
   return (
     <details className="operator-panel advanced-panel">
@@ -283,8 +319,8 @@ function CurrentPageToolsSection({
           <textarea rows={4} value={form.videoUrls} onChange={(event) => setForm({ ...form, videoUrls: event.target.value })} />
         </label>
         <div className="actions-row">
-          <button disabled={working === "detect"} type="submit">{working === "detect" ? "Testing detect..." : "Test detect from form"}</button>
-          <button disabled={working === "capture"} onClick={onCapture} type="button">{working === "capture" ? "Submitting test..." : "Submit manual capture test"}</button>
+          <AsyncButton pending={detectPending} pendingLabel="Testing detect..." type="submit">Test detect from form</AsyncButton>
+          <AsyncButton pending={capturePending} pendingLabel="Submitting test..." onClick={onCapture} type="button">Submit manual capture test</AsyncButton>
         </div>
       </form>
       {detectResult ? (

@@ -24,6 +24,7 @@ import {
   type TtsAiRuntime
 } from "../../lib/api";
 import { useT } from "../../lib/i18n";
+import { useAsyncAction } from "../../lib/useAsyncAction";
 import { isSetupTableInteractiveDragTarget, moveItemIndex, profileIdsOf } from "../../lib/opsProfileReorder";
 import {
   formatProviderError,
@@ -61,7 +62,10 @@ import {
 } from "../../lib/opsTtsProviderCatalog";
 import { OpsConsoleShell } from "../app-shell/OpsConsoleShell";
 import { TopbarRefreshButton } from "../app-shell/TopbarRefreshButton";
-import { OpsPanel, OpsState } from "./OpsShared";
+import { AsyncButton } from "../shared/AsyncButton";
+import { AsyncContentBoundary } from "../shared/AsyncContentBoundary";
+import { useNotice } from "../shared/NoticeCenter";
+import { OpsPanel } from "./OpsShared";
 
 export {
   showsTtsApiKey,
@@ -413,6 +417,8 @@ function TtsSetupActionIcon({ kind }: { kind: TtsSetupActionIconKind }) {
 
 export function OpsTtsAiPage() {
   const t = useT();
+  const asyncAction = useAsyncAction();
+  const { notify } = useNotice();
   const [form, setForm] = useState<FormState | null>(null);
   const [kind, setKind] = useState<TtsProviderKind>("system");
   const [meta, setMeta] = useState<{ apiKeySet: boolean; apiKeyMasked: string; source: string }>({
@@ -675,6 +681,7 @@ export function OpsTtsAiPage() {
       }
       await saveTtsAiProfile(profileId, payload);
       await loadList();
+      notify({ id: "tts-settings-saved", message: t("opsTtsAi.saved"), tone: "success" });
     } catch (err) {
       setError(err instanceof Error ? err.message : t("opsTtsAi.saveError"));
     } finally {
@@ -839,6 +846,11 @@ export function OpsTtsAiPage() {
     try {
       const result = await testTtsAi({ ...payload, profile_id: editingProfileId || undefined });
       setTestResult({ ok: result.ok, provider: result.provider, detail: result.detail });
+      notify({
+        id: "tts-settings-test",
+        message: result.ok ? t("opsTtsAi.testOk") : t("opsTtsAi.testFail"),
+        tone: result.ok ? "success" : "warning"
+      });
       if (result.runtime) setRuntime(result.runtime);
       const nextCatalog = result.catalog && result.ok ? result.catalog : null;
       if (form) {
@@ -985,6 +997,11 @@ export function OpsTtsAiPage() {
     });
     if (result.runtime) setRuntime(result.runtime);
     if (result.ok) {
+      notify({
+        id: "tts-install-finished",
+        message: result.already_satisfied ? t("opsTtsAi.installAlready") : t("opsTtsAi.installOk"),
+        tone: "success"
+      });
       if (typeof result.probe_ok === "boolean") {
         setTestResult({
           ok: result.probe_ok,
@@ -1051,7 +1068,7 @@ export function OpsTtsAiPage() {
                   capabilities: getTtsFieldCapabilities(slug || "custom")
                 } satisfies TtsAiCatalog)
               : null;
-      setForm(applyCatalog(nextCatalog, nextForm));
+      setForm(applyCatalog(nextCatalog ?? null, nextForm));
     }
   }
 
@@ -1226,6 +1243,7 @@ export function OpsTtsAiPage() {
             duration: status.duration_seconds,
             detail: status.detail
           });
+          notify({ id: "tts-preview-finished", message: status.detail || t("opsTtsAi.preview"), tone: "success" });
           return;
         }
         setError(t("opsTtsAi.previewPollTimeout"));
@@ -1252,6 +1270,7 @@ export function OpsTtsAiPage() {
         duration: started.duration_seconds,
         detail: started.detail
       });
+      notify({ id: "tts-preview-finished", message: started.detail || t("opsTtsAi.preview"), tone: "success" });
     } catch (err) {
       const message = err instanceof Error ? err.message : t("opsTtsAi.previewError");
       // Older API builds returned 409 for a stuck lock — cancel once so the next click works.
@@ -1280,6 +1299,7 @@ export function OpsTtsAiPage() {
       await cancelTtsAiPreview();
       setError(null);
       setPreviewMeta(null);
+      notify({ id: "tts-preview-cancelled", message: t("opsTtsAi.previewCancel"), tone: "info" });
     } catch (err) {
       setError(err instanceof Error ? err.message : t("opsTtsAi.previewCancelError"));
     } finally {
@@ -1296,7 +1316,9 @@ export function OpsTtsAiPage() {
         description={t("nav.ttsSettingsDesc")}
         title={t("nav.ttsSettings")}
       >
-        <OpsState title={t("ops.loadingTitle")} detail={t("opsTtsAi.loadingDetail")} />
+        <AsyncContentBoundary status="loading" skeletonVariant="list" loadingLabel={t("opsTtsAi.loadingDetail")}>
+          {null}
+        </AsyncContentBoundary>
       </OpsConsoleShell>
     );
   }
@@ -1575,7 +1597,9 @@ export function OpsTtsAiPage() {
         description={t("nav.ttsSettingsDesc")}
         title={t("nav.ttsSettings")}
       >
-        <OpsState title={t("ops.loadingTitle")} detail={t("opsTtsAi.loadingDetail")} />
+        <AsyncContentBoundary status="loading" skeletonVariant="form" loadingLabel={t("opsTtsAi.loadingDetail")}>
+          {null}
+        </AsyncContentBoundary>
       </OpsConsoleShell>
     );
   }
@@ -1652,32 +1676,29 @@ export function OpsTtsAiPage() {
                 <TtsSetupActionIcon kind="back" />
                 <span className="ops-tts-editor-actions__label">{t("opsTtsAi.actionBack")}</span>
               </button>
-              <button
-                type="button"
-                className={testing ? "is-busy" : undefined}
-                onClick={() => void onTest()}
-                disabled={saving || testing || installing || previewing || profileBusy}
+              <AsyncButton
+                pending={asyncAction.isPending("test")}
+                pendingLabel={t("opsTtsAi.testing")}
+                leadingIcon={<TtsSetupActionIcon kind="test" />}
+                onClick={() => void asyncAction.run("test", onTest)}
+                disabled={saving || installing || previewing || profileBusy}
                 aria-label={t("opsTtsAi.test")}
                 title={t("opsTtsAi.test")}
               >
-                <TtsSetupActionIcon kind="test" />
-                <span className="ops-tts-editor-actions__label">
-                  {testing ? t("opsTtsAi.testing") : t("opsTtsAi.actionTest")}
-                </span>
-              </button>
-              <button
-                type="button"
-                className={`primary${saving ? " is-busy" : ""}`}
-                onClick={() => void onSave()}
-                disabled={saving || testing || installing || previewing || profileBusy}
+                <span className="ops-tts-editor-actions__label">{t("opsTtsAi.actionTest")}</span>
+              </AsyncButton>
+              <AsyncButton
+                className="primary"
+                pending={asyncAction.isPending("save")}
+                pendingLabel={t("opsTtsAi.saving")}
+                leadingIcon={<TtsSetupActionIcon kind="save" />}
+                onClick={() => void asyncAction.run("save", onSave)}
+                disabled={testing || installing || previewing || profileBusy}
                 aria-label={t("opsTtsAi.save")}
                 title={t("opsTtsAi.save")}
               >
-                <TtsSetupActionIcon kind="save" />
-                <span className="ops-tts-editor-actions__label">
-                  {saving ? t("opsTtsAi.saving") : t("opsTtsAi.actionSave")}
-                </span>
-              </button>
+                <span className="ops-tts-editor-actions__label">{t("opsTtsAi.actionSave")}</span>
+              </AsyncButton>
             </div>
           </div>
         }
@@ -1964,12 +1985,13 @@ export function OpsTtsAiPage() {
                       {copied ? t("opsTtsAi.copied") : t("opsTtsAi.copyInstall")}
                     </span>
                   </button>
-                  <button
-                    type="button"
-                    className={`ops-tts-action-btn is-primary${installing ? " is-busy" : ""}`}
-                    onClick={() => void onInstall()}
+                  <AsyncButton
+                    className="ops-tts-action-btn is-primary"
+                    pending={asyncAction.isPending("install")}
+                    pendingLabel={t("opsTtsAi.installing")}
+                    leadingIcon={<TtsSetupActionIcon kind="install" />}
+                    onClick={() => void asyncAction.run("install", () => onInstall())}
                     disabled={
-                      installing ||
                       saving ||
                       testing ||
                       (!form.installCommand.trim() && !form.packageName.trim() && !form.repoUrl.trim())
@@ -1989,26 +2011,24 @@ export function OpsTtsAiPage() {
                           : t("opsTtsAi.install")
                     }
                   >
-                    <TtsSetupActionIcon kind="install" />
                     <span className="ops-tts-editor-actions__label">
-                      {installing
-                        ? t("opsTtsAi.installing")
-                        : installResult?.already_satisfied || runtime?.last_install?.already_satisfied
-                          ? t("opsTtsAi.useInstalled")
-                          : t("opsTtsAi.install")}
+                      {installResult?.already_satisfied || runtime?.last_install?.already_satisfied
+                        ? t("opsTtsAi.useInstalled")
+                        : t("opsTtsAi.install")}
                     </span>
-                  </button>
+                  </AsyncButton>
                 </div>
                 <p className="ops-tts-field-hint ops-tts-field-hint--quiet">{t("opsTtsAi.installCommandHint")}</p>
               </div>
               <div className="ops-tts-install-actions">
                 {hadInstall || installResult?.already_satisfied ? (
-                  <button
-                    type="button"
-                    className={`ops-tts-action-btn${installing ? " is-busy" : ""}`}
-                    onClick={() => void onInstall({ forceReinstall: true })}
+                  <AsyncButton
+                    className="ops-tts-action-btn"
+                    pending={asyncAction.isPending("install")}
+                    pendingLabel={t("opsTtsAi.installing")}
+                    leadingIcon={<TtsSetupActionIcon kind="reinstall" />}
+                    onClick={() => void asyncAction.run("install", () => onInstall({ forceReinstall: true }))}
                     disabled={
-                      installing ||
                       saving ||
                       testing ||
                       (!form.installCommand.trim() && !form.packageName.trim() && !form.repoUrl.trim())
@@ -2016,11 +2036,8 @@ export function OpsTtsAiPage() {
                     aria-label={installing ? t("opsTtsAi.installing") : t("opsTtsAi.reinstallUpgrade")}
                     title={installing ? t("opsTtsAi.installing") : t("opsTtsAi.reinstallUpgrade")}
                   >
-                    <TtsSetupActionIcon kind="reinstall" />
-                    <span className="ops-tts-editor-actions__label">
-                      {installing ? t("opsTtsAi.installing") : t("opsTtsAi.reinstallUpgrade")}
-                    </span>
-                  </button>
+                    <span className="ops-tts-editor-actions__label">{t("opsTtsAi.reinstallUpgrade")}</span>
+                  </AsyncButton>
                 ) : null}
                 {form.packageName ? (
                   <span className="ops-tts-chip is-muted">
@@ -2365,30 +2382,30 @@ export function OpsTtsAiPage() {
               </div>
 
               <div className="ops-tts-preview-bar">
-                <button
-                  type="button"
-                  className={`ops-tts-action-btn is-primary${previewing ? " is-busy" : ""}`}
-                  onClick={() => void onPreview()}
-                  disabled={previewing || saving || testing || installing || !previewText.trim()}
+                <AsyncButton
+                  className="ops-tts-action-btn is-primary"
+                  pending={asyncAction.isPending("preview")}
+                  pendingLabel={t("opsTtsAi.previewing")}
+                  leadingIcon={<TtsSetupActionIcon kind="preview" />}
+                  onClick={() => void asyncAction.run("preview", onPreview)}
+                  disabled={saving || testing || installing || !previewText.trim()}
                   aria-label={previewing ? t("opsTtsAi.previewing") : t("opsTtsAi.preview")}
                   title={previewing ? t("opsTtsAi.previewing") : t("opsTtsAi.preview")}
                 >
-                  <TtsSetupActionIcon kind="preview" />
-                  <span className="ops-tts-editor-actions__label">
-                    {previewing ? t("opsTtsAi.previewing") : t("opsTtsAi.preview")}
-                  </span>
-                </button>
-                <button
-                  type="button"
+                  <span className="ops-tts-editor-actions__label">{t("opsTtsAi.preview")}</span>
+                </AsyncButton>
+                <AsyncButton
                   className="ops-tts-action-btn"
-                  onClick={() => void onCancelPreview()}
+                  pending={asyncAction.isPending("cancel-preview")}
+                  pendingLabel={t("opsTtsAi.previewCancel")}
+                  leadingIcon={<TtsSetupActionIcon kind="stop" />}
+                  onClick={() => void asyncAction.run("cancel-preview", onCancelPreview)}
                   disabled={saving || testing || installing}
                   aria-label={t("opsTtsAi.previewCancel")}
                   title={t("opsTtsAi.previewCancelHint")}
                 >
-                  <TtsSetupActionIcon kind="stop" />
                   <span className="ops-tts-editor-actions__label">{t("opsTtsAi.previewCancel")}</span>
-                </button>
+                </AsyncButton>
                 {previewAudioUrl ? (
                   <audio controls src={previewAudioUrl} className="ops-tts-preview-audio" preload="metadata">
                     <track kind="captions" />

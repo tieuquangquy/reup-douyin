@@ -201,10 +201,18 @@ class LocalTextDetector:
         self.model_path = path
         logger.info("local_text_detector_ready model=%s", path.name)
 
-    def detect(self, frame_bgr: np.ndarray) -> list[TextBox]:
+    def detect(
+        self,
+        frame_bgr: np.ndarray,
+        *,
+        long_edge: int = _DET_LONG_EDGE,
+    ) -> list[TextBox]:
         """Return normalized text boxes for one BGR frame."""
         h, w = int(frame_bgr.shape[0]), int(frame_bgr.shape[1])
-        tensor, scale, _pad = preprocess_bgr_for_dbnet(frame_bgr)
+        tensor, scale, _pad = preprocess_bgr_for_dbnet(
+            frame_bgr,
+            long_edge=max(_DET_LONG_EDGE, int(long_edge)),
+        )
         try:
             outputs = self._session.run(None, {self._input_name: tensor})
         except Exception as exc:  # noqa: BLE001

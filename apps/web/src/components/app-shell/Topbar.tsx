@@ -23,6 +23,12 @@ function accountInitial(label: string): string {
   return letter ? letter.toUpperCase() : "?";
 }
 
+function shortAccountTriggerLabel(label: string): string {
+  const trimmed = label.trim();
+  if (trimmed.length <= 16) return trimmed;
+  return `${trimmed.slice(0, 13)}...`;
+}
+
 function MenuCaretIcon() {
   return (
     <span aria-hidden="true" className="app-topbar-menu-caret">
@@ -105,9 +111,10 @@ export function Topbar({
         <div className="app-topbar-command-cluster">
           <details className="app-topbar-menu app-topbar-account-menu" ref={accountMenuRef}>
             <summary aria-label={t("topbar.account")} title={accountLabel}>
-              <span aria-hidden="true" className="app-topbar-account-avatar">
+              <span aria-hidden="true" className="app-topbar-account-avatar app-topbar-btn__icon-wrap">
                 {accountInitial(accountLabel)}
               </span>
+              <span className="app-topbar-btn__label app-topbar-account-trigger-label">{shortAccountTriggerLabel(accountLabel)}</span>
               <MenuCaretIcon />
             </summary>
             <div className="app-topbar-menu-panel app-topbar-account-panel" role="menu">

@@ -4,12 +4,15 @@ import Link from "next/link";
 import { useT } from "../../lib/i18n";
 import type { EditablePublishDraft, PublishDraft } from "../../types/publish-draft";
 import { humanizeStatus } from "../../lib/statusLabels";
+import { AsyncButton } from "../shared/AsyncButton";
 
 export function PublishDraftHeader({
   draft,
   editable,
   dirty,
   saving,
+  savePending,
+  readyPending,
   errors,
   onSave,
   onDiscard,
@@ -19,6 +22,8 @@ export function PublishDraftHeader({
   editable: EditablePublishDraft | null;
   dirty: boolean;
   saving: boolean;
+  savePending: boolean;
+  readyPending: boolean;
   errors: string[];
   onSave: () => void;
   onDiscard: () => void;
@@ -36,8 +41,17 @@ export function PublishDraftHeader({
         <Link href={draft ? `/production/final-review/${draft.source_video_id}` : "/selection/review-board"}>{t("publishDraftHeader.finalReview")}</Link>
         <Link href="/publishing/drafts">{t("nav.publishDrafts")}</Link>
         <button onClick={onDiscard} disabled={!dirty || saving}>{t("publishDraftHeader.discard")}</button>
-        <button onClick={onSave} disabled={!dirty || saving || !draft}>{t("publishDraftHeader.saveDraft")}</button>
-        <button className="primary" onClick={onMarkReady} disabled={saving || !draft || errors.length > 0}>{t("publishDraftHeader.markDraftReady")}</button>
+        <AsyncButton pending={savePending} onClick={onSave} disabled={!dirty || saving || !draft}>
+          {t("publishDraftHeader.saveDraft")}
+        </AsyncButton>
+        <AsyncButton
+          className="primary"
+          pending={readyPending}
+          onClick={onMarkReady}
+          disabled={saving || !draft || errors.length > 0}
+        >
+          {t("publishDraftHeader.markDraftReady")}
+        </AsyncButton>
       </div>
     </header>
   );

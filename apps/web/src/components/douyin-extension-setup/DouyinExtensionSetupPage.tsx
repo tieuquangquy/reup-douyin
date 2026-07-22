@@ -4,70 +4,66 @@ import { useEffect, useState, type ReactNode } from "react";
 import { checkDouyinExtensionStatus, fetchDouyinExtensionStatus, getDouyinExtensionDownloadUrl } from "../../lib/api";
 import { EXTENSION_BUILD_COMMAND, EXTENSION_DIST_PATH, resolveDouyinExtensionDownloadState } from "../../lib/douyinExtensionInstall";
 import { useT } from "../../lib/i18n";
+import { useLatestRequest } from "../../lib/useLatestRequest";
 import type { DouyinExtensionStatusResponse } from "../../types/douyin-extension-setup";
 import { OperatorStudioShell } from "../app-shell/OperatorStudioShell";
 import { TopbarRefreshButton } from "../app-shell/TopbarRefreshButton";
+import { AsyncContentBoundary } from "../shared/AsyncContentBoundary";
+import { useNotice } from "../shared/NoticeCenter";
 import { OpsState, formatDateTime, type OpsTone } from "../ops-console/OpsShared";
 
 export function DouyinExtensionSetupPage() {
   const t = useT();
   const [status, setStatus] = useState<DouyinExtensionStatusResponse | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [checking, setChecking] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const request = useLatestRequest();
+  const { notify } = useNotice();
 
   useEffect(() => {
     void loadStatus();
   }, [t]);
 
   async function loadStatus() {
-    setLoading(true);
-    setError(null);
     try {
-      setStatus(await fetchDouyinExtensionStatus());
+      await request.run(() => fetchDouyinExtensionStatus(), setStatus, status ? "refresh" : "initial");
     } catch (err) {
-      setError(err instanceof Error ? err.message : t("extensionSetup.loadError"));
-    } finally {
-      setLoading(false);
+      if (status) notify({ id: "extension-status", message: err instanceof Error ? err.message : t("extensionSetup.loadError"), tone: "error" });
     }
   }
 
   async function checkConnection() {
-    setChecking(true);
-    setError(null);
     try {
-      setStatus(await checkDouyinExtensionStatus());
+      const result = await request.run(() => checkDouyinExtensionStatus(), setStatus, "refresh");
+      if (result) notify({ id: "extension-status", message: "Extension connection checked.", tone: "success" });
     } catch (err) {
-      setError(err instanceof Error ? err.message : t("extensionSetup.checkError"));
-    } finally {
-      setChecking(false);
+      notify({ id: "extension-status", message: err instanceof Error ? err.message : t("extensionSetup.checkError"), tone: "error" });
     }
   }
 
-  const busy = checking || (loading && Boolean(status));
   const refreshAction = (
-    <TopbarRefreshButton busy={busy} disabled={loading && !status} onClick={() => void (status ? checkConnection() : loadStatus())} />
+    <TopbarRefreshButton busy={request.refreshing} disabled={request.initialLoading} onClick={() => void (status ? checkConnection() : loadStatus())} />
   );
 
-  if (loading && !status) {
+  if (!status && !request.error) {
     return (
       <OperatorStudioShell actions={refreshAction} description={t("extensionSetup.description")} title={t("extensionSetup.title")}>
-        <OpsState title={t("extensionSetup.loadingTitle")} detail={t("extensionSetup.loadingDetail")} />
+        <AsyncContentBoundary skeletonVariant="detail" status="loading"><span /></AsyncContentBoundary>
       </OperatorStudioShell>
     );
   }
 
-  if (error && !status) {
+  if (request.error && !status) {
     return (
       <OperatorStudioShell actions={refreshAction} description={t("extensionSetup.description")} title={t("extensionSetup.title")}>
-        <OpsState title={t("extensionSetup.unavailableTitle")} detail={error} retry={() => void loadStatus()} />
+        <AsyncContentBoundary errorState={<OpsState title={t("extensionSetup.unavailableTitle")} detail={request.error.message} retry={() => void loadStatus()} />} skeletonVariant="detail" status="error"><span /></AsyncContentBoundary>
       </OperatorStudioShell>
     );
   }
 
   return (
     <OperatorStudioShell actions={refreshAction} description={t("extensionSetup.description")} title={t("extensionSetup.title")}>
-      <ExtensionSetupBody error={error} status={status} t={t} />
+      <AsyncContentBoundary refreshing={request.refreshing} skeletonVariant="detail" status="success">
+        <ExtensionSetupBody error={null} status={status} t={t} />
+      </AsyncContentBoundary>
     </OperatorStudioShell>
   );
 }

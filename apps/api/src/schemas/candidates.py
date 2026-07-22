@@ -277,6 +277,9 @@ class CandidateSummaryResponse(BaseModel):
 
 class CandidateDetailResponse(PersistedCandidateResponse):
     source_video: CandidateSourceVideoSummary | None = None
+    in_reup_queue: bool = False
+    reup_queue_item_id: UUID | None = None
+    reup_queue_status: str | None = None
     capture_item_id: str | None = None
     capture_session_id: str | None = None
     source: str | None = None
@@ -594,6 +597,7 @@ class CandidateBulkStatusResponse(BaseModel):
 class CandidateListResponse(BaseModel):
     view: Literal["summary", "detail"] = "summary"
     total_count: int = 0
+    status_counts: dict[str, int] = Field(default_factory=dict)
     offset: int = 0
     limit: int = 0
     candidates: list[CandidateSummaryResponse] | list[CandidateDetailResponse]

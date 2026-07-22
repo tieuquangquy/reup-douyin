@@ -6,9 +6,14 @@ import { fetchPublishHealthDashboard, submitOperatorFeedback } from "../../lib/a
 import { useT } from "../../lib/i18n";
 import { buildFeedbackPayload, healthStatusLabel, needsAttentionCount } from "../../lib/publishHealthState";
 import { humanizeStatus } from "../../lib/statusLabels";
+import { useAsyncAction } from "../../lib/useAsyncAction";
+import { useLatestRequest, type LatestRequestMode } from "../../lib/useLatestRequest";
 import type { AnalyticsWindow, PublicationOutcomeItem, PublishHealthDashboard } from "../../types/analytics";
 import { OpsConsoleShell } from "../app-shell/OpsConsoleShell";
 import { TopbarRefreshButton } from "../app-shell/TopbarRefreshButton";
+import { AsyncButton } from "../shared/AsyncButton";
+import { AsyncContentBoundary } from "../shared/AsyncContentBoundary";
+import { useNotice } from "../shared/NoticeCenter";
 import { OpsState, formatDateTime, type OpsTone } from "../ops-console/OpsShared";
 
 const windows: AnalyticsWindow[] = ["today", "last_7_days", "last_30_days"];
@@ -59,25 +64,21 @@ export function PublishHealthDashboardPage() {
   const [confidence, setConfidence] = useState("SCALABLE");
   const [rootCause, setRootCause] = useState("");
   const [note, setNote] = useState("");
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const action = useAsyncAction();
+  const request = useLatestRequest();
+  const { notify } = useNotice();
 
-  async function load() {
-    setLoading(true);
-    setError(null);
-    try {
-      setSnapshot(await fetchPublishHealthDashboard(windowValue));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("publishHealthPage.loadError"));
-    } finally {
-      setLoading(false);
-    }
+  async function load(mode: LatestRequestMode = snapshot ? "refresh" : "initial") {
+    await request.run(
+      async () => fetchPublishHealthDashboard(windowValue),
+      setSnapshot,
+      mode
+    ).catch(() => undefined);
   }
 
   useEffect(() => {
-    void load();
+    void load(snapshot ? "refresh" : "initial");
   }, [windowValue, t]);
 
   const statusLabel = useMemo(() => (snapshot ? healthStatusLabel(snapshot) : "—"), [snapshot]);
@@ -85,53 +86,44 @@ export function PublishHealthDashboardPage() {
 
   async function handleFeedbackSubmit() {
     if (!selectedPublication) return;
-    setSaving(true);
-    setError(null);
-    setMessage(null);
-    try {
-      await submitOperatorFeedback(
-        buildFeedbackPayload(selectedPublication, {
-          qualityLabel,
-          confidence,
-          rootCause,
-          note,
-        }),
-      );
-      setMessage(t("publishHealthPage.feedbackSuccess"));
-      setNote("");
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("publishHealthPage.saveError"));
-    } finally {
-      setSaving(false);
-    }
+    await action.run("feedback", async () => {
+      setActionError(null);
+      try {
+        await submitOperatorFeedback(
+          buildFeedbackPayload(selectedPublication, {
+            qualityLabel,
+            confidence,
+            rootCause,
+            note,
+          }),
+        );
+        notify({ message: t("publishHealthPage.feedbackSuccess"), tone: "success" });
+        setNote("");
+        await load("refresh");
+      } catch (err) {
+        const message = err instanceof Error ? err.message : t("publishHealthPage.saveError");
+        setActionError(message);
+        notify({ message, tone: "error" });
+      }
+    });
   }
 
   const refreshAction = (
-    <TopbarRefreshButton busy={loading && Boolean(snapshot)} disabled={loading && !snapshot} onClick={() => void load()} />
+    <TopbarRefreshButton busy={request.refreshing} disabled={request.initialLoading} onClick={() => void load("refresh")} />
   );
-
-  if (loading && !snapshot) {
-    return (
-      <OpsConsoleShell actions={refreshAction} description={t("publishHealthPage.pageDesc")} title={t("publishHealthPage.pageTitle")}>
-        <OpsState title={t("publishHealthPage.loading")} detail={t("publishHealthPage.loadingDetail")} />
-      </OpsConsoleShell>
-    );
-  }
-
-  if (error && !snapshot) {
-    return (
-      <OpsConsoleShell actions={refreshAction} description={t("publishHealthPage.pageDesc")} title={t("publishHealthPage.pageTitle")}>
-        <OpsState title={t("publishHealthPage.unavailable")} detail={error} retry={() => void load()} />
-      </OpsConsoleShell>
-    );
-  }
+  const boundaryStatus = request.initialLoading && !snapshot ? "loading" : request.error && !snapshot ? "error" : "success";
+  const inlineError = actionError ?? (snapshot ? request.error?.message ?? null : null);
 
   return (
     <OpsConsoleShell actions={refreshAction} description={t("publishHealthPage.pageDesc")} title={t("publishHealthPage.pageTitle")}>
+      <AsyncContentBoundary
+        refreshing={request.refreshing}
+        status={boundaryStatus}
+        skeleton={<OpsState title={t("publishHealthPage.loading")} detail={t("publishHealthPage.loadingDetail")} />}
+        errorState={<OpsState title={t("publishHealthPage.unavailable")} detail={request.error?.message ?? t("publishHealthPage.loadError")} retry={() => void load("initial")} />}
+      >
       <main className="ops-page ops-ph-page">
-        {error ? <div className="inline-error">{error}</div> : null}
-        {message ? <div className="ops-ph-notice">{message}</div> : null}
+        {inlineError ? <div className="inline-error">{inlineError}</div> : null}
 
         <p className="ops-ph-freshness">
           {t("publishHealthPage.metricsGenerated")}{" "}
@@ -318,9 +310,14 @@ export function PublishHealthDashboardPage() {
                         {t("publishHealthPage.note")}
                         <textarea value={note} rows={4} onChange={(event) => setNote(event.target.value)} />
                       </label>
-                      <button className="primary" type="button" disabled={saving} onClick={() => void handleFeedbackSubmit()}>
-                        {saving ? t("publishHealthPage.saving") : t("publishHealthPage.saveFeedback")}
-                      </button>
+                      <AsyncButton
+                        className="primary"
+                        pending={action.isPending("feedback")}
+                        pendingLabel={t("publishHealthPage.saving")}
+                        onClick={() => void handleFeedbackSubmit()}
+                      >
+                        {t("publishHealthPage.saveFeedback")}
+                      </AsyncButton>
                     </div>
                   ) : (
                     <p className="ops-ph-empty">{t("publishHealthPage.selectPublication")}</p>
@@ -331,6 +328,7 @@ export function PublishHealthDashboardPage() {
           </>
         ) : null}
       </main>
+      </AsyncContentBoundary>
     </OpsConsoleShell>
   );
 }

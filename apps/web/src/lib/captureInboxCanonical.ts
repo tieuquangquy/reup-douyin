@@ -382,5 +382,7 @@ function formatDateTime(value: string | null): string {
   if (!value) return "Not captured";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleString();
+  const hours = String(date.getHours()).padStart(2, "0");
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+  return `${hours}:${minutes} ${date.getDate()}/${date.getMonth() + 1}/${date.getFullYear()}`;
 }

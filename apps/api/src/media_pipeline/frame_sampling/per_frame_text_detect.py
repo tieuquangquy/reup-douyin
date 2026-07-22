@@ -15,6 +15,7 @@ from typing import Any
 
 import cv2
 
+from src.media_pipeline.cache_provenance import video_content_fingerprint
 from src.media_pipeline.frame_sampling.ensure_dbnet_model import ensure_dbnet_onnx
 from src.media_pipeline.frame_sampling.errors import FrameSamplingError, FrameSamplingErrorCode
 from src.media_pipeline.frame_sampling.local_text_detector import LocalTextDetector, TextBox
@@ -117,9 +118,11 @@ def detect_text_boxes_every_frame(
             cap.release()
 
         resolved = str(video_path.resolve())
+        fingerprint = video_content_fingerprint(video_path)
 
     payload: dict[str, Any] = {
         "video": resolved,
+        "video_fingerprint": fingerprint,
         "detector": "dbnet_onnx",
         "stride": stride,
         "frame_count": decoded,

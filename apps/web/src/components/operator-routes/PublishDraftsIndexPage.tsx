@@ -3,11 +3,14 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useT } from "../../lib/i18n";
+import { useLatestRequest } from "../../lib/useLatestRequest";
 import { fetchPublishControlQueue } from "../../lib/api";
 import { humanizeStatus } from "../../lib/statusLabels";
 import type { PublishControlQueue, PublishQueueItem } from "../../types/publish-control";
 import { OperatorStudioShell } from "../app-shell/OperatorStudioShell";
 import { TopbarRefreshButton } from "../app-shell/TopbarRefreshButton";
+import { AsyncContentBoundary } from "../shared/AsyncContentBoundary";
+import { useNotice } from "../shared/NoticeCenter";
 import { OpsState, formatDateTime, statusTone, type OpsTone } from "../ops-console/OpsShared";
 
 function DraftsKpi({ label, value, detail, tone = "muted" }: { label: string; value: string; detail: string; tone?: OpsTone }) {
@@ -34,18 +37,16 @@ function DraftsPanel({ title, children }: { title: string; children: ReactNode }
 export function PublishDraftsIndexPage() {
   const t = useT();
   const [queue, setQueue] = useState<PublishControlQueue | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const request = useLatestRequest();
+  const { notify } = useNotice();
 
   async function load() {
-    setLoading(true);
-    setError(null);
+    const mode = queue ? "refresh" : "initial";
     try {
-      setQueue(await fetchPublishControlQueue());
+      await request.run(() => fetchPublishControlQueue(), setQueue, mode);
+      if (mode === "refresh") notify({ id: "publish-drafts-refresh", message: "Publish drafts refreshed.", tone: "success" });
     } catch (err) {
-      setError(err instanceof Error ? err.message : t("publishDraftsIndex.loadError"));
-    } finally {
-      setLoading(false);
+      if (mode === "refresh") notify({ id: "publish-drafts-refresh", message: err instanceof Error ? err.message : t("publishDraftsIndex.loadError"), tone: "error" });
     }
   }
 
@@ -61,21 +62,21 @@ export function PublishDraftsIndexPage() {
   const hasAttention = attention.length > 0;
 
   const refreshAction = (
-    <TopbarRefreshButton busy={loading && Boolean(queue)} disabled={loading && !queue} onClick={() => void load()} />
+    <TopbarRefreshButton busy={request.refreshing} disabled={request.initialLoading} onClick={() => void load()} />
   );
 
-  if (loading && !queue) {
+  if (!queue && !request.error) {
     return (
       <OperatorStudioShell actions={refreshAction} description={t("publishDraftsIndex.pageDesc")} title={t("publishDraftsIndex.pageTitle")}>
-        <OpsState title={t("publishDraftsIndex.loadingTitle")} detail={t("publishDraftsIndex.loadingDetail")} />
+        <AsyncContentBoundary skeletonVariant="list" status="loading"><span /></AsyncContentBoundary>
       </OperatorStudioShell>
     );
   }
 
-  if (error && !queue) {
+  if (request.error && !queue) {
     return (
       <OperatorStudioShell actions={refreshAction} description={t("publishDraftsIndex.pageDesc")} title={t("publishDraftsIndex.pageTitle")}>
-        <OpsState title={t("publishDraftsIndex.couldNotLoad")} detail={error} retry={() => void load()} />
+        <AsyncContentBoundary errorState={<OpsState title={t("publishDraftsIndex.couldNotLoad")} detail={request.error.message} retry={() => void load()} />} skeletonVariant="list" status="error"><span /></AsyncContentBoundary>
       </OperatorStudioShell>
     );
   }
@@ -90,8 +91,8 @@ export function PublishDraftsIndexPage() {
 
   return (
     <OperatorStudioShell actions={refreshAction} description={t("publishDraftsIndex.pageDesc")} title={t("publishDraftsIndex.pageTitle")}>
+      <AsyncContentBoundary refreshing={request.refreshing} skeletonVariant="list" status="success">
       <main className="ops-page ops-drafts-page">
-        {error ? <div className="inline-error">{error}</div> : null}
 
         <div className="ops-drafts-freshness">
           <p>
@@ -164,6 +165,7 @@ export function PublishDraftsIndexPage() {
           ) : null}
         </section>
       </main>
+      </AsyncContentBoundary>
     </OperatorStudioShell>
   );
 }

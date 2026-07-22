@@ -1,30 +1,45 @@
+import type { Candidate } from "../../types/review-board";
+import { reviewBoardDetailsActionVisibility } from "../../lib/reviewBoardQueueState";
+import { AsyncButton } from "../shared/AsyncButton";
 import { WorkItemActionIcon } from "../shared/WorkItemActionIcon";
 
 type ReviewBoardTileActionsProps = {
-  approvedForQueue: boolean;
-  inReupQueue: boolean;
+  approvedForQueue?: boolean;
+  candidate?: Pick<Candidate, "status" | "decision_status" | "in_reup_queue" | "reup_queue_status">;
+  inReupQueue?: boolean;
   mutating: boolean;
   onApprove?: () => void;
   onApproveAndSend?: () => void;
-  onDetails: () => void;
   onLater: () => void;
+  pendingAction?: string | null;
   onReject: () => void;
   onSendToQueue?: () => void;
   variant?: "tile" | "inspector";
 };
 
 export function ReviewBoardTileActions({
-  approvedForQueue,
-  inReupQueue,
+  approvedForQueue: approvedForQueueProp,
+  candidate,
+  inReupQueue: inReupQueueProp,
   mutating,
   onApprove,
   onApproveAndSend,
-  onDetails,
   onLater,
+  pendingAction = null,
   onReject,
   onSendToQueue,
   variant = "tile"
 }: ReviewBoardTileActionsProps) {
+  const visibility = candidate
+    ? reviewBoardDetailsActionVisibility(candidate)
+    : {
+        approvedForQueue: Boolean(approvedForQueueProp),
+        inReupQueue: Boolean(inReupQueueProp),
+        showApproveOnly: !approvedForQueueProp,
+        showLater: true,
+        showReject: true
+      };
+  const { approvedForQueue, inReupQueue, showApproveOnly, showLater, showReject } = visibility;
   const disabled = mutating;
   const barClass = [
     "review-board-tile-action-bar",
@@ -35,118 +50,99 @@ export function ReviewBoardTileActions({
     .filter(Boolean)
     .join(" ");
 
-  if (variant === "inspector" && !inReupQueue) {
-    return (
-      <div className={barClass} aria-label="Candidate actions">
-        <div className="review-board-tile-action-primary">
-          {approvedForQueue ? (
-            <button className="review-board-tile-btn is-primary" disabled={disabled} onClick={onSendToQueue} type="button">
-              <WorkItemActionIcon kind="send" />
-              Send to queue
-            </button>
-          ) : (
-            <button className="review-board-tile-btn is-primary" disabled={disabled} onClick={onApprove} type="button">
-              <WorkItemActionIcon kind="approve" />
-              Approve
-            </button>
-          )}
-        </div>
-        <div className="review-board-tile-action-row is-split">
-          <button className="review-board-tile-btn is-muted" disabled={disabled} onClick={onLater} type="button">
-            <WorkItemActionIcon kind="later" />
-            Later
-          </button>
-          <button className="review-board-tile-btn is-danger" disabled={disabled} onClick={onReject} type="button">
-            <WorkItemActionIcon kind="reject" />
-            Reject
-          </button>
-        </div>
-      </div>
-    );
-  }
-
   if (inReupQueue) {
-    if (variant === "inspector") {
-      return (
-        <div className={barClass} aria-label="Candidate actions">
-          <a
-            className="review-board-tile-btn is-primary is-promoted-open review-board-inspector-queue-btn"
-            href="/selection/reup-queue"
-            title="Open this clip in Reup Queue"
-          >
-            <WorkItemActionIcon kind="open" />
-            Open in Reup Queue
-          </a>
-        </div>
-      );
-    }
-
     return (
       <div className={barClass} aria-label="Candidate actions">
         <a
-          className="review-board-tile-btn is-primary is-promoted-open"
+          className={`review-board-tile-btn is-primary is-promoted-open${variant === "inspector" ? " review-board-inspector-queue-btn" : ""}`}
           href="/selection/reup-queue"
           title="Open this clip in Reup Queue"
         >
           <WorkItemActionIcon kind="open" />
           {variant === "inspector" ? "Open in Reup Queue" : "Open queue"}
         </a>
-        <button
-          className="review-board-tile-btn is-secondary is-promoted-details"
-          disabled={disabled}
-          onClick={onDetails}
-          title="Inspect candidate details"
-          type="button"
-        >
-          <WorkItemActionIcon kind="details" />
-          Details
-        </button>
       </div>
     );
   }
+
+  const showCompanionSplit = showLater || showReject;
 
   return (
     <div className={barClass} aria-label="Candidate actions">
       <div className="review-board-tile-action-primary">
         {approvedForQueue ? (
-          <button className="review-board-tile-btn is-primary" disabled={disabled} onClick={onSendToQueue} type="button">
-            <WorkItemActionIcon kind="send" />
+          <AsyncButton
+            className="review-board-tile-btn is-primary"
+            disabled={disabled}
+            leadingIcon={<WorkItemActionIcon kind="send" />}
+            onClick={onSendToQueue}
+            pending={pendingAction === "send"}
+            pendingLabel="Sending…"
+            type="button"
+          >
             Send to queue
-          </button>
+          </AsyncButton>
         ) : (
-          <button className="review-board-tile-btn is-primary" disabled={disabled} onClick={onApproveAndSend} type="button">
-            <WorkItemActionIcon kind="send" />
+          <AsyncButton
+            className="review-board-tile-btn is-primary"
+            disabled={disabled}
+            leadingIcon={<WorkItemActionIcon kind="send" />}
+            onClick={onApproveAndSend}
+            pending={pendingAction === "approve-and-send"}
+            pendingLabel="Sending…"
+            type="button"
+          >
             Approve & send
-          </button>
+          </AsyncButton>
         )}
       </div>
 
-      {!approvedForQueue && onApprove ? (
+      {showApproveOnly && onApprove ? (
         <div className="review-board-tile-action-row is-secondary">
-          <button className="review-board-tile-btn is-secondary" disabled={disabled} onClick={onApprove} type="button">
-            <WorkItemActionIcon kind="approve" />
+          <AsyncButton
+            className="review-board-tile-btn is-secondary"
+            disabled={disabled}
+            leadingIcon={<WorkItemActionIcon kind="approve" />}
+            onClick={onApprove}
+            pending={pendingAction === "approved"}
+            pendingLabel="Approving…"
+            type="button"
+          >
             Approve only
-          </button>
+          </AsyncButton>
         </div>
       ) : null}
 
-      <div className="review-board-tile-action-row is-split">
-        <button className="review-board-tile-btn is-muted" disabled={disabled} onClick={onLater} type="button">
-          <WorkItemActionIcon kind="later" />
-          Later
-        </button>
-        <button className="review-board-tile-btn is-danger" disabled={disabled} onClick={onReject} type="button">
-          <WorkItemActionIcon kind="reject" />
-          Reject
-        </button>
-      </div>
-
-      <div className="review-board-tile-action-row is-tertiary">
-        <button className="review-board-tile-btn is-ghost" disabled={disabled} onClick={onDetails} type="button">
-          <WorkItemActionIcon kind="details" />
-          View details
-        </button>
-      </div>
+      {showCompanionSplit ? (
+        <div className={`review-board-tile-action-row ${showLater && showReject ? "is-split" : "is-secondary"}`}>
+          {showLater ? (
+            <AsyncButton
+              className="review-board-tile-btn is-muted"
+              disabled={disabled}
+              leadingIcon={<WorkItemActionIcon kind="later" />}
+              onClick={onLater}
+              pending={pendingAction === "in_review"}
+              pendingLabel="Updating…"
+              type="button"
+            >
+              Later
+            </AsyncButton>
+          ) : null}
+          {showReject ? (
+            <AsyncButton
+              className="review-board-tile-btn is-danger"
+              disabled={disabled}
+              leadingIcon={<WorkItemActionIcon kind="reject" />}
+              onClick={onReject}
+              pending={pendingAction === "rejected"}
+              pendingLabel="Rejecting…"
+              type="button"
+            >
+              Reject
+            </AsyncButton>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -278,8 +278,8 @@ assert.doesNotMatch(
   /\/source-videos\//,
   "Transcript nav must open the production canonical path (avoid NEXT_REDIRECT overlay)"
 );
-assert.equal(resolveNavItemStatusLabel(transcriptItem, "source-1"), "nav.openCurrentVideo");
-assert.equal(resolveNavItemStatusLabel(finalReviewItem, "source-1"), "nav.openCurrentVideo");
+assert.equal(resolveNavItemStatusLabel(transcriptItem, "source-1"), null);
+assert.equal(resolveNavItemStatusLabel(finalReviewItem, "source-1"), null);
 assert.equal(resolveNavItemStatusLabel(transcriptItem, null), "nav.selectVideo");
 assert.equal(resolveNavItemStatusLabel(finalReviewItem, null), "nav.selectOutput");
 assert.equal(extractSourceVideoIdFromPath("/source-videos/source-1/transcript-editor"), "source-1");

@@ -32,7 +32,17 @@ def _timed_from_dict(b: dict[str, Any]) -> TimedBox:
 
 
 def _boxes_to_dicts(boxes: list[TimedBox]) -> list[dict[str, Any]]:
-    return [b.to_dict() for b in boxes]
+    return [
+        {
+            "x": round(float(b.x), 6),
+            "y": round(float(b.y), 6),
+            "width": round(float(b.w), 6),
+            "height": round(float(b.h), 6),
+            "text": b.text,
+            "confidence": round(float(b.confidence), 4),
+        }
+        for b in boxes
+    ]
 
 
 def _observations_from_payload(frames: list[dict[str, Any]]) -> list[OcrObservation]:
@@ -60,6 +70,10 @@ def apply_best_box_authority(
     Keeps the original frame list shape (one entry per Phase-1 sample) so render
     hold logic is unchanged; box geometry/text are upgraded in place.
     """
+    if str(ocr_payload.get("authority") or "").strip().startswith(
+        "ocr_authority_v3"
+    ):
+        return ocr_payload
     frames = list(ocr_payload.get("frames") or [])
     if not frames:
         return ocr_payload

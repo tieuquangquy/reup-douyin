@@ -97,6 +97,9 @@ export function buildCapturedItemFromReviewCandidate(candidate: Candidate): Capt
     share_count_text: metadata.shareCountText,
     favorite_count: metadata.favoriteCount,
     favorite_count_text: metadata.favoriteCountText,
+    reup_score: metadata.reupScore,
+    reup_score_label: metadata.reupScoreLabel as CapturedItem["reup_score_label"],
+    reup_score_level: metadata.reupScoreLevel as CapturedItem["reup_score_level"],
     missing_metadata_fields: metadata.missingMetadataFields ?? [],
     has_all_core_metadata: !(metadata.missingMetadataFields?.length ?? 0)
   };

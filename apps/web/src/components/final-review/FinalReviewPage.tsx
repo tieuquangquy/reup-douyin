@@ -1,7 +1,6 @@
 "use client";
 
-import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useState } from "react";
 import { useT } from "../../lib/i18n";
 import {
   approveRender,
@@ -19,6 +18,7 @@ import {
   updateRiskFlagStatus
 } from "../../lib/api";
 import { pollAnalyzeJobUntilSettled } from "../../lib/transcriptEditorReanalyze";
+import { useAsyncAction } from "../../lib/useAsyncAction";
 import type { OcrSummaryResponse } from "../../types/ocr";
 import {
   DEFAULT_FINAL_REVIEW_CHECKLIST,
@@ -27,7 +27,8 @@ import {
   getRenderWarnings,
   isApproved,
   isPublishReady,
-  nextCompareMode
+  nextCompareMode,
+  resolveFinalReviewPrepFocus
 } from "../../lib/finalReviewState";
 import type {
   ChecklistState,
@@ -38,19 +39,28 @@ import type {
 } from "../../types/final-review";
 import type { OperatorRiskDecisionType, RiskFlag, RiskSummary } from "../../types/risk";
 import { RiskSummaryCard } from "../risk/RiskSummaryCard";
+import { useNotice } from "../shared/NoticeCenter";
+import { AsyncContentBoundary } from "../shared/AsyncContentBoundary";
 import { FinalCompareViewer } from "./FinalCompareViewer";
 import { FinalRenderMetadataPanel } from "./FinalRenderMetadataPanel";
 import { FinalReviewActions } from "./FinalReviewActions";
 import { FinalReviewChecklist } from "./FinalReviewChecklist";
 import { FinalReviewHeader } from "./FinalReviewHeader";
-import { FinalReviewEmptyState, FinalReviewErrorState, FinalReviewLoadingState } from "./FinalReviewStates";
+import { FinalReviewEmptyState, FinalReviewErrorState } from "./FinalReviewStates";
 import { FinalReviewVisualCheckpoint } from "./FinalReviewVisualCheckpoint";
 import { FinalReviewWarningsPanel } from "./FinalReviewWarningsPanel";
 
 type RailTab = "review" | "visual" | "risk" | "info";
 
-export function FinalReviewPage({ sourceVideoId }: { sourceVideoId: string }) {
+export type FinalReviewPageHandle = {
+  refresh: () => Promise<void>;
+};
+
+export const FinalReviewPage = forwardRef<FinalReviewPageHandle, { sourceVideoId: string }>(
+  function FinalReviewPage({ sourceVideoId }, ref) {
   const t = useT();
+  const asyncAction = useAsyncAction();
+  const { notify } = useNotice();
   const [render, setRender] = useState<RenderOutput | null>(null);
   const [manifest, setManifest] = useState<SourceVideoAssetManifest | null>(null);
   const [ocrSummary, setOcrSummary] = useState<OcrSummaryResponse | null>(null);
@@ -67,8 +77,8 @@ export function FinalReviewPage({ sourceVideoId }: { sourceVideoId: string }) {
   const [riskSummary, setRiskSummary] = useState<RiskSummary | null>(null);
   const [riskLoading, setRiskLoading] = useState(false);
 
-  const loadData = useCallback(async () => {
-    setLoading(true);
+  const loadData = useCallback(async (mode: "initial" | "refresh" = "initial") => {
+    if (mode === "initial") setLoading(true);
     setError(null);
     try {
       const [latestRender, assetManifest] = await Promise.all([
@@ -88,9 +98,19 @@ export function FinalReviewPage({ sourceVideoId }: { sourceVideoId: string }) {
     } catch (err) {
       setError(err instanceof Error ? err.message : t("finalReviewPage.loadError"));
     } finally {
-      setLoading(false);
+      if (mode === "initial") setLoading(false);
     }
   }, [sourceVideoId, t]);
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      refresh: async () => {
+        await loadData("refresh");
+      }
+    }),
+    [loadData]
+  );
 
   useEffect(() => {
     void loadData();
@@ -123,6 +143,7 @@ export function FinalReviewPage({ sourceVideoId }: { sourceVideoId: string }) {
       const approved = await approveRender(render.id);
       setRender(approved);
       setActionMessage(t("finalReviewPage.approveSuccess"));
+      notify({ id: `final-review-approve-${render.id}`, message: t("finalReviewPage.approveSuccess"), tone: "success" });
     } catch (err) {
       setError(err instanceof Error ? err.message : t("finalReviewPage.approveError"));
     } finally {
@@ -153,6 +174,7 @@ export function FinalReviewPage({ sourceVideoId }: { sourceVideoId: string }) {
       const updated = await markRenderPublishReady(render.id);
       setRender(updated);
       setActionMessage(t("finalReviewPage.publishReadySuccess"));
+      notify({ id: `final-review-ready-${render.id}`, message: t("finalReviewPage.publishReadySuccess"), tone: "success" });
     } catch (err) {
       setError(err instanceof Error ? err.message : t("finalReviewPage.publishReadyError"));
     } finally {
@@ -197,33 +219,53 @@ export function FinalReviewPage({ sourceVideoId }: { sourceVideoId: string }) {
     }
   }
 
+  async function pollRenderJob(jobId: string) {
+    return pollAnalyzeJobUntilSettled({
+      fetchStatus: async () => {
+        const next = await fetchJob(jobId);
+        return { status: next.status, error_message: next.error_message };
+      },
+      maxAttempts: 240
+    });
+  }
+
+  async function announceRenderLifecycle(jobId: string) {
+    const noticeId = `final-review-render-${sourceVideoId}`;
+    const queued = t("finalReviewStates.renderQueued").replace("{jobId}", jobId);
+    notify({ id: `${noticeId}-queued`, message: queued, tone: "info" });
+    notify({
+      id: noticeId,
+      message: t("finalReviewStates.renderInProgress"),
+      tone: "info",
+      durationMs: null
+    });
+    return noticeId;
+  }
+
   async function handleStartFirstRender() {
     if (!window.confirm(t("finalReviewStates.startRenderConfirm"))) return;
     setActionBusy(true);
     setActionMessage(null);
     setError(null);
+    const noticeId = `final-review-render-${sourceVideoId}`;
     try {
       const job = await createRenderJob(sourceVideoId, true);
-      setOcrMessage(t("finalReviewStates.renderQueued").replace("{jobId}", job.job_id));
-      const settled = await pollAnalyzeJobUntilSettled({
-        fetchStatus: async () => {
-          const next = await fetchJob(job.job_id);
-          return { status: next.status, error_message: next.error_message };
-        },
-        maxAttempts: 240
-      });
+      await announceRenderLifecycle(job.job_id);
+      const settled = await pollRenderJob(job.job_id);
       if (settled.outcome === "success") {
         await loadData();
-        setActionMessage(t("finalReviewStates.renderSuccess"));
+        notify({ id: noticeId, message: t("finalReviewStates.renderSuccess"), tone: "success" });
         return;
       }
       if (settled.outcome === "failed") {
-        setError(`${t("finalReviewStates.renderFailed")}: ${settled.errorMessage ?? settled.status}`);
+        const message = `${t("finalReviewStates.renderFailed")}: ${settled.errorMessage ?? settled.status}`;
+        notify({ id: noticeId, message, tone: "error" });
         return;
       }
-      setError(t("finalReviewStates.renderTimeout"));
+      notify({ id: noticeId, message: t("finalReviewStates.renderTimeout"), tone: "error" });
     } catch (err) {
-      setError(err instanceof Error ? err.message : t("finalReviewStates.renderFailed"));
+      const message = err instanceof Error ? err.message : t("finalReviewStates.renderFailed");
+      notify({ id: noticeId, message, tone: "error" });
     } finally {
       setActionBusy(false);
     }
@@ -234,29 +276,26 @@ export function FinalReviewPage({ sourceVideoId }: { sourceVideoId: string }) {
     setActionBusy(true);
     setActionMessage(null);
     setError(null);
+    const noticeId = `final-review-render-${sourceVideoId}`;
     try {
       const job = await createRenderJob(sourceVideoId, true);
-      setActionMessage(t("finalReviewStates.renderQueued").replace("{jobId}", job.job_id));
-      const settled = await pollAnalyzeJobUntilSettled({
-        fetchStatus: async () => {
-          const next = await fetchJob(job.job_id);
-          return { status: next.status, error_message: next.error_message };
-        },
-        maxAttempts: 240
-      });
+      await announceRenderLifecycle(job.job_id);
+      const settled = await pollRenderJob(job.job_id);
       if (settled.outcome === "success") {
         await loadData();
-        setActionMessage(t("finalReviewStates.renderSuccess"));
+        notify({ id: noticeId, message: t("finalReviewStates.renderSuccess"), tone: "success" });
         return;
       }
       if (settled.outcome === "failed") {
         await loadData();
-        setError(`${t("finalReviewStates.renderFailed")}: ${settled.errorMessage ?? settled.status}`);
+        const message = `${t("finalReviewStates.renderFailed")}: ${settled.errorMessage ?? settled.status}`;
+        notify({ id: noticeId, message, tone: "error" });
         return;
       }
-      setError(t("finalReviewStates.renderTimeout"));
+      notify({ id: noticeId, message: t("finalReviewStates.renderTimeout"), tone: "error" });
     } catch (err) {
-      setError(err instanceof Error ? err.message : t("finalReviewPage.rerenderError"));
+      const message = err instanceof Error ? err.message : t("finalReviewPage.rerenderError");
+      notify({ id: noticeId, message, tone: "error" });
     } finally {
       setActionBusy(false);
     }
@@ -285,9 +324,13 @@ export function FinalReviewPage({ sourceVideoId }: { sourceVideoId: string }) {
           (summary.warnings || []).some(
             (warning) => warning === "clean_skipped_no_hardsub" || warning === "no_hardsub_detected"
           );
-        setOcrMessage(
-          noFreshClean ? t("finalReviewVisual.analyzeNoOutput") : t("finalReviewVisual.analyzeSuccess")
-        );
+        const message = noFreshClean ? t("finalReviewVisual.analyzeNoOutput") : t("finalReviewVisual.analyzeSuccess");
+        setOcrMessage(message);
+        notify({
+          id: `final-review-ocr-${sourceVideoId}`,
+          message,
+          tone: noFreshClean ? "warning" : "success"
+        });
         return;
       }
       if (settled.outcome === "failed") {
@@ -312,6 +355,7 @@ export function FinalReviewPage({ sourceVideoId }: { sourceVideoId: string }) {
     try {
       setOcrSummary(await approveOcrVisual(sourceVideoId));
       setOcrMessage(t("finalReviewVisual.approveSuccess"));
+      notify({ id: `final-review-visual-${sourceVideoId}`, message: t("finalReviewVisual.approveSuccess"), tone: "success" });
     } catch (err) {
       setError(err instanceof Error ? err.message : t("finalReviewVisual.approveFailed"));
     } finally {
@@ -319,15 +363,25 @@ export function FinalReviewPage({ sourceVideoId }: { sourceVideoId: string }) {
     }
   }
 
-  if (loading) return <FinalReviewLoadingState />;
+  if (loading) {
+    return (
+      <main className="final-review">
+        <AsyncContentBoundary status="loading" skeletonVariant="detail" loadingLabel={t("finalReviewStates.loading")}>
+          {null}
+        </AsyncContentBoundary>
+      </main>
+    );
+  }
   if (error && !render && !ocrSummary) return <FinalReviewErrorState message={error} onRetry={loadData} />;
   if (!render) {
     return (
       <main className="final-review final-review--prep">
-        <header className="final-review-preheader">
-          <h1>{t("finalReviewHeader.title")}</h1>
-          <p>{t("finalReviewStates.emptyPrepHint")}</p>
-          <Link href={`/production/transcript-editor/${sourceVideoId}`}>{t("finalReviewHeader.transcriptEditor")}</Link>
+        <header className="final-review-preheader final-review-preheader--studio">
+          <div className="final-review-preheader__copy">
+            <span className="fr-topbar__kicker">{t("finalReviewStates.prepKicker")}</span>
+            <h1>{t("finalReviewHeader.title")}</h1>
+            <p>{t("finalReviewStates.emptyPrepHint")}</p>
+          </div>
         </header>
         {error ? <div className="inline-error">{error}</div> : null}
         {ocrMessage ? <p className="action-message">{ocrMessage}</p> : null}
@@ -336,16 +390,20 @@ export function FinalReviewPage({ sourceVideoId }: { sourceVideoId: string }) {
           <FinalReviewEmptyState
             sourceVideoId={sourceVideoId}
             actionBusy={actionBusy || ocrBusy || approveBusy}
-            onStartRender={() => void handleStartFirstRender()}
+            startRenderPending={asyncAction.isPending("start-render")}
+            prepFocus={resolveFinalReviewPrepFocus(ocrSummary)}
+            onStartRender={() => void asyncAction.run("start-render", handleStartFirstRender)}
           />
           <aside className="final-review-side">
             <FinalReviewVisualCheckpoint
               summary={ocrSummary}
-              analyzeBusy={ocrBusy || actionBusy}
+              analyzeBusy={ocrBusy}
               approveBusy={approveBusy}
               message={ocrMessage}
-              onAnalyze={() => void handleAnalyzeOcr()}
-              onApprove={() => void handleApproveVisual()}
+              presentation="prep"
+              prepFocus={resolveFinalReviewPrepFocus(ocrSummary)}
+              onAnalyze={() => void asyncAction.run("analyze-ocr", handleAnalyzeOcr)}
+              onApprove={() => void asyncAction.run("approve-visual", handleApproveVisual)}
             />
           </aside>
         </section>
@@ -366,7 +424,8 @@ export function FinalReviewPage({ sourceVideoId }: { sourceVideoId: string }) {
         render={render}
         manifest={manifest}
         actionBusy={actionBusy}
-        onRerender={() => void handleRerender()}
+        rerenderPending={asyncAction.isPending("rerender")}
+        onRerender={() => void asyncAction.run("rerender", handleRerender)}
       />
       {error ? <div className="inline-error fr-inline-error">{error}</div> : null}
       {isPublishReady(render) ? <div className="publish-ready-banner">{t("finalReviewPage.isPublishReady")}</div> : null}
@@ -410,8 +469,8 @@ export function FinalReviewPage({ sourceVideoId }: { sourceVideoId: string }) {
                 analyzeBusy={ocrBusy}
                 approveBusy={approveBusy}
                 message={ocrMessage}
-                onAnalyze={() => void handleAnalyzeOcr()}
-                onApprove={() => void handleApproveVisual()}
+                onAnalyze={() => void asyncAction.run("analyze-ocr", handleAnalyzeOcr)}
+                onApprove={() => void asyncAction.run("approve-visual", handleApproveVisual)}
               />
             ) : null}
             {railTab === "risk" ? (
@@ -432,11 +491,14 @@ export function FinalReviewPage({ sourceVideoId }: { sourceVideoId: string }) {
           render={render}
           checklist={checklist}
           actionBusy={actionBusy}
+          approvePending={asyncAction.isPending("approve-render")}
+          publishReadyPending={asyncAction.isPending("publish-ready")}
           actionMessage={actionMessage}
-          onApprove={() => void handleApprove()}
-          onPublishReady={() => void handlePublishReady()}
+          onApprove={() => void asyncAction.run("approve-render", handleApprove)}
+          onPublishReady={() => void asyncAction.run("publish-ready", handlePublishReady)}
         />
       ) : null}
     </main>
   );
-}
+  }
+);

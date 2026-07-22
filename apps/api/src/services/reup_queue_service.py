@@ -196,6 +196,29 @@ class ReupQueueService:
             raise ReupQueueError("REUP_QUEUE_ITEM_NOT_FOUND", "Reup Queue item was not found.")
         return item
 
+    def resolve_display_job(self, item: ReupQueueItem) -> Job | None:
+        """Prefer ANALYZE_AUDIO job from metadata when linked ``job_id`` is stale.
+
+        After Hold during download, ``item.job_id`` can still point at a cancelled
+        DOWNLOAD while ``metadata_json.analyze_audio_job_id`` holds the real analyze job.
+        List/get responses must surface that analyze job so the worklist can unlock Transcript.
+        """
+        linked = getattr(item, "job", None)
+        if item.status != ReupQueueStatus.WAITING_FOR_METADATA:
+            return linked
+        meta = item.metadata_json if isinstance(item.metadata_json, dict) else {}
+        raw = meta.get("analyze_audio_job_id")
+        if not raw:
+            return linked
+        try:
+            analyze_id = UUID(str(raw))
+        except (TypeError, ValueError):
+            return linked
+        if linked is not None and linked.id == analyze_id:
+            return linked
+        job = self.db.get(Job, analyze_id)
+        return job if job is not None else linked
+
     def membership_for_candidates(self, candidate_ids: list[UUID]) -> dict[UUID, ReupQueueCandidateMembership]:
         if not candidate_ids:
             return {}
@@ -371,6 +394,7 @@ class ReupQueueService:
             from src.audio_pipeline.errors import AudioAnalysisError
 
             item.media_ready_at = now
+            item.held_at = None
             item.media_prep_notes = media_prep_notes or note or item.media_prep_notes
             # Localization path: confirm media always enters analysis prep (not export skip).
             if media_prep_status is not None and media_prep_status not in {
@@ -411,9 +435,12 @@ class ReupQueueService:
             item.held_at = now
             item.last_action_note = hold_note
             # Do not set blocked_reason — Hold is pause, not attention/blocked.
-            if item.status in {
+            if item.status == ReupQueueStatus.WAITING_FOR_METADATA:
+                # Pause during transcript/metadata: keep stage, do not kick back to download wait.
+                item.status = ReupQueueStatus.WAITING_FOR_METADATA
+                item.media_prep_status = ReupQueueMediaPrepStatus.WAITING_FOR_METADATA
+            elif item.status in {
                 ReupQueueStatus.WAITING_FOR_MEDIA,
-                ReupQueueStatus.WAITING_FOR_METADATA,
                 ReupQueueStatus.PROCESSING,
             }:
                 item.status = ReupQueueStatus.WAITING_FOR_MEDIA
@@ -427,10 +454,34 @@ class ReupQueueService:
             item.failed_at = None
             if item.media_prep_status == ReupQueueMediaPrepStatus.BLOCKED:
                 item.media_prep_status = ReupQueueMediaPrepStatus.NOT_STARTED
+            # Transcript/metadata stage (or download-wait left with media already confirmed): resume analyze.
+            resume_metadata = item.status == ReupQueueStatus.WAITING_FOR_METADATA or (
+                item.media_ready_at is not None and item.status == ReupQueueStatus.WAITING_FOR_MEDIA
+            )
+            if resume_metadata:
+                from src.audio_pipeline.errors import AudioAnalysisError
+
+                prior_job_id = item.job_id
+                item.job_id = None
+                if prior_job_id is not None:
+                    self._release_download_job_idempotency_slot(prior_job_id)
+                try:
+                    item.job_id = self._ensure_analyze_audio_job_id(item)
+                except AudioAnalysisError as exc:
+                    item.status = ReupQueueStatus.FAILED_NEEDS_ATTENTION
+                    item.media_prep_status = ReupQueueMediaPrepStatus.BLOCKED
+                    item.failed_at = now
+                    item.last_error_code = str(exc.code)
+                    item.last_error_message = exc.message
+                else:
+                    item.status = ReupQueueStatus.WAITING_FOR_METADATA
+                    item.media_prep_status = ReupQueueMediaPrepStatus.WAITING_FOR_METADATA
+                    meta = dict(item.metadata_json or {})
+                    meta["analyze_audio_job_id"] = str(item.job_id)
+                    item.metadata_json = meta
             # Paused download / in-progress media wait: restart download job.
-            if item.status in {
+            elif item.status in {
                 ReupQueueStatus.WAITING_FOR_MEDIA,
-                ReupQueueStatus.WAITING_FOR_METADATA,
                 ReupQueueStatus.PROCESSING,
             } or item.started_at is not None:
                 prior_job_id = item.job_id
@@ -549,13 +600,21 @@ class ReupQueueService:
 
     def _ensure_analyze_audio_job_id(self, item: ReupQueueItem) -> UUID:
         from src.audio_pipeline.types import AudioAnalysisRequest, TranslationPreset
-        from src.enums import JobType
+        from src.enums import JobStatus, JobType
         from src.models.jobs import Job
 
         if item.job_id is not None:
             job = self.db.get(Job, item.job_id)
             if job is not None and str(job.job_type) == JobType.ANALYZE_AUDIO:
-                return item.job_id
+                status_obj = getattr(job, "status", None)
+                if status_obj is None:
+                    return item.job_id
+                status = status_obj.value if hasattr(status_obj, "value") else str(status_obj)
+                if status.upper() in {JobStatus.FAILED.value, JobStatus.CANCELLED.value, "FAILED", "CANCELLED"}:
+                    self._release_download_job_idempotency_slot(item.job_id)
+                    item.job_id = None
+                else:
+                    return item.job_id
         job = self._get_audio_analysis_service().create_analysis_job(
             AudioAnalysisRequest(
                 source_video_id=item.source_video_id,
@@ -629,7 +688,25 @@ def available_action_values(item: ReupQueueItem) -> set[ReupQueueAction]:
         if held:
             actions.add(ReupQueueAction.RESUME)
             actions.discard(ReupQueueAction.HOLD)
+    if item.status == ReupQueueStatus.WAITING_FOR_METADATA and _linked_analyze_audio_failed(item):
+        # Missing media / analyze crash: allow reset to Needs start for a clean re-download path.
+        actions.add(ReupQueueAction.RETRY)
     return actions
+
+
+def _linked_analyze_audio_failed(item: ReupQueueItem) -> bool:
+    from src.enums import JobStatus, JobType
+
+    job = getattr(item, "job", None)
+    if job is None:
+        return False
+    job_type = getattr(job, "job_type", None)
+    type_value = job_type.value if hasattr(job_type, "value") else str(job_type) if job_type is not None else ""
+    if type_value != JobType.ANALYZE_AUDIO and type_value != JobType.ANALYZE_AUDIO.value:
+        return False
+    status = getattr(job, "status", None)
+    status_value = status.value if hasattr(status, "value") else str(status) if status is not None else ""
+    return status_value == JobStatus.FAILED or status_value == JobStatus.FAILED.value
 
 
 def bucket_for_status(status: ReupQueueStatus) -> str:

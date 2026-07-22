@@ -95,7 +95,7 @@ assert.equal(captionCanShowModel("gemini", true, ""), true);
 assert.match(componentSource, /listCaptionAiModels\b/, "Shared page must list caption models via listCaptionAiModels");
 assert.match(sharedSource, /profile_id:\s*editingProfileId/, "Caption model list must send editing profile_id for stored key");
 assert.match(sharedSource, /ops-ai-model-action/, "Caption model actions must use icon+text buttons");
-assert.match(sharedSource, /modelsRequestIdRef/, "Caption model auto-load must ignore stale responses");
+assert.match(sharedSource, /useLatestRequest/, "Caption model auto-load must ignore stale responses");
 
 assert.match(apiSource, /\/ops\/caption-ai\/models/, "API helper must hit caption-ai models endpoint");
 assert.match(apiSource, /\/ops\/caption-ai/, "API helper must hit caption-ai endpoints");

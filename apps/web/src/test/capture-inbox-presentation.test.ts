@@ -45,13 +45,14 @@ const baseItem: CapturedItem = {
   reup_score_label: "Good",
   reup_score_level: "good",
   reup_score_components: {
-    performance: 22,
-    engagement: 21,
-    shareability: 10,
-    duration_fit: 15,
-    recency: 8,
+    performance: 20,
+    engagement: 10,
+    virality_retention: 10,
+    duration_fit: 10,
+    recency: 20,
     metadata_quality: 10,
-    penalty: 0
+    penalty: 0,
+    outlier_bonus: 0
   },
   reup_score_reasons: ["Strong score"]
 } as CapturedItem;

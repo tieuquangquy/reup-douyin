@@ -108,6 +108,39 @@ class ReupQueueJobVisibilityResponseTests(unittest.TestCase):
         self.assertEqual(response.job_type, "ANALYZE_AUDIO")
         self.assertEqual(response.job_status, "COMPLETED")
 
+    def test_queue_item_response_prefers_analyze_audio_job_over_stale_linked_job(self) -> None:
+        stale_id = uuid4()
+        analyze_id = uuid4()
+        stale_job = SimpleNamespace(
+            id=stale_id,
+            job_type="DOWNLOAD_VIDEO",
+            status=JobStatus.CANCELLED,
+            progress_percent=0,
+            error_code=None,
+            error_message=None,
+        )
+        analyze_job = SimpleNamespace(
+            id=analyze_id,
+            job_type="ANALYZE_AUDIO",
+            status=JobStatus.COMPLETED,
+            progress_percent=100,
+            error_code=None,
+            error_message=None,
+        )
+        item = _base_item(
+            job_id=stale_id,
+            job=stale_job,
+            status=ReupQueueStatus.WAITING_FOR_METADATA,
+            media_prep_status=ReupQueueMediaPrepStatus.WAITING_FOR_METADATA,
+            metadata_json={"analyze_audio_job_id": str(analyze_id)},
+        )
+
+        response = _queue_item_response(item, display_job=analyze_job)
+
+        self.assertEqual(response.job_id, analyze_id)
+        self.assertEqual(response.job_type, "ANALYZE_AUDIO")
+        self.assertEqual(response.job_status, "COMPLETED")
+
 
 if __name__ == "__main__":
     unittest.main()

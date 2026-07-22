@@ -9,8 +9,10 @@ import {
   formatResolution,
   getRenderWarnings,
   isApproved,
+  isFinalReviewOcrPrepComplete,
   isPublishReady,
   nextCompareMode,
+  resolveFinalReviewPrepFocus,
   resolveRenderTechSpecs
 } from "../lib/finalReviewState";
 import type { RenderOutput, SourceVideoAssetManifest } from "../types/final-review";
@@ -110,6 +112,34 @@ const assetSpecs = resolveRenderTechSpecs(fromAssets, {
 });
 assert.equal(formatBytes(assetSpecs.size_bytes), "4.0 MB");
 assert.equal(assetSpecs.job_id, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+
+assert.equal(isFinalReviewOcrPrepComplete(null), false);
+assert.equal(resolveFinalReviewPrepFocus(null), "ocr");
+assert.equal(isFinalReviewOcrPrepComplete({ cleaned_video_asset_id: null, ocr_events_asset_id: null, warnings: [] }), false);
+assert.equal(
+  isFinalReviewOcrPrepComplete({ cleaned_video_asset_id: null, ocr_events_asset_id: "ocr-1", warnings: [] }),
+  false,
+  "orphan OCR events without cleaned video or skip warning must not mark OCR prep complete"
+);
+assert.equal(
+  isFinalReviewOcrPrepComplete({ cleaned_video_asset_id: null, ocr_events_asset_id: "ocr-1", clean_produced: false, warnings: [] }),
+  false,
+  "clean_produced=false alone must not mark OCR prep complete"
+);
+assert.equal(
+  isFinalReviewOcrPrepComplete({ cleaned_video_asset_id: "clean-1", ocr_events_asset_id: null, warnings: [] }),
+  true
+);
+assert.equal(
+  isFinalReviewOcrPrepComplete({
+    cleaned_video_asset_id: null,
+    ocr_events_asset_id: "ocr-1",
+    warnings: ["no_hardsub_detected"]
+  }),
+  true
+);
+assert.equal(resolveFinalReviewPrepFocus({ cleaned_video_asset_id: "clean-1" }), "render");
+assert.equal(resolveFinalReviewPrepFocus({ cleaned_video_asset_id: null, ocr_events_asset_id: "ocr-1" }), "ocr");
 
 console.log("final-review state tests passed");
 

@@ -50,8 +50,9 @@ assert.doesNotMatch(
   /\/ops\/translation-prompt/,
   "Transcript header must not duplicate prompt link when settings tabs cover it"
 );
-assert.match(headerSource, /editor-command__translate/, "Translate must remain a primary command button");
-assert.doesNotMatch(headerSource, /editor-command__menu|<details/, "Translate must not use a dropdown");
+assert.match(headerSource, /editor-command__translate/, "Translate must remain a primary command button when next");
+assert.match(headerSource, /editor-command__reasr/, "Re-ASR must live on the main toolbar");
+assert.doesNotMatch(headerSource, /editor-command__menu|<details/, "Translate must not use a legacy dropdown menu");
 assert.doesNotMatch(headerSource, /onApproveSource/, "Approve source is not a primary CTA for non-Chinese operators");
 assert.doesNotMatch(focusSource, /aiTools/, "AI job menu must not duplicate on the segment toolbar");
 assert.match(pageSource, /createAudioAnalysis/, "Transcript page must enqueue ANALYZE_AUDIO via createAudioAnalysis");

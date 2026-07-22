@@ -90,6 +90,20 @@ class LocalTextDetectorLoadTests(unittest.TestCase):
         self.assertGreaterEqual(len(boxes), 1)
         session.run.assert_called_once()
 
+    def test_detect_accepts_high_resolution_long_edge(self) -> None:
+        frame = np.full((180, 960, 3), 90, dtype=np.uint8)
+        session = MagicMock()
+        session.run.return_value = [np.zeros((1, 1, 192, 960), dtype=np.float32)]
+        det = object.__new__(LocalTextDetector)
+        det._session = session
+        det._input_name = "x"
+        det.model_path = Path("fake.onnx")
+
+        det.detect(frame, long_edge=960)
+
+        tensor = session.run.call_args.args[1]["x"]
+        self.assertEqual(tensor.shape[3], 960)
+
 
 if __name__ == "__main__":
     unittest.main()

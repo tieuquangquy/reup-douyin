@@ -157,7 +157,11 @@ class CandidateEvaluationService:
         stmt: Select[tuple[VideoCandidate]] = (
             select(VideoCandidate)
             .options(selectinload(VideoCandidate.source_video))
-            .order_by(VideoCandidate.score.desc().nullslast(), VideoCandidate.updated_at.desc())
+            .order_by(
+                VideoCandidate.score.desc().nullslast(),
+                VideoCandidate.updated_at.desc(),
+                VideoCandidate.id.asc(),
+            )
             .limit(limit)
             .offset(offset)
         )
@@ -200,6 +204,33 @@ class CandidateEvaluationService:
             search=search,
         )
         return int(self.db.scalar(stmt) or 0)
+
+    def count_candidates_by_status(
+        self,
+        *,
+        min_score: float | None = None,
+        max_score: float | None = None,
+        source_profile_id: UUID | None = None,
+        search: str | None = None,
+    ) -> dict[str, int]:
+        stmt = (
+            select(VideoCandidate.status, func.count())
+            .select_from(VideoCandidate)
+            .group_by(VideoCandidate.status)
+        )
+        stmt = self._apply_candidate_list_filters(
+            stmt,
+            status=None,
+            min_score=min_score,
+            max_score=max_score,
+            source_profile_id=source_profile_id,
+            search=search,
+        )
+        counts = {status.value: 0 for status in CandidateStatus}
+        for candidate_status, count in self.db.execute(stmt).all():
+            key = candidate_status.value if isinstance(candidate_status, CandidateStatus) else str(candidate_status)
+            counts[key] = int(count or 0)
+        return counts
 
     def _apply_candidate_list_filters(
         self,
@@ -437,7 +468,7 @@ class CandidateEvaluationService:
             "capture_item_id", "capture_session_id", "aweme_id", "source_video_external_id", "source_url", "video_url", "profile_url", "profile_name",
             "caption", "title", "description", "thumbnail_url", "posted_display_exact", "posted_display", "posted_display_source", "posted_at", "posted_text_raw", "duration_text", "duration_seconds",
             "estimated_views_display", "estimated_views_min", "estimated_views_max", "estimated_views_mid", "like_count", "comment_count", "share_count",
-            "favorite_count", "engagement_score", "engagement_rate", "reup_score", "reup_score_label", "reup_score_level", "reup_score_components",
+            "favorite_count", "follower_count", "follower_count_text", "engagement_score", "engagement_rate", "reup_score", "reup_score_label", "reup_score_level", "reup_score_components",
             "reup_score_reasons", "has_thumbnail", "has_posted", "has_duration", "has_estimated_views", "has_likes", "has_comments", "has_shares",
             "has_all_core_metadata", "missing_metadata_fields",
         )

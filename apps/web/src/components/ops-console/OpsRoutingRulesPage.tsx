@@ -3,64 +3,54 @@
 import { useEffect, useState } from "react";
 import { fetchPublishControlQueue, fetchRoutingRules } from "../../lib/api";
 import { useT } from "../../lib/i18n";
+import { useLatestRequest, type LatestRequestMode } from "../../lib/useLatestRequest";
 import type { PublishControlQueue, RoutingRule } from "../../types/publish-control";
 import { OpsConsoleShell } from "../app-shell/OpsConsoleShell";
 import { TopbarRefreshButton } from "../app-shell/TopbarRefreshButton";
 import { StatusBadge } from "../app-shell/StatusBadge";
+import { AsyncContentBoundary } from "../shared/AsyncContentBoundary";
 import { OpsMetricCard, OpsPanel, OpsState, statusTone } from "./OpsShared";
 
 export function OpsRoutingRulesPage() {
   const t = useT();
   const [rules, setRules] = useState<RoutingRule[]>([]);
   const [queue, setQueue] = useState<PublishControlQueue | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const request = useLatestRequest();
 
-  async function load() {
-    setLoading(true);
-    setError(null);
-    try {
-      const [rulesPayload, queuePayload] = await Promise.all([fetchRoutingRules(), fetchPublishControlQueue()]);
-      setRules(rulesPayload.rules);
-      setQueue(queuePayload);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("opsRoutingRules.unavailableTitle"));
-    } finally {
-      setLoading(false);
-    }
+  async function load(mode: LatestRequestMode = queue ? "refresh" : "initial") {
+    await request.run(
+      async () => Promise.all([fetchRoutingRules(), fetchPublishControlQueue()]),
+      ([rulesPayload, queuePayload]) => {
+        setRules(rulesPayload.rules);
+        setQueue(queuePayload);
+      },
+      mode
+    ).catch(() => undefined);
   }
 
   useEffect(() => {
-    void load();
+    void load("initial");
   }, [t]);
 
   const refreshAction = (
-    <TopbarRefreshButton busy={loading && rules.length > 0} disabled={loading && rules.length === 0} onClick={() => void load()} />
+    <TopbarRefreshButton busy={request.refreshing} disabled={request.initialLoading} onClick={() => void load("refresh")} />
   );
-
-  if (loading && rules.length === 0) {
-    return (
-      <OpsConsoleShell actions={refreshAction} description={t("opsRoutingRules.description")} title={t("opsRoutingRules.title")}>
-        <OpsState title={t("opsRoutingRules.loadingTitle")} detail={t("opsRoutingRules.loadingDetail")} />
-      </OpsConsoleShell>
-    );
-  }
-
-  if (error && rules.length === 0) {
-    return (
-      <OpsConsoleShell actions={refreshAction} description={t("opsRoutingRules.description")} title={t("opsRoutingRules.title")}>
-        <OpsState title={t("opsRoutingRules.unavailableTitle")} detail={error} retry={() => void load()} />
-      </OpsConsoleShell>
-    );
-  }
+  const hasData = Boolean(queue);
+  const boundaryStatus = request.initialLoading && !hasData ? "loading" : request.error && !hasData ? "error" : "success";
 
   return (
     <OpsConsoleShell actions={refreshAction} description={t("opsRoutingRules.description")} title={t("opsRoutingRules.title")}>
+      <AsyncContentBoundary
+        refreshing={request.refreshing}
+        status={boundaryStatus}
+        skeleton={<OpsState title={t("opsRoutingRules.loadingTitle")} detail={t("opsRoutingRules.loadingDetail")} />}
+        errorState={<OpsState title={t("opsRoutingRules.unavailableTitle")} detail={request.error?.message ?? t("opsRoutingRules.unavailableTitle")} retry={() => void load("initial")} />}
+      >
       <main className="ops-page">
         <div className="actions-row">
           <a href="/ops/publish-control">{t("opsAccounts.openPublishControl")}</a>
         </div>
-        {error ? <div className="inline-error">{error}</div> : null}
+        {hasData && request.error ? <div className="inline-error">{request.error.message}</div> : null}
 
         <section className="health-overview-grid">
           <OpsMetricCard label={t("opsRoutingRules.rules")} value={String(rules.length)} detail={t("opsRoutingRules.configuredRules")} />
@@ -101,6 +91,7 @@ export function OpsRoutingRulesPage() {
           </OpsPanel>
         </section>
       </main>
+      </AsyncContentBoundary>
     </OpsConsoleShell>
   );
 }

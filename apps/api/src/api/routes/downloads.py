@@ -8,14 +8,17 @@ from sqlalchemy.orm import Session
 from src.core.settings import get_settings
 from src.db.session import get_db_session
 from src.downloaders.errors import DownloadError, DownloadErrorCode
+from src.enums import MediaAssetType
 from src.models.media import MediaAsset
 from src.schemas.downloads import (
     DownloadCreateRequest,
     DownloadCreateResponse,
+    LocalAssetRevealResponse,
     MediaAssetResponse,
     SourceVideoAssetsResponse,
 )
 from src.services.download_service import DownloadRequest, DownloadService
+from src.services.local_asset_reveal import LocalAssetRevealError, reveal_source_video_local_asset
 from src.storage.local import LocalStorageBackend
 
 router = APIRouter(tags=["downloads"])
@@ -77,6 +80,35 @@ def get_source_video_asset_manifest(
         raise _download_http_error(exc) from exc
 
 
+@router.post(
+    "/source-videos/{source_video_id}/reveal-local-asset",
+    response_model=LocalAssetRevealResponse,
+)
+def reveal_source_video_local_media(
+    source_video_id: UUID,
+    db: Session = Depends(get_db_session),
+) -> LocalAssetRevealResponse:
+    """Open the OS file manager on the current local SOURCE_VIDEO_RAW file.
+
+    Absolute paths are never returned in the response body.
+    """
+    storage = LocalStorageBackend(get_settings().local_storage_root)
+    try:
+        result = reveal_source_video_local_asset(
+            db,
+            source_video_id=source_video_id,
+            storage=storage,
+            asset_type=MediaAssetType.SOURCE_VIDEO_RAW,
+        )
+    except LocalAssetRevealError as exc:
+        raise _reveal_http_error(exc) from exc
+    return LocalAssetRevealResponse(
+        revealed=bool(result["revealed"]),
+        asset_type=str(result["asset_type"]),
+        source_video_id=source_video_id,
+    )
+
+
 @router.get("/media-assets/{asset_id}/content")
 def get_media_asset_content(asset_id: UUID, db: Session = Depends(get_db_session)) -> FileResponse:
     asset = db.scalar(select(MediaAsset).where(MediaAsset.id == asset_id))
@@ -107,6 +139,15 @@ def refresh_source_video_assets(
         asset_count=result.asset_count,
         manifest=result.manifest,
     )
+
+
+def _reveal_http_error(exc: LocalAssetRevealError) -> HTTPException:
+    http_status = (
+        status.HTTP_404_NOT_FOUND
+        if exc.code in {"ASSET_NOT_FOUND", "FILE_NOT_FOUND"}
+        else status.HTTP_422_UNPROCESSABLE_ENTITY
+    )
+    return HTTPException(status_code=http_status, detail={"code": exc.code, "message": exc.message})
 
 
 def _download_http_error(exc: DownloadError) -> HTTPException:

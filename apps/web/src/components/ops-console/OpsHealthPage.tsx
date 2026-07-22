@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useState, type ReactNode } from "react";
 import { fetchOperationalMetrics, fetchPublishHealthDashboard } from "../../lib/api";
 import { useT } from "../../lib/i18n";
+import { useLatestRequest } from "../../lib/useLatestRequest";
 import type { PublishDayStats, PublishHealthDashboard } from "../../types/analytics";
 import type {
   OperationalMetrics,
@@ -12,6 +13,8 @@ import type {
 } from "../../types/operations";
 import { OpsConsoleShell } from "../app-shell/OpsConsoleShell";
 import { TopbarRefreshButton } from "../app-shell/TopbarRefreshButton";
+import { AsyncContentBoundary } from "../shared/AsyncContentBoundary";
+import { useNotice } from "../shared/NoticeCenter";
 import { OpsState, formatDateTime, sumRecord, type OpsTone } from "./OpsShared";
 
 function formatStatusChipLabel(status: string): string {
@@ -418,23 +421,25 @@ export function OpsHealthPage() {
   const t = useT();
   const [metrics, setMetrics] = useState<OperationalMetrics | null>(null);
   const [publishHealth, setPublishHealth] = useState<PublishHealthDashboard | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const request = useLatestRequest();
+  const { notify } = useNotice();
 
   async function load() {
-    setLoading(true);
-    setError(null);
+    const mode = metrics ? "refresh" : "initial";
     try {
-      const [metricsPayload, healthPayload] = await Promise.all([
-        fetchOperationalMetrics(),
-        fetchPublishHealthDashboard("last_7_days"),
-      ]);
-      setMetrics(metricsPayload);
-      setPublishHealth(healthPayload);
+      await request.run(async () => {
+        const [metricsPayload, healthPayload] = await Promise.all([
+          fetchOperationalMetrics(),
+          fetchPublishHealthDashboard("last_7_days"),
+        ]);
+        return { metricsPayload, healthPayload };
+      }, ({ metricsPayload, healthPayload }) => {
+        setMetrics(metricsPayload);
+        setPublishHealth(healthPayload);
+      }, mode);
+      if (mode === "refresh") notify({ id: "ops-health-refresh", message: "Ops health refreshed.", tone: "success" });
     } catch (err) {
-      setError(err instanceof Error ? err.message : t("opsHealth.unavailableTitle"));
-    } finally {
-      setLoading(false);
+      if (mode === "refresh") notify({ id: "ops-health-refresh", message: err instanceof Error ? err.message : t("opsHealth.unavailableTitle"), tone: "error" });
     }
   }
 
@@ -443,21 +448,21 @@ export function OpsHealthPage() {
   }, [t]);
 
   const refreshAction = (
-    <TopbarRefreshButton busy={loading && Boolean(metrics)} disabled={loading && !metrics} onClick={() => void load()} />
+    <TopbarRefreshButton busy={request.refreshing} disabled={request.initialLoading} onClick={() => void load()} />
   );
 
-  if (loading && !metrics) {
+  if (!metrics && !request.error) {
     return (
       <OpsConsoleShell actions={refreshAction} description={t("opsHealth.description")} title={t("opsHealth.title")}>
-        <OpsState title={t("opsHealth.loadingTitle")} detail={t("opsHealth.loadingDetail")} />
+        <AsyncContentBoundary skeletonVariant="gallery" status="loading"><span /></AsyncContentBoundary>
       </OpsConsoleShell>
     );
   }
 
-  if (error && !metrics) {
+  if (request.error && !metrics) {
     return (
       <OpsConsoleShell actions={refreshAction} description={t("opsHealth.description")} title={t("opsHealth.title")}>
-        <OpsState title={t("opsHealth.unavailableTitle")} detail={error} retry={() => void load()} />
+        <AsyncContentBoundary errorState={<OpsState title={t("opsHealth.unavailableTitle")} detail={request.error.message} retry={() => void load()} />} skeletonVariant="gallery" status="error"><span /></AsyncContentBoundary>
       </OpsConsoleShell>
     );
   }
@@ -481,8 +486,8 @@ export function OpsHealthPage() {
 
   return (
     <OpsConsoleShell actions={refreshAction} description={t("opsHealth.description")} title={t("opsHealth.title")}>
+      <AsyncContentBoundary refreshing={request.refreshing} skeletonVariant="gallery" status="success">
       <main className="ops-page ops-health-page is-dense">
-        {error ? <div className="inline-error">{error}</div> : null}
         {metrics ? (
           <>
             <p className="ops-health-freshness is-inline">
@@ -715,6 +720,7 @@ export function OpsHealthPage() {
           </>
         ) : null}
       </main>
+      </AsyncContentBoundary>
     </OpsConsoleShell>
   );
 }

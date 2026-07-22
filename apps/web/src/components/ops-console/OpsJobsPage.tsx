@@ -6,6 +6,8 @@ import { useSearchParams } from "next/navigation";
 import { deleteJob, fetchJobs, fetchOperationalMetrics, retryJob } from "../../lib/api";
 import { useT } from "../../lib/i18n";
 import { hasMoreOffsetItems, mergeOffsetItemsById } from "../../lib/offsetListPagination";
+import { useAsyncAction } from "../../lib/useAsyncAction";
+import { useLatestRequest, type LatestRequestMode } from "../../lib/useLatestRequest";
 import {
   OPERATOR_LIST_PAGE_SIZE_PRESETS,
   OPS_JOBS_PAGE_SIZE_STORAGE_KEY,
@@ -18,6 +20,9 @@ import { OpsConsoleShell } from "../app-shell/OpsConsoleShell";
 import { TopbarRefreshButton } from "../app-shell/TopbarRefreshButton";
 import { OpsState, statusTone, type OpsTone } from "./OpsShared";
 import { OffsetLoadMoreFooter } from "../shared/OffsetLoadMoreFooter";
+import { AsyncButton } from "../shared/AsyncButton";
+import { AsyncContentBoundary } from "../shared/AsyncContentBoundary";
+import { useNotice } from "../shared/NoticeCenter";
 
 const STALE_RUNNING_MINUTES = 60;
 const JOBS_PAGE_SIZE_DEFAULT = 50;
@@ -319,44 +324,42 @@ export function OpsJobsPage() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [totalCount, setTotalCount] = useState(0);
   const [metrics, setMetrics] = useState<OperationalMetrics | null>(null);
-  const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [deletingJobId, setDeletingJobId] = useState<string | null>(null);
-  const [retryingJobId, setRetryingJobId] = useState<string | null>(null);
+  const [inlineError, setInlineError] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>(() => statusFromUrl ?? "all");
   const [jobTypeFilter, setJobTypeFilter] = useState("all");
   const [searchQuery, setSearchQuery] = useState("");
   const [copiedJobId, setCopiedJobId] = useState<string | null>(null);
+  const action = useAsyncAction();
+  const request = useLatestRequest();
+  const { notify } = useNotice();
 
-  async function load(nextPageSize = pageSize) {
-    setLoading(true);
-    setError(null);
-    try {
-      const [jobPayload, metricsPayload] = await Promise.all([
+  async function load(mode: LatestRequestMode = jobs.length || metrics ? "refresh" : "initial", nextPageSize = pageSize) {
+    setInlineError(null);
+    await request.run(
+      async () => Promise.all([
         fetchJobs(undefined, { limit: nextPageSize, offset: 0 }),
         fetchOperationalMetrics(),
-      ]);
-      setJobs(jobPayload.jobs);
-      setTotalCount(jobPayload.total_count);
-      setMetrics(metricsPayload);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("opsJobs.unavailableTitle"));
-    } finally {
-      setLoading(false);
-    }
+      ]),
+      ([jobPayload, metricsPayload]) => {
+        setJobs(jobPayload.jobs);
+        setTotalCount(jobPayload.total_count);
+        setMetrics(metricsPayload);
+      },
+      mode
+    ).catch(() => undefined);
   }
 
   async function loadMore() {
     if (loadingMore || !hasMoreOffsetItems(jobs.length, totalCount)) return;
     setLoadingMore(true);
-    setError(null);
+    setInlineError(null);
     try {
       const jobPayload = await fetchJobs(undefined, { limit: pageSize, offset: jobs.length });
       setJobs((current) => mergeOffsetItemsById(current, jobPayload.jobs));
       setTotalCount(jobPayload.total_count);
     } catch (err) {
-      setError(err instanceof Error ? err.message : t("opsJobs.unavailableTitle"));
+      setInlineError(err instanceof Error ? err.message : t("opsJobs.unavailableTitle"));
     } finally {
       setLoadingMore(false);
     }
@@ -366,7 +369,7 @@ export function OpsJobsPage() {
     if (nextPageSize === pageSize) return;
     writeOperatorListPageSize(OPS_JOBS_PAGE_SIZE_STORAGE_KEY, nextPageSize, OPERATOR_LIST_PAGE_SIZE_PRESETS);
     setPageSize(nextPageSize);
-    void load(nextPageSize);
+    void load("refresh", nextPageSize);
   }
 
   function toggleStatusFilter(next: StatusFilter) {
@@ -380,7 +383,7 @@ export function OpsJobsPage() {
   }
 
   useEffect(() => {
-    void load();
+    void load("initial");
   }, [t]);
 
   useEffect(() => {
@@ -389,10 +392,10 @@ export function OpsJobsPage() {
   }, [statusFromUrl]);
 
   useEffect(() => {
-    if (!focusJobId || loading) return;
+    if (!focusJobId || request.initialLoading) return;
     const row = document.getElementById(`ops-job-row-${focusJobId}`);
     row?.scrollIntoView({ block: "center", behavior: "smooth" });
-  }, [focusJobId, loading, jobs]);
+  }, [focusJobId, request.initialLoading, jobs]);
 
   const focusedJob = useMemo(
     () => (focusJobId ? jobs.find((job) => job.id === focusJobId) ?? null : null),
@@ -413,40 +416,50 @@ export function OpsJobsPage() {
     );
     if (!confirmed) return;
 
-    setDeletingJobId(job.id);
-    setError(null);
-    try {
-      await deleteJob(job.id);
-      setJobs((current) => current.filter((item) => item.id !== job.id));
-      setTotalCount((current) => Math.max(0, current - 1));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("opsJobs.deleteFailed"));
-    } finally {
-      setDeletingJobId(null);
-    }
+    await action.run(`delete-${job.id}`, async () => {
+      setInlineError(null);
+      try {
+        await deleteJob(job.id);
+        setJobs((current) => current.filter((item) => item.id !== job.id));
+        setTotalCount((current) => Math.max(0, current - 1));
+        notify({ message: `${t("common.delete")}: #${job.id.slice(0, 8)}`, tone: "success" });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : t("opsJobs.deleteFailed");
+        setInlineError(message);
+        notify({ message, tone: "error" });
+      }
+    });
   }
 
   async function handleRetry(job: Job) {
-    setRetryingJobId(job.id);
-    setError(null);
-    try {
-      const updated = await retryJob(job.id);
-      setJobs((current) => current.map((item) => (item.id === job.id ? updated : item)));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("opsJobs.retryFailed"));
-    } finally {
-      setRetryingJobId(null);
-    }
+    await action.run(`retry-${job.id}`, async () => {
+      setInlineError(null);
+      try {
+        const updated = await retryJob(job.id);
+        setJobs((current) => current.map((item) => (item.id === job.id ? updated : item)));
+        notify({ message: `${t("opsJobs.retry")}: #${job.id.slice(0, 8)}`, tone: "success" });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : t("opsJobs.retryFailed");
+        setInlineError(message);
+        notify({ message, tone: "error" });
+      }
+    });
   }
 
   async function handleCopyId(jobId: string) {
-    try {
-      await navigator.clipboard.writeText(jobId);
-      setCopiedJobId(jobId);
-      window.setTimeout(() => setCopiedJobId((current) => (current === jobId ? null : current)), 1200);
-    } catch {
-      setError(t("opsJobs.copyFailed"));
-    }
+    await action.run(`copy-${jobId}`, async () => {
+      setInlineError(null);
+      try {
+        await navigator.clipboard.writeText(jobId);
+        setCopiedJobId(jobId);
+        notify({ message: t("opsJobs.copied"), tone: "success" });
+        window.setTimeout(() => setCopiedJobId((current) => (current === jobId ? null : current)), 1200);
+      } catch {
+        const message = t("opsJobs.copyFailed");
+        setInlineError(message);
+        notify({ message, tone: "error" });
+      }
+    });
   }
 
   const staleRunning = useMemo(() => jobs.filter((job) => isStaleRunning(job)), [jobs]);
@@ -472,29 +485,22 @@ export function OpsJobsPage() {
   const shownCount = filterActive ? visibleJobs.length : jobs.length;
 
   const refreshAction = (
-    <TopbarRefreshButton busy={loading && jobs.length > 0} disabled={loading && jobs.length === 0} onClick={() => void load()} />
+    <TopbarRefreshButton busy={request.refreshing} disabled={request.initialLoading} onClick={() => void load("refresh")} />
   );
-
-  if (loading && jobs.length === 0) {
-    return (
-      <OpsConsoleShell actions={refreshAction} description={t("opsJobs.description")} title={t("opsJobs.title")}>
-        <OpsState title={t("opsJobs.loadingTitle")} detail={t("opsJobs.loadingDetail")} />
-      </OpsConsoleShell>
-    );
-  }
-
-  if (error && jobs.length === 0) {
-    return (
-      <OpsConsoleShell actions={refreshAction} description={t("opsJobs.description")} title={t("opsJobs.title")}>
-        <OpsState title={t("opsJobs.unavailableTitle")} detail={error} retry={() => void load()} />
-      </OpsConsoleShell>
-    );
-  }
+  const hasData = jobs.length > 0 || Boolean(metrics);
+  const boundaryStatus = request.initialLoading && !hasData ? "loading" : request.error && !hasData ? "error" : "success";
+  const visibleError = inlineError ?? (hasData ? request.error?.message ?? null : null);
 
   return (
     <OpsConsoleShell actions={refreshAction} description={t("opsJobs.description")} title={t("opsJobs.title")}>
+      <AsyncContentBoundary
+        refreshing={request.refreshing}
+        status={boundaryStatus}
+        skeleton={<OpsState title={t("opsJobs.loadingTitle")} detail={t("opsJobs.loadingDetail")} />}
+        errorState={<OpsState title={t("opsJobs.unavailableTitle")} detail={request.error?.message ?? t("opsJobs.unavailableTitle")} retry={() => void load("initial")} />}
+      >
       <main className="ops-page ops-jobs-monitor is-compact">
-        {error ? <div className="inline-error">{error}</div> : null}
+        {visibleError ? <div className="inline-error">{visibleError}</div> : null}
 
         <section className="ops-jobs-kpis is-hotel" role="group" aria-label={t("opsJobs.filterByStatus")}>
           <KpiTile
@@ -678,8 +684,6 @@ export function OpsJobsPage() {
                       )
                     );
                     const canRetry = job.status === "FAILED" || job.status === "RETRYABLE";
-                    const deleting = deletingJobId === job.id;
-                    const retrying = retryingJobId === job.id;
                     return (
                       <tr
                         className={`tone-${tone}${job.id === focusJobId ? " is-focused" : ""}`}
@@ -689,15 +693,17 @@ export function OpsJobsPage() {
                         <td>
                           <div className="ops-jobs-table__id">
                             <strong title={job.id}>#{job.id.slice(0, 8)}</strong>
-                            <button
+                            <AsyncButton
                               type="button"
                               className="ops-jobs-table__copy"
                               aria-label={t("opsJobs.copyId")}
                               title={copiedJobId === job.id ? t("opsJobs.copied") : t("opsJobs.copyId")}
+                              pending={action.isPending(`copy-${job.id}`)}
+                              pendingLabel="…"
                               onClick={() => void handleCopyId(job.id)}
                             >
                               {copiedJobId === job.id ? "✓" : "⧉"}
-                            </button>
+                            </AsyncButton>
                           </div>
                         </td>
                         <td>
@@ -755,26 +761,29 @@ export function OpsJobsPage() {
                         </td>
                         <td>
                           <div className="ops-jobs-table__actions">
-                            <button
+                            <AsyncButton
                               type="button"
                               className="ops-jobs-table__retry is-icon"
-                              disabled={!canRetry || retrying}
+                              disabled={!canRetry}
                               aria-label={t("opsJobs.retry")}
                               title={t("opsJobs.retry")}
+                              pending={action.isPending(`retry-${job.id}`)}
+                              pendingLabel="…"
                               onClick={() => void handleRetry(job)}
                             >
-                              {retrying ? "…" : <JobActionIcon kind="retry" />}
-                            </button>
-                            <button
+                              <JobActionIcon kind="retry" />
+                            </AsyncButton>
+                            <AsyncButton
                               className="ops-jobs-delete is-icon"
                               type="button"
-                              disabled={deleting}
                               aria-label={t("common.delete")}
                               title={t("common.delete")}
+                              pending={action.isPending(`delete-${job.id}`)}
+                              pendingLabel="…"
                               onClick={() => void handleDelete(job)}
                             >
-                              {deleting ? "…" : <JobActionIcon kind="delete" />}
-                            </button>
+                              <JobActionIcon kind="delete" />
+                            </AsyncButton>
                           </div>
                         </td>
                       </tr>
@@ -801,6 +810,7 @@ export function OpsJobsPage() {
           />
         ) : null}
       </main>
+      </AsyncContentBoundary>
     </OpsConsoleShell>
   );
 }

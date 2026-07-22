@@ -10,6 +10,7 @@ import {
   formatReupQueueEnqueueNotice,
   isApprovedForReupQueue,
   isCandidateInReupQueue,
+  reviewBoardDetailsActionVisibility,
   selectableBoardCandidates
 } from "../lib/reviewBoardQueueState";
 import type { Candidate } from "../types/review-board";
@@ -62,6 +63,31 @@ assert.match(
 
 assert.deepEqual(candidatesPendingApproval([approved, shortlisted, approvedViaDecision, queued], ["a", "b", "c", "q"]), ["b"]);
 
+{
+  const rejected = reviewBoardDetailsActionVisibility(makeCandidate("rej", "REJECTED"));
+  assert.equal(rejected.inReupQueue, false);
+  assert.equal(rejected.showApproveOnly, true);
+  assert.equal(rejected.showLater, false, "Rejected candidates must not keep Later as a no-op companion");
+  assert.equal(rejected.showReject, false, "Rejected candidates must not keep Reject as a companion");
+
+  const inReview = reviewBoardDetailsActionVisibility(makeCandidate("ir", "IN_REVIEW"));
+  assert.equal(inReview.showApproveOnly, true);
+  assert.equal(inReview.showLater, false, "IN_REVIEW must not keep Later");
+  assert.equal(inReview.showReject, true);
+
+  const approvedVis = reviewBoardDetailsActionVisibility(approved);
+  assert.equal(approvedVis.approvedForQueue, true);
+  assert.equal(approvedVis.showApproveOnly, false);
+  assert.equal(approvedVis.showLater, true);
+  assert.equal(approvedVis.showReject, true);
+
+  const queuedVis = reviewBoardDetailsActionVisibility(queued);
+  assert.equal(queuedVis.inReupQueue, true);
+  assert.equal(queuedVis.showApproveOnly, false);
+  assert.equal(queuedVis.showLater, false);
+  assert.equal(queuedVis.showReject, false);
+}
+
 assert.match(
   formatApproveAndEnqueueNotice(2, {
     requested_count: 2,
@@ -88,9 +114,10 @@ assert.match(reviewPageSource, /approvedCandidatesFromIds/, "Review Board must g
 assert.match(reviewBoardSource, /\/selection\/reup-queue/, "Review Board header must link to Reup Queue");
 assert.match(reviewPageSource, /async function bulkApproveSelected\(\) \{[\s\S]*?await updateCandidateStatuses\(bulkSelectedIds, "APPROVED"\)/, "Bulk approve must only update candidate status");
 assert.match(reviewPageSource, /isCandidateInReupQueue/, "Review Board must detect candidates already in Reup Queue");
-assert.match(reviewPageSource, /In queue/, "Review Board must show in-queue badge");
+assert.match(reviewPageSource, /In Reup Queue/, "Review Board must show the explicit in-queue badge");
 assert.match(reviewPageSource, /applyQueuedMembershipToCandidates/, "Review Board must mark local queue membership after enqueue");
 assert.match(reviewPageSource, /selectableBoardCandidates/, "Review Board must exclude queued tiles from bulk selection");
+assert.match(reviewTileActionsSource, /reviewBoardDetailsActionVisibility/, "Review Board tile/details must use stage-aware action visibility");
 
 console.log("review-board-queue tests passed");
 

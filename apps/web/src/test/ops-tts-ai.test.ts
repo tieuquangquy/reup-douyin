@@ -509,8 +509,8 @@ assert.match(catalogSource, /pip install vieneu/, "Catalog must include VieNeu i
 assert.match(catalogSource, /pip install edge-tts/, "Catalog must include edge install recipe");
 assert.match(
   cssSource,
-  /\.ops-page--settings\s*\{[^}]*padding:\s*1rem 1\.25rem 1\.35rem/,
-  "Settings pages must use the same content padding as other ops pages"
+  /\.ops-page--settings\s*\{[^}]*padding:\s*1rem var\(--app-content-inset-x\) 1\.35rem/,
+  "Settings pages must use the shared app content inset"
 );
 assert.match(cssSource, /\.ops-tts-section--install/, "CSS must style install section");
 assert.match(cssSource, /\.ops-tts-install-log/, "CSS must style install log");

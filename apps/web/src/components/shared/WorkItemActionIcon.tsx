@@ -6,6 +6,7 @@ export type WorkItemActionIconKind =
   | "promote"
   | "approve"
   | "send"
+  | "enter"
   | "details"
   | "later"
   | "reject"
@@ -17,7 +18,10 @@ export type WorkItemActionIconKind =
   | "pause"
   | "transcript"
   | "retry"
-  | "process";
+  | "process"
+  | "home"
+  | "select-visible"
+  | "clear-selection";
 
 type Props = {
   kind: WorkItemActionIconKind;
@@ -52,6 +56,22 @@ export function WorkItemActionIcon({ kind, className = "review-board-tile-btn__i
           stroke="currentColor"
           strokeWidth="1.7"
           strokeLinecap="round"
+        />
+      </svg>
+    );
+  }
+
+  // Enter → go into / open this lane
+  if (kind === "enter") {
+    return (
+      <svg aria-hidden="true" className={className} viewBox="0 0 24 24">
+        <path
+          d="M5.8 5.2h6.1a1 1 0 1 1 0 2H6.8v9.6h5.1a1 1 0 1 1 0 2H5.8a1 1 0 0 1-1-1V6.2a1 1 0 0 1 1-1Z"
+          fill="currentColor"
+        />
+        <path
+          d="M10 11.1h7.2l-2.4-2.4a1 1 0 1 1 1.4-1.4l4.1 4.1a1 1 0 0 1 0 1.4l-4.1 4.1a1 1 0 1 1-1.4-1.4l2.4-2.4H10a1 1 0 1 1 0-2Z"
+          fill="currentColor"
         />
       </svg>
     );
@@ -169,6 +189,43 @@ export function WorkItemActionIcon({ kind, className = "review-board-tile-btn__i
     return (
       <svg aria-hidden="true" className={className} viewBox="0 0 24 24">
         <path d="M8.2 5.8a1.2 1.2 0 0 1 1.8-.9l9.2 5.5a1.2 1.2 0 0 1 0 2.1l-9.2 5.5a1.2 1.2 0 0 1-1.8-1V5.8Z" fill="currentColor" />
+      </svg>
+    );
+  }
+
+  if (kind === "select-visible") {
+    return (
+      <svg aria-hidden="true" className={className} viewBox="0 0 24 24">
+        <path
+          d="M5.8 6.4h5.6v5.6H5.8V6.4Zm7.2 0h5.6v5.6h-5.6V6.4Zm-7.2 7.2h5.6v5.6H5.8v-5.6Zm7.2 0h5.6v5.6h-5.6v-5.6Z"
+          fill="currentColor"
+        />
+        <path
+          d="M8.1 9.1 9.2 10.2l2.1-2.1 1 1-3.1 3.1-2-2 1-1.1Z"
+          fill="currentColor"
+        />
+      </svg>
+    );
+  }
+
+  if (kind === "clear-selection") {
+    return (
+      <svg aria-hidden="true" className={className} viewBox="0 0 24 24">
+        <path
+          d="M12 4.2a7.8 7.8 0 1 1 0 15.6 7.8 7.8 0 0 1 0-15.6Zm3.1 5.1a.9.9 0 0 0-1.3 0L12 10.1l-1.8-1.8a.9.9 0 1 0-1.3 1.3L10.7 11.4l-1.8 1.8a.9.9 0 1 0 1.3 1.3l1.8-1.8 1.8 1.8a.9.9 0 1 0 1.3-1.3l-1.8-1.8 1.8-1.8a.9.9 0 0 0 0-1.3Z"
+          fill="currentColor"
+        />
+      </svg>
+    );
+  }
+
+  if (kind === "home") {
+    return (
+      <svg aria-hidden="true" className={className} viewBox="0 0 24 24">
+        <path
+          d="M12.4 4.3a1 1 0 0 0-1.3 0l-7.2 6.3a1 1 0 0 0-.3.7v7.5a1.6 1.6 0 0 0 1.6 1.6h4.1a1 1 0 0 0 1-1v-3.4h2.4v3.4a1 1 0 0 0 1 1h4.1a1.6 1.6 0 0 0 1.6-1.6v-7.5a1 1 0 0 0-.3-.7l-7.2-6.3Z"
+          fill="currentColor"
+        />
       </svg>
     );
   }

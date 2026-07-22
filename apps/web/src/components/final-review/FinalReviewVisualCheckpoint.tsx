@@ -2,8 +2,11 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useT } from "../../lib/i18n";
+import type { FinalReviewPrepFocus } from "../../lib/finalReviewState";
 import type { OcrSummaryResponse } from "../../types/ocr";
 import { fetchMediaAssetObjectUrl } from "../../lib/api";
+import { AsyncButton } from "../shared/AsyncButton";
+import { WorkItemActionIcon } from "../shared/WorkItemActionIcon";
 
 type Props = {
   summary: OcrSummaryResponse | null;
@@ -12,6 +15,8 @@ type Props = {
   message: string | null;
   onAnalyze: () => void;
   onApprove: () => void;
+  presentation?: "prep" | "rail";
+  prepFocus?: FinalReviewPrepFocus;
 };
 
 const EVENTS_PREVIEW = 3;
@@ -44,10 +49,11 @@ export function FinalReviewVisualCheckpoint({
   approveBusy,
   message,
   onAnalyze,
-  onApprove
+  onApprove,
+  presentation = "rail",
+  prepFocus = "ocr"
 }: Props) {
   const t = useT();
-  const stepsBusy = analyzeBusy || approveBusy;
   const events = summary?.hardsub_events ?? [];
   const cleanedAssetId = summary?.cleaned_video_asset_id ?? null;
   const objectUrlRef = useRef<string | null>(null);
@@ -59,6 +65,8 @@ export function FinalReviewVisualCheckpoint({
   const priorCleaned =
     Boolean(summary?.cleaned_video_asset_id) &&
     (summary?.clean_produced === false || (summary?.warnings || []).includes("clean_skipped_no_hardsub"));
+  const isPrep = presentation === "prep";
+  const analyzeIsPrepFocus = isPrep && prepFocus === "ocr";
 
   useEffect(() => {
     let cancelled = false;
@@ -95,26 +103,38 @@ export function FinalReviewVisualCheckpoint({
   }, [cleanedAssetId]);
 
   return (
-    <section className="final-panel final-visual-checkpoint" aria-label={t("finalReviewVisual.title")}>
-      <h2>{t("finalReviewVisual.title")}</h2>
-      <p className="final-visual-checkpoint__hint">{t("finalReviewVisual.hintShort")}</p>
+    <section
+      className={`final-panel final-visual-checkpoint${isPrep ? " final-review-prep-panel" : ""}`}
+      aria-label={t("finalReviewVisual.title")}
+    >
+      {isPrep ? <span className="final-review-prep-panel__eyebrow">{t("finalReviewVisual.checkpointEyebrow")}</span> : null}
+      <h2 className={isPrep ? "final-review-prep-panel__title" : undefined}>{t("finalReviewVisual.title")}</h2>
+      <p className={`final-visual-checkpoint__hint${isPrep ? " final-review-prep-panel__body" : ""}`}>
+        {t("finalReviewVisual.hintShort")}
+      </p>
       {message ? <p className="action-message">{message}</p> : null}
 
       <div className="final-visual-checkpoint__steps">
-        <button type="button" className="primary" onClick={onAnalyze} disabled={stepsBusy}>
-          {analyzeBusy ? t("finalReviewVisual.analyzing") : t("finalReviewVisual.analyzeOcr")}
-        </button>
-        <button
-          type="button"
-          onClick={onApprove}
-          disabled={stepsBusy || !summary || summary.visual_approved}
+        <AsyncButton
+          className={analyzeIsPrepFocus ? "primary is-prep-focus" : "primary"}
+          leadingIcon={<WorkItemActionIcon className="fr-tool__icon" kind="recheck" />}
+          pending={analyzeBusy}
+          pendingLabel={t("finalReviewVisual.analyzing")}
+          onClick={onAnalyze}
+          disabled={approveBusy}
         >
-          {summary?.visual_approved
-            ? t("finalReviewVisual.approved")
-            : approveBusy
-              ? t("finalReviewVisual.approving")
-              : t("finalReviewVisual.approveVisual")}
-        </button>
+          {t("finalReviewVisual.analyzeOcr")}
+        </AsyncButton>
+        <AsyncButton
+          className="final-visual-checkpoint__approve"
+          leadingIcon={<WorkItemActionIcon className="fr-tool__icon" kind="approve" />}
+          pending={approveBusy}
+          pendingLabel={t("finalReviewVisual.approving")}
+          onClick={onApprove}
+          disabled={analyzeBusy || !summary || summary.visual_approved}
+        >
+          {summary?.visual_approved ? t("finalReviewVisual.approved") : t("finalReviewVisual.approveVisual")}
+        </AsyncButton>
       </div>
 
       {summary ? (

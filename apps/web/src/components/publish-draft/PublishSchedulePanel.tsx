@@ -2,11 +2,14 @@
 
 import { useT } from "../../lib/i18n";
 import type { EditablePublishDraft, PublishDraft } from "../../types/publish-draft";
+import { AsyncButton } from "../shared/AsyncButton";
 
 export function PublishSchedulePanel({
   draft,
   editable,
   disabled,
+  schedulePending,
+  unschedulePending,
   onChange,
   onSchedule,
   onUnschedule
@@ -14,6 +17,8 @@ export function PublishSchedulePanel({
   draft: PublishDraft;
   editable: EditablePublishDraft;
   disabled: boolean;
+  schedulePending: boolean;
+  unschedulePending: boolean;
   onChange: (patch: Partial<EditablePublishDraft>) => void;
   onSchedule: () => void;
   onUnschedule: () => void;
@@ -42,8 +47,12 @@ export function PublishSchedulePanel({
         <textarea value={editable.schedulingNotes} onChange={(event) => onChange({ schedulingNotes: event.target.value })} disabled={disabled} rows={3} />
       </label>
       <div className="publish-button-row">
-        <button onClick={onSchedule} disabled={disabled || !editable.plannedPublishAt}>{t("publishSchedulePanel.schedule")}</button>
-        <button onClick={onUnschedule} disabled={disabled || !draft.planned_publish_at}>{t("publishSchedulePanel.unschedule")}</button>
+        <AsyncButton pending={schedulePending} onClick={onSchedule} disabled={disabled || !editable.plannedPublishAt}>
+          {t("publishSchedulePanel.schedule")}
+        </AsyncButton>
+        <AsyncButton pending={unschedulePending} onClick={onUnschedule} disabled={disabled || !draft.planned_publish_at}>
+          {t("publishSchedulePanel.unschedule")}
+        </AsyncButton>
       </div>
     </section>
   );

@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { AuthProvider } from "../lib/auth";
 import { I18nProvider } from "../lib/i18n";
 import { rootMetadata } from "../lib/pageMetadata";
+import { NoticeProvider } from "../components/shared/NoticeCenter";
 import "./globals.css";
 
 export const metadata: Metadata = rootMetadata;
@@ -21,7 +22,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       </head>
       <body suppressHydrationWarning>
         <I18nProvider>
-          <AuthProvider>{children}</AuthProvider>
+          <NoticeProvider>
+            <AuthProvider>{children}</AuthProvider>
+          </NoticeProvider>
         </I18nProvider>
       </body>
     </html>

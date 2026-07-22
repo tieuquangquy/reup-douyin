@@ -27,6 +27,43 @@ export function isApprovedForReupQueue(candidate: Candidate): boolean {
   return candidate.status === "APPROVED" || candidate.decision_status === "APPROVED";
 }
 
+export type ReviewBoardDetailsActionVisibility = {
+  approvedForQueue: boolean;
+  inReupQueue: boolean;
+  showApproveOnly: boolean;
+  showLater: boolean;
+  showReject: boolean;
+};
+
+/** Stage-aware Review Board tile/details companions — drop no-op Later/Reject. */
+export function reviewBoardDetailsActionVisibility(candidate: {
+  status: Candidate["status"];
+  decision_status?: Candidate["decision_status"];
+  in_reup_queue?: boolean | null;
+  reup_queue_status?: string | null;
+}): ReviewBoardDetailsActionVisibility {
+  const inReupQueue = isCandidateInReupQueue(candidate as Candidate);
+  const approvedForQueue = isApprovedForReupQueue(candidate as Candidate);
+  if (inReupQueue) {
+    return {
+      approvedForQueue,
+      inReupQueue: true,
+      showApproveOnly: false,
+      showLater: false,
+      showReject: false
+    };
+  }
+  const rejected = candidate.status === "REJECTED" || candidate.decision_status === "REJECTED";
+  const inReview = candidate.status === "IN_REVIEW" || candidate.decision_status === "IN_REVIEW";
+  return {
+    approvedForQueue,
+    inReupQueue: false,
+    showApproveOnly: !approvedForQueue,
+    showLater: !rejected && !inReview,
+    showReject: !rejected
+  };
+}
+
 export function approvedCandidatesFromIds(pool: Candidate[], ids: string[]): string[] {
   const byId = new Map(pool.map((candidate) => [candidate.id, candidate]));
   return ids.filter((id) => {

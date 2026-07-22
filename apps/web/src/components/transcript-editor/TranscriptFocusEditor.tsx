@@ -13,13 +13,20 @@ import {
 import { TranscriptSegmentFlags } from "./TranscriptSegmentFlags";
 import { TranscriptSegmentTimingEditor } from "./TranscriptSegmentTimingEditor";
 
-type SegmentOpsIconKind = "play" | "split" | "merge-prev" | "merge-next" | "reset";
+type SegmentOpsIconKind = "play" | "pause" | "split" | "merge-prev" | "merge-next" | "reset";
 
 function SegmentOpsIcon({ kind }: { kind: SegmentOpsIconKind }) {
   if (kind === "play") {
     return (
       <svg className="segment-ops__icon" viewBox="0 0 20 20" aria-hidden="true">
         <path d="M7 5.2v9.6L15 10 7 5.2z" fill="currentColor" />
+      </svg>
+    );
+  }
+  if (kind === "pause") {
+    return (
+      <svg className="segment-ops__icon" viewBox="0 0 20 20" aria-hidden="true">
+        <path d="M6.2 5h2.4v10H6.2V5Zm5.2 0h2.4v10h-2.4V5Z" fill="currentColor" />
       </svg>
     );
   }
@@ -97,6 +104,7 @@ type Props = {
   canMergeNext: boolean;
   ttsClipFit?: TtsClipFit | null;
   onChange: (patch: Partial<Pick<EditableSegment, "sourceText" | "translatedText" | "startMs" | "endMs" | "status">>) => void;
+  isPlaying?: boolean;
   onPlay: () => void;
   onMergePrevious: () => void;
   onMergeNext: () => void;
@@ -115,6 +123,7 @@ export function TranscriptFocusEditor({
   canMergeNext,
   ttsClipFit = null,
   onChange,
+  isPlaying = false,
   onPlay,
   onMergePrevious,
   onMergeNext,
@@ -169,9 +178,14 @@ export function TranscriptFocusEditor({
             onChange={(patch) => onChange(patch)}
           />
           <div className="transcript-focus-editor__actions segment-ops">
-            <button type="button" className="segment-ops__btn segment-ops__btn--play" onClick={onPlay}>
-              <SegmentOpsIcon kind="play" />
-              <span>{t("transcriptEditorRow.play")}</span>
+            <button
+              type="button"
+              className={`segment-ops__btn segment-ops__btn--play${isPlaying ? " is-playing" : ""}`}
+              aria-pressed={isPlaying}
+              onClick={onPlay}
+            >
+              <SegmentOpsIcon kind={isPlaying ? "pause" : "play"} />
+              <span>{t(isPlaying ? "transcriptEditorRow.pause" : "transcriptEditorRow.play")}</span>
             </button>
             <button type="button" className="segment-ops__btn" onClick={onSplit}>
               <SegmentOpsIcon kind="split" />

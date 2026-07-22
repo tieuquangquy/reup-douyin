@@ -71,6 +71,7 @@ class OverlaySegment:
     height: float
     text_vi: str
     kind: str = "hardsub"
+    authority_bounds: tuple[float, float, float, float] | None = None
 
 
 def expand_cover_rect(
@@ -172,6 +173,22 @@ def _as_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _authority_bounds_from_box(
+    box: Mapping[str, Any],
+) -> tuple[float, float, float, float] | None:
+    raw = box.get("cover_bounds")
+    if not isinstance(raw, (list, tuple)) or len(raw) != 4:
+        return None
+    x, y, w, h = (_as_float(value) for value in raw)
+    if w <= 0.0 or h <= 0.0:
+        return None
+    x = max(0.0, min(1.0, x))
+    y = max(0.0, min(1.0, y))
+    w = max(0.001, min(w, 1.0 - x))
+    h = max(0.001, min(h, 1.0 - y))
+    return x, y, w, h
+
+
 def _union_boxes(boxes: list[Mapping[str, Any]]) -> tuple[float, float, float, float] | None:
     if not boxes:
         return None
@@ -239,6 +256,7 @@ def overlays_from_ocr_payload(
       slate panel above the subtitle band. Late-clip alone does **not** force
       a panel (avoids the ugly wipe when OCR only saw the bottom caption).
     """
+    from src.media_pipeline.ocr_filtering.box_payload import box_norm_xywh
     from src.media_pipeline.ocr_filtering.overlay_zones import (
         is_endcard_dense,
         overlay_kind_for_box,
@@ -247,10 +265,12 @@ def overlays_from_ocr_payload(
     from src.media_pipeline.ocr_filtering.types import DetectedTextBox
 
     del pad_x, pad_y
+    endcard_mode = ""
     if isinstance(payload, list):
         frames = list(payload)
     else:
         frames = list(payload.get("frames") or [])
+        endcard_mode = str(payload.get("endcard_mode") or "").strip().lower()
     if not frames:
         raise VideoRendererError(
             VideoRendererErrorCode.EMPTY_OVERLAYS,
@@ -259,9 +279,18 @@ def overlays_from_ocr_payload(
 
     duration_ms = int(video_duration_ms) if video_duration_ms is not None else 0
 
-    # (time_ms, frame_id, box_index, xywh, kind) — box_index among CJK boxes only;
+    # (time_ms, frame_id, box_index, xywh, kind, authority_bounds)
     # dense_ui panel uses box_index=-1.
-    prepared: list[tuple[int, str, int, tuple[float, float, float, float], str]] = []
+    prepared: list[
+        tuple[
+            int,
+            str,
+            int,
+            tuple[float, float, float, float],
+            str,
+            tuple[float, float, float, float] | None,
+        ]
+    ] = []
     for frame in frames:
         if not isinstance(frame, Mapping):
             continue
@@ -274,7 +303,10 @@ def overlays_from_ocr_payload(
         text_boxes = [
             b for b in raw_boxes if str(b.get("text") or "").strip()
         ]
-        if not text_boxes:
+        cover_only_boxes = [
+            b for b in raw_boxes if bool(b.get("cover_only"))
+        ]
+        if not text_boxes and not cover_only_boxes:
             continue
 
         cjk_items: list[tuple[DetectedTextBox, tuple[float, float, float, float], str]] = []
@@ -282,10 +314,7 @@ def overlays_from_ocr_payload(
             text = str(box.get("text") or "").strip()
             if not contains_cjk(text):
                 continue
-            x = float(box.get("x") or 0.0)
-            y = float(box.get("y") or 0.0)
-            w = max(0.01, float(box.get("width") or 0.01))
-            h = max(0.01, float(box.get("height") or 0.01))
+            x, y, w, h = box_norm_xywh(box)
             detected = DetectedTextBox(
                 x=x,
                 y=y,
@@ -297,18 +326,67 @@ def overlays_from_ocr_payload(
             kind = overlay_kind_for_box(detected)
             cjk_items.append((detected, (x, y, w, h), kind))
 
-        force_panel = bool(cjk_items) and is_endcard_dense([item[0] for item in cjk_items])
+        dense_endcard = bool(cjk_items) and is_endcard_dense(
+            [item[0] for item in cjk_items]
+        )
+        force_panel = dense_endcard and endcard_mode != "text_only"
 
         if not cjk_items and not force_panel:
             continue
 
         if force_panel:
             prepared.append(
-                (time_ms, frame_id, -1, dense_ui_content_panel(), DENSE_UI_KIND)
+                (
+                    time_ms,
+                    frame_id,
+                    -1,
+                    dense_ui_content_panel(),
+                    DENSE_UI_KIND,
+                    None,
+                )
             )
 
         for box_index, (_detected, xywh, kind) in enumerate(cjk_items):
-            prepared.append((time_ms, frame_id, box_index, xywh, kind))
+            source = next(
+                (
+                    box
+                    for box in text_boxes
+                    if box_norm_xywh(box) == xywh
+                    and str(box.get("text") or "").strip() == _detected.text
+                ),
+                None,
+            )
+            bounds = _authority_bounds_from_box(source) if source is not None else None
+            prepared.append((time_ms, frame_id, box_index, xywh, kind, bounds))
+        if dense_endcard and endcard_mode == "text_only":
+            for box in text_boxes:
+                text = str(box.get("text") or "").strip()
+                if contains_cjk(text):
+                    continue
+                x, y, w, h = box_norm_xywh(box)
+                # Negative index means cover-only: no Vietnamese burn-in.
+                prepared.append(
+                    (
+                        time_ms,
+                        frame_id,
+                        -2,
+                        (x, y, w, h),
+                        "ui",
+                        _authority_bounds_from_box(box),
+                    )
+                )
+            for box in cover_only_boxes:
+                x, y, w, h = box_norm_xywh(box)
+                prepared.append(
+                    (
+                        time_ms,
+                        frame_id,
+                        -2,
+                        (x, y, w, h),
+                        "ui",
+                        _authority_bounds_from_box(box),
+                    )
+                )
 
     if not prepared:
         raise VideoRendererError(
@@ -330,7 +408,7 @@ def overlays_from_ocr_payload(
             next_time[t] = end
 
     overlays: list[OverlaySegment] = []
-    for time_ms, frame_id, box_index, (x, y, w, h), kind in prepared:
+    for time_ms, frame_id, box_index, (x, y, w, h), kind, bounds in prepared:
         end_ms = next_time[time_ms]
         if end_ms <= time_ms:
             end_ms = time_ms + max(hold, 50)
@@ -355,6 +433,7 @@ def overlays_from_ocr_payload(
                 height=h,
                 text_vi=text_vi,
                 kind=kind,
+                authority_bounds=bounds,
             )
         )
     return overlays

@@ -119,6 +119,25 @@ The API also exposes publish preparation, risk, Facebook Page/Reels publishing, 
 - multi-account routing/control-plane APIs
 - feedback-driven optimization hints
 
+## Authority V3.6 full-duration OCR (box QA)
+
+When `OCR_QUALITY_PROFILE=best`, hard-sub E2E Phase 2 uses `run_per_frame_position_authority` over the **full video timeline** (every frame), not Phase-1 sample fps.
+
+Box-only QA (no blur/render):
+
+```powershell
+cd apps/api
+$env:PYTHONPATH = "src;."
+python -m src.media_pipeline.ocr_filtering.per_frame_position_authority `
+  --video path\to\video.mp4 `
+  --out tmp_ocr_v36_run\ocr-authority-v3.6.json `
+  --ocr-cache tmp_ocr_v36_run\ocr-cache.json `
+  --overlay-dir tmp_ocr_v36_run\overlays_full_duration `
+  --overlay-all
+```
+
+Details: `docs/ocr-hardsub-pipeline.md`, `docs/hardsub-e2e-pipeline.md`.
+
 ## Running Migrations Later
 
 After dependencies are installed and `DATABASE_URL` is configured:

@@ -109,5 +109,12 @@ assert.doesNotMatch(
   "Media preview must not put protected /media-assets URL directly on <video src>"
 );
 assert.match(previewSource, /loadedmetadata|readyState/, "Play/Jump must wait until video metadata is ready");
+assert.match(previewSource, /pauseRequestId/, "Media preview must accept pause requests from the focus Play/Pause control");
+assert.match(
+  previewSource,
+  /onPlayingChange|addEventListener\("play"|addEventListener\("pause"/,
+  "Media preview must report playing state from the video element"
+);
+assert.match(previewSource, /\.pause\(\)/, "Media preview must pause the video on pauseRequestId");
 
 console.log("transcript-editor preview tests passed");

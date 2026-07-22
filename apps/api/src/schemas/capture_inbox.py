@@ -21,6 +21,7 @@ from src.services.douyin_metadata_normalization import (
 
 MetadataStatus = Literal["pending_hydration", "complete", "partial", "missing", "failed"]
 MetadataGroupStatus = Literal["captured", "missing", "failed", "pending"]
+CaptureInboxStudioStatus = Literal["all", "ready", "promoted", "duplicate", "needs_action", "failed"]
 
 
 class CaptureInboxReconciliationResponse(BaseModel):
@@ -80,6 +81,8 @@ class CapturedItemResponse(BaseModel):
     share_count_text: str | None = None
     favorite_count: int | None = None
     favorite_count_text: str | None = None
+    follower_count: int | None = None
+    follower_count_text: str | None = None
     engagement_score: int | None = None
     engagement_rate: float | None = None
     engagement_rate_basis: Literal["estimated_views_mid", "view_count", "none"] = "none"
@@ -281,6 +284,8 @@ class CapturedItemResponse(BaseModel):
             )
         if self.favorite_count is None:
             self.favorite_count = normalize_douyin_count(self.favorite_count_text)
+        self.follower_count = _int_metadata(metadata, raw_payload, {}, key="follower_count")
+        self.follower_count_text = _string_metadata(metadata, raw_payload, key="follower_count_text")
 
         engagement = calculate_engagement(
             like_count=self.like_count,
@@ -430,6 +435,7 @@ class CaptureSessionListResponse(BaseModel):
 class CapturedItemListResponse(BaseModel):
     items: list[CapturedItemResponse]
     total_count: int
+    status_counts: dict[str, int] = Field(default_factory=dict)
 
 
 class CaptureSessionCountsResponse(BaseModel):
@@ -592,6 +598,7 @@ class CaptureInboxAdvancedFilterRequest(BaseModel):
 class CaptureInboxItemQueryRequest(BaseModel):
     capture_session_id: UUID
     status: CapturedItemStatus | None = None
+    studio_status: CaptureInboxStudioStatus | None = None
     search: str | None = None
     limit: int = Field(default=100, ge=1, le=500)
     offset: int = Field(default=0, ge=0)

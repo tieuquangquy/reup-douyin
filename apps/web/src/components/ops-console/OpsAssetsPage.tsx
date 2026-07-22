@@ -4,9 +4,12 @@ import Link from "next/link";
 import { useEffect, useState, type ReactNode } from "react";
 import { fetchOperationalMetrics } from "../../lib/api";
 import { useT } from "../../lib/i18n";
+import { useLatestRequest } from "../../lib/useLatestRequest";
 import type { OperationalMetrics, OpsAssetReuseSummary } from "../../types/operations";
 import { OpsConsoleShell } from "../app-shell/OpsConsoleShell";
 import { TopbarRefreshButton } from "../app-shell/TopbarRefreshButton";
+import { AsyncContentBoundary } from "../shared/AsyncContentBoundary";
+import { useNotice } from "../shared/NoticeCenter";
 import { OpsState, formatDateTime, type OpsTone } from "./OpsShared";
 
 type AssetRow = OpsAssetReuseSummary & {
@@ -76,18 +79,16 @@ function AssetsPanel({
 export function OpsAssetsPage() {
   const t = useT();
   const [metrics, setMetrics] = useState<OperationalMetrics | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const request = useLatestRequest();
+  const { notify } = useNotice();
 
   async function load() {
-    setLoading(true);
-    setError(null);
+    const mode = metrics ? "refresh" : "initial";
     try {
-      setMetrics(await fetchOperationalMetrics());
+      await request.run(() => fetchOperationalMetrics(), setMetrics, mode);
+      if (mode === "refresh") notify({ id: "ops-assets-refresh", message: "Assets refreshed.", tone: "success" });
     } catch (err) {
-      setError(err instanceof Error ? err.message : t("opsAssets.unavailableTitle"));
-    } finally {
-      setLoading(false);
+      if (mode === "refresh") notify({ id: "ops-assets-refresh", message: err instanceof Error ? err.message : t("opsAssets.unavailableTitle"), tone: "error" });
     }
   }
 
@@ -102,29 +103,29 @@ export function OpsAssetsPage() {
   const needsCurrentCount = needsCurrentRows.length;
 
   const refreshAction = (
-    <TopbarRefreshButton busy={loading && Boolean(metrics)} disabled={loading && !metrics} onClick={() => void load()} />
+    <TopbarRefreshButton busy={request.refreshing} disabled={request.initialLoading} onClick={() => void load()} />
   );
 
-  if (loading && !metrics) {
+  if (!metrics && !request.error) {
     return (
       <OpsConsoleShell actions={refreshAction} description={t("opsAssets.description")} title={t("opsAssets.title")}>
-        <OpsState title={t("opsAssets.loadingTitle")} detail={t("opsAssets.loadingDetail")} />
+        <AsyncContentBoundary skeletonVariant="list" status="loading"><span /></AsyncContentBoundary>
       </OpsConsoleShell>
     );
   }
 
-  if (error && !metrics) {
+  if (request.error && !metrics) {
     return (
       <OpsConsoleShell actions={refreshAction} description={t("opsAssets.description")} title={t("opsAssets.title")}>
-        <OpsState title={t("opsAssets.unavailableTitle")} detail={error} retry={() => void load()} />
+        <AsyncContentBoundary errorState={<OpsState title={t("opsAssets.unavailableTitle")} detail={request.error.message} retry={() => void load()} />} skeletonVariant="list" status="error"><span /></AsyncContentBoundary>
       </OpsConsoleShell>
     );
   }
 
   return (
     <OpsConsoleShell actions={refreshAction} description={t("opsAssets.description")} title={t("opsAssets.title")}>
+      <AsyncContentBoundary refreshing={request.refreshing} skeletonVariant="list" status="success">
       <main className="ops-page ops-assets-page">
-        {error ? <div className="inline-error">{error}</div> : null}
 
         <p className="ops-assets-freshness">
           {t("opsAssets.metricsGenerated")}{" "}
@@ -210,6 +211,7 @@ export function OpsAssetsPage() {
           ) : null}
         </section>
       </main>
+      </AsyncContentBoundary>
     </OpsConsoleShell>
   );
 }

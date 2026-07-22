@@ -8,6 +8,7 @@ const webRoot = resolve(testDir, "..");
 
 const topbarSource = readFileSync(resolve(webRoot, "components/app-shell/Topbar.tsx"), "utf8");
 const refreshSource = readFileSync(resolve(webRoot, "components/app-shell/TopbarRefreshButton.tsx"), "utf8");
+const labeledButtonSource = readFileSync(resolve(webRoot, "components/app-shell/TopbarLabeledButton.tsx"), "utf8");
 const globalCssSource = readFileSync(resolve(webRoot, "app/globals.css"), "utf8");
 const navConfigSource = readFileSync(resolve(webRoot, "lib/navigationConfig.ts"), "utf8");
 const languageSource = readFileSync(resolve(webRoot, "components/app-shell/LanguageSwitcher.tsx"), "utf8");
@@ -40,8 +41,9 @@ assert.match(topbarSource, /loginPathForSurface\("operator"\)/, "Ops→Studio sw
 assert.match(topbarSource, /OPS_ADMIN_ROLES|owner.*admin|canOpenOps/, "Ops workspace option must be role-gated");
 assert.match(topbarSource, /topbar\.switchToOpsConsole|topbar\.switchToOperatorStudio/, "Workspace menu must use Go to … labels");
 
-assert.match(refreshSource, /app-topbar-btn is-icon/, "Refresh control must be an icon-only topbar button");
-assert.match(refreshSource, /aria-label/, "Icon refresh must expose an accessible label");
+assert.match(refreshSource, /TopbarLabeledButton/, "Refresh control must use shared icon+text topbar button");
+assert.match(labeledButtonSource, /app-topbar-btn__label/, "Labeled topbar button must render visible text label");
+assert.match(topbarSource, /app-topbar-account-trigger-label/, "Account trigger must show icon + text label");
 assert.match(refreshSource, /RefreshIcon|app-topbar-refresh-icon/, "Refresh control must use an SVG icon");
 
 assert.doesNotMatch(languageSource, /🌐/, "Language switcher must not use emoji");
@@ -50,7 +52,8 @@ assert.match(languageSource, /language-switcher__icon|svg/, "Language switcher m
 assert.doesNotMatch(opsHomeShell, /href=["']\/ops\/health["']/, "Ops home shell must not duplicate sidebar Health link");
 assert.doesNotMatch(opsHomeShell, /href=["']\/ops\/jobs["']/, "Ops home shell must not duplicate sidebar Jobs link");
 
-assert.match(globalCssSource, /\.app-topbar-btn\.is-icon/, "Global CSS must style icon-only topbar buttons");
+assert.match(globalCssSource, /\.app-topbar-btn\.is-labeled/, "Global CSS must style labeled icon+text topbar buttons");
+assert.match(globalCssSource, /\.app-topbar-btn__icon-wrap/, "Global CSS must style topbar icon wraps");
 assert.match(globalCssSource, /\.app-topbar-account-surface/, "Global CSS must style account surface subtitle");
 assert.match(globalCssSource, /\.app-topbar-menu-logout/, "Global CSS must style logout quietly");
 assert.match(

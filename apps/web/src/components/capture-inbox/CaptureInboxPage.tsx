@@ -11,17 +11,16 @@ import {
   OpsDetailPanel,
   OpsDetailSection,
   OpsEmptyState,
-  OpsFilterBar,
   OpsMetadataList,
-  OpsSection,
-  OpsToolbarGroup
+  OpsSection
 } from "../ops-console/OpsShared";
+import { CaptureInboxFilterChipIcon, type CaptureInboxFilterChipIconKind } from "./CaptureInboxFilterChipIcon";
+import { CaptureInboxPromoteSplitButton } from "./CaptureInboxPromoteSplitButton";
 import { CaptureInboxTileActions } from "./CaptureInboxTileActions";
 import {
   deleteCaptureInboxSession,
   fetchCaptureInboxItem,
   fetchCaptureInboxItems,
-  fetchCaptureInboxProfileItems,
   fetchCaptureInboxProfileSummary,
   fetchCaptureInboxSession,
   fetchCaptureInboxSessions,
@@ -30,10 +29,16 @@ import {
 } from "../../lib/api";
 import { hasMoreOffsetItems, mergeOffsetItemsById } from "../../lib/offsetListPagination";
 import { OffsetLoadMoreFooter } from "../shared/OffsetLoadMoreFooter";
+import { AsyncButton } from "../shared/AsyncButton";
+import { AsyncContentBoundary } from "../shared/AsyncContentBoundary";
+import { useNotice } from "../shared/NoticeCenter";
 import { WorkItemDetailsDrawer } from "../shared/WorkItemDetailsDrawer";
+import { WorkItemActionIcon, type WorkItemActionIconKind } from "../shared/WorkItemActionIcon";
 import { WorkMediaTileOverlay } from "../shared/WorkMediaTileOverlay";
 import { useOffsetLoadMoreOnScroll } from "../shared/useOffsetLoadMoreOnScroll";
-import { getOperatorTileScoreBadge } from "../../lib/operatorTileScore";
+import { useAsyncAction } from "../../lib/useAsyncAction";
+import { getReupScoreForCaptureItem, type DouyinReupScore } from "../../lib/captureInboxReupScore";
+import { useOperatorTileScoreBadge, useOptionalReupScoreForCaptureItem } from "../../lib/useCaptureItemReupScore";
 import {
   hasMoreCapturedItems,
   hasMoreCapturedItemsAfterPage,
@@ -64,7 +69,6 @@ import {
 } from "../../lib/captureInboxCanonical";
 import {
   inspectorMetadataQualityItems,
-  inspectorPerformanceItems,
   itemNeedsInspectorHydration
 } from "../../lib/captureInboxInspector";
 import {
@@ -80,7 +84,6 @@ import {
   type ComparableEstimatedViews,
   type MetadataHealthFilter
 } from "../../lib/captureInboxFilterMetadata";
-import { getReupScoreForCaptureItem } from "../../lib/captureInboxReupScore";
 import {
   formatReupScoreBadgeValue,
 } from "../../lib/reupScoreBadge";
@@ -90,13 +93,12 @@ import {
   getDouyinReviewPresetCounts,
   matchesDouyinReviewPreset,
   type DouyinReviewPreset,
+  type DouyinReviewPresetConfig,
   type DouyinReviewPresetId
 } from "../../lib/captureInboxReviewPresets";
 import {
   buildPromoteSuccessSummary,
-  CAPTURE_INBOX_REVIEW_BOARD_HREF,
-  promoteSuccessFollowUpLabel,
-  type PromoteSuccessSummary
+  CAPTURE_INBOX_REVIEW_BOARD_HREF
 } from "../../lib/captureInboxPromoteNotice";
 import {
   buildReupScoreBreakdownBars,
@@ -104,6 +106,7 @@ import {
 } from "../../lib/captureInboxPresentation";
 import {
   CAPTURE_INBOX_POWER_DEFAULT_SORT,
+  isCaptureInboxPromotableItem,
   pickLatestCaptureSessionId,
   selectTopPromotableCaptureItems,
   sortCaptureSessionsNewestFirst
@@ -116,10 +119,10 @@ import type {
   CaptureInboxProfileSummaryResponse,
   CaptureSession,
   CaptureSessionDetail,
-  CaptureSessionStatus
+  CaptureSessionStatus,
+  StudioItemStatusFilter
 } from "../../types/capture-inbox";
 
-type StudioItemStatusFilter = "all" | "ready" | "needs_action" | "failed" | "duplicate" | "promoted";
 type MetadataStatusFilter = "all" | "complete" | "missing_posted" | "missing_thumbnail" | "missing_duration" | "missing_metrics";
 type SortMode = "ready_first" | "recently_captured" | "newest_posted" | "oldest_posted" | "highest_views" | "highest_likes" | "highest_comments" | "highest_shares" | "highest_engagement" | "highest_reup_score" | "lowest_reup_score" | "shortest_duration" | "longest_duration";
 type StudioFilters = {
@@ -128,7 +131,6 @@ type StudioFilters = {
   metadataFilter: MetadataStatusFilter;
   onlyActionable: boolean;
   onlyWithThumbnail: boolean;
-  hideDuplicates: boolean;
   sort: SortMode;
 };
 type OperatorBadge = "Ready" | "Duplicate" | "Needs action" | "Failed" | "Promoted" | "Preview pending" | "Excluded";
@@ -150,12 +152,23 @@ type BulkActionResultSummary = {
   skippedCount: number;
   backendMessage: string;
 };
-type TileQuickMetaChip = { label: string; value: string };
 type TileMetricCell = { label: "Views" | "Est. Views" | "Likes" | "Comments" | "Shares"; value: string; title?: string };
+type TilePerfStat = {
+  key: string;
+  label: string;
+  value: string;
+  title: string;
+  icon: CaptureInboxFilterChipIconKind;
+};
 type TileCardModel = {
   metadataGap: string | null;
-  metrics: TileMetricCell[];
-  quickMetaChips: TileQuickMetaChip[];
+  meta: {
+    duration: string;
+    durationTitle: string;
+    posted: string;
+    postedTitle: string;
+  };
+  perfStats: TilePerfStat[];
 };
 
 const SESSION_STATUS_OPTIONS: Array<"all" | CaptureSessionStatus> = [
@@ -186,25 +199,36 @@ const SORT_OPTIONS: Array<{ key: SortMode; label: string }> = [
   { key: "longest_duration", label: "Longest duration" }
 ];
 
-const SUMMARY_FILTERS: Array<{ key: StudioItemStatusFilter; label: string }> = [
+const PIPELINE_STATUS_FILTERS: Array<{ key: StudioItemStatusFilter; label: string }> = [
   { key: "all", label: "Captured" },
   { key: "ready", label: "Ready" },
-  { key: "duplicate", label: "Duplicates" },
-  { key: "needs_action", label: "Needs action" },
-  { key: "failed", label: "Failed" },
   { key: "promoted", label: "Promoted" }
 ];
+
+const ATTENTION_STATUS_FILTERS: Array<{ key: StudioItemStatusFilter; label: string }> = [
+  { key: "duplicate", label: "Duplicates" },
+  { key: "needs_action", label: "Needs action" },
+  { key: "failed", label: "Failed" }
+];
+
+const EMPTY_STUDIO_STATUS_COUNTS: Record<StudioItemStatusFilter, number> = {
+  all: 0,
+  ready: 0,
+  promoted: 0,
+  duplicate: 0,
+  needs_action: 0,
+  failed: 0,
+};
 
 const TARGET_DEBUG_AWEME_IDS = new Set(["7628281732369796388", "7631223404342857006", "7628596519502892307"]);
 
 const CAPTURE_INBOX_ITEMS_PAGE_SIZE = 100;
-const CAPTURE_INBOX_VIRTUAL_ROW_HEIGHT = 520;
+const CAPTURE_INBOX_VIRTUAL_ROW_HEIGHT = 510;
+const CAPTURE_INBOX_VIRTUAL_ROW_GAP = 12;
 const CAPTURE_INBOX_VIRTUAL_OVERSCAN_ROWS = 2;
-const CAPTURE_INBOX_GALLERY_MAX_COLUMNS = 5;
-const CAPTURE_INBOX_VIRTUAL_MIN_COLUMN_WIDTH = 180;
-const CAPTURE_INBOX_PROMOTE_TOP_BATCHES = [5, 10, 20] as const;
+const CAPTURE_INBOX_GALLERY_MAX_COLUMNS = 4;
+const CAPTURE_INBOX_VIRTUAL_MIN_COLUMN_WIDTH = 220;
 const CAPTURE_INBOX_UI_VERSION = "22G-3C";
-const CAPTURE_INBOX_PRIMARY_PRESET_IDS: DouyinReviewPresetId[] = ["ready_to_promote", "high_potential", "needs_cleanup"];
 
 const METADATA_STATUS_OPTIONS: Array<{ key: MetadataStatusFilter; label: string; title: string }> = [
   { key: "all", label: "All", title: "All metadata" },
@@ -350,13 +374,122 @@ function advancedFilterSummaryItems(filters: AdvancedAppliedFilters | null): str
   return items;
 }
 
-function countCaptureInboxActiveFilters({
+function formatDateInputValue(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function advancedPostedTimePresetRange(preset: "last7" | "last30" | "thisMonth"): { from: string; to: string } {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const to = formatDateInputValue(today);
+
+  if (preset === "last7") {
+    const fromDate = new Date(today);
+    fromDate.setDate(fromDate.getDate() - 6);
+    return { from: formatDateInputValue(fromDate), to };
+  }
+
+  if (preset === "last30") {
+    const fromDate = new Date(today);
+    fromDate.setDate(fromDate.getDate() - 29);
+    return { from: formatDateInputValue(fromDate), to };
+  }
+
+  const fromDate = new Date(today.getFullYear(), today.getMonth(), 1);
+  return { from: formatDateInputValue(fromDate), to };
+}
+
+function metadataHealthFiltersEqual(left: MetadataHealthFilter[], right: MetadataHealthFilter[]): boolean {
+  if (left.length !== right.length) return false;
+  const sortedLeft = [...left].sort();
+  const sortedRight = [...right].sort();
+  return sortedLeft.every((value, index) => value === sortedRight[index]);
+}
+
+function advancedAppliedFiltersEqual(
+  left: AdvancedAppliedFilters | null,
+  right: AdvancedAppliedFilters | null
+): boolean {
+  if (left === right) return true;
+  if (!left || !right) return false;
+
+  return (
+    left.postedFrom === right.postedFrom &&
+    left.postedTo === right.postedTo &&
+    left.capturedFrom === right.capturedFrom &&
+    left.capturedTo === right.capturedTo &&
+    left.minDurationSeconds === right.minDurationSeconds &&
+    left.maxDurationSeconds === right.maxDurationSeconds &&
+    left.minEstimatedViews === right.minEstimatedViews &&
+    left.maxEstimatedViews === right.maxEstimatedViews &&
+    left.minLikes === right.minLikes &&
+    left.maxLikes === right.maxLikes &&
+    left.minComments === right.minComments &&
+    left.maxComments === right.maxComments &&
+    left.minShares === right.minShares &&
+    left.maxShares === right.maxShares &&
+    left.minEngagementScore === right.minEngagementScore &&
+    left.maxEngagementScore === right.maxEngagementScore &&
+    left.minEngagementRate === right.minEngagementRate &&
+    left.maxEngagementRate === right.maxEngagementRate &&
+    metadataHealthFiltersEqual(left.metadataHealthFilters, right.metadataHealthFilters)
+  );
+}
+
+function advancedFiltersAreDirty(draft: AdvancedFilterDraft, applied: AdvancedAppliedFilters | null): boolean {
+  return !advancedAppliedFiltersEqual(buildAdvancedFilterPayload(draft), applied);
+}
+
+function advancedPerformanceTabHasDraftFilters(
+  draft: AdvancedFilterDraft,
+  tab: "views" | "engagement" | "rates"
+): boolean {
+  const hasValue = (value: string) => value.trim().length > 0;
+
+  if (tab === "views") {
+    return hasValue(draft.minEstimatedViews) || hasValue(draft.maxEstimatedViews);
+  }
+
+  if (tab === "engagement") {
+    return [
+      draft.minLikes,
+      draft.maxLikes,
+      draft.minComments,
+      draft.maxComments,
+      draft.minShares,
+      draft.maxShares
+    ].some(hasValue);
+  }
+
+  return [
+    draft.minEngagementScore,
+    draft.maxEngagementScore,
+    draft.minEngagementRate,
+    draft.maxEngagementRate
+  ].some(hasValue);
+}
+
+function studioItemStatusFilterLabel(filter: StudioItemStatusFilter): string {
+  const entry = [...PIPELINE_STATUS_FILTERS, ...ATTENTION_STATUS_FILTERS].find((option) => option.key === filter);
+  return entry?.label ?? filter;
+}
+
+function metadataStatusFilterLabel(filter: MetadataStatusFilter): string {
+  return METADATA_STATUS_OPTIONS.find((option) => option.key === filter)?.label ?? filter;
+}
+
+function sortModeLabel(sortMode: SortMode): string {
+  return SORT_OPTIONS.find((option) => option.key === sortMode)?.label ?? sortMode;
+}
+
+function buildCaptureInboxActiveFilterChips({
   activePreset,
   appliedAdvancedFilter,
-  baselineFilter,
   baselineSort,
-  filter,
-  hideDuplicates,
+  metadataFilter,
   onlyActionable,
   onlyWithThumbnail,
   searchQuery,
@@ -364,25 +497,25 @@ function countCaptureInboxActiveFilters({
 }: {
   activePreset: DouyinReviewPreset;
   appliedAdvancedFilter: AdvancedAppliedFilters | null;
-  baselineFilter: StudioItemStatusFilter;
   baselineSort: SortMode;
-  filter: StudioItemStatusFilter;
-  hideDuplicates: boolean;
+  metadataFilter: MetadataStatusFilter;
   onlyActionable: boolean;
   onlyWithThumbnail: boolean;
   searchQuery: string;
   sortMode: SortMode;
-}): number {
-  let count = 0;
-  if (filter !== baselineFilter) count += 1;
-  if (searchQuery.trim()) count += 1;
-  if (sortMode !== baselineSort) count += 1;
-  if (onlyActionable) count += 1;
-  if (onlyWithThumbnail) count += 1;
-  if (hideDuplicates) count += 1;
-  if (activePreset !== "none") count += 1;
-  if (appliedAdvancedFilter) count += advancedFilterSummaryItems(appliedAdvancedFilter).length;
-  return count;
+}): string[] {
+  const chips: string[] = [];
+  if (metadataFilter !== "all") chips.push(metadataStatusFilterLabel(metadataFilter));
+  if (searchQuery.trim()) chips.push(`Search: ${truncateInlineLabel(searchQuery.trim(), 28)}`);
+  if (sortMode !== baselineSort) chips.push(sortModeLabel(sortMode));
+  if (onlyActionable) chips.push("Only actionable");
+  if (onlyWithThumbnail) chips.push("Only with thumbnail");
+  if (activePreset !== "none") {
+    const preset = getDouyinReviewPresetConfig(activePreset);
+    if (preset) chips.push(`Preset: ${preset.shortLabel}`);
+  }
+  chips.push(...advancedFilterSummaryItems(appliedAdvancedFilter));
+  return chips;
 }
 
 function pushDateRangeSummary(items: string[], label: string, fromValue: string | null, toValue: string | null): void {
@@ -430,6 +563,7 @@ function formatCompactNumber(value: number): string {
 type SessionItemsPage = {
   items: CapturedItem[];
   total_count: number;
+  status_counts: Record<StudioItemStatusFilter, number>;
   unique_video_count?: number | null;
 };
 
@@ -439,26 +573,15 @@ function resolveSessionItemsGalleryTotal(
   sessionCapturedCount?: number | null,
   itemStatusFilter: StudioItemStatusFilter = "all"
 ): number {
-  if (loadScope === "session" && !usesServerStatusFilter(itemStatusFilter) && sessionCapturedCount != null) {
-    return sessionCapturedCount;
-  }
+  void sessionCapturedCount;
+  void itemStatusFilter;
   return resolveGalleryTotalCount(loadScope, page.total_count, page.unique_video_count);
-}
-
-function studioFilterToApiStatus(filter: StudioItemStatusFilter): CapturedItemStatus | undefined {
-  if (filter === "ready") return "READY";
-  if (filter === "duplicate") return "DUPLICATE";
-  if (filter === "failed") return "FAILED";
-  if (filter === "promoted") return "PROMOTED";
-  return undefined;
-}
-
-function usesServerStatusFilter(filter: StudioItemStatusFilter): boolean {
-  return filter === "ready" || filter === "duplicate" || filter === "failed" || filter === "promoted";
 }
 
 export function CaptureInboxPage() {
   const searchParams = useSearchParams();
+  const asyncActions = useAsyncAction();
+  const { notify } = useNotice();
   const profileUrlFromQuery = searchParams.get("profile_url")?.trim() || null;
   const [sessions, setSessions] = useState<CaptureSession[]>([]);
   const [sessionsTotalCount, setSessionsTotalCount] = useState(0);
@@ -467,6 +590,8 @@ export function CaptureInboxPage() {
   const [selectedSession, setSelectedSession] = useState<CaptureSessionDetail | null>(null);
   const [statusFilter, setStatusFilter] = useState<"all" | CaptureSessionStatus>("all");
   const [operatorFilter, setOperatorFilter] = useState<StudioItemStatusFilter>("all");
+  const [statusCounts, setStatusCounts] = useState<Record<StudioItemStatusFilter, number>>(EMPTY_STUDIO_STATUS_COUNTS);
+  const [statusTransitionLoading, setStatusTransitionLoading] = useState(false);
   const [metadataFilter, setMetadataFilter] = useState<MetadataStatusFilter>("all");
   const [searchQuery, setSearchQuery] = useState<StudioFilters["searchQuery"]>("");
   const [sortMode, setSortMode] = useState<SortMode>(CAPTURE_INBOX_POWER_DEFAULT_SORT);
@@ -475,17 +600,14 @@ export function CaptureInboxPage() {
   const selectionScope = "visible_items" as const;
   const [onlyActionable, setOnlyActionable] = useState(false);
   const [onlyWithThumbnail, setOnlyWithThumbnail] = useState(false);
-  const [hideDuplicates, setHideDuplicates] = useState(false);
   const [activeItemId, setActiveItemId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [working, setWorking] = useState<CaptureInboxAction | "delete_session" | "refresh" | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
-  const [promoteSuccess, setPromoteSuccess] = useState<PromoteSuccessSummary | null>(null);
   const [rawDetails, setRawDetails] = useState<Array<Record<string, unknown>>>([]);
   const [sourceUrls, setSourceUrls] = useState<string[]>([]);
   const [rightInspectorOpen, setRightInspectorOpen] = useState(false);
-  const [showAdvancedFilters, setShowAdvancedFilters] = useState(true);
+  const [showAdvancedFilters, setShowAdvancedFilters] = useState(false);
   const [advancedFilterDraft, setAdvancedFilterDraft] = useState<AdvancedFilterDraft>(DEFAULT_ADVANCED_FILTER_DRAFT);
   const [appliedAdvancedFilter, setAppliedAdvancedFilter] = useState<AdvancedAppliedFilters | null>(null);
   const [queryLoading, setQueryLoading] = useState(false);
@@ -503,6 +625,7 @@ export function CaptureInboxPage() {
   const manualSessionSelectionRef = useRef<string | null>(null);
   const loadMoreInFlightRef = useRef(false);
   const itemsLoadGenerationRef = useRef(0);
+  const operatorFilterTransitionRef = useRef(0);
   const [itemsLoadScope, setItemsLoadScope] = useState<CaptureInboxItemsLoadScope>("session");
   const [inspectorDetailLoading, setInspectorDetailLoading] = useState(false);
   const [inspectorPinnedItem, setInspectorPinnedItem] = useState<CapturedItem | null>(null);
@@ -536,6 +659,7 @@ export function CaptureInboxPage() {
         setSelectedSession(null);
         setSessionItems([]);
         setSessionItemsTotalCount(0);
+        setStatusCounts(EMPTY_STUDIO_STATUS_COUNTS);
         setHasMoreSessionItems(false);
         setSelectedItemIds([]);
         setActiveItemId(null);
@@ -544,7 +668,9 @@ export function CaptureInboxPage() {
         setSourceUrls([]);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load Capture Inbox");
+      const message = err instanceof Error ? err.message : "Failed to load Capture Inbox";
+      setError(message);
+      notify({ message, tone: "error" });
     } finally {
       setLoading(false);
     }
@@ -565,7 +691,9 @@ export function CaptureInboxPage() {
       );
       setSessionsTotalCount(payload.total_count);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load more capture sessions");
+      const message = err instanceof Error ? err.message : "Failed to load more capture sessions";
+      setError(message);
+      notify({ message, tone: "error" });
     } finally {
       setLoadingMoreSessions(false);
     }
@@ -582,36 +710,18 @@ export function CaptureInboxPage() {
     itemStatusFilter: StudioItemStatusFilter,
     loadScope: CaptureInboxItemsLoadScope = itemsLoadScope
   ): Promise<SessionItemsPage> {
-    const apiStatus = studioFilterToApiStatus(itemStatusFilter);
-    const serverStatus = usesServerStatusFilter(itemStatusFilter) ? apiStatus : undefined;
-    if (shouldUseProfileItemsScope(profileUrlFromQuery, loadScope)) {
-      if (serverStatus) {
-        const page = await fetchCaptureInboxItems({
-          profileUrl: profileUrlFromQuery!,
-          status: serverStatus,
-          limit: CAPTURE_INBOX_ITEMS_PAGE_SIZE,
-          offset
-        });
-        return { items: page.items, total_count: page.total_count };
-      }
-      const page = await fetchCaptureInboxProfileItems({
-        profileUrl: profileUrlFromQuery!,
-        limit: CAPTURE_INBOX_ITEMS_PAGE_SIZE,
-        offset
-      });
-      return {
-        items: page.items,
-        total_count: page.total_count,
-        unique_video_count: page.unique_video_count
-      };
-    }
     const page = await fetchCaptureInboxItems({
-      captureSessionId: sessionId,
-      status: serverStatus,
+      captureSessionId: shouldUseProfileItemsScope(profileUrlFromQuery, loadScope) ? undefined : sessionId,
+      profileUrl: shouldUseProfileItemsScope(profileUrlFromQuery, loadScope) ? profileUrlFromQuery! : undefined,
+      studioStatus: itemStatusFilter,
       limit: CAPTURE_INBOX_ITEMS_PAGE_SIZE,
       offset
     });
-    return { items: page.items, total_count: page.total_count };
+    return {
+      items: page.items,
+      total_count: page.total_count,
+      status_counts: page.status_counts,
+    };
   }
 
   async function loadSession(
@@ -636,6 +746,7 @@ export function CaptureInboxPage() {
     const firstPage = await fetchSessionItemsPage(sessionId, 0, itemStatusFilter, loadScope);
     if (generation !== itemsLoadGenerationRef.current) return;
     const items = firstPage.items;
+    setStatusCounts(firstPage.status_counts);
     const galleryTotal = resolveSessionItemsGalleryTotal(loadScope, firstPage, detail.captured_item_count, itemStatusFilter);
     setSessionItems(items);
     setSessionItemsTotalCount(galleryTotal);
@@ -671,6 +782,7 @@ export function CaptureInboxPage() {
       const offset = sessionItems.length;
       const nextPage = await fetchSessionItemsPage(selectedSessionId, offset, operatorFilter, itemsLoadScope);
       if (generation !== itemsLoadGenerationRef.current) return;
+      setStatusCounts(nextPage.status_counts);
       const { merged, appendedCount } = mergeCapturedItemsPage(sessionItems, nextPage.items, itemsLoadScope);
       let galleryTotal = resolveSessionItemsGalleryTotal(
         itemsLoadScope,
@@ -692,12 +804,14 @@ export function CaptureInboxPage() {
         return { ...current, items: mergedSessionItems };
       });
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load more Capture Inbox items");
+      const message = err instanceof Error ? err.message : "Failed to load more Capture Inbox items";
+      setError(message);
+      notify({ message, tone: "error" });
     } finally {
       loadMoreInFlightRef.current = false;
       setSessionItemsLoadingMore(false);
     }
-  }, [hasMoreSessionItems, itemsLoadScope, operatorFilter, profileUrlFromQuery, selectedSessionId, sessionItems.length, sessionItemsLoadingMore]);
+  }, [hasMoreSessionItems, itemsLoadScope, notify, operatorFilter, profileUrlFromQuery, selectedSessionId, sessionItems.length, sessionItemsLoadingMore]);
 
   useEffect(() => {
     if (!selectedSessionId || loading || sessionItemsLoadingMore || !hasMoreSessionItems) {
@@ -723,14 +837,23 @@ export function CaptureInboxPage() {
   }, [profileUrlFromQuery]);
 
   useEffect(() => {
-    if (!selectedSessionId || !usesServerStatusFilter(operatorFilter)) {
+    if (!selectedSessionId || !statusTransitionLoading) {
       return;
     }
-    void loadSession(selectedSessionId, operatorFilter, itemsLoadScope).catch((err) => {
-      setError(err instanceof Error ? err.message : "Failed to reload Capture Inbox items");
-    });
+    const transitionId = operatorFilterTransitionRef.current;
+    void loadSession(selectedSessionId, operatorFilter, itemsLoadScope)
+      .catch((err) => {
+        const message = err instanceof Error ? err.message : "Failed to reload Capture Inbox items";
+        setError(message);
+        notify({ message, tone: "error" });
+      })
+      .finally(() => {
+        if (operatorFilterTransitionRef.current === transitionId) {
+          setStatusTransitionLoading(false);
+        }
+      });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [operatorFilter, selectedSessionId]);
+  }, [operatorFilter, selectedSessionId, statusTransitionLoading]);
 
   useEffect(() => {
     void loadSessions(null);
@@ -790,8 +913,8 @@ export function CaptureInboxPage() {
   }, [profileUrlFromQuery, profileSummary?.profile_identifier, sessions, selectedSessionId]);
 
   const summary = useMemo(
-    () => buildAuthoritativeSummary(selectedSession, profileSummary, profileUrlFromQuery, sessionItems, itemsLoadScope),
-    [itemsLoadScope, profileSummary, profileUrlFromQuery, selectedSession, sessionItems]
+    () => buildSummaryFromStatusCounts(statusCounts),
+    [statusCounts]
   );
   const latestSessionId = useMemo(() => pickLatestCaptureSessionId(sessions), [sessions]);
   const operatorFilterBaseline: StudioItemStatusFilter = "all";
@@ -802,13 +925,11 @@ export function CaptureInboxPage() {
   const studioFilteredItems = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
     return [...baseItems]
-      .filter((item) => usesServerStatusFilter(operatorFilter) || matchesItemStatusFilter(item, operatorFilter))
       .filter((item) => matchesMetadataFilter(item, metadataFilter))
       .filter((item) => !query || searchableText(item).includes(query))
       .filter((item) => !onlyActionable || isActionableItem(item))
-      .filter((item) => !onlyWithThumbnail || hasUsableThumbnail(item))
-      .filter((item) => !hideDuplicates || item.status !== "DUPLICATE");
-  }, [baseItems, hideDuplicates, metadataFilter, onlyActionable, onlyWithThumbnail, operatorFilter, searchQuery]);
+      .filter((item) => !onlyWithThumbnail || hasUsableThumbnail(item));
+  }, [baseItems, metadataFilter, onlyActionable, onlyWithThumbnail, searchQuery]);
 
   const metadataHealthCountMap = useMemo(() => metadataHealthCounts(studioFilteredItems), [studioFilteredItems]);
   const presetCountMap = useMemo(() => getDouyinReviewPresetCounts(studioFilteredItems), [studioFilteredItems]);
@@ -826,6 +947,37 @@ export function CaptureInboxPage() {
       .filter((item) => matchesAdvancedAppliedFilters(item, appliedAdvancedFilter))
       .sort((left, right) => compareItems(left, right, sortMode));
   }, [activePreset, appliedAdvancedFilter, studioFilteredItems, sortMode]);
+
+  const galleryFilterExpanded = Boolean(selectedSessionId) && (baseItems.length > 0 || working === "refresh");
+  const activeFilterChips = useMemo(
+    () =>
+      buildCaptureInboxActiveFilterChips({
+        activePreset,
+        appliedAdvancedFilter,
+        baselineSort: sortModeBaseline,
+        metadataFilter,
+        onlyActionable,
+        onlyWithThumbnail,
+        searchQuery,
+        sortMode
+      }),
+    [
+      activePreset,
+      appliedAdvancedFilter,
+      metadataFilter,
+      onlyActionable,
+      onlyWithThumbnail,
+      searchQuery,
+      sortMode,
+      sortModeBaseline
+    ]
+  );
+  const galleryEmptyVariant = useMemo((): "loading" | "session-empty" | "filtered-empty" | null => {
+    if (working === "refresh" && selectedSession && baseItems.length === 0) return "loading";
+    if (baseItems.length === 0 && selectedSession) return "session-empty";
+    if (baseItems.length > 0 && visibleItems.length === 0) return "filtered-empty";
+    return null;
+  }, [baseItems.length, selectedSession, visibleItems.length, working]);
 
   const bulkActionEligibility = useMemo(() => getBulkActionEligibility(visibleItems, selectedItemIds), [selectedItemIds, visibleItems]);
 
@@ -872,7 +1024,7 @@ export function CaptureInboxPage() {
         setInspectorPinnedItem((current) => (current?.id === detail.id ? { ...current, ...detail } : current));
       } catch (err) {
         if (!cancelled) {
-          setNotice(err instanceof Error ? err.message : "Failed to load item details");
+          notify({ message: err instanceof Error ? err.message : "Failed to load item details", tone: "error" });
         }
       } finally {
         if (!cancelled) setInspectorDetailLoading(false);
@@ -882,13 +1034,13 @@ export function CaptureInboxPage() {
     return () => {
       cancelled = true;
     };
-  }, [activeItem, rightInspectorOpen]);
+  }, [activeItem, notify, rightInspectorOpen]);
 
   useEffect(() => {
     clearSelectionState();
     setBulkActionDialog(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedSessionId, operatorFilter, metadataFilter, searchQuery, onlyActionable, onlyWithThumbnail, hideDuplicates, activePreset, appliedAdvancedFilter, sortMode]);
+  }, [selectedSessionId, operatorFilter, metadataFilter, searchQuery, onlyActionable, onlyWithThumbnail, activePreset, appliedAdvancedFilter, sortMode]);
 
   async function selectSession(sessionId: string, options?: { manual?: boolean }) {
     const manual = options?.manual ?? true;
@@ -917,13 +1069,14 @@ export function CaptureInboxPage() {
     }
     setWorking("refresh");
     setError(null);
-    setNotice(null);
     setRawDetails([]);
     setSourceUrls([]);
     try {
       await loadSession(sessionId, operatorFilter, loadScope);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load capture session");
+      const message = err instanceof Error ? err.message : "Failed to load capture session";
+      setError(message);
+      notify({ message, tone: "error" });
     } finally {
       setWorking(null);
     }
@@ -938,25 +1091,15 @@ export function CaptureInboxPage() {
     setLastSelectedAt(null);
   }
 
-  async function applyAdvancedFilters() {
-    setQueryLoading(true);
-    setError(null);
-    try {
-      const validationMessage = advancedFilterValidationMessage(advancedFilterDraft);
-      if (validationMessage) {
-        setError(validationMessage);
-        return;
-      }
-      const advancedFilter = buildAdvancedFilterPayload(advancedFilterDraft);
-      const filteredItemIds = new Set(baseItems.filter((item) => matchesAdvancedAppliedFilters(item, advancedFilter)).map((item) => item.id));
-      setAppliedAdvancedFilter(advancedFilter);
-      clearSelectionState();
-      setNotice(`Applied advanced filters to ${filteredItemIds.size.toLocaleString()} item(s).`);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to apply advanced filters");
-    } finally {
-      setQueryLoading(false);
+  function applyAdvancedFilters() {
+    const validationMessage = advancedFilterValidationMessage(advancedFilterDraft);
+    if (validationMessage) {
+      setError(validationMessage);
+      return;
     }
+    setError(null);
+    setAppliedAdvancedFilter(buildAdvancedFilterPayload(advancedFilterDraft));
+    clearSelectionState();
   }
 
   function resetAdvancedFilters() {
@@ -975,17 +1118,20 @@ export function CaptureInboxPage() {
     });
   }
 
-  function clearSmartPreset() {
-    setActivePreset("none");
-  }
-
   function updateSortMode(nextSortMode: SortMode) {
     setSortTouched(true);
     setSortMode(nextSortMode);
   }
 
+  function selectOperatorStatus(nextFilter: StudioItemStatusFilter) {
+    if (nextFilter === operatorFilter) return;
+    operatorFilterTransitionRef.current += 1;
+    setStatusTransitionLoading(Boolean(selectedSessionId));
+    setOperatorFilter(nextFilter);
+  }
+
   function clearOperatorFilters() {
-    setOperatorFilter(operatorFilterBaseline);
+    selectOperatorStatus(operatorFilterBaseline);
     setMetadataFilter("all");
     setSearchQuery("");
     setStatusFilter("all");
@@ -994,12 +1140,7 @@ export function CaptureInboxPage() {
     setActivePreset("none");
     setOnlyActionable(false);
     setOnlyWithThumbnail(false);
-    setHideDuplicates(false);
     resetAdvancedFilters();
-  }
-
-  function toggleReadyFocus() {
-    setOperatorFilter((current) => (current === "ready" ? operatorFilterBaseline : "ready"));
   }
 
   function promoteTopVisible(limit: number) {
@@ -1008,39 +1149,50 @@ export function CaptureInboxPage() {
     void runAction("promote_now", topItems.map((item) => item.id));
   }
 
-  async function runAction(action: CaptureInboxAction, itemIds?: string[], resultSummary?: BulkActionResultSummary) {
+  function captureItemActionKey(item: CapturedItem, action: CaptureInboxAction) {
+    return `capture-item:${item.id}:${action}`;
+  }
+
+  async function runAction(
+    action: CaptureInboxAction,
+    itemIds?: string[],
+    resultSummary?: BulkActionResultSummary,
+    pendingKey = itemIds?.length === 1 ? `capture-item:${itemIds[0]}:${action}` : `bulk:${action}`
+  ) {
     if (!selectedSession) return;
     const actionSessionId = selectedSession.id;
-    setWorking(action);
-    setError(null);
-    setNotice(null);
-    setPromoteSuccess(null);
-    setRawDetails([]);
-    setSourceUrls([]);
-    try {
-      const targetItemIds = itemIds ?? selectedItemIds;
-      const response = await runCaptureInboxAction(actionSessionId, {
-        action,
-        item_ids: targetItemIds,
-        exclude_reason: action === "exclude" ? "Excluded by operator from Capture Inbox" : undefined
-      });
-      if (action === "promote_now") {
-        setPromoteSuccess(buildPromoteSuccessSummary(response));
-      } else {
-        setNotice(resultSummary ? formatBulkActionResultSummary({ ...resultSummary, affectedCount: response.affected_item_ids.length, backendMessage: response.message }) : response.message);
+    await asyncActions.run(pendingKey, async () => {
+      setError(null);
+      setRawDetails([]);
+      setSourceUrls([]);
+      try {
+        const targetItemIds = itemIds ?? selectedItemIds;
+        const response = await runCaptureInboxAction(actionSessionId, {
+          action,
+          item_ids: targetItemIds,
+          exclude_reason: action === "exclude" ? "Excluded by operator from Capture Inbox" : undefined
+        });
+        const message = resultSummary
+          ? formatBulkActionResultSummary({ ...resultSummary, affectedCount: response.affected_item_ids.length, backendMessage: response.message })
+          : response.message;
+        if (action === "promote_now") {
+          const summary = buildPromoteSuccessSummary(response);
+          notify({ message: summary.message, tone: "success" });
+        } else {
+          notify({ message, tone: "success" });
+        }
+        setRawDetails(response.raw_details);
+        setSourceUrls(response.source_urls);
+        if (action === "delete_items") {
+          applyDeletedItems(response.affected_item_ids.length ? response.affected_item_ids : targetItemIds);
+        }
+        if (resultSummary) clearSelectionState();
+        await loadSessions(actionSessionId);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : `Failed to run ${actionLabel(action)}`;
+        notify({ message, tone: "error" });
       }
-      setRawDetails(response.raw_details);
-      setSourceUrls(response.source_urls);
-      if (action === "delete_items") {
-        applyDeletedItems(response.affected_item_ids.length ? response.affected_item_ids : targetItemIds);
-      }
-      if (resultSummary) clearSelectionState();
-      await loadSessions(actionSessionId);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : `Failed to run ${actionLabel(action)}`);
-    } finally {
-      setWorking(null);
-    }
+    });
   }
 
   function toggleItem(itemId: string) {
@@ -1097,7 +1249,6 @@ export function CaptureInboxPage() {
     const nextSessionId = sessions.find((session) => session.id !== sessionId)?.id ?? null;
     setWorking("delete_session");
     setError(null);
-    setNotice(null);
     setRawDetails([]);
     setSourceUrls([]);
     try {
@@ -1110,7 +1261,7 @@ export function CaptureInboxPage() {
       setRightInspectorOpen(false);
       setRawDetails([]);
       setSourceUrls([]);
-      setNotice("Deleted session and staged items.");
+      notify({ message: "Deleted session and staged items.", tone: "success" });
       if (deletingActiveSession) {
         setSelectedSession(null);
         setSelectedSessionId(nextSessionId);
@@ -1124,7 +1275,9 @@ export function CaptureInboxPage() {
         }
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to delete capture session");
+      const message = err instanceof Error ? err.message : "Failed to delete capture session";
+      setError(message);
+      notify({ message, tone: "error" });
     } finally {
       setWorking(null);
     }
@@ -1133,11 +1286,6 @@ export function CaptureInboxPage() {
   function requestDeleteSession(session: CaptureSession) {
     const confirmed = window.confirm(`Delete session?\n\nThis removes the local staged session and staged items. Promoted Review Board records are not deleted.\n\nSession: ${shortSessionLabel(session)}\nStaged items: ${formatNumber(session.captured_item_count, "0")}`);
     if (confirmed) void deleteSession(session.id);
-  }
-
-  function requestDeleteItems(itemIds: string[]) {
-    if (!itemIds.length) return;
-    void runAction("delete_items", itemIds);
   }
 
   function clearSelection() {
@@ -1179,12 +1327,7 @@ export function CaptureInboxPage() {
   }
 
   const primaryActions = (
-    <>
-      <TopbarRefreshButton busy={working === "refresh"} disabled={loading || working !== null} onClick={() => void loadSessions(selectedSessionId)} />
-      <button className="app-topbar-btn is-primary" disabled={!selectedSession || working !== null || summary.ready === 0} onClick={() => void runAction("promote_now", readyItems(sessionItems).map((item) => item.id))} type="button">
-        {working === "promote_now" ? "Promoting..." : "Promote ready"}
-      </button>
-    </>
+    <TopbarRefreshButton busy={working === "refresh"} disabled={loading || working !== null} onClick={() => void loadSessions(selectedSessionId)} />
   );
 
   return (
@@ -1194,18 +1337,31 @@ export function CaptureInboxPage() {
       title="Capture Inbox"
     >
         <OpsConsolePage>
-          {error ? <section className="operator-panel intake-status danger"><strong>Capture Inbox error:</strong> {error}</section> : null}
-          {promoteSuccess ? (
-            <section className="operator-panel intake-status good capture-inbox-promote-success capture-inbox-promote-toast">
-              <strong>Promoted:</strong> {promoteSuccess.message}
-              {promoteSuccessFollowUpLabel(promoteSuccess) ? (
-                <p className="capture-inbox-promote-follow-up">
-                  <a className="primary" href={CAPTURE_INBOX_REVIEW_BOARD_HREF}>{promoteSuccessFollowUpLabel(promoteSuccess)}</a>
-                </p>
-              ) : null}
-            </section>
-          ) : notice ? <section className="operator-panel intake-status good"><strong>Action complete:</strong> {notice}</section> : null}
           <CaptureInboxCommandDeck
+            filter={operatorFilter}
+            latestSessionId={latestSessionId}
+            loading={loading}
+            loadingMoreSessions={loadingMoreSessions}
+            onDeleteSession={requestDeleteSession}
+            onFilter={selectOperatorStatus}
+            onLoadMoreSessions={() => void loadMoreSessions()}
+            onPromoteAllReady={() => void runAction("promote_now", readyItems(sessionItems).map((item) => item.id))}
+            onPromoteTop={promoteTopVisible}
+            onSelectSession={(sessionId) => void selectSession(sessionId)}
+            onSessionStatus={setStatusFilter}
+            promoting={asyncActions.isPending("bulk:promote_now")}
+            readyCount={summary.ready}
+            selectedSession={Boolean(selectedSession)}
+            selectedSessionId={selectedSessionId}
+            sessionStatus={statusFilter}
+            sessions={sessions}
+            sessionsTotalCount={sessionsTotalCount}
+            summary={summary}
+            visibleCount={visibleItems.length}
+            working={working ?? (asyncActions.isPending("bulk:promote_now") ? "promote_now" : null)}
+          />
+          <CaptureInboxGalleryFilterDeck
+            activeFilterChips={activeFilterChips}
             activePreset={activePreset}
             advancedApplied={appliedAdvancedFilter}
             advancedDraft={advancedFilterDraft}
@@ -1214,99 +1370,104 @@ export function CaptureInboxPage() {
             baselineFilter={operatorFilterBaseline}
             baselineSort={sortModeBaseline}
             filter={operatorFilter}
-            hideDuplicates={hideDuplicates}
-            itemsLoadScope={itemsLoadScope}
-            latestSessionId={latestSessionId}
-            loading={loading}
-            loadingMoreSessions={loadingMoreSessions}
+            filterDeckExpanded={galleryFilterExpanded}
+            hasSelectedSession={Boolean(selectedSessionId)}
             metadataFilter={metadataFilter}
             metadataHealthCounts={metadataHealthCountMap}
             onApplyAdvanced={() => void applyAdvancedFilters()}
             onClearFilters={clearOperatorFilters}
-            onClearSmartPreset={clearSmartPreset}
-            onDeleteSession={requestDeleteSession}
-            onFilter={setOperatorFilter}
-            onHideDuplicates={setHideDuplicates}
-            onLoadMoreSessions={() => void loadMoreSessions()}
             onMetadataFilter={setMetadataFilter}
             onOnlyActionable={setOnlyActionable}
             onOnlyWithThumbnail={setOnlyWithThumbnail}
-            onPromoteTop={promoteTopVisible}
             onResetAdvanced={resetAdvancedFilters}
             onSearch={setSearchQuery}
-            onSelectSession={(sessionId) => void selectSession(sessionId)}
-            onSessionStatus={setStatusFilter}
             onSmartPreset={toggleSmartPreset}
             onSort={updateSortMode}
             onToggleAdvanced={() => setShowAdvancedFilters((value) => !value)}
-            onToggleReadyFocus={toggleReadyFocus}
             onUpdateAdvanced={updateAdvancedFilterDraft}
             onlyActionable={onlyActionable}
             onlyWithThumbnail={onlyWithThumbnail}
             presetCounts={presetCountMap}
-            profileSummary={profileSummary}
-            profileSummaryError={profileSummaryError}
-            profileSummaryLoading={profileSummaryLoading}
-            profileUrlFromQuery={profileUrlFromQuery}
             searchQuery={searchQuery}
-            selectedSessionId={selectedSessionId}
-            sessionStatus={statusFilter}
-            sessions={sessions}
-            sessionsTotalCount={sessionsTotalCount}
             sortMode={sortMode}
-            summary={summary}
-            visibleCount={visibleItems.length}
-            working={working}
           />
           <div className="capture-inbox-review-workspace">
-            <main className="capture-inbox-review-main" aria-label="Capture Inbox item gallery">
-              <BatchActionBar
-                eligibility={bulkActionEligibility}
-                lastSelectedAt={lastSelectedAt}
-                onAction={requestBulkAction}
-                onClear={clearSelection}
-                onSelectVisible={selectVisibleItems}
-                selectionScope={selectionScope}
-                visibleCount={visibleItems.length}
-                working={working}
-              />
-              {baseItems.length === 0 && selectedSession ? (
-                <section className="operator-panel" aria-label="Capture Inbox session empty state">
-                  <h3>No items in this session yet.</h3>
-                  <p>session exists: yes</p>
-                  <p>loaded from: {shouldUseProfileItemsScope(profileUrlFromQuery, itemsLoadScope) ? "/douyin-extension/capture-inbox/profile-items" : `/capture-inbox/items?capture_session_id=${selectedSession.id}`}</p>
-                  <p>captured count: {selectedSession.captured_item_count}</p>
-                  <p>likely reasons: no finalized harvest payload has succeeded yet; backend item creation failed; current filter hides items</p>
-                </section>
-              ) : null}
-              {baseItems.length > 0 && visibleItems.length === 0 ? (
-                <section className="operator-panel" aria-label="Capture Inbox filtered-empty state">
-                  <p>Items exist but are hidden by filters.</p>
-                  <button onClick={clearOperatorFilters} type="button">Clear filters</button>
-                </section>
-              ) : null}
-              <MediaTileGallery
-                activeItemId={activeItemId}
-                hasMoreItems={hasMoreSessionItems}
-                items={visibleItems}
-                itemsTotalCount={sessionItemsTotalCount}
-                loadingMoreItems={sessionItemsLoadingMore}
-                onAction={(item, action) => action === "delete_items" ? requestDeleteItems([item.id]) : void runAction(action, [item.id])}
-                onFocusItem={openItemDetails}
-                onLoadMore={() => void loadMoreSessionItems()}
-                onToggleItem={toggleItem}
-                selectedItemIds={selectedItemIds}
-                working={working}
-              />
+            <main
+              aria-busy={statusTransitionLoading}
+              aria-label="Capture Inbox item gallery"
+              className={`capture-inbox-review-main ${statusTransitionLoading ? "is-preloading" : ""}`}
+            >
+              <AsyncContentBoundary
+                emptyState={<CaptureInboxGalleryEmptyState onClearFilters={clearOperatorFilters} variant="session-empty" />}
+                errorState={<CaptureInboxGalleryEmptyState onClearFilters={clearOperatorFilters} variant="filtered-empty" />}
+                refreshing={loading && Boolean(selectedSession)}
+                skeleton={<CaptureInboxGalleryPreloading statusLabel={studioItemStatusFilterLabel(operatorFilter)} />}
+                status={loading && !selectedSession ? "loading" : error && !selectedSession ? "error" : !selectedSession ? "empty" : "success"}
+              >
+                <BatchActionBar
+                  eligibility={bulkActionEligibility}
+                  lastSelectedAt={lastSelectedAt}
+                  onAction={requestBulkAction}
+                  onClear={clearSelection}
+                  pendingAction={
+                    asyncActions.isPending("bulk:promote_now") ? "promote"
+                      : asyncActions.isPending("bulk:re_evaluate_intake") ? "recheck"
+                        : asyncActions.isPending("bulk:delete_items") ? "delete"
+                          : null
+                  }
+                  selectionScope={selectionScope}
+                  working={working}
+                />
+                <AsyncContentBoundary
+                  skeleton={<CaptureInboxGalleryPreloading statusLabel={studioItemStatusFilterLabel(operatorFilter)} />}
+                  status={statusTransitionLoading ? "loading" : "success"}
+                >
+                  {galleryEmptyVariant ? (
+                    <CaptureInboxGalleryEmptyState onClearFilters={clearOperatorFilters} variant={galleryEmptyVariant} />
+                  ) : null}
+                  <MediaTileGallery
+                    activeItemId={activeItemId}
+                    hasMoreItems={hasMoreSessionItems}
+                    items={visibleItems}
+                    itemsTotalCount={sessionItemsTotalCount}
+                    loadingMoreItems={sessionItemsLoadingMore}
+                    onAction={(item, action) => action === "delete_items"
+                      ? void runAction(action, [item.id], undefined, captureItemActionKey(item, action))
+                      : void runAction(action, [item.id], undefined, captureItemActionKey(item, action))}
+                    onFocusItem={openItemDetails}
+                    onLoadMore={() => void loadMoreSessionItems()}
+                    onSelectVisible={selectVisibleItems}
+                    onToggleItem={toggleItem}
+                    pendingActionForItem={(item) => (
+                      (["promote_now", "re_evaluate_intake", "delete_items"] as CaptureInboxAction[])
+                        .find((action) => asyncActions.isPending(captureItemActionKey(item, action))) ?? null
+                    )}
+                    selectedItemIds={selectedItemIds}
+                    working={working}
+                  />
+                </AsyncContentBoundary>
+              </AsyncContentBoundary>
             </main>
           </div>
           <RightInspector
             detailLoading={inspectorDetailLoading}
             item={activeItem}
+            mutating={working !== null}
+            pendingAction={
+              activeItem
+                ? ((["promote_now", "re_evaluate_intake", "delete_items"] as CaptureInboxAction[]).find((action) =>
+                    asyncActions.isPending(captureItemActionKey(activeItem, action))
+                  ) ?? null)
+                : null
+            }
+            onAction={(item, action) =>
+              void runAction(action, [item.id], undefined, captureItemActionKey(item, action))
+            }
             onClose={closeItemDetails}
             open={rightInspectorOpen && Boolean(activeItemId)}
             rawDetails={rawDetails}
             sourceUrls={sourceUrls}
+            workingAction={working}
           />
           <BulkActionConfirmationDialog dialog={bulkActionDialog} onClose={closeBulkActionDialog} onConfirm={confirmBulkAction} working={working} />
         </OpsConsolePage>
@@ -1314,151 +1475,51 @@ export function CaptureInboxPage() {
   );
 }
 
-function ProfileSummaryHeader({
-  profileUrl,
-  summary,
-  loading,
-  error
-}: {
-  profileUrl: string;
-  summary: CaptureInboxProfileSummaryResponse | null;
-  loading: boolean;
-  error: string | null;
-}) {
-  const displayUrl = summary?.normalized_profile_url ?? profileUrl;
-  const uniqueCount = summary?.unique_video_count ?? summary?.total_count ?? 0;
-  const stagedCount = summary?.total_count ?? 0;
-  const stagedMeta =
-    !loading && !error && stagedCount > 0
-      ? uniqueCount !== stagedCount
-        ? `${formatNumber(uniqueCount)} unique · ${formatNumber(stagedCount)} staged`
-        : `${formatNumber(stagedCount)} staged`
-      : null;
-  return (
-    <div className="capture-inbox-command-deck-scope capture-inbox-context-strip capture-inbox-scope-context is-inline" aria-label="Profile summary from extension deep link">
-      <a
-        className="capture-inbox-studio-profile-link"
-        href={displayUrl}
-        rel="noopener noreferrer"
-        target="_blank"
-        title={displayUrl}
-      >
-        {truncateInlineLabel(displayUrl, 44)}
-      </a>
-      {loading ? <span className="capture-inbox-command-deck-scope-meta">Loading…</span> : null}
-      {error ? <span className="capture-inbox-command-deck-scope-meta is-danger">{error}</span> : null}
-      {stagedMeta ? <span className="capture-inbox-command-deck-scope-meta">{stagedMeta}</span> : null}
-    </div>
-  );
-}
-
 function CaptureInboxCommandDeck({
-  activePreset,
-  advancedApplied,
-  advancedDraft,
-  advancedLoading,
-  advancedOpen,
-  baselineFilter,
-  baselineSort,
   filter,
-  hideDuplicates,
-  itemsLoadScope,
   latestSessionId,
   loading,
   loadingMoreSessions,
-  metadataFilter,
-  metadataHealthCounts,
-  onApplyAdvanced,
-  onClearFilters,
-  onClearSmartPreset,
   onDeleteSession,
   onFilter,
-  onHideDuplicates,
   onLoadMoreSessions,
-  onMetadataFilter,
-  onOnlyActionable,
-  onOnlyWithThumbnail,
+  onPromoteAllReady,
   onPromoteTop,
-  onResetAdvanced,
-  onSearch,
   onSelectSession,
   onSessionStatus,
-  onSmartPreset,
-  onSort,
-  onToggleAdvanced,
-  onToggleReadyFocus,
-  onUpdateAdvanced,
-  onlyActionable,
-  onlyWithThumbnail,
-  presetCounts,
-  profileSummary,
-  profileSummaryError,
-  profileSummaryLoading,
-  profileUrlFromQuery,
-  searchQuery,
+  promoting,
+  readyCount,
+  selectedSession,
   selectedSessionId,
   sessionStatus,
   sessions,
   sessionsTotalCount,
-  sortMode,
   summary,
   visibleCount,
   working
 }: {
-  activePreset: DouyinReviewPreset;
-  advancedApplied: AdvancedAppliedFilters | null;
-  advancedDraft: AdvancedFilterDraft;
-  advancedLoading: boolean;
-  advancedOpen: boolean;
-  baselineFilter: StudioItemStatusFilter;
-  baselineSort: SortMode;
   filter: StudioItemStatusFilter;
-  hideDuplicates: boolean;
-  itemsLoadScope: CaptureInboxItemsLoadScope;
   latestSessionId: string | null;
   loading: boolean;
   loadingMoreSessions: boolean;
-  metadataFilter: MetadataStatusFilter;
-  metadataHealthCounts: MetadataHealthCountMap;
-  onApplyAdvanced: () => void;
-  onClearFilters: () => void;
-  onClearSmartPreset: () => void;
   onDeleteSession: (session: CaptureSession) => void;
   onFilter: (filter: StudioItemStatusFilter) => void;
-  onHideDuplicates: (enabled: boolean) => void;
   onLoadMoreSessions: () => void;
-  onMetadataFilter: (filter: MetadataStatusFilter) => void;
-  onOnlyActionable: (enabled: boolean) => void;
-  onOnlyWithThumbnail: (enabled: boolean) => void;
+  onPromoteAllReady: () => void;
   onPromoteTop: (limit: number) => void;
-  onResetAdvanced: () => void;
-  onSearch: (query: string) => void;
   onSelectSession: (sessionId: string) => void;
   onSessionStatus: (status: "all" | CaptureSessionStatus) => void;
-  onSmartPreset: (preset: DouyinReviewPresetId) => void;
-  onSort: (sortMode: SortMode) => void;
-  onToggleAdvanced: () => void;
-  onToggleReadyFocus: () => void;
-  onUpdateAdvanced: <K extends keyof AdvancedFilterDraft>(key: K, value: AdvancedFilterDraft[K]) => void;
-  onlyActionable: boolean;
-  onlyWithThumbnail: boolean;
-  presetCounts: Record<DouyinReviewPresetId, number>;
-  profileSummary: CaptureInboxProfileSummaryResponse | null;
-  profileSummaryError: string | null;
-  profileSummaryLoading: boolean;
-  profileUrlFromQuery: string | null;
-  searchQuery: string;
+  promoting: boolean;
+  readyCount: number;
+  selectedSession: boolean;
   selectedSessionId: string | null;
   sessionStatus: "all" | CaptureSessionStatus;
   sessions: CaptureSession[];
   sessionsTotalCount: number;
-  sortMode: SortMode;
   summary: CaptureSummary;
   visibleCount: number;
   working: CaptureInboxAction | "delete_session" | "refresh" | null;
 }) {
-  const readyFocusActive = filter === "ready";
-
   return (
     <section
       className="capture-inbox-command-deck capture-inbox-studio-deck capture-inbox-hero-panel is-compact"
@@ -1469,29 +1530,23 @@ function CaptureInboxCommandDeck({
         <div className="capture-inbox-command-deck-title capture-inbox-hero-head-compact capture-inbox-studio-hero-copy">
           <div className="capture-inbox-studio-hero-headline">
             <span className="capture-inbox-command-deck-kicker capture-inbox-hero-kicker">Capture studio</span>
-            {profileUrlFromQuery && itemsLoadScope === "profile" ? (
-              <ProfileSummaryHeader
-                error={profileSummaryError}
-                loading={profileSummaryLoading}
-                profileUrl={profileUrlFromQuery}
-                summary={profileSummary}
-              />
-            ) : null}
           </div>
           <p className="capture-inbox-command-deck-hint capture-inbox-hero-steps-inline capture-inbox-sr-only">
             Review ready videos → promote top candidates → continue in Review Board
           </p>
         </div>
         <div className="capture-inbox-command-deck-quick capture-inbox-hero-actions">
-          <CaptureInboxQuickPathBar onPromoteTop={onPromoteTop} visibleCount={visibleCount} working={working} />
-          <button
-            aria-pressed={readyFocusActive}
-            className={`capture-inbox-hero-btn capture-inbox-hero-btn-ghost${readyFocusActive ? " is-active" : ""}`}
-            onClick={onToggleReadyFocus}
-            type="button"
-          >
-            Ready focus
-          </button>
+          <CaptureInboxHeroActionRail
+            onOpenReady={() => onFilter("ready")}
+            onPromoteAllReady={onPromoteAllReady}
+            onPromoteTop={onPromoteTop}
+            promoting={promoting}
+            readyCount={readyCount}
+            readyViewActive={filter === "ready"}
+            selectedSession={selectedSession}
+            visibleCount={visibleCount}
+            working={working !== null}
+          />
         </div>
       </div>
 
@@ -1504,36 +1559,500 @@ function CaptureInboxCommandDeck({
         onDelete={onDeleteSession}
         onLoadMore={onLoadMoreSessions}
         onSelect={onSelectSession}
+        onSessionStatus={onSessionStatus}
         selectedSessionId={selectedSessionId}
+        sessionStatus={sessionStatus}
         sessions={sessions}
         sessionsTotalCount={sessionsTotalCount}
         working={working}
       />
+    </section>
+  );
+}
 
-      <div className="capture-inbox-filter-deck">
-        <StudioFilterToolbar
-          baselineFilter={baselineFilter}
-          baselineSort={baselineSort}
-          filter={filter}
-          hideDuplicates={hideDuplicates}
+function CaptureInboxHeroActionRail({
+  onOpenReady,
+  onPromoteAllReady,
+  onPromoteTop,
+  promoting,
+  readyCount,
+  readyViewActive,
+  selectedSession,
+  visibleCount,
+  working
+}: {
+  onOpenReady: () => void;
+  onPromoteAllReady: () => void;
+  onPromoteTop: (limit: number) => void;
+  promoting: boolean;
+  readyCount: number;
+  readyViewActive: boolean;
+  selectedSession: boolean;
+  visibleCount: number;
+  working: boolean;
+}) {
+  return (
+    <div aria-label="Studio shortcuts" className="capture-inbox-hero-action-rail" role="group">
+      <CaptureInboxPromoteSplitButton
+        onOpenReady={onOpenReady}
+        onPromoteAllReady={onPromoteAllReady}
+        onPromoteTop={onPromoteTop}
+        promoting={promoting}
+        readyCount={readyCount}
+        readyViewActive={readyViewActive}
+        selectedSession={selectedSession}
+        visibleCount={visibleCount}
+        working={working}
+      />
+      <a className="capture-inbox-hero-action-rail__item" href={CAPTURE_INBOX_REVIEW_BOARD_HREF}>
+        <span aria-hidden="true" className="capture-inbox-hero-action-rail__icon">
+          <WorkItemActionIcon className="capture-inbox-hero-action-rail__glyph" kind="open" />
+        </span>
+        <span className="capture-inbox-hero-action-rail__label">Open Review Board</span>
+      </a>
+    </div>
+  );
+}
+
+const STATUS_STAT_BAR_PATTERNS: Record<StudioItemStatusFilter, readonly number[]> = {
+  all: [0.88, 0.92, 0.9, 0.86, 0.91],
+  ready: [0.42, 0.58, 0.74, 0.9, 1],
+  promoted: [1, 0.72, 0.52, 0.34, 0.18],
+  duplicate: [0.82, 0.82, 0.58, 0.58, 0.34],
+  needs_action: [0.28, 0.88, 0.32, 0.82, 0.38],
+  failed: [0.62, 0.48, 0.3, 0.14, 0.06]
+};
+
+function StatusStatBars({ ratio, status }: { ratio: number; status: StudioItemStatusFilter }) {
+  const pattern = STATUS_STAT_BAR_PATTERNS[status];
+  const clamped = Math.max(0, Math.min(1, ratio));
+  const displayRatio = clamped > 0 ? clamped : 0.16;
+  return (
+    <span aria-hidden="true" className="capture-inbox-stat-card__viz" data-status={status}>
+      {pattern.map((slot, index) => (
+        <span className="capture-inbox-stat-card__bar" key={index}>
+          <span className="capture-inbox-stat-card__bar-fill" style={{ height: `${Math.round(slot * displayRatio * 100)}%` }} />
+        </span>
+      ))}
+    </span>
+  );
+}
+
+function StatusStrip({
+  activeFilter,
+  className,
+  onFilter,
+  summary
+}: {
+  activeFilter: StudioItemStatusFilter;
+  className?: string;
+  onFilter: (filter: StudioItemStatusFilter) => void;
+  summary: CaptureSummary;
+}) {
+  const capturedCount = captureInboxSummaryCount(summary, "all");
+  const readyCount = captureInboxSummaryCount(summary, "ready");
+  const attentionPeak = Math.max(
+    ...ATTENTION_STATUS_FILTERS.map((entry) => captureInboxSummaryCount(summary, entry.key)),
+    0
+  );
+
+  function statCardRatio(key: StudioItemStatusFilter, count: number): number {
+    if (count <= 0) {
+      return 0;
+    }
+    if (PIPELINE_STATUS_FILTERS.some((entry) => entry.key === key)) {
+      if (key === "all") {
+        return 1;
+      }
+      return capturedCount > 0 ? Math.min(1, count / capturedCount) : 0;
+    }
+    return attentionPeak > 0 ? Math.min(1, count / attentionPeak) : 0;
+  }
+
+  function renderStatCard(entry: { key: StudioItemStatusFilter; label: string }, variant: "pipeline" | "attention") {
+    const count = captureInboxSummaryCount(summary, entry.key);
+    const isActive = activeFilter === entry.key;
+    const tone = captureInboxStatusTone(entry.key, count);
+    const value = summaryValue(summary, entry.key);
+    return (
+      <button
+        aria-pressed={isActive}
+        aria-selected={isActive}
+        className={`capture-inbox-stat-card is-${variant} is-tone-${tone}${count === 0 ? " is-empty" : ""}${isActive ? " is-active" : ""}`}
+        data-status={entry.key}
+        onClick={() => onFilter(entry.key)}
+        role="tab"
+        title={`${entry.label}: ${value}`}
+        type="button"
+      >
+        <span className="capture-inbox-stat-card__copy">
+          <span className="capture-inbox-stat-card__label">{entry.label}</span>
+          <strong className="capture-inbox-stat-card__value">{value}</strong>
+        </span>
+        <StatusStatBars ratio={statCardRatio(entry.key, count)} status={entry.key} />
+      </button>
+    );
+  }
+
+  return (
+    <section
+      className={`capture-inbox-status-flow capture-inbox-studio-status ${className ?? ""}`.trim()}
+      aria-label="Capture Inbox Status Strip"
+    >
+      <div className="capture-inbox-status-flow__lane is-pipeline">
+        <div className="capture-inbox-status-flow__lane-head">
+          <p className="capture-inbox-status-flow__lane-title">Pipeline</p>
+          <p className="capture-inbox-status-flow__lane-meta">
+            {readyCount.toLocaleString()} of {capturedCount.toLocaleString()} ready
+          </p>
+        </div>
+        <div className="capture-inbox-status-flow__track" aria-label="Pipeline filters" role="tablist">
+          {PIPELINE_STATUS_FILTERS.map((entry) => (
+            <div className="capture-inbox-status-flow__card-wrap" key={entry.key}>
+              {renderStatCard(entry, "pipeline")}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="capture-inbox-status-flow__lane is-attention">
+        <div className="capture-inbox-status-flow__lane-head">
+          <p className="capture-inbox-status-flow__lane-title">Attention</p>
+          <p className="capture-inbox-status-flow__lane-meta">Exceptions and cleanup</p>
+        </div>
+        <div className="capture-inbox-status-flow__track is-compact" aria-label="Attention filters" role="tablist">
+          {ATTENTION_STATUS_FILTERS.map((entry) => (
+            <div className="capture-inbox-status-flow__card-wrap" key={entry.key}>
+              {renderStatCard(entry, "attention")}
+            </div>
+          ))}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function CaptureInboxActiveFilterSummary({ chips, onClear }: { chips: string[]; onClear: () => void }) {
+  if (!chips.length) return null;
+  return (
+    <div aria-label="Active gallery filters" className="capture-inbox-active-filter-summary">
+      <span className="capture-inbox-active-filter-summary__label">Active</span>
+      <div className="capture-inbox-active-filter-summary__chips">
+        {chips.map((chip, index) => (
+          <span className="capture-inbox-active-filter-summary__chip" key={`${chip}-${index}`}>{chip}</span>
+        ))}
+      </div>
+      <button className="capture-inbox-active-filter-summary__clear capture-inbox-filter-clear-btn" onClick={onClear} type="button">
+        <span aria-hidden="true" className="capture-inbox-filter-clear-btn__icon">
+          <WorkItemActionIcon className="capture-inbox-filter-clear-btn__glyph" kind="dismiss" />
+        </span>
+        <span className="capture-inbox-filter-clear-btn__label">Clear all</span>
+      </button>
+    </div>
+  );
+}
+
+function CaptureInboxGalleryEmptyState({
+  onClearFilters,
+  variant
+}: {
+  onClearFilters: () => void;
+  variant: "loading" | "session-empty" | "filtered-empty";
+}) {
+  if (variant === "loading") {
+    return (
+      <div aria-busy="true" aria-label="Loading capture items" className="capture-inbox-gallery-empty">
+        <div className="capture-inbox-gallery-empty__card is-loading">
+          <div className="capture-inbox-gallery-empty__copy">
+            <span className="capture-inbox-gallery-empty__eyebrow">Tile gallery</span>
+            <h3 className="capture-inbox-gallery-empty__title">Loading items…</h3>
+            <p className="capture-inbox-gallery-empty__detail">Fetching staged items for the selected session.</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (variant === "session-empty") {
+    return (
+      <div aria-label="No items in session" className="capture-inbox-gallery-empty">
+        <div className="capture-inbox-gallery-empty__card is-session">
+          <div aria-hidden="true" className="capture-inbox-gallery-empty__glyph">
+            <svg fill="none" height="28" viewBox="0 0 28 28" width="28" xmlns="http://www.w3.org/2000/svg">
+              <rect height="14" rx="3" stroke="currentColor" strokeWidth="1.75" width="18" x="5" y="7" />
+              <path d="M9 12h10M9 16h6" stroke="currentColor" strokeLinecap="round" strokeWidth="1.75" />
+            </svg>
+          </div>
+          <div className="capture-inbox-gallery-empty__copy">
+            <span className="capture-inbox-gallery-empty__eyebrow">Tile gallery</span>
+            <h3 className="capture-inbox-gallery-empty__title">No items in this session yet</h3>
+            <p className="capture-inbox-gallery-empty__detail">
+              Capture or enrich this session first. Items appear here once the extension finishes staging media for triage.
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div aria-label="No matching media tiles" className="capture-inbox-gallery-empty">
+      <div className="capture-inbox-gallery-empty__card is-filtered">
+        <div aria-hidden="true" className="capture-inbox-gallery-empty__glyph">
+          <svg fill="none" height="28" viewBox="0 0 28 28" width="28" xmlns="http://www.w3.org/2000/svg">
+            <path d="M6 8h16M8 14h12M10 20h8" stroke="currentColor" strokeLinecap="round" strokeWidth="1.75" />
+            <circle cx="21" cy="8" r="4.25" stroke="currentColor" strokeWidth="1.75" />
+          </svg>
+        </div>
+        <div className="capture-inbox-gallery-empty__copy">
+          <span className="capture-inbox-gallery-empty__eyebrow">Filtered view</span>
+          <h3 className="capture-inbox-gallery-empty__title">No media tiles match</h3>
+          <p className="capture-inbox-gallery-empty__detail">
+            No media tiles match the current studio filters. Try another status, preset, or search term.
+          </p>
+        </div>
+        <button className="capture-inbox-gallery-empty__action capture-inbox-filter-clear-btn" onClick={onClearFilters} type="button">
+          <span aria-hidden="true" className="capture-inbox-filter-clear-btn__icon">
+            <WorkItemActionIcon className="capture-inbox-filter-clear-btn__glyph" kind="dismiss" />
+          </span>
+          <span className="capture-inbox-filter-clear-btn__label">Clear all filters</span>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function StudioFilterToolbar({
+  expanded,
+  hasSelectedSession,
+  metadataFilter,
+  onMetadataFilter,
+  onOnlyActionable,
+  onOnlyWithThumbnail,
+  onSearch,
+  onSort,
+  onlyActionable,
+  onlyWithThumbnail,
+  searchQuery,
+  sortMode
+}: {
+  expanded: boolean;
+  hasSelectedSession: boolean;
+  metadataFilter: MetadataStatusFilter;
+  onMetadataFilter: (filter: MetadataStatusFilter) => void;
+  onOnlyActionable: (enabled: boolean) => void;
+  onOnlyWithThumbnail: (enabled: boolean) => void;
+  onSearch: (query: string) => void;
+  onSort: (sortMode: SortMode) => void;
+  onlyActionable: boolean;
+  onlyWithThumbnail: boolean;
+  searchQuery: string;
+  sortMode: SortMode;
+}) {
+  return (
+    <div className={`capture-inbox-filter-deck-toolbar${expanded ? "" : " is-collapsed"}`.trim()}>
+      <span className="capture-inbox-sr-only">Studio filters — Search, filter, sort, and tune the media-first triage gallery.</span>
+      <div className="capture-inbox-filter-tier capture-inbox-filter-tier-query is-sticky">
+        <div className="capture-inbox-filter-query-panel">
+          <label className="capture-inbox-filter-field capture-inbox-toolbar-search">
+            <span className="capture-inbox-sr-only">Search capture items</span>
+            <input
+              aria-label="Search capture items"
+              className="review-board-deck-input capture-inbox-filter-search"
+              onChange={(event) => onSearch(event.target.value)}
+              placeholder="Caption, video ID, profile, source URL"
+              type="search"
+              value={searchQuery}
+            />
+          </label>
+          <label className="capture-inbox-filter-field capture-inbox-filter-field-sort">
+            <span className="capture-inbox-filter-field-label">Sort</span>
+            <select
+              aria-label="Sort capture items"
+              className="review-board-deck-input capture-inbox-filter-sort"
+              onChange={(event) => onSort(event.target.value as SortMode)}
+              value={sortMode}
+            >
+              {SORT_OPTIONS.map((option) => <option key={option.key} value={option.key}>{option.label}</option>)}
+            </select>
+          </label>
+        </div>
+      </div>
+      {expanded ? (
+        <div className="capture-inbox-filter-tier capture-inbox-filter-tier-tuning">
+          <div className="capture-inbox-filter-tuning-row">
+            <div className="capture-inbox-filter-lane capture-inbox-filter-lane-metadata">
+              <span className="capture-inbox-filter-lane-label">Metadata status</span>
+              <div className="capture-inbox-filter-scroll-rail capture-inbox-filter-chip-rail" role="group" aria-label="Metadata status">
+                {METADATA_STATUS_OPTIONS.map((option) => (
+                  <button
+                    aria-pressed={metadataFilter === option.key}
+                    className={`capture-inbox-filter-chip capture-inbox-filter-chip-elevated${metadataFilter === option.key ? " is-active" : ""}`}
+                    key={option.key}
+                    onClick={() => onMetadataFilter(option.key)}
+                    title={option.title}
+                    type="button"
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="capture-inbox-filter-lane capture-inbox-filter-lane-quick">
+              <span className="capture-inbox-filter-lane-label">Quick filters</span>
+              <div className="capture-inbox-quick-toggle-rail is-inline" role="group" aria-label="Quick filters">
+                <label className={`capture-inbox-quick-toggle capture-inbox-quick-toggle-elevated${onlyActionable ? " is-active" : ""}`}>
+                  <span className="capture-inbox-quick-toggle-label">Only actionable</span>
+                  <input checked={onlyActionable} onChange={(event) => onOnlyActionable(event.target.checked)} type="checkbox" />
+                </label>
+                <label className={`capture-inbox-quick-toggle capture-inbox-quick-toggle-elevated${onlyWithThumbnail ? " is-active" : ""}`}>
+                  <span className="capture-inbox-quick-toggle-label">Only with thumbnail</span>
+                  <input checked={onlyWithThumbnail} onChange={(event) => onOnlyWithThumbnail(event.target.checked)} type="checkbox" />
+                </label>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : (
+        <p className="capture-inbox-filter-deck-collapsed-hint">
+          {hasSelectedSession
+            ? "Metadata filters and smart presets unlock once this session has staged items."
+            : "Open a capture session to tune metadata filters and smart presets."}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function SmartPresetChip({
+  activePreset,
+  count,
+  onPreset,
+  preset
+}: {
+  activePreset: DouyinReviewPreset;
+  count: number;
+  onPreset: (preset: DouyinReviewPresetId) => void;
+  preset: DouyinReviewPresetConfig;
+}) {
+  const selected = activePreset === preset.id;
+  const disabled = count === 0 && !selected;
+  return (
+    <button
+      aria-pressed={selected}
+      className={`capture-inbox-filter-chip capture-inbox-filter-chip-elevated capture-inbox-smart-preset-chip${selected ? " primary is-active" : ""}${disabled ? " is-empty" : ""}`.trim()}
+      disabled={disabled}
+      onClick={() => onPreset(preset.id)}
+      title={`${preset.description} Sort hint: ${preset.sortHint.replaceAll("_", " ")}.`}
+      type="button"
+    >
+      <span>{preset.shortLabel}</span>
+      <b>{count.toLocaleString()}</b>
+    </button>
+  );
+}
+
+function SmartPresetBar({ activePreset, counts, onPreset }: { activePreset: DouyinReviewPreset; counts: Record<DouyinReviewPresetId, number>; onPreset: (preset: DouyinReviewPresetId) => void }) {
+  return (
+    <section className="capture-inbox-filter-tier capture-inbox-filter-tier-presets capture-inbox-filter-presets capture-inbox-smart-presets is-compact is-expanded" aria-label="Smart presets">
+      <span className="capture-inbox-filter-lane-label">Smart presets</span>
+      <div className="capture-inbox-filter-scroll-rail capture-inbox-smart-preset-row is-expanded">
+        {DOUYIN_REVIEW_PRESETS.map((preset) => (
+          <SmartPresetChip activePreset={activePreset} count={counts[preset.id]} key={preset.id} onPreset={onPreset} preset={preset} />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function CaptureInboxGalleryFilterDeck({
+  activeFilterChips,
+  activePreset,
+  advancedApplied,
+  advancedDraft,
+  advancedLoading,
+  advancedOpen,
+  baselineFilter,
+  baselineSort,
+  filter,
+  filterDeckExpanded,
+  hasSelectedSession,
+  metadataFilter,
+  metadataHealthCounts,
+  onApplyAdvanced,
+  onClearFilters,
+  onMetadataFilter,
+  onOnlyActionable,
+  onOnlyWithThumbnail,
+  onResetAdvanced,
+  onSearch,
+  onSmartPreset,
+  onSort,
+  onToggleAdvanced,
+  onUpdateAdvanced,
+  onlyActionable,
+  onlyWithThumbnail,
+  presetCounts,
+  searchQuery,
+  sortMode
+}: {
+  activeFilterChips: string[];
+  activePreset: DouyinReviewPreset;
+  advancedApplied: AdvancedAppliedFilters | null;
+  advancedDraft: AdvancedFilterDraft;
+  advancedLoading: boolean;
+  advancedOpen: boolean;
+  baselineFilter: StudioItemStatusFilter;
+  baselineSort: SortMode;
+  filter: StudioItemStatusFilter;
+  filterDeckExpanded: boolean;
+  hasSelectedSession: boolean;
+  metadataFilter: MetadataStatusFilter;
+  metadataHealthCounts: MetadataHealthCountMap;
+  onApplyAdvanced: () => void;
+  onClearFilters: () => void;
+  onMetadataFilter: (filter: MetadataStatusFilter) => void;
+  onOnlyActionable: (enabled: boolean) => void;
+  onOnlyWithThumbnail: (enabled: boolean) => void;
+  onResetAdvanced: () => void;
+  onSearch: (query: string) => void;
+  onSmartPreset: (preset: DouyinReviewPresetId) => void;
+  onSort: (sortMode: SortMode) => void;
+  onToggleAdvanced: () => void;
+  onUpdateAdvanced: <K extends keyof AdvancedFilterDraft>(key: K, value: AdvancedFilterDraft[K]) => void;
+  onlyActionable: boolean;
+  onlyWithThumbnail: boolean;
+  presetCounts: Record<DouyinReviewPresetId, number>;
+  searchQuery: string;
+  sortMode: SortMode;
+}) {
+  return (
+    <section className="capture-inbox-gallery-filter-deck" aria-label="Gallery filters">
+      <div className="capture-inbox-gallery-filter-shell">
+        <div className="capture-inbox-gallery-filter-head">
+          <span className="capture-inbox-gallery-filter-kicker">Tile filters</span>
+        </div>
+        <div className={`capture-inbox-filter-deck${filterDeckExpanded ? "" : " is-collapsed"}`.trim()}>
+          <StudioFilterToolbar
+          expanded={filterDeckExpanded}
+          hasSelectedSession={hasSelectedSession}
           metadataFilter={metadataFilter}
-          onClearFilters={onClearFilters}
-          onHideDuplicates={onHideDuplicates}
           onMetadataFilter={onMetadataFilter}
           onOnlyActionable={onOnlyActionable}
           onOnlyWithThumbnail={onOnlyWithThumbnail}
           onSearch={onSearch}
-          onSessionStatus={onSessionStatus}
           onSort={onSort}
           onlyActionable={onlyActionable}
           onlyWithThumbnail={onlyWithThumbnail}
           searchQuery={searchQuery}
-          sessionStatus={sessionStatus}
           sortMode={sortMode}
         />
-        <SmartPresetBar activePreset={activePreset} counts={presetCounts} onClear={onClearSmartPreset} onPreset={onSmartPreset} />
+        <CaptureInboxActiveFilterSummary chips={activeFilterChips} onClear={onClearFilters} />
+        {filterDeckExpanded ? (
+          <SmartPresetBar activePreset={activePreset} counts={presetCounts} onPreset={onSmartPreset} />
+        ) : null}
+        </div>
       </div>
-
       <AdvancedFilterPanel
         applied={advancedApplied}
         draft={advancedDraft}
@@ -1549,335 +2068,152 @@ function CaptureInboxCommandDeck({
   );
 }
 
-function CaptureInboxQuickPathBar({
-  onPromoteTop,
-  visibleCount,
-  working
-}: {
-  onPromoteTop: (limit: number) => void;
-  visibleCount: number;
-  working: CaptureInboxAction | "delete_session" | "refresh" | null;
-}) {
-  const busy = working !== null;
-  const promoting = working === "promote_now";
+function metadataHealthIcon(filter: MetadataHealthFilter): CaptureInboxFilterChipIconKind {
+  if (filter === "complete") {
+    return "meta-complete";
+  }
+  if (filter === "missing_posted") {
+    return "meta-posted";
+  }
+  if (filter === "missing_thumbnail") {
+    return "meta-thumb";
+  }
+  if (filter === "missing_duration") {
+    return "meta-duration";
+  }
+  if (filter === "missing_views") {
+    return "meta-views";
+  }
+  if (filter === "missing_metrics") {
+    return "meta-metrics";
+  }
+  return "meta-actionable";
+}
+
+const ADVANCED_VIEWS_INPUT_HINT = "Supports 10K, 1.2M, 3万. Estimated ranges use overlap matching.";
+
+function FilterChipIconLabel({ icon, label }: { icon: CaptureInboxFilterChipIconKind; label: string }) {
   return (
-    <div className="capture-inbox-hero-actions capture-inbox-quick-path capture-inbox-command-deck-quick" aria-label="Capture Inbox quick path">
-      <div className="capture-inbox-promote-group" role="group" aria-label="Promote top candidates">
-        {CAPTURE_INBOX_PROMOTE_TOP_BATCHES.map((n, index) => (
-          <button
-            aria-label={promoting ? "Promoting capture items" : `Promote top ${n}`}
-            className={`capture-inbox-promote-seg${index === 1 ? " is-primary" : ""}`}
-            disabled={busy || visibleCount === 0}
-            key={n}
-            onClick={() => onPromoteTop(n)}
-            title={`Promote top ${n}`}
-            type="button"
-          >
-            {promoting ? "…" : `Top ${n}`}
-          </button>
-        ))}
-      </div>
-      <a className="capture-inbox-hero-btn capture-inbox-hero-btn-secondary" href={CAPTURE_INBOX_REVIEW_BOARD_HREF}>
-        Open Review Board
-      </a>
-    </div>
+    <>
+      <span aria-hidden="true" className="capture-inbox-filter-chip-icon">
+        <CaptureInboxFilterChipIcon className="capture-inbox-filter-chip-icon__glyph" kind={icon} />
+      </span>
+      <span className="capture-inbox-filter-chip-label">{label}</span>
+    </>
   );
 }
 
-function StatusStrip({
-  activeFilter,
-  className,
-  onFilter,
-  summary
-}: {
-  activeFilter: StudioItemStatusFilter;
-  className?: string;
-  onFilter: (filter: StudioItemStatusFilter) => void;
-  summary: CaptureSummary;
-}) {
+function advancedScopeLaneIcon(lane: "posted" | "captured" | "duration" | "metadata-health"): CaptureInboxFilterChipIconKind {
+  if (lane === "posted") {
+    return "meta-posted";
+  }
+  if (lane === "captured") {
+    return "lane-captured";
+  }
+  if (lane === "duration") {
+    return "meta-duration";
+  }
+  return "lane-metadata-health";
+}
+
+function AdvancedScopeLaneLabel({ lane, label }: { lane: "posted" | "captured" | "duration" | "metadata-health"; label: string }) {
   return (
-    <section
-      className={`capture-inbox-status-strip reup-queue-hero-stats capture-inbox-studio-status ${className ?? ""}`.trim()}
-      aria-label="Capture Inbox Status Strip"
-      role="tablist"
-    >
-      {SUMMARY_FILTERS.map((entry) => {
-        const count = captureInboxSummaryCount(summary, entry.key);
-        const isActive = activeFilter === entry.key;
-        const tone = captureInboxStatusTone(entry.key, count);
-        return (
-          <button
-            aria-pressed={isActive}
-            aria-selected={isActive}
-            className={`capture-inbox-status-pill reup-queue-hero-stat is-tone-${tone}${isActive ? " active is-active" : ""}`}
-            key={entry.key}
-            onClick={() => onFilter(entry.key)}
-            role="tab"
-            type="button"
-          >
-            <span>{entry.label}</span>
-            <strong>{summaryValue(summary, entry.key)}</strong>
-          </button>
-        );
-      })}
-    </section>
+    <span className="capture-inbox-advanced-scope-lane-label">
+      <span aria-hidden="true" className="capture-inbox-advanced-scope-lane-label-icon">
+        <CaptureInboxFilterChipIcon className="capture-inbox-advanced-scope-lane-label-icon__glyph" kind={advancedScopeLaneIcon(lane)} />
+      </span>
+      <span className="capture-inbox-advanced-scope-lane-label-text">{label}</span>
+    </span>
   );
 }
 
-function CaptureInboxTriageBar({
-  activePreset,
-  baselineFilter,
-  baselineSort,
-  filter,
-  hideDuplicates,
-  onClearFilters,
-  onClearSmartPreset,
-  onHideDuplicates,
-  onOnlyActionable,
-  onOnlyWithThumbnail,
-  onPromoteTop,
-  onSearch,
-  onSmartPreset,
-  onSort,
-  onlyActionable,
-  onlyWithThumbnail,
-  presetCounts,
-  searchQuery,
-  sortMode,
-  visibleCount,
-  working
-}: {
-  activePreset: DouyinReviewPreset;
-  baselineFilter: StudioItemStatusFilter;
-  baselineSort: SortMode;
-  filter: StudioItemStatusFilter;
-  hideDuplicates: boolean;
-  onClearFilters: () => void;
-  onClearSmartPreset: () => void;
-  onHideDuplicates: (enabled: boolean) => void;
-  onOnlyActionable: (enabled: boolean) => void;
-  onOnlyWithThumbnail: (enabled: boolean) => void;
-  onPromoteTop: (limit: number) => void;
-  onSearch: (query: string) => void;
-  onSmartPreset: (preset: DouyinReviewPresetId) => void;
-  onSort: (sortMode: SortMode) => void;
-  onlyActionable: boolean;
-  onlyWithThumbnail: boolean;
-  presetCounts: Record<DouyinReviewPresetId, number>;
-  searchQuery: string;
-  sortMode: SortMode;
-  visibleCount: number;
-  working: CaptureInboxAction | "delete_session" | "refresh" | null;
-}) {
-  const filtersAreClear = filter === baselineFilter && !searchQuery && sortMode === baselineSort && !onlyActionable && !onlyWithThumbnail && !hideDuplicates;
-
-  return (
-    <div className="capture-inbox-triage-bar capture-inbox-filter-deck">
-      <div className="capture-inbox-triage-toolbar">
-        <div className="capture-inbox-triage-search-row">
-          <label className="capture-inbox-filter-field capture-inbox-toolbar-search">
-            <input
-              aria-label="Search capture items"
-              className="review-board-deck-input capture-inbox-filter-search"
-              onChange={(event) => onSearch(event.target.value)}
-              placeholder="Caption, video ID, profile, source URL"
-              type="search"
-              value={searchQuery}
-            />
-          </label>
-          <label className="capture-inbox-filter-field">
-            <select
-              aria-label="Sort capture items"
-              className="review-board-deck-input capture-inbox-filter-sort"
-              onChange={(event) => onSort(event.target.value as SortMode)}
-              value={sortMode}
-            >
-              {SORT_OPTIONS.map((option) => <option key={option.key} value={option.key}>{option.label}</option>)}
-            </select>
-          </label>
-          <button className="review-board-deck-btn is-ghost capture-inbox-filter-clear" disabled={filtersAreClear} onClick={onClearFilters} type="button">
-            Clear filters
-          </button>
-        </div>
-        <div className="capture-inbox-triage-actions-row">
-          <div className="capture-inbox-filter-secondary capture-inbox-filter-tuning-panel is-compact capture-inbox-triage-quick">
-            <OpsToolbarGroup label="Quick filters">
-              <div className="capture-inbox-quick-toggle-rail is-inline" role="group" aria-label="Quick filters">
-                <label className={`capture-inbox-quick-toggle${onlyActionable ? " is-active" : ""}`}>
-                  <span className="capture-inbox-quick-toggle-label">Only actionable</span>
-                  <input checked={onlyActionable} onChange={(event) => onOnlyActionable(event.target.checked)} type="checkbox" />
-                </label>
-                <label className={`capture-inbox-quick-toggle${onlyWithThumbnail ? " is-active" : ""}`}>
-                  <span className="capture-inbox-quick-toggle-label">Only with thumbnail</span>
-                  <input checked={onlyWithThumbnail} onChange={(event) => onOnlyWithThumbnail(event.target.checked)} type="checkbox" />
-                </label>
-                <label className={`capture-inbox-quick-toggle${hideDuplicates ? " is-active" : ""}`}>
-                  <span className="capture-inbox-quick-toggle-label">Hide duplicates</span>
-                  <input checked={hideDuplicates} onChange={(event) => onHideDuplicates(event.target.checked)} type="checkbox" />
-                </label>
-              </div>
-            </OpsToolbarGroup>
-          </div>
-          <CaptureInboxQuickPathBar onPromoteTop={onPromoteTop} visibleCount={visibleCount} working={working} />
-        </div>
-        <SmartPresetBar activePreset={activePreset} counts={presetCounts} onClear={onClearSmartPreset} onPreset={onSmartPreset} />
-      </div>
-    </div>
-  );
+function advancedPerformanceTabIcon(tab: "views" | "engagement" | "rates"): CaptureInboxFilterChipIconKind {
+  if (tab === "engagement") {
+    return "perf-engagement";
+  }
+  if (tab === "rates") {
+    return "perf-rates";
+  }
+  return "perf-views";
 }
 
-function StudioFilterToolbar({
-  baselineFilter,
-  baselineSort,
-  filter,
-  hideDuplicates,
-  metadataFilter,
-  onClearFilters,
-  onHideDuplicates,
-  onMetadataFilter,
-  onOnlyActionable,
-  onOnlyWithThumbnail,
-  onSearch,
-  onSessionStatus,
-  onSort,
-  onlyActionable,
-  onlyWithThumbnail,
-  searchQuery,
-  sessionStatus,
-  sortMode
+function AdvancedPerformanceTabs({
+  draft,
+  onUpdate
 }: {
-  baselineFilter: StudioItemStatusFilter;
-  baselineSort: SortMode;
-  filter: StudioItemStatusFilter;
-  hideDuplicates: boolean;
-  metadataFilter: MetadataStatusFilter;
-  onClearFilters: () => void;
-  onHideDuplicates: (enabled: boolean) => void;
-  onMetadataFilter: (filter: MetadataStatusFilter) => void;
-  onOnlyActionable: (enabled: boolean) => void;
-  onOnlyWithThumbnail: (enabled: boolean) => void;
-  onSearch: (query: string) => void;
-  onSessionStatus: (status: "all" | CaptureSessionStatus) => void;
-  onSort: (sortMode: SortMode) => void;
-  onlyActionable: boolean;
-  onlyWithThumbnail: boolean;
-  searchQuery: string;
-  sessionStatus: "all" | CaptureSessionStatus;
-  sortMode: SortMode;
+  draft: AdvancedFilterDraft;
+  onUpdate: <K extends keyof AdvancedFilterDraft>(key: K, value: AdvancedFilterDraft[K]) => void;
 }) {
-  const filtersAreClear = filter === baselineFilter && metadataFilter === "all" && !searchQuery && sortMode === baselineSort && sessionStatus === "all" && !onlyActionable && !onlyWithThumbnail && !hideDuplicates;
+  const [activeTab, setActiveTab] = useState<"views" | "engagement" | "rates">("views");
+  const tabs: Array<{ key: "views" | "engagement" | "rates"; label: string }> = [
+    { key: "views", label: "Views" },
+    { key: "engagement", label: "Engagement" },
+    { key: "rates", label: "Rates" }
+  ];
+
   return (
-    <div className="capture-inbox-filter-deck-toolbar">
-    <OpsFilterBar
-      description="Search, filter, sort, and tune the media-first triage gallery."
-      title="Studio filters"
-    >
-      <div className="capture-inbox-filter-primary">
-        <label className="capture-inbox-filter-field capture-inbox-toolbar-search">
-          <input
-            aria-label="Search capture items"
-            className="review-board-deck-input capture-inbox-filter-search"
-            onChange={(event) => onSearch(event.target.value)}
-            placeholder="Caption, video ID, profile, source URL"
-            type="search"
-            value={searchQuery}
-          />
-        </label>
-        <label className="capture-inbox-filter-field">
-          <select
-            aria-label="Filter capture sessions"
-            className="review-board-deck-input capture-inbox-filter-select"
-            onChange={(event) => onSessionStatus(event.target.value as "all" | CaptureSessionStatus)}
-            value={sessionStatus}
-          >
-            <option value="all">All sessions</option>
-            {SESSION_STATUS_OPTIONS.filter((option) => option !== "all").map((option) => (
-              <option key={option} value={option}>{formatCaptureSessionStatusLabel(option)}</option>
-            ))}
-          </select>
-        </label>
-        <label className="capture-inbox-filter-field">
-          <select
-            aria-label="Sort capture items"
-            className="review-board-deck-input capture-inbox-filter-sort"
-            onChange={(event) => onSort(event.target.value as SortMode)}
-            value={sortMode}
-          >
-            {SORT_OPTIONS.map((option) => <option key={option.key} value={option.key}>{option.label}</option>)}
-          </select>
-        </label>
-        <button className="review-board-deck-btn is-ghost capture-inbox-filter-clear" disabled={filtersAreClear} onClick={onClearFilters} type="button">
-          Clear filters
-        </button>
-      </div>
-      <div className="capture-inbox-filter-secondary capture-inbox-filter-tuning-panel is-compact">
-        <OpsToolbarGroup label="Metadata status">
-          <div className="capture-inbox-filter-chip-rail" role="group" aria-label="Metadata status">
-            {METADATA_STATUS_OPTIONS.map((option) => (
+    <section className="capture-inbox-advanced-block capture-inbox-advanced-block-performance is-flat" aria-label="Performance filters">
+      <div className="capture-inbox-advanced-block-head capture-inbox-advanced-performance-toolbar is-toolbar-only">
+        <div className="capture-inbox-advanced-performance-toolbar-controls">
+          <div aria-label="Performance filter groups" className="capture-inbox-advanced-performance-tabs is-segmented" role="tablist">
+          {tabs.map((tab) => {
+            const tabHasFilters = advancedPerformanceTabHasDraftFilters(draft, tab.key);
+            return (
               <button
-                aria-pressed={metadataFilter === option.key}
-                className={`capture-inbox-filter-chip${metadataFilter === option.key ? " is-active" : ""}`}
-                key={option.key}
-                onClick={() => onMetadataFilter(option.key)}
-                title={option.title}
+                aria-selected={activeTab === tab.key}
+                className={`capture-inbox-filter-chip capture-inbox-filter-chip-elevated capture-inbox-advanced-performance-tab${activeTab === tab.key ? " is-active" : ""}${tabHasFilters ? " has-filters" : ""}`.trim()}
+                key={tab.key}
+                onClick={() => setActiveTab(tab.key)}
+                role="tab"
                 type="button"
               >
-                {option.label}
+                <FilterChipIconLabel icon={advancedPerformanceTabIcon(tab.key)} label={tab.label} />
+                {tabHasFilters ? <span aria-hidden="true" className="capture-inbox-advanced-performance-tab-badge" /> : null}
               </button>
-            ))}
+            );
+          })}
           </div>
-        </OpsToolbarGroup>
-        <OpsToolbarGroup label="Quick filters">
-          <div className="capture-inbox-quick-toggle-rail is-inline" role="group" aria-label="Quick filters">
-            <label className={`capture-inbox-quick-toggle${onlyActionable ? " is-active" : ""}`}>
-              <span className="capture-inbox-quick-toggle-label">Only actionable</span>
-              <input checked={onlyActionable} onChange={(event) => onOnlyActionable(event.target.checked)} type="checkbox" />
-            </label>
-            <label className={`capture-inbox-quick-toggle${onlyWithThumbnail ? " is-active" : ""}`}>
-              <span className="capture-inbox-quick-toggle-label">Only with thumbnail</span>
-              <input checked={onlyWithThumbnail} onChange={(event) => onOnlyWithThumbnail(event.target.checked)} type="checkbox" />
-            </label>
-            <label className={`capture-inbox-quick-toggle${hideDuplicates ? " is-active" : ""}`}>
-              <span className="capture-inbox-quick-toggle-label">Hide duplicates</span>
-              <input checked={hideDuplicates} onChange={(event) => onHideDuplicates(event.target.checked)} type="checkbox" />
-            </label>
-          </div>
-        </OpsToolbarGroup>
+        </div>
       </div>
-    </OpsFilterBar>
-    </div>
-  );
-}
-
-function SmartPresetBar({ activePreset, counts, onClear, onPreset }: { activePreset: DouyinReviewPreset; counts: Record<DouyinReviewPresetId, number>; onClear: () => void; onPreset: (preset: DouyinReviewPresetId) => void }) {
-  const activeConfig = getDouyinReviewPresetConfig(activePreset);
-
-  return (
-    <section className="capture-inbox-filter-presets capture-inbox-smart-presets is-compact" aria-label="Smart presets">
-      <span className="capture-inbox-filter-row-label">Smart presets</span>
-      <div className="capture-inbox-smart-preset-row">
-        {DOUYIN_REVIEW_PRESETS.map((preset) => {
-          const selected = activePreset === preset.id;
-          return (
-            <button
-              aria-pressed={selected}
-              className={`capture-inbox-filter-chip capture-inbox-smart-preset-chip${selected ? " primary is-active" : ""}`}
-              key={preset.id}
-              onClick={() => onPreset(preset.id)}
-              title={`${preset.description} Sort hint: ${preset.sortHint.replaceAll("_", " ")}.`}
-              type="button"
-            >
-              <span>{preset.shortLabel}</span>
-              <b>{counts[preset.id].toLocaleString()}</b>
-            </button>
-          );
-        })}
-        {activeConfig ? (
-          <>
-            <span className="capture-inbox-active-preset-chip">Preset: {activeConfig.label}</span>
-            <button className="capture-inbox-smart-preset-clear review-board-deck-btn is-ghost" onClick={onClear} type="button">Clear preset</button>
-          </>
-        ) : null}
+      <div className="capture-inbox-advanced-block-body">
+        <div className="capture-inbox-advanced-performance-panel" role="tabpanel">
+          {activeTab === "views" ? (
+            <div className="capture-inbox-advanced-performance-stack capture-inbox-advanced-performance-stack-compact is-grid is-grid-views">
+              <div className="capture-inbox-advanced-pair capture-inbox-advanced-pair-compact capture-inbox-advanced-input-row">
+                <NumberInput hint={ADVANCED_VIEWS_INPUT_HINT} label="Min est. views" narrow placeholder="e.g. 10000, 10K, or 3万" value={draft.minEstimatedViews} onChange={(v) => onUpdate("minEstimatedViews", v)} />
+                <NumberInput hint={ADVANCED_VIEWS_INPUT_HINT} label="Max est. views" narrow placeholder="No limit" value={draft.maxEstimatedViews} onChange={(v) => onUpdate("maxEstimatedViews", v)} />
+              </div>
+            </div>
+          ) : null}
+          {activeTab === "engagement" ? (
+            <div className="capture-inbox-advanced-performance-stack capture-inbox-advanced-performance-stack-compact is-grid is-grid-engagement">
+              <div className="capture-inbox-advanced-pair capture-inbox-advanced-pair-compact capture-inbox-advanced-input-row">
+                <NumberInput label="Min likes" narrow placeholder="e.g. 500" value={draft.minLikes} onChange={(v) => onUpdate("minLikes", v)} />
+                <NumberInput label="Max likes" narrow placeholder="No limit" value={draft.maxLikes} onChange={(v) => onUpdate("maxLikes", v)} />
+              </div>
+              <div className="capture-inbox-advanced-pair capture-inbox-advanced-pair-compact capture-inbox-advanced-input-row">
+                <NumberInput label="Min comments" narrow placeholder="No limit" value={draft.minComments} onChange={(v) => onUpdate("minComments", v)} />
+                <NumberInput label="Max comments" narrow placeholder="No limit" value={draft.maxComments} onChange={(v) => onUpdate("maxComments", v)} />
+              </div>
+              <div className="capture-inbox-advanced-pair capture-inbox-advanced-pair-compact capture-inbox-advanced-input-row">
+                <NumberInput label="Min shares" narrow placeholder="No limit" value={draft.minShares} onChange={(v) => onUpdate("minShares", v)} />
+                <NumberInput label="Max shares" narrow placeholder="No limit" value={draft.maxShares} onChange={(v) => onUpdate("maxShares", v)} />
+              </div>
+            </div>
+          ) : null}
+          {activeTab === "rates" ? (
+            <div className="capture-inbox-advanced-performance-stack capture-inbox-advanced-performance-stack-compact is-grid is-grid-rates">
+              <div className="capture-inbox-advanced-pair capture-inbox-advanced-pair-compact capture-inbox-advanced-input-row">
+                <NumberInput label="Min score" narrow placeholder="No limit" value={draft.minEngagementScore} onChange={(v) => onUpdate("minEngagementScore", v)} />
+                <NumberInput label="Max score" narrow placeholder="No limit" value={draft.maxEngagementScore} onChange={(v) => onUpdate("maxEngagementScore", v)} />
+              </div>
+              <div className="capture-inbox-advanced-pair capture-inbox-advanced-pair-compact capture-inbox-advanced-input-row">
+                <NumberInput label="Min rate %" narrow placeholder="No limit" value={draft.minEngagementRate} onChange={(v) => onUpdate("minEngagementRate", v)} />
+                <NumberInput label="Max rate %" narrow placeholder="No limit" value={draft.maxEngagementRate} onChange={(v) => onUpdate("maxEngagementRate", v)} />
+              </div>
+            </div>
+          ) : null}
+        </div>
       </div>
     </section>
   );
@@ -1906,14 +2242,16 @@ function AdvancedFilterPanel({
 }) {
   const summaryItems = advancedFilterSummaryItems(applied);
   const validationMessage = advancedFilterValidationMessage(draft);
-  const metadataHealthOptions: Array<{ key: MetadataHealthFilter; label: string; detail: string }> = [
-    { key: "complete", label: "Complete", detail: "All key fields" },
-    { key: "missing_posted", label: "Missing posted", detail: "No posted date" },
-    { key: "missing_thumbnail", label: "Missing thumbnail", detail: "No thumbnail" },
-    { key: "missing_duration", label: "Missing duration", detail: "No duration" },
-    { key: "missing_views", label: "Missing views", detail: "No estimate" },
-    { key: "missing_metrics", label: "Missing metrics", detail: "likes/comments/shares" },
-    { key: "actionable", label: "Actionable", detail: "Needs review/fix" }
+  const advancedDirty = advancedFiltersAreDirty(draft, applied);
+  const applyDisabled = loading || Boolean(validationMessage) || !advancedDirty;
+  const metadataHealthOptions: Array<{ key: MetadataHealthFilter; label: string; shortLabel: string; detail: string }> = [
+    { key: "complete", label: "Complete", shortLabel: "Complete", detail: "All key fields" },
+    { key: "missing_posted", label: "Missing posted", shortLabel: "No posted", detail: "No posted date" },
+    { key: "missing_thumbnail", label: "Missing thumbnail", shortLabel: "No thumb", detail: "No thumbnail" },
+    { key: "missing_duration", label: "Missing duration", shortLabel: "No duration", detail: "No duration" },
+    { key: "missing_views", label: "Missing views", shortLabel: "No views", detail: "No estimate" },
+    { key: "missing_metrics", label: "Missing metrics", shortLabel: "No metrics", detail: "likes/comments/shares" },
+    { key: "actionable", label: "Actionable", shortLabel: "Actionable", detail: "Needs review/fix" }
   ];
   const toggleMetadataHealth = (filter: MetadataHealthFilter) => {
     const nextFilters = draft.metadataHealthFilters.includes(filter)
@@ -1921,132 +2259,186 @@ function AdvancedFilterPanel({
       : [...draft.metadataHealthFilters, filter];
     onUpdate("metadataHealthFilters", nextFilters);
   };
+  const applyPostedTimePreset = (preset: "last7" | "last30" | "thisMonth") => {
+    const range = advancedPostedTimePresetRange(preset);
+    onUpdate("postedFrom", range.from);
+    onUpdate("postedTo", range.to);
+  };
 
   return (
     <section className={`operator-panel capture-inbox-advanced-panel capture-inbox-advanced-deck is-compact${open ? " is-expanded" : " is-collapsed"}`} aria-label="More filters">
-      <div className="capture-inbox-advanced-header">
-        <div className="capture-inbox-advanced-header-top">
-          <div className="capture-inbox-advanced-heading">
-            <h2>Advanced filters</h2>
-            <p className="capture-inbox-advanced-subtitle">Filter by posted date, duration, performance, and metadata health.</p>
+      <div className="capture-inbox-advanced-shell">
+        <div className="capture-inbox-advanced-header is-sticky">
+          <div className="capture-inbox-advanced-header-top">
+            <div className="capture-inbox-advanced-heading">
+              <button
+                aria-expanded={open}
+                aria-label={open ? "Collapse advanced filters" : "Expand advanced filters"}
+                className="capture-inbox-advanced-title-toggle"
+                onClick={onToggle}
+                type="button"
+              >
+                <span aria-hidden="true" className="capture-inbox-advanced-title-icon">
+                  <WorkItemActionIcon className="capture-inbox-advanced-title-icon__glyph" kind={open ? "dismiss" : "open"} />
+                </span>
+                <span className="capture-inbox-advanced-title">Advanced filters</span>
+                {!open && summaryItems.length ? (
+                  <span className="capture-inbox-advanced-collapsed-count">{summaryItems.length} active</span>
+                ) : null}
+              </button>
+              <p className="capture-inbox-advanced-subtitle">
+                Filter by posted date, duration, performance, and metadata health.
+                <span
+                  className="capture-inbox-advanced-risk-hint"
+                  title="Unsupported risk, speech, text-density, copyright, and complexity filters are not active yet."
+                >
+                  <span aria-hidden="true" className="capture-inbox-advanced-risk-hint-icon">i</span>
+                  <span className="capture-inbox-advanced-risk-hint-label">Risk filters unavailable</span>
+                </span>
+              </p>
+            </div>
+            <div className="capture-inbox-advanced-actions" aria-label="Advanced filter actions">
+              <button className={`capture-inbox-advanced-action-btn is-primary${advancedDirty ? " is-dirty" : ""}`.trim()} disabled={applyDisabled} onClick={onApply} type="button">
+                <span aria-hidden="true" className="capture-inbox-advanced-action-btn__icon">
+                  <WorkItemActionIcon className="capture-inbox-advanced-action-btn__glyph" kind="approve" />
+                </span>
+                <span className="capture-inbox-advanced-action-btn__label">{loading ? "Applying..." : "Apply"}</span>
+              </button>
+              <button className="capture-inbox-advanced-action-btn" disabled={loading} onClick={onReset} type="button">
+                <span aria-hidden="true" className="capture-inbox-advanced-action-btn__icon">
+                  <WorkItemActionIcon className="capture-inbox-advanced-action-btn__glyph" kind="retry" />
+                </span>
+                <span className="capture-inbox-advanced-action-btn__label">Reset</span>
+              </button>
+            </div>
           </div>
-          <div className="capture-inbox-advanced-actions" aria-label="Advanced filter actions">
-            <button className="review-board-deck-btn is-primary" disabled={loading || Boolean(validationMessage)} onClick={onApply} type="button">{loading ? "Applying..." : "Apply"}</button>
-            <button className="review-board-deck-btn" disabled={loading} onClick={onReset} type="button">Reset</button>
-            <button className="review-board-deck-btn is-ghost" onClick={onToggle} type="button">{open ? "Collapse" : "Expand"}</button>
-          </div>
-        </div>
-        <div
-          className={`capture-inbox-advanced-summary${summaryItems.length ? " has-active" : " is-empty"}`}
-          aria-label="Active filter summary"
-        >
-          {summaryItems.length ? (
-            <>
+          {open && summaryItems.length ? (
+            <div className="capture-inbox-advanced-summary has-active" aria-label="Active filter summary">
               <strong>Active filters</strong>
               <div className="capture-inbox-advanced-summary-chips">
                 {summaryItems.map((item) => (
                   <span className="capture-inbox-advanced-summary-chip" key={item}>{item}</span>
                 ))}
               </div>
-            </>
-          ) : (
-            <span>No advanced filters applied</span>
-          )}
+            </div>
+          ) : null}
         </div>
-      </div>
-      {validationMessage ? <p className="capture-inbox-advanced-validation" role="alert">{validationMessage}</p> : null}
-      {open ? (
-        <div className="capture-inbox-advanced-workspace compact-priority">
-          <div className="capture-inbox-advanced-workspace-row capture-inbox-advanced-workspace-row-top">
-            <section className="capture-inbox-advanced-group capture-inbox-advanced-card compact-group">
-              <div className="capture-inbox-advanced-group-heading"><h3>Time</h3></div>
-              <div className="capture-inbox-advanced-grid two-up">
-                <label className="field"><span>Posted from</span><input className="capture-inbox-advanced-input" type="date" value={draft.postedFrom} onChange={(e) => onUpdate("postedFrom", e.target.value)} /></label>
-                <label className="field"><span>Posted to</span><input className="capture-inbox-advanced-input" type="date" value={draft.postedTo} onChange={(e) => onUpdate("postedTo", e.target.value)} /></label>
-                <label className="field"><span>Captured from</span><input className="capture-inbox-advanced-input" type="date" value={draft.capturedFrom} onChange={(e) => onUpdate("capturedFrom", e.target.value)} /></label>
-                <label className="field"><span>Captured to</span><input className="capture-inbox-advanced-input" type="date" value={draft.capturedTo} onChange={(e) => onUpdate("capturedTo", e.target.value)} /></label>
+        {validationMessage ? <p className="capture-inbox-advanced-validation" role="alert">{validationMessage}</p> : null}
+        {open ? (
+          <div className="capture-inbox-advanced-workspace compact-priority">
+            <section aria-label="Time filters" className="capture-inbox-advanced-block capture-inbox-advanced-block-time">
+              <div className="capture-inbox-advanced-block-head capture-inbox-advanced-block-head-presets">
+                <div aria-label="Posted date presets" className="capture-inbox-advanced-time-presets" role="group">
+                  <button className="capture-inbox-filter-chip capture-inbox-filter-chip-elevated capture-inbox-smart-preset-chip" onClick={() => applyPostedTimePreset("last7")} type="button">
+                    <FilterChipIconLabel icon="time-week" label="Last 7 days" />
+                  </button>
+                  <button className="capture-inbox-filter-chip capture-inbox-filter-chip-elevated capture-inbox-smart-preset-chip" onClick={() => applyPostedTimePreset("last30")} type="button">
+                    <FilterChipIconLabel icon="time-month" label="Last 30 days" />
+                  </button>
+                  <button className="capture-inbox-filter-chip capture-inbox-filter-chip-elevated capture-inbox-smart-preset-chip" onClick={() => applyPostedTimePreset("thisMonth")} type="button">
+                    <FilterChipIconLabel icon="time-current-month" label="This month" />
+                  </button>
+                </div>
+              </div>
+              <div className="capture-inbox-advanced-block-body">
+                <div className="capture-inbox-advanced-time-matrix capture-inbox-advanced-scope-body">
+                  <div className="capture-inbox-advanced-scope-lane">
+                    <AdvancedScopeLaneLabel lane="posted" label="Posted" />
+                    <div className="capture-inbox-advanced-pair capture-inbox-advanced-pair-compact capture-inbox-advanced-input-row">
+                      <label className="field capture-inbox-advanced-field-compact"><span>From</span><input className="capture-inbox-advanced-input capture-inbox-advanced-input-narrow review-board-deck-input" type="date" value={draft.postedFrom} onChange={(e) => onUpdate("postedFrom", e.target.value)} /></label>
+                      <label className="field capture-inbox-advanced-field-compact"><span>To</span><input className="capture-inbox-advanced-input capture-inbox-advanced-input-narrow review-board-deck-input" type="date" value={draft.postedTo} onChange={(e) => onUpdate("postedTo", e.target.value)} /></label>
+                    </div>
+                  </div>
+                  <div className="capture-inbox-advanced-scope-lane">
+                    <AdvancedScopeLaneLabel lane="captured" label="Captured" />
+                    <div className="capture-inbox-advanced-pair capture-inbox-advanced-pair-compact capture-inbox-advanced-input-row">
+                      <label className="field capture-inbox-advanced-field-compact"><span>From</span><input className="capture-inbox-advanced-input capture-inbox-advanced-input-narrow review-board-deck-input" type="date" value={draft.capturedFrom} onChange={(e) => onUpdate("capturedFrom", e.target.value)} /></label>
+                      <label className="field capture-inbox-advanced-field-compact"><span>To</span><input className="capture-inbox-advanced-input capture-inbox-advanced-input-narrow review-board-deck-input" type="date" value={draft.capturedTo} onChange={(e) => onUpdate("capturedTo", e.target.value)} /></label>
+                    </div>
+                  </div>
+                </div>
               </div>
             </section>
-            <section className="capture-inbox-advanced-group capture-inbox-advanced-card compact-group">
-              <div className="capture-inbox-advanced-group-heading">
-                <h3>Duration</h3>
-                <p>Numeric input means minutes; mm:ss and hh:mm:ss are also accepted.</p>
-              </div>
-              <div className="capture-inbox-advanced-pair capture-inbox-advanced-pair-stacked">
-                <NumberInput label="Min duration (minutes or mm:ss)" placeholder="e.g. 10 or 10:47" value={draft.minDurationSeconds} onChange={(v) => onUpdate("minDurationSeconds", v)} />
-                <NumberInput label="Max duration (minutes or mm:ss)" placeholder="No limit" value={draft.maxDurationSeconds} onChange={(v) => onUpdate("maxDurationSeconds", v)} />
+            <section
+              aria-label="Scope filters"
+              className="capture-inbox-advanced-block capture-inbox-advanced-block-scope"
+            >
+              <div className="capture-inbox-advanced-block-body capture-inbox-advanced-scope-body">
+                <div
+                  className="capture-inbox-advanced-scope-lane capture-inbox-advanced-scope-lane-duration"
+                  title="Numeric input means minutes; mm:ss and hh:mm:ss are also accepted."
+                >
+                  <AdvancedScopeLaneLabel lane="duration" label="Duration" />
+                  <span className="capture-inbox-sr-only">Numeric input means minutes; mm:ss and hh:mm:ss are also accepted.</span>
+                  <div className="capture-inbox-advanced-pair capture-inbox-advanced-pair-compact capture-inbox-advanced-input-row capture-inbox-advanced-duration-row">
+                    <NumberInput label="Min" narrow placeholder="e.g. 10 or 10:47" value={draft.minDurationSeconds} onChange={(v) => onUpdate("minDurationSeconds", v)} />
+                    <NumberInput label="Max" narrow placeholder="No limit" value={draft.maxDurationSeconds} onChange={(v) => onUpdate("maxDurationSeconds", v)} />
+                  </div>
+                </div>
+                <div
+                  aria-label="Metadata health filters"
+                  className="capture-inbox-advanced-scope-lane capture-inbox-advanced-scope-lane-metadata"
+                  title="Find items that are ready, incomplete, or missing key Douyin fields."
+                >
+                  <AdvancedScopeLaneLabel lane="metadata-health" label="Metadata health" />
+                  <span className="capture-inbox-sr-only">Find items that are ready, incomplete, or missing key Douyin fields.</span>
+                  <span className="capture-inbox-sr-only">Missing metadata policy: items lacking time/performance/processing-fit evidence remain visible and can be grouped with metadata health filters.</span>
+                  <div className="capture-inbox-advanced-metadata-rail" role="group" aria-label="Metadata health">
+                    {metadataHealthOptions.map((option) => {
+                      const selected = draft.metadataHealthFilters.includes(option.key);
+                      return (
+                        <button
+                          aria-pressed={selected}
+                          className={`capture-inbox-filter-chip capture-inbox-filter-chip-elevated capture-inbox-smart-preset-chip capture-inbox-metadata-health-chip${selected ? " is-active" : ""}`}
+                          key={option.key}
+                          onClick={() => toggleMetadataHealth(option.key)}
+                          title={`${option.label}. ${option.detail}`}
+                          type="button"
+                        >
+                          <FilterChipIconLabel icon={metadataHealthIcon(option.key)} label={option.shortLabel} />
+                          <b>{metadataHealthCounts[option.key].toLocaleString()}</b>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
               </div>
             </section>
-            <section className="capture-inbox-advanced-group capture-inbox-advanced-card compact-group">
-              <div className="capture-inbox-advanced-group-heading">
-                <h3>Metadata health</h3>
-                <p>Find items that are ready, incomplete, or missing key Douyin fields.</p>
-                <p className="capture-inbox-advanced-policy">Missing metadata policy: items lacking time/performance/processing-fit evidence remain visible and can be grouped with metadata health filters.</p>
-              </div>
-              <div className="capture-inbox-metadata-health-grid">
-                {metadataHealthOptions.map((option) => {
-                  const selected = draft.metadataHealthFilters.includes(option.key);
-                  return (
-                    <button
-                      aria-pressed={selected}
-                      className={`capture-inbox-filter-chip capture-inbox-metadata-health-card ${selected ? "is-active" : ""}`}
-                      key={option.key}
-                      onClick={() => toggleMetadataHealth(option.key)}
-                      title={option.detail}
-                      type="button"
-                    >
-                      <span>{option.label}</span>
-                      <b>{metadataHealthCounts[option.key].toLocaleString()}</b>
-                    </button>
-                  );
-                })}
-              </div>
-            </section>
+            <AdvancedPerformanceTabs draft={draft} onUpdate={onUpdate} />
           </div>
-          <section className="capture-inbox-advanced-group capture-inbox-advanced-card compact-group primary-performance">
-            <div className="capture-inbox-advanced-group-heading">
-              <h3>Performance</h3>
-              <p className="capture-inbox-advanced-help">Supports 10K, 1.2M, 3万. Estimated ranges use overlap matching.</p>
-            </div>
-            <div className="capture-inbox-advanced-grid capture-inbox-performance-grid is-dense">
-              <div className="capture-inbox-advanced-pair">
-                <NumberInput label="Min estimated views" placeholder="e.g. 10000, 10K, or 3万" value={draft.minEstimatedViews} onChange={(v) => onUpdate("minEstimatedViews", v)} />
-                <NumberInput label="Max estimated views" placeholder="No limit" value={draft.maxEstimatedViews} onChange={(v) => onUpdate("maxEstimatedViews", v)} />
-              </div>
-              <div className="capture-inbox-advanced-pair">
-                <NumberInput label="Min likes" placeholder="e.g. 500" value={draft.minLikes} onChange={(v) => onUpdate("minLikes", v)} />
-                <NumberInput label="Max likes" placeholder="No limit" value={draft.maxLikes} onChange={(v) => onUpdate("maxLikes", v)} />
-              </div>
-              <div className="capture-inbox-advanced-pair">
-                <NumberInput label="Min comments" placeholder="No limit" value={draft.minComments} onChange={(v) => onUpdate("minComments", v)} />
-                <NumberInput label="Max comments" placeholder="No limit" value={draft.maxComments} onChange={(v) => onUpdate("maxComments", v)} />
-              </div>
-              <div className="capture-inbox-advanced-pair">
-                <NumberInput label="Min shares" placeholder="No limit" value={draft.minShares} onChange={(v) => onUpdate("minShares", v)} />
-                <NumberInput label="Max shares" placeholder="No limit" value={draft.maxShares} onChange={(v) => onUpdate("maxShares", v)} />
-              </div>
-              <div className="capture-inbox-advanced-pair">
-                <NumberInput label="Min engagement score" placeholder="No limit" value={draft.minEngagementScore} onChange={(v) => onUpdate("minEngagementScore", v)} />
-                <NumberInput label="Max engagement score" placeholder="No limit" value={draft.maxEngagementScore} onChange={(v) => onUpdate("maxEngagementScore", v)} />
-              </div>
-              <div className="capture-inbox-advanced-pair">
-                <NumberInput label="Min engagement rate %" placeholder="No limit" value={draft.minEngagementRate} onChange={(v) => onUpdate("minEngagementRate", v)} />
-                <NumberInput label="Max engagement rate %" placeholder="No limit" value={draft.maxEngagementRate} onChange={(v) => onUpdate("maxEngagementRate", v)} />
-              </div>
-            </div>
-          </section>
-          <p className="capture-inbox-advanced-risk-disclosure"><strong>Risk filters</strong> Not available yet. Unsupported risk, speech, text-density, copyright, and complexity filters are not available yet and are not active filters.</p>
-        </div>
-      ) : null}
+        ) : null}
+      </div>
     </section>
   );
 }
 
-function NumberInput({ label, onChange, placeholder, value }: { label: string; onChange: (value: string) => void; placeholder?: string; value: string }) {
+function NumberInput({
+  hint,
+  label,
+  narrow = false,
+  onChange,
+  placeholder,
+  value
+}: {
+  hint?: string;
+  label: string;
+  narrow?: boolean;
+  onChange: (value: string) => void;
+  placeholder?: string;
+  value: string;
+}) {
   return (
-    <label className="field capture-inbox-advanced-field">
+    <label className={`field capture-inbox-advanced-field${narrow ? " capture-inbox-advanced-field-narrow" : ""}`.trim()} title={hint}>
       <span>{label}</span>
-      <input className="capture-inbox-advanced-input" inputMode="numeric" onChange={(event) => onChange(event.target.value)} placeholder={placeholder} type="text" value={value} />
+      <input
+        className={`capture-inbox-advanced-input${narrow ? " capture-inbox-advanced-input-narrow" : ""}`.trim()}
+        inputMode="numeric"
+        onChange={(event) => onChange(event.target.value)}
+        placeholder={placeholder}
+        title={hint}
+        type="text"
+        value={value}
+      />
     </label>
   );
 }
@@ -2060,6 +2452,78 @@ function AdvancedToggle({ checked, label, onChange }: { checked: boolean; label:
   );
 }
 
+function SessionRibbonEmptyState({
+  loading,
+  onShowAllSessions,
+  sessionStatus
+}: {
+  loading: boolean;
+  onShowAllSessions: () => void;
+  sessionStatus: "all" | CaptureSessionStatus;
+}) {
+  if (loading) {
+    return (
+      <div aria-busy="true" aria-label="Loading capture sessions" className="capture-inbox-session-ribbon-empty">
+        <div className="capture-inbox-session-ribbon-empty__card is-loading">
+          <div className="capture-inbox-session-ribbon-empty__copy">
+            <span className="capture-inbox-session-ribbon-empty__eyebrow">Sessions</span>
+            <h3 className="capture-inbox-session-ribbon-empty__title">Loading sessions…</h3>
+            <p className="capture-inbox-session-ribbon-empty__detail">Fetching capture sessions from the inbox.</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const filtered = sessionStatus !== "all";
+  const statusLabel = filtered ? formatCaptureSessionStatusLabel(sessionStatus) : null;
+
+  return (
+    <div
+      aria-label={filtered ? "No matching capture sessions" : "No capture sessions yet"}
+      className="capture-inbox-session-ribbon-empty"
+    >
+      <div className={`capture-inbox-session-ribbon-empty__card ${filtered ? "is-filtered" : "is-global"}`.trim()}>
+        <div aria-hidden="true" className="capture-inbox-session-ribbon-empty__glyph">
+          {filtered ? (
+            <svg fill="none" height="28" viewBox="0 0 28 28" width="28" xmlns="http://www.w3.org/2000/svg">
+              <path d="M6 8h16M8 14h12M10 20h8" stroke="currentColor" strokeLinecap="round" strokeWidth="1.75" />
+              <circle cx="21" cy="8" r="4.25" stroke="currentColor" strokeWidth="1.75" />
+            </svg>
+          ) : (
+            <svg fill="none" height="28" viewBox="0 0 28 28" width="28" xmlns="http://www.w3.org/2000/svg">
+              <rect height="18" rx="4" stroke="currentColor" strokeWidth="1.75" width="14" x="7" y="5" />
+              <path d="M11 22h6" stroke="currentColor" strokeLinecap="round" strokeWidth="1.75" />
+              <path d="M14 9v6M11 12h6" stroke="currentColor" strokeLinecap="round" strokeWidth="1.75" />
+            </svg>
+          )}
+        </div>
+        <div className="capture-inbox-session-ribbon-empty__copy">
+          <span className="capture-inbox-session-ribbon-empty__eyebrow">
+            {filtered ? `${statusLabel} filter` : "Get started"}
+          </span>
+          <h3 className="capture-inbox-session-ribbon-empty__title">
+            {filtered ? `No ${statusLabel} sessions` : "No capture session yet"}
+          </h3>
+          <p className="capture-inbox-session-ribbon-empty__detail">
+            {filtered
+              ? `No sessions match the ${statusLabel} status right now. Try another filter or view all sessions.`
+              : "Capture a Douyin page with the extension to start triaging items here."}
+          </p>
+        </div>
+        {filtered ? (
+          <button className="capture-inbox-session-ribbon-empty__action" onClick={onShowAllSessions} type="button">
+            <span aria-hidden="true" className="capture-inbox-session-ribbon-empty__action-icon">
+              <WorkItemActionIcon className="capture-inbox-session-ribbon-empty__action-glyph" kind="details" />
+            </span>
+            <span className="capture-inbox-session-ribbon-empty__action-label">Show all sessions</span>
+          </button>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 function SessionRibbon({
   latestSessionId,
   loading,
@@ -2067,7 +2531,9 @@ function SessionRibbon({
   onDelete,
   onLoadMore,
   onSelect,
+  onSessionStatus,
   selectedSessionId,
+  sessionStatus,
   sessions,
   sessionsTotalCount,
   working
@@ -2078,7 +2544,9 @@ function SessionRibbon({
   onDelete: (session: CaptureSession) => void;
   onLoadMore: () => void;
   onSelect: (sessionId: string) => void;
+  onSessionStatus: (status: "all" | CaptureSessionStatus) => void;
   selectedSessionId: string | null;
+  sessionStatus: "all" | CaptureSessionStatus;
   sessions: CaptureSession[];
   sessionsTotalCount: number;
   working: CaptureInboxAction | "delete_session" | "refresh" | null;
@@ -2086,17 +2554,33 @@ function SessionRibbon({
   return (
     <div className="capture-inbox-command-deck-sessions capture-inbox-session-ribbon-shell-wrap" aria-label="Session Ribbon">
       <div className="capture-inbox-command-deck-sessions-head capture-inbox-session-ribbon-heading">
-        <span className="capture-inbox-command-deck-sessions-kicker">Sessions</span>
-        <span className="capture-inbox-command-deck-sessions-meta">
-          {loading
-            ? "Loading…"
-            : sessionsTotalCount > 0
-              ? `${sessions.length.toLocaleString("en-US")} of ${sessionsTotalCount.toLocaleString("en-US")} available`
-              : `${sessions.length} available`}
-        </span>
+        <div className="capture-inbox-session-ribbon-heading-copy">
+          <span className="capture-inbox-command-deck-sessions-kicker">Sessions</span>
+          <span className="capture-inbox-command-deck-sessions-meta">
+            {loading
+              ? "Loading…"
+              : sessionsTotalCount > 0
+                ? `${sessions.length.toLocaleString("en-US")} of ${sessionsTotalCount.toLocaleString("en-US")} available`
+                : `${sessions.length} available`}
+          </span>
+        </div>
+        <label className="capture-inbox-session-ribbon-filter">
+          <span className="capture-inbox-sr-only">Filter capture sessions</span>
+          <select
+            aria-label="Filter capture sessions"
+            className="review-board-deck-input capture-inbox-filter-select"
+            onChange={(event) => onSessionStatus(event.target.value as "all" | CaptureSessionStatus)}
+            value={sessionStatus}
+          >
+            <option value="all">All sessions</option>
+            {SESSION_STATUS_OPTIONS.filter((option) => option !== "all").map((option) => (
+              <option key={option} value={option}>{formatCaptureSessionStatusLabel(option)}</option>
+            ))}
+          </select>
+        </label>
       </div>
-      <div className={`capture-inbox-session-rail-shell ${sessions.length ? "" : "empty"}`.trim()}>
-        <div className="capture-inbox-session-ribbon" aria-label="Session Ribbon">
+      <div className={`capture-inbox-session-rail-shell ${sessions.length || loading ? "" : "empty"}`.trim()}>
+        <div className={`capture-inbox-session-ribbon ${sessions.length ? "" : "is-empty"}`.trim()} aria-label="Session Ribbon">
         {sessions.map((session) => {
           const selected = selectedSessionId === session.id;
           const isDeleting = working === "delete_session" && selected;
@@ -2115,11 +2599,32 @@ function SessionRibbon({
                   <span className="capture-inbox-session-time">{formatDateTime(session.created_at)}</span>
                 </span>
                 <span className="capture-inbox-session-actions" aria-label={`Session actions for ${sessionLabel}`}>
-                  <button aria-current={selected ? "true" : undefined} aria-pressed={selected} className="capture-inbox-session-action-btn capture-inbox-session-open" disabled={working !== null} onClick={() => onSelect(session.id)} type="button">
-                    Open
+                  <button
+                    aria-current={selected ? "true" : undefined}
+                    aria-label={selected ? "Current session" : "Open session"}
+                    aria-pressed={selected}
+                    className="capture-inbox-session-action-btn is-icon capture-inbox-session-open"
+                    disabled={working !== null}
+                    onClick={() => onSelect(session.id)}
+                    title={selected ? "Current session" : "Open session"}
+                    type="button"
+                  >
+                    <WorkItemActionIcon className="capture-inbox-session-action-btn__icon" kind="enter" />
                   </button>
-                  <button className="capture-inbox-session-action-btn is-danger capture-inbox-session-delete" disabled={working !== null} onClick={() => onDelete(session)} type="button">
-                    {isDeleting ? "…" : "Delete"}
+                  <button
+                    aria-busy={isDeleting || undefined}
+                    aria-label={isDeleting ? "Deleting session" : "Delete session"}
+                    className="capture-inbox-session-action-btn is-danger is-icon capture-inbox-session-delete"
+                    disabled={working !== null}
+                    onClick={() => onDelete(session)}
+                    title={isDeleting ? "Deleting session" : "Delete session"}
+                    type="button"
+                  >
+                    {isDeleting ? (
+                      <span aria-hidden="true" className="capture-inbox-session-action-btn__busy">…</span>
+                    ) : (
+                      <WorkItemActionIcon className="capture-inbox-session-action-btn__icon" kind="delete" />
+                    )}
                   </button>
                 </span>
               </div>
@@ -2153,9 +2658,15 @@ function SessionRibbon({
             </article>
           );
         })}
-          {!sessions.length ? <OpsEmptyState detail="Capture a Douyin page with the extension to start triaging items here." title="No capture session yet" /> : null}
+          {!sessions.length ? (
+            <SessionRibbonEmptyState
+              loading={loading}
+              onShowAllSessions={() => onSessionStatus("all")}
+              sessionStatus={sessionStatus}
+            />
+          ) : null}
         </div>
-        {sessions.length > 0 || sessionsTotalCount > 0 ? (
+        {hasMoreOffsetItems(sessions.length, sessionsTotalCount) ? (
           <OffsetLoadMoreFooter
             disabled={working !== null}
             loadedCount={sessions.length}
@@ -2172,6 +2683,34 @@ function SessionRibbon({
   );
 }
 
+function CaptureInboxGalleryPreloading({ statusLabel }: { statusLabel: string }) {
+  return (
+    <section className="capture-inbox-gallery-preloading" role="status" aria-live="polite">
+      <div className="capture-inbox-gallery-preloading__status">
+        <span aria-hidden="true" className="capture-inbox-gallery-preloading__spinner" />
+        <div>
+          <strong>Preparing {statusLabel.toLocaleLowerCase()} tiles…</strong>
+          <span>Loading the authoritative database slice.</span>
+        </div>
+      </div>
+      <div aria-hidden="true" className="capture-inbox-gallery-preloading__grid">
+        {Array.from({ length: 8 }, (_, index) => (
+          <div className="capture-inbox-gallery-preloading__tile" key={index}>
+            <div className="capture-inbox-gallery-preloading__media" />
+            <span className="capture-inbox-gallery-preloading__line is-wide" />
+            <span className="capture-inbox-gallery-preloading__line" />
+            <div className="capture-inbox-gallery-preloading__pills">
+              <span />
+              <span />
+              <span />
+            </div>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function MediaTileGallery({
   activeItemId,
   hasMoreItems,
@@ -2181,6 +2720,8 @@ function MediaTileGallery({
   onAction,
   onFocusItem,
   onLoadMore,
+  pendingActionForItem,
+  onSelectVisible,
   onToggleItem,
   selectedItemIds,
   working
@@ -2193,30 +2734,45 @@ function MediaTileGallery({
   onAction: (item: CapturedItem, action: CaptureInboxAction) => void;
   onFocusItem: (itemId: string) => void;
   onLoadMore: () => void;
+  pendingActionForItem: (item: CapturedItem) => CaptureInboxAction | null;
+  onSelectVisible: () => void;
   onToggleItem: (itemId: string) => void;
   selectedItemIds: string[];
   working: CaptureInboxAction | "delete_session" | "refresh" | null;
 }) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
-  const loadMoreRef = useRef<HTMLDivElement | null>(null);
-  const [scrollRoot, setScrollRoot] = useState<Element | null>(null);
+  const loadMoreSentinelRef = useRef<HTMLDivElement | null>(null);
+  const virtualRowStride = CAPTURE_INBOX_VIRTUAL_ROW_HEIGHT + CAPTURE_INBOX_VIRTUAL_ROW_GAP;
   const [columnCount, setColumnCount] = useState(CAPTURE_INBOX_GALLERY_MAX_COLUMNS);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(720);
 
   useOffsetLoadMoreOnScroll({
-    sentinelRef: loadMoreRef,
+    sentinelRef: loadMoreSentinelRef,
     hasMore: hasMoreItems,
     loading: loadingMoreItems,
     disabled: working !== null,
     loadedCount: items.length,
     onLoadMore,
-    root: scrollRoot,
+    root: null,
     rootMargin: "240px 0px",
   });
 
   useEffect(() => {
-    setScrollRoot(scrollRef.current);
+    const updateFromPageScroll = () => {
+      const scrollElement = scrollRef.current;
+      if (!scrollElement) return;
+      const rect = scrollElement.getBoundingClientRect();
+      setScrollTop(Math.max(0, -rect.top));
+      setViewportHeight(window.innerHeight);
+    };
+    updateFromPageScroll();
+    window.addEventListener("scroll", updateFromPageScroll, { passive: true });
+    window.addEventListener("resize", updateFromPageScroll);
+    return () => {
+      window.removeEventListener("scroll", updateFromPageScroll);
+      window.removeEventListener("resize", updateFromPageScroll);
+    };
   }, [items.length]);
 
   useEffect(() => {
@@ -2229,7 +2785,6 @@ function MediaTileGallery({
         Math.max(1, Math.floor((width + 12) / (CAPTURE_INBOX_VIRTUAL_MIN_COLUMN_WIDTH + 12)))
       );
       setColumnCount(nextColumnCount);
-      setViewportHeight(scrollElement.clientHeight);
     };
     updateLayout();
     const observer = typeof ResizeObserver !== "undefined" ? new ResizeObserver(updateLayout) : null;
@@ -2237,14 +2792,15 @@ function MediaTileGallery({
     return () => observer?.disconnect();
   }, [items.length]);
 
-  if (!items.length) return <OpsEmptyState detail="No media tiles match the current studio filters." title="No media tiles match" />;
+  if (!items.length) return null;
 
   const rowCount = Math.ceil(items.length / columnCount);
-  const startRow = Math.max(0, Math.floor(scrollTop / CAPTURE_INBOX_VIRTUAL_ROW_HEIGHT) - CAPTURE_INBOX_VIRTUAL_OVERSCAN_ROWS);
+  const startRow = Math.max(0, Math.floor(scrollTop / virtualRowStride) - CAPTURE_INBOX_VIRTUAL_OVERSCAN_ROWS);
   const endRow = Math.min(
     rowCount,
-    Math.ceil((scrollTop + viewportHeight) / CAPTURE_INBOX_VIRTUAL_ROW_HEIGHT) + CAPTURE_INBOX_VIRTUAL_OVERSCAN_ROWS
+    Math.ceil((scrollTop + viewportHeight) / virtualRowStride) + CAPTURE_INBOX_VIRTUAL_OVERSCAN_ROWS
   );
+  const virtualSpacerHeight = rowCount > 0 ? rowCount * virtualRowStride - CAPTURE_INBOX_VIRTUAL_ROW_GAP : 0;
   const startIndex = startRow * columnCount;
   const endIndex = Math.min(items.length, endRow * columnCount);
   const visibleSlice = items.slice(startIndex, endIndex);
@@ -2260,17 +2816,24 @@ function MediaTileGallery({
           <p className="eyebrow">Media-first Triage Studio</p>
           <h2>Tile Gallery</h2>
         </div>
-        <span>{items.length.toLocaleString()} tile(s) shown · {itemsTotalCount.toLocaleString()} total</span>
+        <div className="capture-inbox-gallery-heading-actions">
+          <span>{items.length.toLocaleString()} tile(s) shown · {itemsTotalCount.toLocaleString()} total</span>
+          <button className="capture-inbox-gallery-select-visible" disabled={working !== null} onClick={onSelectVisible} title="Select visible applies to the current filtered view." type="button">
+            <WorkItemActionIcon className="capture-inbox-gallery-select-visible__icon" kind="select-visible" />
+            Select visible
+          </button>
+        </div>
       </div>
       <div
         className="capture-inbox-virtual-scroll"
-        onScroll={(event) => {
-          setScrollTop(event.currentTarget.scrollTop);
-        }}
         ref={scrollRef}
+        style={{
+          ["--capture-inbox-virtual-row-height" as string]: `${CAPTURE_INBOX_VIRTUAL_ROW_HEIGHT}px`,
+          ["--capture-inbox-virtual-row-gap" as string]: `${CAPTURE_INBOX_VIRTUAL_ROW_GAP}px`,
+        }}
       >
-        <div className="capture-inbox-virtual-spacer" style={{ height: rowCount * CAPTURE_INBOX_VIRTUAL_ROW_HEIGHT }}>
-          <div className="capture-inbox-virtual-window" style={{ transform: `translateY(${startRow * CAPTURE_INBOX_VIRTUAL_ROW_HEIGHT}px)` }}>
+        <div className="capture-inbox-virtual-spacer" style={{ height: virtualSpacerHeight }}>
+          <div className="capture-inbox-virtual-window" style={{ transform: `translateY(${startRow * virtualRowStride}px)` }}>
             {visibleRows.map((row, rowOffset) => (
               <div
                 className="capture-inbox-virtual-row"
@@ -2285,6 +2848,7 @@ function MediaTileGallery({
                     onAction={onAction}
                     onFocusItem={onFocusItem}
                     onToggleItem={onToggleItem}
+                    pendingAction={pendingActionForItem(item)}
                     selected={selectedItemIds.includes(item.id)}
                     working={working}
                   />
@@ -2293,30 +2857,32 @@ function MediaTileGallery({
             ))}
           </div>
         </div>
-        {items.length > 0 || itemsTotalCount > 0 ? (
-          <OffsetLoadMoreFooter
-            ref={loadMoreRef}
-            autoLoad
-            disabled={working !== null}
-            loadedCount={items.length}
-            loadingMore={loadingMoreItems}
-            noun="tiles"
-            onLoadMore={hasMoreItems ? onLoadMore : undefined}
-            pageSize={CAPTURE_INBOX_ITEMS_PAGE_SIZE}
-            totalCount={itemsTotalCount}
-            variant="studio"
-          />
+        {hasMoreItems ? (
+          <div aria-hidden="true" className="capture-inbox-load-more-sentinel" ref={loadMoreSentinelRef} />
         ) : null}
       </div>
+      {items.length > 0 || itemsTotalCount > 0 ? (
+        <OffsetLoadMoreFooter
+          autoLoad
+          disabled={working !== null}
+          loadedCount={items.length}
+          loadingMore={loadingMoreItems}
+          noun="tiles"
+          onLoadMore={hasMoreItems ? onLoadMore : undefined}
+          pageSize={CAPTURE_INBOX_ITEMS_PAGE_SIZE}
+          totalCount={itemsTotalCount}
+          variant="studio"
+        />
+      ) : null}
     </section>
   );
 }
 
-function MediaTile({ focused, item, onAction, onFocusItem, onToggleItem, selected, working }: { focused: boolean; item: CapturedItem; onAction: (item: CapturedItem, action: CaptureInboxAction) => void; onFocusItem: (itemId: string) => void; onToggleItem: (itemId: string) => void; selected: boolean; working: CaptureInboxAction | "delete_session" | "refresh" | null }) {
+function MediaTile({ focused, item, onAction, onFocusItem, onToggleItem, pendingAction, selected, working }: { focused: boolean; item: CapturedItem; onAction: (item: CapturedItem, action: CaptureInboxAction) => void; onFocusItem: (itemId: string) => void; onToggleItem: (itemId: string) => void; pendingAction: CaptureInboxAction | null; selected: boolean; working: CaptureInboxAction | "delete_session" | "refresh" | null }) {
   const ready = isReadyItem(item);
   const thumbnailUrl = resolveThumbnailDisplayUrl(item);
   const cardModel = compactCardModelForItem(item);
-  const scoreBadge = getOperatorTileScoreBadge(item);
+  const scoreBadge = useOperatorTileScoreBadge(item);
   const showTileMetrics = shouldShowCaptureInboxTileMetrics(item);
 
   useEffect(() => {
@@ -2324,7 +2890,7 @@ function MediaTile({ focused, item, onAction, onFocusItem, onToggleItem, selecte
   }, [item, thumbnailUrl]);
 
   return (
-    <article className={`capture-inbox-media-tile capture-inbox-compact-card ${showTileMetrics ? "" : "is-metrics-collapsed"} ${focused ? "selected" : ""}`}>
+    <article className={`capture-inbox-media-tile capture-inbox-compact-card ${showTileMetrics ? "" : "is-metrics-collapsed"} ${selected ? "is-bulk-selected" : ""} ${focused ? "selected" : ""}`}>
       <div className="capture-inbox-media-frame">
         <button className="capture-inbox-media-thumbnail" onClick={() => onFocusItem(item.id)} type="button">
           {thumbnailUrl ? (
@@ -2352,28 +2918,43 @@ function MediaTile({ focused, item, onAction, onFocusItem, onToggleItem, selecte
         <div className="capture-inbox-tile-primary-row">
           <button className="link-button capture-inbox-tile-title" onClick={() => onFocusItem(item.id)} title={titleForItem(item)} type="button">{titleForItem(item)}</button>
         </div>
-        <div className="capture-inbox-tile-quick-meta" aria-label="Compact quick metadata">
-          {cardModel.quickMetaChips.map((chip) => (
-            <span className="capture-inbox-tile-quick-chip" key={chip.label}>
-              <strong>{chip.label}</strong>
-              <span>{chip.value}</span>
+        <div className="capture-inbox-tile-stats">
+          <p className="capture-inbox-tile-meta-line" aria-label="Duration and posted">
+            <span className="capture-inbox-tile-meta-stat" title={cardModel.meta.durationTitle}>
+              <span aria-hidden="true" className="capture-inbox-tile-perf-stat-icon">
+                <CaptureInboxFilterChipIcon className="capture-inbox-tile-perf-stat-icon__glyph" kind="stat-duration" />
+              </span>
+              <span className="capture-inbox-tile-meta-copy">
+                <span className="capture-inbox-tile-meta-label">Duration</span>
+                <span className="capture-inbox-tile-meta-value">{cardModel.meta.duration}</span>
+              </span>
             </span>
-          ))}
+            <span className="capture-inbox-tile-meta-stat" title={cardModel.meta.postedTitle}>
+              <span aria-hidden="true" className="capture-inbox-tile-perf-stat-icon">
+                <CaptureInboxFilterChipIcon className="capture-inbox-tile-perf-stat-icon__glyph" kind="stat-posted" />
+              </span>
+              <span className="capture-inbox-tile-meta-copy">
+                <span className="capture-inbox-tile-meta-label">Posted</span>
+                <span className="capture-inbox-tile-meta-value">{cardModel.meta.posted}</span>
+              </span>
+            </span>
+          </p>
+          <div className="capture-inbox-tile-perf-rail" aria-label="Engagement">
+            {cardModel.perfStats.map((stat) => (
+              <span className="capture-inbox-tile-perf-stat" key={stat.key} title={stat.title}>
+                <span aria-hidden="true" className="capture-inbox-tile-perf-stat-icon">
+                  <CaptureInboxFilterChipIcon className="capture-inbox-tile-perf-stat-icon__glyph" kind={stat.icon} />
+                </span>
+                <span className="capture-inbox-tile-perf-stat-value">{stat.value}</span>
+                <span className="capture-inbox-sr-only">{stat.label}</span>
+              </span>
+            ))}
+          </div>
         </div>
         {cardModel.metadataGap ? (
           <div className="capture-inbox-tile-gap-note" aria-label="Metadata quality gaps">
             <strong>Missing</strong>
             <span>{cardModel.metadataGap}</span>
-          </div>
-        ) : null}
-        {showTileMetrics ? (
-          <div className="capture-inbox-tile-metrics" aria-label="Item metrics">
-            {cardModel.metrics.map((metric) => (
-              <div className="capture-inbox-tile-metric-cell" key={metric.label} title={metric.title}>
-                <span className="capture-inbox-tile-metric-label">{metric.label}</span>
-                <strong className="capture-inbox-tile-metric-value">{metric.value}</strong>
-              </div>
-            ))}
           </div>
         ) : null}
       </div>
@@ -2382,7 +2963,7 @@ function MediaTile({ focused, item, onAction, onFocusItem, onToggleItem, selecte
           item={item}
           mutating={working !== null}
           onAction={onAction}
-          onFocusItem={onFocusItem}
+          pendingAction={pendingAction}
           promotable={isPromotableItem(item)}
           workingAction={working}
         />
@@ -2394,17 +2975,25 @@ function MediaTile({ focused, item, onAction, onFocusItem, onToggleItem, selecte
 function RightInspector({
   detailLoading,
   item,
+  mutating,
+  onAction,
   onClose,
   open,
+  pendingAction,
   rawDetails,
-  sourceUrls
+  sourceUrls,
+  workingAction
 }: {
   detailLoading: boolean;
   item: CapturedItem | null;
+  mutating: boolean;
+  onAction: (item: CapturedItem, action: CaptureInboxAction) => void;
   onClose: () => void;
   open: boolean;
+  pendingAction: CaptureInboxAction | null;
   rawDetails: Array<Record<string, unknown>>;
   sourceUrls: string[];
+  workingAction: CaptureInboxAction | "delete_session" | "refresh" | null;
 }) {
   const [expandedTextKeys, setExpandedTextKeys] = useState<Record<string, boolean>>({});
 
@@ -2417,11 +3006,28 @@ function RightInspector({
   }
 
   const detailTextSections = item ? compactDetailTextSections(item) : [];
-  const reupScore = item ? getReupScoreForCaptureItem(item) : null;
+  const reupScore = useOptionalReupScoreForCaptureItem(item);
+  const coreStats = item ? inspectorCoreStats(item) : [];
+  const thumbnailUrl = item ? resolveThumbnailDisplayUrl(item) : null;
 
   return (
     <WorkItemDetailsDrawer
       eyebrow="Capture Inbox"
+      footer={
+        item ? (
+          <div className="review-board-inspector-queue-actions">
+            <CaptureInboxTileActions
+              item={item}
+              mutating={mutating}
+              onAction={onAction}
+              pendingAction={pendingAction}
+              promotable={isPromotableItem(item)}
+              variant="inspector"
+              workingAction={workingAction}
+            />
+          </div>
+        ) : null
+      }
       open={open}
       title="Item details"
       titleId="capture-inbox-details-title"
@@ -2430,34 +3036,67 @@ function RightInspector({
       <OpsDetailPanel emptyDetail={!item ? "Select an item to inspect details." : undefined} title="Item details">
         {item ? (
           <>
-            <div className="capture-inbox-detail-hero compact">
-              <div className="capture-inbox-detail-hero-topline">
-                <span className={`status-badge ${itemStatusTone(item.status)}`}>{operatorStatusLabel(item.status)}</span>
-                <span className="capture-inbox-session-time">{metadataSummary(item)}</span>
+            <div className="capture-inbox-inspector">
+              <div className="capture-inbox-inspector-summary-card">
+                <div className="capture-inbox-inspector-media">
+                  {thumbnailUrl ? <img alt="" src={thumbnailUrl} /> : <span>Preview unavailable</span>}
+                </div>
+                <div className="capture-inbox-inspector-summary">
+                  <div className="capture-inbox-inspector-summary-topline">
+                    <div className="capture-inbox-inspector-statuses">
+                      <span className={`status-badge ${itemStatusTone(item.status)}`}>{operatorStatusLabel(item.status)}</span>
+                      {reupScore ? (
+                        <span className={`capture-inbox-inspector-score is-${reupScore.reup_score_level}`}>
+                          Score {formatReupScoreBadgeValue(reupScore.reup_score)}
+                        </span>
+                      ) : null}
+                    </div>
+                    <span className="capture-inbox-session-time">{metadataSummary(item)}</span>
+                  </div>
+                  <CompactText
+                    expanded={Boolean(expandedTextKeys.title)}
+                    label="Title"
+                    text={titleForItem(item)}
+                    textKey="title"
+                    threshold={140}
+                    onToggle={toggleText}
+                  />
+                  <CompactText
+                    expanded={Boolean(expandedTextKeys.caption)}
+                    label="Caption"
+                    placeholder="Caption not captured"
+                    text={item.caption}
+                    textKey="caption"
+                    threshold={180}
+                    onToggle={toggleText}
+                  />
+                </div>
               </div>
-              <CompactText
-                expanded={Boolean(expandedTextKeys.title)}
-                label="Title"
-                text={titleForItem(item)}
-                textKey="title"
-                threshold={140}
-                onToggle={toggleText}
-              />
-              <CompactText
-                expanded={Boolean(expandedTextKeys.caption)}
-                label="Caption"
-                placeholder="Caption not captured"
-                text={item.caption}
-                textKey="caption"
-                threshold={180}
-                onToggle={toggleText}
-              />
-            </div>
-            <OpsDetailSection title="Overview">
-              <OpsMetadataList items={inspectorOverviewItems(item)} />
+              <section className="capture-inbox-inspector-metadata" aria-labelledby="capture-inbox-inspector-metadata-title">
+                <div className="capture-inbox-inspector-section-heading">
+                  <span aria-hidden="true">01</span>
+                  <div>
+                    <h3 id="capture-inbox-inspector-metadata-title">Core metadata</h3>
+                    <small>Timing and engagement at a glance</small>
+                  </div>
+                </div>
+                <div className="capture-inbox-inspector-metadata-grid">
+                  {coreStats.map((stat) => (
+                    <div className="capture-inbox-inspector-stat" key={stat.key}>
+                      <span className="capture-inbox-inspector-stat__icon">
+                        <CaptureInboxFilterChipIcon kind={stat.icon} />
+                      </span>
+                      <span className="capture-inbox-inspector-stat__copy">
+                        <small>{stat.label}</small>
+                        <strong title={stat.value}>{stat.value}</strong>
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </section>
               {detailLoading ? <p className="capture-inbox-inspector-loading">Loading full item details…</p> : null}
               {detailTextSections.length ? (
-                <div className="capture-inbox-compact-text-stack">
+                <div className="capture-inbox-compact-text-stack capture-inbox-inspector-copy-card">
                   {detailTextSections.map((section) => (
                     <CompactText
                       expanded={Boolean(expandedTextKeys[section.key])}
@@ -2471,7 +3110,7 @@ function RightInspector({
                   ))}
                 </div>
               ) : null}
-            </OpsDetailSection>
+            </div>
             {reupScore ? (
               <OpsDetailSection title="Reup Score">
                 <ReupScoreBreakdown score={reupScore} />
@@ -2484,9 +3123,6 @@ function RightInspector({
                 { label: "Share", value: item.share_url ? <a href={item.share_url} rel="noreferrer" target="_blank">Open share link</a> : "Not captured" },
                 { label: "Thumbnail", value: resolveThumbnailUrl(item) ? <a href={resolveThumbnailDisplayUrl(item) ?? "#"} rel="noreferrer" target="_blank">Open thumbnail</a> : "Not captured" }
               ]} />
-            </OpsDetailSection>
-            <OpsDetailSection title="Performance & engagement">
-              <OpsMetadataList items={inspectorPerformanceItems(item)} />
             </OpsDetailSection>
             <OpsDetailSection title="Metadata quality">
               <OpsMetadataList items={inspectorMetadataQualityItems(item)} />
@@ -2549,18 +3185,17 @@ function mergeSessionItemDetail(items: CapturedItem[], detail: CapturedItem): Ca
   return items.map((item) => (item.id === detail.id ? { ...item, ...detail } : item));
 }
 
-function inspectorOverviewItems(item: CapturedItem): Array<{ label: string; value: string }> {
+function inspectorCoreStats(item: CapturedItem): Array<{ key: string; label: string; value: string; icon: CaptureInboxFilterChipIconKind }> {
   return [
-    { label: "Next", value: nextActionForItem(item) },
-    { label: "Duration", value: resolveDuration(item) },
-    { label: "Posted", value: resolvePosted(item) },
-    { label: "Views", value: resolveViewCount(item) },
-    { label: "Estimated views range", value: estimatedViewsSummary(item) },
-    { label: "Estimated from likes", value: estimatedViewsSource(item) },
-    { label: "Like-rate assumptions", value: "Low 5% · Base 3% · High 1%" },
-    { label: "Likes", value: exactEngagementMetricDisplay(item.like_count, resolveLikeCount(item)) },
-    { label: "Comments", value: exactEngagementMetricDisplay(item.comment_count, resolveCommentCount(item)) },
-    { label: "Shares", value: exactEngagementMetricDisplay(item.share_count, resolveShareCount(item)) }
+    { key: "duration", label: "Duration", value: resolveDuration(item), icon: "meta-duration" },
+    { key: "posted", label: "Posted", value: resolvePosted(item), icon: "meta-posted" },
+    { key: "views", label: "Views", value: resolveViewCount(item), icon: "perf-views" },
+    { key: "estimated-views", label: "Estimated views range", value: estimatedViewsSummary(item), icon: "meta-views" },
+    { key: "estimated-source", label: "Estimated from likes", value: estimatedViewsSource(item), icon: "perf-rates" },
+    { key: "like-rate", label: "Like-rate assumptions", value: "Low 5% · Base 3% · High 1%", icon: "perf-rates" },
+    { key: "likes", label: "Likes", value: exactEngagementMetricDisplay(item.like_count, resolveLikeCount(item)), icon: "perf-engagement" },
+    { key: "comments", label: "Comments", value: exactEngagementMetricDisplay(item.comment_count, resolveCommentCount(item)), icon: "stat-comments" },
+    { key: "shares", label: "Shares", value: exactEngagementMetricDisplay(item.share_count, resolveShareCount(item)), icon: "stat-shares" }
   ];
 }
 
@@ -2576,36 +3211,53 @@ function CompactText({ expanded, label, onToggle, placeholder = "Not captured", 
   );
 }
 
-function BatchActionBar({ eligibility, lastSelectedAt, onAction, onClear, onSelectVisible, selectionScope, visibleCount, working }: { eligibility: BulkActionEligibility; lastSelectedAt: string | null; onAction: (action: BulkAction) => void; onClear: () => void; onSelectVisible: () => void; selectionScope: "visible_items"; visibleCount: number; working: CaptureInboxAction | "delete_session" | "refresh" | null }) {
-  if (!visibleCount) return null;
+function BulkActionButtonLabel({ icon, label }: { icon: WorkItemActionIconKind; label: string }) {
+  return (
+    <>
+      <span aria-hidden="true" className="capture-inbox-bulk-btn-icon">
+        <WorkItemActionIcon className="capture-inbox-bulk-btn-icon__glyph" kind={icon} />
+      </span>
+      <span className="capture-inbox-bulk-btn-label">{label}</span>
+    </>
+  );
+}
+
+function BatchActionBar({ eligibility, lastSelectedAt, onAction, onClear, pendingAction, selectionScope, working }: { eligibility: BulkActionEligibility; lastSelectedAt: string | null; onAction: (action: BulkAction) => void; onClear: () => void; pendingAction: BulkAction | null; selectionScope: "visible_items"; working: CaptureInboxAction | "delete_session" | "refresh" | null }) {
   const selectedCount = eligibility.selectedItems.length;
+  if (!selectedCount) return null;
   const disabled = working !== null;
-  const hasSelection = selectedCount > 0;
   return (
     <section
-      className={`capture-inbox-command-bar capture-inbox-bulk-command-bar ${hasSelection ? "is-active" : "is-idle"}`}
+      className="capture-inbox-command-bar capture-inbox-bulk-command-bar is-active"
       aria-label="Bulk actions"
       data-sticky="true"
       data-selection-scope={selectionScope}
     >
-      <div className="capture-inbox-bulk-toolbar">
-        <div className="capture-inbox-bulk-selection">
+      <div className="capture-inbox-bulk-rail">
+        <div className="capture-inbox-bulk-status">
           <span aria-hidden="true" className="capture-inbox-bulk-count-badge">{selectedCount}</span>
-          <div className="capture-inbox-command-bar-summary capture-inbox-bulk-selection-copy">
+          <div className="capture-inbox-bulk-status-copy">
             <strong>{selectedCount} selected</strong>
-            <p>{hasSelection ? "Bulk actions apply only to selected items." : "Select visible items or tick cards to enable bulk actions."}</p>
-            {lastSelectedAt ? <small>Last selected {formatDateTime(lastSelectedAt)}</small> : null}
+            <span className="capture-inbox-bulk-status-hint">Bulk actions apply only to selected items.</span>
+            {lastSelectedAt ? <span className="capture-inbox-bulk-status-meta">Last selected {formatDateTime(lastSelectedAt)}</span> : null}
           </div>
         </div>
-        <div className="capture-inbox-bulk-toolbar-utilities">
-          <button className="capture-inbox-bulk-btn" disabled={disabled || visibleCount === 0} onClick={onSelectVisible} title="Select visible applies to the current filtered view." type="button">Select visible</button>
-          <button className="capture-inbox-command-bar-clear capture-inbox-bulk-btn" disabled={disabled || selectedCount === 0} onClick={onClear} type="button">Clear selection</button>
+        <div aria-label="Bulk decisions" className="capture-inbox-bulk-action-row is-inline is-segmented" role="group">
+          <AsyncButton className="capture-inbox-bulk-btn is-primary" disabled={disabled || eligibility.promotableItems.length === 0} onClick={() => onAction("promote")} pending={pendingAction === "promote"} pendingLabel="Promoting…" type="button">
+            <BulkActionButtonLabel icon="promote" label="Promote" />
+          </AsyncButton>
+          <AsyncButton className="capture-inbox-bulk-btn" disabled={disabled || eligibility.recheckableItems.length === 0} onClick={() => onAction("recheck")} pending={pendingAction === "recheck"} pendingLabel="Re-checking…" type="button">
+            <BulkActionButtonLabel icon="recheck" label="Re-check" />
+          </AsyncButton>
+          <AsyncButton className="capture-inbox-bulk-btn is-danger" disabled={disabled || eligibility.deletableItems.length === 0} onClick={() => onAction("delete")} pending={pendingAction === "delete"} pendingLabel="Deleting…" type="button">
+            <BulkActionButtonLabel icon="delete" label="Delete" />
+          </AsyncButton>
         </div>
-      </div>
-      <div className="capture-inbox-bulk-action-row">
-        <button className="primary" disabled={disabled || eligibility.promotableItems.length === 0} onClick={() => onAction("promote")} type="button">Promote</button>
-        <button className="capture-inbox-bulk-btn" disabled={disabled || eligibility.recheckableItems.length === 0} onClick={() => onAction("recheck")} type="button">Re-check</button>
-        <button className="danger" disabled={disabled || eligibility.deletableItems.length === 0} onClick={() => onAction("delete")} type="button">Delete</button>
+        <div className="capture-inbox-bulk-toolbar-utilities">
+          <button className="capture-inbox-bulk-btn capture-inbox-command-bar-clear" disabled={disabled} onClick={onClear} type="button">
+            <BulkActionButtonLabel icon="clear-selection" label="Clear selection" />
+          </button>
+        </div>
       </div>
     </section>
   );
@@ -2671,6 +3323,20 @@ type CaptureSummary = {
   intakeNeedsReview: number;
   intakeFailed: number;
 };
+
+function buildSummaryFromStatusCounts(statusCounts: Record<StudioItemStatusFilter, number>): CaptureSummary {
+  return {
+    captured: statusCounts.all,
+    ready: statusCounts.ready,
+    duplicates: statusCounts.duplicate,
+    needsEnrichment: statusCounts.needs_action,
+    failed: statusCounts.failed,
+    promoted: statusCounts.promoted,
+    intakeMatched: statusCounts.ready,
+    intakeNeedsReview: statusCounts.needs_action,
+    intakeFailed: statusCounts.failed,
+  };
+}
 
 function buildSummary(session: CaptureSessionDetail | null): CaptureSummary {
   const items = session?.items ?? [];
@@ -3096,7 +3762,7 @@ function isReadyItem(item: CapturedItem): boolean {
 }
 
 function isPromotableItem(item: CapturedItem): boolean {
-  return isReadyItem(item) || item.status === "PREVIEW_MISSING";
+  return isCaptureInboxPromotableItem(item);
 }
 
 function isRetryableItem(item: CapturedItem): boolean {
@@ -3260,32 +3926,60 @@ function shortIdLine(item: CapturedItem): string {
 }
 
 function compactCardModelForItem(item: CapturedItem): TileCardModel {
+  const posted = resolvePostedCompactForTile(item);
+  const duration = resolveDuration(item);
+  const metrics = compactMetricMetaForItem(item);
+  const perfStats = compactTilePerfStatsForItem(metrics);
+  logTargetedAwemeCheckpoint5Render(
+    item,
+    [
+      { label: "Duration", value: duration },
+      { label: "Posted", value: posted.value }
+    ],
+    metrics
+  );
   return {
     metadataGap: formatCaptureInboxTileMetadataGap(item),
-    metrics: compactMetricMetaForItem(item),
-    quickMetaChips: compactQuickMetaForItem(item)
+    meta: {
+      duration,
+      durationTitle: `Duration: ${duration}`,
+      posted: posted.value,
+      postedTitle: posted.title
+    },
+    perfStats
   };
 }
 
-function compactQuickMetaForItem(item: CapturedItem): TileQuickMetaChip[] {
-  const values = [
-    { label: "Duration", value: resolveDuration(item) },
-    { label: "Posted", value: resolvePosted(item) }
-  ];
-  logTargetedAwemeCheckpoint5Render(item, values, null);
-  return values;
+function compactTilePerfStatsForItem(metrics: TileMetricCell[]): TilePerfStat[] {
+  return metrics.map((metric) => ({
+    key: metric.label.toLowerCase().replace(/\s+/g, "-"),
+    label: metric.label,
+    value: metric.value,
+    title: metric.title ?? metric.label,
+    icon: tileStatIconForMetric(metric.label)
+  }));
+}
+
+function tileStatIconForMetric(label: TileMetricCell["label"]): CaptureInboxFilterChipIconKind {
+  if (label === "Likes") return "perf-engagement";
+  if (label === "Comments") return "stat-comments";
+  if (label === "Shares") return "stat-shares";
+  return "perf-views";
+}
+
+function resolvePostedCompactForTile(item: CapturedItem): { value: string; title: string } {
+  const full = resolvePosted(item);
+  return { value: full, title: `Posted: ${full}` };
 }
 
 function compactMetricMetaForItem(item: CapturedItem): TileMetricCell[] {
   const viewMetric = resolveViewMetricForCard(item);
-  const values: TileMetricCell[] = [
+  return [
     viewMetric,
     { label: "Likes", value: exactEngagementMetricDisplay(item.like_count, resolveLikeCount(item)) },
     { label: "Comments", value: exactEngagementMetricDisplay(item.comment_count, resolveCommentCount(item)) },
     { label: "Shares", value: exactEngagementMetricDisplay(item.share_count, resolveShareCount(item)) }
   ];
-  logTargetedAwemeCheckpoint5Render(item, null, values);
-  return values;
 }
 
 function resolveViewMetricForCard(item: CapturedItem): TileMetricCell {

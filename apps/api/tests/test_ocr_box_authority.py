@@ -13,6 +13,32 @@ from src.media_pipeline.ocr_filtering.ocr_box_authority import apply_best_box_au
 
 
 class OcrBoxAuthorityTests(unittest.TestCase):
+    def test_v3_payload_is_not_reprocessed_by_legacy_authority(self) -> None:
+        payload = {
+            "authority": "ocr_authority_v3",
+            "frames": [
+                {
+                    "time_ms": 0,
+                    "boxes": [
+                        {
+                            "x": 0.3,
+                            "y": 0.9,
+                            "width": 0.4,
+                            "height": 0.05,
+                            "text": "字幕",
+                            "confidence": 0.99,
+                        }
+                    ],
+                }
+            ],
+        }
+        out = apply_best_box_authority(payload)
+        self.assertEqual(out, payload)
+
+    def test_v31_payload_is_not_reprocessed_by_legacy_authority(self) -> None:
+        payload = {"authority": "ocr_authority_v3.1", "frames": [{"boxes": []}]}
+        self.assertIs(apply_best_box_authority(payload), payload)
+
     def test_apply_best_authority_refines_hardsub_geometry(self) -> None:
         h, w = 180, 320
         frame = np.full((h, w, 3), 25, dtype=np.uint8)
@@ -42,8 +68,8 @@ class OcrBoxAuthorityTests(unittest.TestCase):
             boxes = out["frames"][0]["boxes"]
             self.assertEqual(out.get("box_authority"), "best_v6_inkscan")
             self.assertEqual(len(boxes), 1)
-            self.assertGreater(boxes[0]["w"], 0.4)
-            self.assertGreater(boxes[0]["y"] + boxes[0]["h"] / 2.0, 0.85)
+            self.assertGreater(boxes[0]["width"], 0.4)
+            self.assertGreater(boxes[0]["y"] + boxes[0]["height"] / 2.0, 0.85)
 
 
 if __name__ == "__main__":

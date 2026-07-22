@@ -114,6 +114,33 @@ class ReupQueueMarkMediaReadyAnalyzeTests(unittest.TestCase):
         self.assertEqual(updated.job_id, analyze_job_id)
         self.assertEqual(updated.status, ReupQueueStatus.WAITING_FOR_METADATA)
 
+    def test_mark_media_ready_recreates_analyze_job_when_previous_failed(self) -> None:
+        from src.enums import JobStatus, JobType
+
+        failed_id = uuid4()
+        item = queue_item(
+            job_id=failed_id,
+            status=ReupQueueStatus.WAITING_FOR_METADATA,
+            media_prep_status=ReupQueueMediaPrepStatus.WAITING_FOR_METADATA,
+        )
+        db = FakeActionDb(item)
+        db._jobs[failed_id] = SimpleNamespace(
+            id=failed_id,
+            job_type=JobType.ANALYZE_AUDIO,
+            status=JobStatus.FAILED,
+            idempotency_key=f"reup-queue:{item.id}:analyze-audio",
+        )
+        analysis = FakeAudioAnalysisService()
+
+        updated = ReupQueueService(db, audio_analysis_service=analysis).apply_action(
+            item.id,
+            action=ReupQueueAction.MARK_MEDIA_READY,
+        )
+
+        self.assertEqual(len(analysis.calls), 1)
+        self.assertNotEqual(updated.job_id, failed_id)
+        self.assertTrue(str(db._jobs[failed_id].idempotency_key).endswith(f":cancelled:{failed_id}"))
+
 
 if __name__ == "__main__":
     unittest.main()

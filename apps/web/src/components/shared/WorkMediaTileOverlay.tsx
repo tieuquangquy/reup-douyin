@@ -28,30 +28,12 @@ type WorkMediaTileScoreBadgeProps = {
 };
 
 export function WorkMediaTileScoreBadge({ badge, className = "", compact = false }: WorkMediaTileScoreBadgeProps) {
-  const tier = badge.tierLabel.trim();
   return (
     <span
       className={`work-media-tile-score-badge is-${badge.level} ${badge.score == null ? "is-missing" : "is-ready"} ${compact ? "is-inline" : ""} ${className}`.trim()}
       title={badge.title}
     >
-      {compact ? (
-        <span className="work-media-tile-score-inline">
-          <strong>{badge.valueLabel}</strong>
-          {tier ? (
-            <>
-              <span aria-hidden="true" className="work-media-tile-score-sep">
-                ·
-              </span>
-              <small>{tier}</small>
-            </>
-          ) : null}
-        </span>
-      ) : (
-        <>
-          <strong>{badge.valueLabel}</strong>
-          <small>{badge.tierLabel}</small>
-        </>
-      )}
+      <strong>{badge.valueLabel}</strong>
     </span>
   );
 }

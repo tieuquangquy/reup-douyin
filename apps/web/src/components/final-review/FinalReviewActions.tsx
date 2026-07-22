@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useT } from "../../lib/i18n";
 import type { ChecklistState, RenderOutput } from "../../types/final-review";
 import { checklistComplete, getRenderWarnings, isApproved, isPublishReady } from "../../lib/finalReviewState";
+import { AsyncButton } from "../shared/AsyncButton";
 
 const CHECKLIST_TOTAL = 6;
 
@@ -11,6 +12,8 @@ export function FinalReviewActions({
   render,
   checklist,
   actionBusy,
+  approvePending,
+  publishReadyPending,
   actionMessage,
   onApprove,
   onPublishReady
@@ -18,6 +21,8 @@ export function FinalReviewActions({
   render: RenderOutput;
   checklist: ChecklistState;
   actionBusy: boolean;
+  approvePending: boolean;
+  publishReadyPending: boolean;
   actionMessage: string | null;
   onApprove: () => void;
   onPublishReady: () => void;
@@ -43,17 +48,17 @@ export function FinalReviewActions({
         {actionMessage ? <p className="action-message">{actionMessage}</p> : null}
       </div>
       <div className="fr-decision-bar__actions">
-        <button type="button" onClick={onApprove} disabled={actionBusy || approved}>
+        <AsyncButton pending={approvePending} onClick={onApprove} disabled={actionBusy || approved}>
           {t("finalReviewActions.approveExport")}
-        </button>
-        <button
-          type="button"
+        </AsyncButton>
+        <AsyncButton
           className="primary"
+          pending={publishReadyPending}
           onClick={onPublishReady}
           disabled={actionBusy || publishReady || !readyForPublish}
         >
           {t("finalReviewActions.markPublishReady")}
-        </button>
+        </AsyncButton>
         {publishReady ? (
           <Link className="fr-decision-bar__link" href={`/source-videos/${render.source_video_id}/publish`}>
             {t("finalReviewActions.preparePublishDraft")}

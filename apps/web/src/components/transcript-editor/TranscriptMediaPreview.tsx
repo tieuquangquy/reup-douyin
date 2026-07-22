@@ -11,20 +11,26 @@ type Props = {
   summary: AudioAnalysisSummaryResponse | null;
   selectedSegment: EditableSegment | null;
   playRequestId: number;
+  pauseRequestId?: number;
   joinedTtsAssetId?: string | null;
+  onPlayingChange?: (playing: boolean) => void;
 };
 
 export function TranscriptMediaPreview({
   summary,
   selectedSegment,
   playRequestId,
-  joinedTtsAssetId = null
+  pauseRequestId = 0,
+  joinedTtsAssetId = null,
+  onPlayingChange
 }: Props) {
   const t = useT();
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const pendingPlayRef = useRef(false);
   const objectUrlRef = useRef<string | null>(null);
   const ttsObjectUrlRef = useRef<string | null>(null);
+  const onPlayingChangeRef = useRef(onPlayingChange);
+  onPlayingChangeRef.current = onPlayingChange;
   const previewSource = resolveTranscriptPreviewSource(summary?.manifest ?? null);
   const [playbackUrl, setPlaybackUrl] = useState<string | null>(null);
   const [loadState, setLoadState] = useState<"idle" | "loading" | "ready" | "error">(
@@ -134,6 +140,37 @@ export function TranscriptMediaPreview({
       void seekAndPlay();
     }
   }, [playRequestId, selectedSegment?.localId, selectedSegment?.startMs, playbackUrl]);
+
+  useEffect(() => {
+    if (pauseRequestId <= 0) return;
+    const video = videoRef.current;
+    if (!video) return;
+    pendingPlayRef.current = false;
+    video.pause();
+  }, [pauseRequestId]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    const syncPlaying = () => {
+      onPlayingChangeRef.current?.(!video.paused && !video.ended);
+    };
+    const onPlay = () => onPlayingChangeRef.current?.(true);
+    const onPause = () => onPlayingChangeRef.current?.(false);
+    const onEnded = () => onPlayingChangeRef.current?.(false);
+
+    video.addEventListener("play", onPlay);
+    video.addEventListener("pause", onPause);
+    video.addEventListener("ended", onEnded);
+    syncPlaying();
+
+    return () => {
+      video.removeEventListener("play", onPlay);
+      video.removeEventListener("pause", onPause);
+      video.removeEventListener("ended", onEnded);
+    };
+  }, [playbackUrl]);
 
   function seekAndPlay() {
     const video = videoRef.current;

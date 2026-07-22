@@ -20,7 +20,49 @@ export const CAPTURE_INBOX_SIMPLE_DEFAULT_FILTER = "ready" as const;
 export const CAPTURE_INBOX_POWER_DEFAULT_SORT: CaptureInboxSortMode = "ready_first";
 
 export function isCaptureInboxPromotableStatus(status: CapturedItem["status"]): boolean {
-  return status === "READY" || status === "ENRICHED" || status === "PREVIEW_MISSING";
+  return status === "READY" || status === "ENRICHED";
+}
+
+export function isCaptureInboxPromotableItem(item: CapturedItem): boolean {
+  return isCaptureInboxPromotableStatus(item.status) && item.matches_intake === true;
+}
+
+export type CaptureInboxDetailsActionModel =
+  | {
+      kind: "promoted";
+      reviewBoardHref: string | undefined;
+      showPromote: false;
+      showRecheck: false;
+      showDelete: false;
+    }
+  | {
+      kind: "ready" | "recover" | "excluded";
+      reviewBoardHref?: undefined;
+      showPromote: boolean;
+      showRecheck: boolean;
+      showDelete: boolean;
+    };
+
+/** Stage-aware Capture Inbox tile/details CTAs — hide disabled Promote teasers. */
+export function captureInboxDetailsActionModel(item: CapturedItem): CaptureInboxDetailsActionModel {
+  if (item.status === "PROMOTED") {
+    return {
+      kind: "promoted",
+      reviewBoardHref: item.promoted_video_candidate_id
+        ? `/selection/review-board?candidate=${encodeURIComponent(item.promoted_video_candidate_id)}`
+        : undefined,
+      showPromote: false,
+      showRecheck: false,
+      showDelete: false
+    };
+  }
+  if (item.status === "EXCLUDED") {
+    return { kind: "excluded", showPromote: false, showRecheck: false, showDelete: true };
+  }
+  if (isCaptureInboxPromotableItem(item)) {
+    return { kind: "ready", showPromote: true, showRecheck: true, showDelete: true };
+  }
+  return { kind: "recover", showPromote: false, showRecheck: true, showDelete: true };
 }
 
 export function sortCaptureSessionsNewestFirst(sessions: CaptureSession[]): CaptureSession[] {
@@ -39,7 +81,7 @@ export function isLatestCaptureSession(session: CaptureSession, sessions: Captur
 export function selectTopPromotableCaptureItems(items: CapturedItem[], limit: number): CapturedItem[] {
   const safeLimit = Math.max(0, Math.floor(limit));
   if (safeLimit === 0) return [];
-  return items.filter((item) => isCaptureInboxPromotableStatus(item.status)).slice(0, safeLimit);
+  return items.filter(isCaptureInboxPromotableItem).slice(0, safeLimit);
 }
 
 export function captureInboxSortLabel(sortMode: CaptureInboxSortMode): string {

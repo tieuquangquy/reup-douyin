@@ -4,9 +4,12 @@ import Link from "next/link";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { fetchExportPackages } from "../../lib/api";
 import { useT } from "../../lib/i18n";
+import { useLatestRequest } from "../../lib/useLatestRequest";
 import type { ExportPackage } from "../../types/export-handoff";
 import { OperatorStudioShell } from "../app-shell/OperatorStudioShell";
 import { TopbarRefreshButton } from "../app-shell/TopbarRefreshButton";
+import { AsyncContentBoundary } from "../shared/AsyncContentBoundary";
+import { useNotice } from "../shared/NoticeCenter";
 import { OpsState, formatDateTime, statusTone, type OpsTone } from "../ops-console/OpsShared";
 
 function ExportKpi({ label, value, detail, tone = "muted" }: { label: string; value: string; detail: string; tone?: OpsTone }) {
@@ -35,21 +38,20 @@ export function ExportPackagesIndexPage() {
   const [packages, setPackages] = useState<ExportPackage[]>([]);
   const [total, setTotal] = useState(0);
   const [loadedAt, setLoadedAt] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const request = useLatestRequest();
+  const { notify } = useNotice();
 
   async function load() {
-    setLoading(true);
-    setError(null);
+    const mode = loadedAt ? "refresh" : "initial";
     try {
-      const payload = await fetchExportPackages(100);
-      setPackages(payload.items);
-      setTotal(payload.total_count);
-      setLoadedAt(new Date().toISOString());
+      await request.run(() => fetchExportPackages(100), (payload) => {
+        setPackages(payload.items);
+        setTotal(payload.total_count);
+        setLoadedAt(new Date().toISOString());
+      }, mode);
+      if (mode === "refresh") notify({ id: "export-packages-refresh", message: "Export packages refreshed.", tone: "success" });
     } catch (err) {
-      setError(err instanceof Error ? err.message : t("opsExportPackages.loadError"));
-    } finally {
-      setLoading(false);
+      if (mode === "refresh") notify({ id: "export-packages-refresh", message: err instanceof Error ? err.message : t("opsExportPackages.loadError"), tone: "error" });
     }
   }
 
@@ -66,29 +68,29 @@ export function ExportPackagesIndexPage() {
   const hasAttention = needsAttention.length > 0;
 
   const refreshAction = (
-    <TopbarRefreshButton busy={loading && packages.length > 0} disabled={loading && packages.length === 0} onClick={() => void load()} />
+    <TopbarRefreshButton busy={request.refreshing} disabled={request.initialLoading} onClick={() => void load()} />
   );
 
-  if (loading && packages.length === 0 && !error) {
+  if (!loadedAt && !request.error) {
     return (
       <OperatorStudioShell actions={refreshAction} description={t("opsExportPackages.description")} title={t("opsExportPackages.title")}>
-        <OpsState title={t("opsExportPackages.loadingTitle")} detail={t("opsExportPackages.loadingDetail")} />
+        <AsyncContentBoundary skeletonVariant="list" status="loading"><span /></AsyncContentBoundary>
       </OperatorStudioShell>
     );
   }
 
-  if (error && packages.length === 0) {
+  if (request.error && !loadedAt) {
     return (
       <OperatorStudioShell actions={refreshAction} description={t("opsExportPackages.description")} title={t("opsExportPackages.title")}>
-        <OpsState title={t("opsExportPackages.unavailableTitle")} detail={error} retry={() => void load()} />
+        <AsyncContentBoundary errorState={<OpsState title={t("opsExportPackages.unavailableTitle")} detail={request.error.message} retry={() => void load()} />} skeletonVariant="list" status="error"><span /></AsyncContentBoundary>
       </OperatorStudioShell>
     );
   }
 
   return (
     <OperatorStudioShell actions={refreshAction} description={t("opsExportPackages.description")} title={t("opsExportPackages.title")}>
+      <AsyncContentBoundary refreshing={request.refreshing} skeletonVariant="list" status="success">
       <main className="ops-page ops-export-page">
-        {error ? <div className="inline-error">{error}</div> : null}
 
         <div className="ops-export-freshness">
           <p>
@@ -166,6 +168,7 @@ export function ExportPackagesIndexPage() {
           ) : null}
         </section>
       </main>
+      </AsyncContentBoundary>
     </OperatorStudioShell>
   );
 }

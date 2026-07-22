@@ -93,11 +93,19 @@ class OcrServiceFullE2ETests(unittest.TestCase):
                 ) as run_e2e,
             ):
                 result = service.run_pipeline(
-                    OcrRequest(source_video_id=source_id, clean_hardsub=True, sample_fps=1.0),
+                    OcrRequest(
+                        source_video_id=source_id,
+                        clean_hardsub=True,
+                        sample_fps=1.0,
+                        force_refresh=True,
+                    ),
                     job_id=uuid4(),
                 )
 
             run_e2e.assert_called_once()
+            e2e_kwargs = run_e2e.call_args.kwargs
+            self.assertTrue(e2e_kwargs["force_refresh"])
+            self.assertIn(str(source_id), str(e2e_kwargs["ocr_cache_path"]))
             self.assertIsNotNone(result.cleaned_video_asset_id)
             self.assertTrue(result.clean_produced)
             self.assertEqual(persisted_meta.get("clean_method"), CLEAN_METHOD_SINGLE_PASS)

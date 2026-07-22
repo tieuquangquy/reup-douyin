@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
+from src.media_pipeline.ocr_filtering.box_payload import box_norm_xywh
 from src.ocr_pipeline.hardsub_filter import group_hard_sub_events
 from src.ocr_pipeline.types import FrameOcrResult, HardSubEvent, OcrBox
 
@@ -25,12 +26,13 @@ def frame_results_from_ocr_payload(payload: Mapping[str, Any]) -> list[FrameOcrR
             if not isinstance(box, Mapping):
                 continue
             text = str(box.get("text") or "").strip()
+            x, y, bw, bh = box_norm_xywh(box)
             boxes.append(
                 OcrBox(
-                    x=float(box.get("x") or 0.0),
-                    y=float(box.get("y") or 0.0),
-                    width=max(0.01, float(box.get("width") or 0.01)),
-                    height=max(0.01, float(box.get("height") or 0.01)),
+                    x=x,
+                    y=y,
+                    width=bw,
+                    height=bh,
                     text=text,
                     confidence=float(box.get("confidence") or 0.0),
                 )

@@ -187,8 +187,12 @@ def _ink_local_for_segment(
     x0, y0, x1, y1 = _norm_box_to_pixels(sx, sy, sw, sh, frame_w=frame_w, frame_h=frame_h)
     if x1 - x0 < 2 or y1 - y0 < 2:
         return None
-    local = _roi_text_mask(gray[y0:y1, x0:x1])
+    local = _contrast_ink_mask(gray[y0:y1, x0:x1])
+    local = _dilate_ink(local)
     if int(local.max()) == 0:
+        return None
+    ink_frac = float(np.count_nonzero(local)) / float(local.size)
+    if ink_frac > 0.55:
         return None
 
     cx0, cy0, cx1, cy1 = _norm_box_to_pixels(
@@ -253,6 +257,33 @@ def build_ink_cover_mask(
     return mask
 
 
+def _build_text_cover_mask(
+    frame_bgr: np.ndarray,
+    segments: Sequence[OverlaySegment],
+) -> np.ndarray:
+    """
+    Hybrid cover: ink pixels when detectable; tight OCR AABB per segment otherwise.
+
+    Ink-first avoids wiping food/gaps inside a wide bogus OCR box. Per-segment
+    fallback keeps production from rendering zero cover when ink scan fails.
+    """
+    import cv2
+
+    if not segments:
+        return build_ink_cover_mask(frame_bgr, segments)
+
+    mask = build_ink_cover_mask(frame_bgr, segments)
+    for seg in segments:
+        if seg.kind == DENSE_UI_KIND:
+            continue
+        seg_ink = build_ink_cover_mask(frame_bgr, [seg])
+        if int(seg_ink.max()) > 0:
+            continue
+        seg_aabb = build_cover_mask(frame_bgr, [seg])
+        mask = cv2.bitwise_or(mask, seg_aabb)
+    return mask
+
+
 def refine_segments_to_ink(
     frame_bgr: np.ndarray,
     segments: Sequence[OverlaySegment],
@@ -292,6 +323,7 @@ def refine_segments_to_ink(
                 height=max(0.01, (fy1 - fy0) / float(h)),
                 text_vi=seg.text_vi,
                 kind=seg.kind,
+                authority_bounds=seg.authority_bounds,
             )
         )
     return refined
@@ -610,6 +642,15 @@ def _snap_segment_to_nearby_ink(
         frame_w=frame_w,
         frame_h=frame_h,
     )
+    authority_rect = (
+        _norm_box_to_pixels(
+            *seg.authority_bounds,
+            frame_w=frame_w,
+            frame_h=frame_h,
+        )
+        if seg.authority_bounds is not None
+        else None
+    )
     if cx1 - cx0 < 2 or cy1 - cy0 < 2:
         return None
 
@@ -639,7 +680,11 @@ def _snap_segment_to_nearby_ink(
         grown = _grow_textline_right(frame_bgr, gray, sat, box)
         if _is_plausible_ink_box(grown, ocr_w=ocr_w, ocr_h=ocr_h):
             return _segment_from_pixel_box(
-                seg, grown, frame_w=frame_w, frame_h=frame_h, clamp_to=None
+                seg,
+                grown,
+                frame_w=frame_w,
+                frame_h=frame_h,
+                clamp_to=authority_rect,
             )
 
     # Empty white-card OCR: do not search neighbors (would latch 525 onto 干卡).
@@ -769,7 +814,7 @@ def _snap_segment_to_nearby_ink(
         grown,
         frame_w=frame_w,
         frame_h=frame_h,
-        clamp_to=None,
+        clamp_to=authority_rect,
     )
 
 
@@ -836,6 +881,7 @@ def _segment_from_pixel_box(
         height=(fy1 - fy0) / float(frame_h),
         text_vi=seg.text_vi,
         kind=seg.kind,
+        authority_bounds=seg.authority_bounds,
     )
 
 
@@ -848,7 +894,7 @@ def _expand_segment_cover(seg: OverlaySegment) -> tuple[float, float, float, flo
             float(seg.width),
             float(seg.height),
         )
-    return expand_cover_rect(
+    x, y, w, h = expand_cover_rect(
         float(seg.x),
         float(seg.y),
         float(seg.width),
@@ -857,6 +903,14 @@ def _expand_segment_cover(seg: OverlaySegment) -> tuple[float, float, float, flo
         pad_y=_TIGHT_PAD_Y,
         min_width=0.0,
     )
+    if seg.authority_bounds is None:
+        return x, y, w, h
+    ax, ay, aw, ah = seg.authority_bounds
+    x0 = max(x, ax)
+    y0 = max(y, ay)
+    x1 = min(x + w, ax + aw)
+    y1 = min(y + h, ay + ah)
+    return x0, y0, max(0.001, x1 - x0), max(0.001, y1 - y0)
 
 
 def build_cover_mask(
@@ -1154,6 +1208,7 @@ def _expand_segments_width_for_vi(
                 height=float(seg.height),
                 text_vi=seg.text_vi,
                 kind=seg.kind,
+                authority_bounds=seg.authority_bounds,
             )
         )
     return out
@@ -1186,9 +1241,10 @@ def process_frame_bgr(
             return cleaned
         return draw_vi_overlays(cleaned, text_segs, fontfile=fontfile, align="left")
     text_segs = refine_segments_to_ink_inside_ocr(frame_bgr, text_segs)
-    mask = build_cover_mask(frame_bgr, text_segs)
+    mask = _build_text_cover_mask(frame_bgr, text_segs)
     cleaned = apply_blur_cover(frame_bgr, mask)
-    return draw_vi_overlays(cleaned, text_segs, fontfile=fontfile, align="left")
+    vi_segs = refine_segments_to_ink(frame_bgr, text_segs)
+    return draw_vi_overlays(cleaned, vi_segs, fontfile=fontfile, align="left")
 
 
 def render_image_opencv_inpaint(

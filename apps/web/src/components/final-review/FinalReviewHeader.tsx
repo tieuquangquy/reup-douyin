@@ -1,20 +1,23 @@
 "use client";
 
-import Link from "next/link";
 import { useT } from "../../lib/i18n";
 import type { RenderOutput, SourceVideoAssetManifest } from "../../types/final-review";
 import { getRenderWarnings, isApproved, isPublishReady } from "../../lib/finalReviewState";
 import { humanizeStatus } from "../../lib/statusLabels";
+import { AsyncButton } from "../shared/AsyncButton";
+import { WorkItemActionIcon } from "../shared/WorkItemActionIcon";
 
 export function FinalReviewHeader({
   render,
   manifest,
   actionBusy,
+  rerenderPending,
   onRerender
 }: {
   render: RenderOutput;
   manifest: SourceVideoAssetManifest | null;
   actionBusy: boolean;
+  rerenderPending: boolean;
   onRerender: () => void;
 }) {
   const t = useT();
@@ -53,19 +56,17 @@ export function FinalReviewHeader({
           </h1>
           <p className="fr-topbar__meta-quiet">{humanizeStatus(render.status)}</p>
         </div>
-        <nav className="fr-topbar__actions" aria-label={t("finalReviewHeader.navLabel")}>
-          <button type="button" className="fr-tool fr-tool--primary" onClick={onRerender} disabled={actionBusy}>
+        <nav className="fr-topbar__actions" aria-label={t("finalReviewHeader.pageActionsLabel")}>
+          <AsyncButton
+            className="fr-tool fr-tool--primary"
+            leadingIcon={<WorkItemActionIcon className="fr-tool__icon" kind="retry" />}
+            pending={rerenderPending}
+            pendingLabel={t("finalReviewHeader.rerender")}
+            onClick={onRerender}
+            disabled={actionBusy}
+          >
             {t("finalReviewHeader.rerender")}
-          </button>
-          <Link className="fr-tool" href={`/production/transcript-editor/${render.source_video_id}`}>
-            {t("finalReviewHeader.transcriptEditor")}
-          </Link>
-          <Link className="fr-tool" href={`/source-videos/${render.source_video_id}/publish`}>
-            {t("finalReviewHeader.publishDraft")}
-          </Link>
-          <Link className="fr-tool fr-tool--quiet" href="/selection/review-board">
-            {t("finalReviewHeader.reviewBoard")}
-          </Link>
+          </AsyncButton>
         </nav>
       </div>
     </header>

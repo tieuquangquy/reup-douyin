@@ -4,9 +4,12 @@ import Link from "next/link";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { fetchRiskFlags } from "../../lib/api";
 import { useT } from "../../lib/i18n";
+import { useLatestRequest } from "../../lib/useLatestRequest";
 import type { RiskFlag, RiskFlagStatus, RiskSeverity } from "../../types/risk";
 import { OpsConsoleShell } from "../app-shell/OpsConsoleShell";
 import { TopbarRefreshButton } from "../app-shell/TopbarRefreshButton";
+import { AsyncContentBoundary } from "../shared/AsyncContentBoundary";
+import { useNotice } from "../shared/NoticeCenter";
 import { OpsState, formatDateTime, statusTone, type OpsTone } from "./OpsShared";
 
 type StatusFilter = "ALL" | RiskFlagStatus;
@@ -118,29 +121,31 @@ function RiskChip({ label, tone }: { label: string; tone: OpsTone }) {
 export function OpsRiskPage() {
   const t = useT();
   const [flags, setFlags] = useState<RiskFlag[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [loadedAt, setLoadedAt] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("OPEN");
   const [page, setPage] = useState(1);
+  const request = useLatestRequest();
+  const { notify } = useNotice();
 
   async function load() {
-    setLoading(true);
-    setError(null);
+    const mode = loadedAt ? "refresh" : "initial";
     try {
-      const [open, acknowledged, waived, resolved, rejected] = await Promise.all([
-        fetchRiskFlags("OPEN"),
-        fetchRiskFlags("ACKNOWLEDGED"),
-        fetchRiskFlags("WAIVED"),
-        fetchRiskFlags("RESOLVED"),
-        fetchRiskFlags("REJECTED"),
-      ]);
-      setFlags([...open, ...acknowledged, ...waived, ...resolved, ...rejected]);
-      setLoadedAt(new Date().toISOString());
+      await request.run(async () => {
+        const [open, acknowledged, waived, resolved, rejected] = await Promise.all([
+          fetchRiskFlags("OPEN"),
+          fetchRiskFlags("ACKNOWLEDGED"),
+          fetchRiskFlags("WAIVED"),
+          fetchRiskFlags("RESOLVED"),
+          fetchRiskFlags("REJECTED"),
+        ]);
+        return [...open, ...acknowledged, ...waived, ...resolved, ...rejected];
+      }, (nextFlags) => {
+        setFlags(nextFlags);
+        setLoadedAt(new Date().toISOString());
+      }, mode);
+      if (mode === "refresh") notify({ id: "ops-risk-refresh", message: "Risk flags refreshed.", tone: "success" });
     } catch (err) {
-      setError(err instanceof Error ? err.message : t("opsRisk.unavailableTitle"));
-    } finally {
-      setLoading(false);
+      if (mode === "refresh") notify({ id: "ops-risk-refresh", message: err instanceof Error ? err.message : t("opsRisk.unavailableTitle"), tone: "error" });
     }
   }
 
@@ -204,29 +209,29 @@ export function OpsRiskPage() {
   }
 
   const refreshAction = (
-    <TopbarRefreshButton busy={loading && flags.length > 0} disabled={loading && flags.length === 0} onClick={() => void load()} />
+    <TopbarRefreshButton busy={request.refreshing} disabled={request.initialLoading} onClick={() => void load()} />
   );
 
-  if (loading && flags.length === 0) {
+  if (!loadedAt && !request.error) {
     return (
       <OpsConsoleShell actions={refreshAction} description={t("opsRisk.description")} title={t("opsRisk.title")}>
-        <OpsState title={t("opsRisk.loadingTitle")} detail={t("opsRisk.loadingDetail")} />
+        <AsyncContentBoundary skeletonVariant="list" status="loading"><span /></AsyncContentBoundary>
       </OpsConsoleShell>
     );
   }
 
-  if (error && flags.length === 0) {
+  if (request.error && !loadedAt) {
     return (
       <OpsConsoleShell actions={refreshAction} description={t("opsRisk.description")} title={t("opsRisk.title")}>
-        <OpsState title={t("opsRisk.unavailableTitle")} detail={error} retry={() => void load()} />
+        <AsyncContentBoundary errorState={<OpsState title={t("opsRisk.unavailableTitle")} detail={request.error.message} retry={() => void load()} />} skeletonVariant="list" status="error"><span /></AsyncContentBoundary>
       </OpsConsoleShell>
     );
   }
 
   return (
     <OpsConsoleShell actions={refreshAction} description={t("opsRisk.description")} title={t("opsRisk.title")}>
+      <AsyncContentBoundary refreshing={request.refreshing} skeletonVariant="list" status="success">
       <main className="ops-page ops-risk-page">
-        {error ? <div className="inline-error">{error}</div> : null}
 
         <p className="ops-risk-freshness">
           {t("opsRisk.loadedAt")}{" "}
@@ -386,6 +391,7 @@ export function OpsRiskPage() {
           ) : null}
         </section>
       </main>
+      </AsyncContentBoundary>
     </OpsConsoleShell>
   );
 }

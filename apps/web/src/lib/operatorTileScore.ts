@@ -17,11 +17,12 @@ export function getOperatorTileScoreBadge(item: CapturedItem): OperatorTileScore
   const score = Number.isFinite(operatorScore) ? operatorScore : null;
   const level = reupScoreBadgeLevelForCaptureItem(score, getDouyinMetadataCompletenessForItem(item));
   const valueLabel = formatReupScoreBadgeValue(score);
+  const tierLabel = reupScoreBadgeTier(score);
   return {
     score,
     level,
     valueLabel,
-    tierLabel: reupScoreBadgeTier(score),
-    title: score === null ? "Needs metadata before scoring" : `Operator Reup Score ${valueLabel}`
+    tierLabel,
+    title: score === null ? "Needs metadata before scoring" : `Operator Reup Score ${valueLabel}${tierLabel ? ` · ${tierLabel}` : ""}`
   };
 }

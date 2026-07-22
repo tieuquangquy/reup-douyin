@@ -11,7 +11,6 @@ export type NavItem = {
   external?: boolean;
   sourceVideoTarget?: "transcript-editor" | "final-review";
   sourceVideoFallbackLabel?: string;
-  sourceVideoCurrentLabel?: string;
 };
 
 export type NavSection = {
@@ -81,7 +80,6 @@ export const operatorNavSections: NavSection[] = [
         status: "context",
         sourceVideoTarget: "transcript-editor",
         sourceVideoFallbackLabel: "nav.selectVideo",
-        sourceVideoCurrentLabel: "nav.openCurrentVideo",
         activePatterns: [
           "/production/transcript-editor/*",
           "/source-videos/*/transcript-editor"
@@ -94,7 +92,6 @@ export const operatorNavSections: NavSection[] = [
         status: "context",
         sourceVideoTarget: "final-review",
         sourceVideoFallbackLabel: "nav.selectOutput",
-        sourceVideoCurrentLabel: "nav.openCurrentVideo",
         activePatterns: [
           "/production/final-review/*",
           "/source-videos/*/final-review"
@@ -434,7 +431,7 @@ export function resolveNavItemHref(item: NavItem, sourceVideoId: string | null):
 
 export function resolveNavItemStatusLabel(item: NavItem, sourceVideoId: string | null): string | null {
   if (item.sourceVideoTarget) {
-    return sourceVideoId ? item.sourceVideoCurrentLabel ?? "nav.openCurrentVideo" : item.sourceVideoFallbackLabel ?? "nav.selectVideo";
+    return sourceVideoId ? null : item.sourceVideoFallbackLabel ?? "nav.selectVideo";
   }
   if (item.status === "placeholder") return "common.planned";
   if (item.status === "context") return "common.context";

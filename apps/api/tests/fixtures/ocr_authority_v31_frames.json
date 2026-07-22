@@ -1,0 +1,43 @@
+{
+  "source": "0014c4b6 sequential OpenCV decode",
+  "frames": {
+    "11": {
+      "time_ms": 425,
+      "expected_state": "hardsub",
+      "local_boxes": [
+        {"x": 0.55, "y": 0.955556, "w": 0.053125, "h": 0.011111},
+        {"x": 0.409375, "y": 0.944444, "w": 0.1375, "h": 0.027778}
+      ]
+    },
+    "25": {
+      "time_ms": 965,
+      "expected_state": "hardsub",
+      "low_res_boxes": [
+        {"x": 0.425, "y": 0.955556, "w": 0.05, "h": 0.005556}
+      ],
+      "high_res_boxes": [
+        {"x": 0.305208, "y": 0.944444, "w": 0.390625, "h": 0.024074}
+      ]
+    },
+    "738": {
+      "time_ms": 28489,
+      "expected_state": "endcard",
+      "sequential_white_fraction": 0.805353,
+      "timestamp_seek_white_fraction": 0.013326,
+      "local_box_count": 8
+    },
+    "740": {
+      "time_ms": 28567,
+      "expected_state": "endcard",
+      "sequential_white_fraction": 0.805381,
+      "timestamp_seek_white_fraction": 0.805353,
+      "local_box_count": 8
+    },
+    "745": {
+      "time_ms": 28760,
+      "expected_state": "endcard",
+      "cloud_rice_box": {"x": 0.025521, "y": 0.387963, "w": 0.05625, "h": 0.053704},
+      "local_rice_box": {"x": 0.083, "y": 0.409, "w": 0.03, "h": 0.017}
+    }
+  }
+}

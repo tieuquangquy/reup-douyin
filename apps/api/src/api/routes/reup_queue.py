@@ -86,10 +86,25 @@ def _dialogue_summary_from_source_video(source_video: object | None) -> dict:
     }
 
 
-def _queue_item_response(item: ReupQueueItem) -> ReupQueueItemResponse:
+def _queue_item_response(
+    item: ReupQueueItem,
+    *,
+    display_job: object | None = None,
+) -> ReupQueueItemResponse:
+    """Serialize a queue row.
+
+    ``display_job`` overrides ``item.job`` when callers resolve analyze-audio authority
+    from ``metadata_json.analyze_audio_job_id`` (e.g. after pause left a stale download link).
+    """
     source_video = item.source_video
-    job = getattr(item, "job", None)
+    linked = getattr(item, "job", None)
+    job = display_job if display_job is not None else linked
     dialogue = _dialogue_summary_from_source_video(source_video)
+    job_id = getattr(job, "id", None) if job is not None else item.job_id
+    job_status = None
+    if job is not None:
+        status = getattr(job, "status", None)
+        job_status = status.value if status is not None and hasattr(status, "value") else status
     return ReupQueueItemResponse.model_validate(
         {
             "id": item.id,
@@ -123,9 +138,9 @@ def _queue_item_response(item: ReupQueueItem) -> ReupQueueItemResponse:
             "completed_at": item.completed_at,
             "cancelled_at": item.cancelled_at,
             "operator_dismissed_at": item.operator_dismissed_at,
-            "job_id": item.job_id,
+            "job_id": job_id,
             "job_type": _job_type_value(job),
-            "job_status": job.status.value if job is not None else None,
+            "job_status": job_status,
             "job_progress_percent": int(job.progress_percent) if job is not None else None,
             "job_error_code": job.error_code if job is not None else None,
             "job_error_message": job.error_message if job is not None else None,
@@ -142,6 +157,10 @@ def _queue_item_response(item: ReupQueueItem) -> ReupQueueItemResponse:
             "updated_at": item.updated_at,
         }
     )
+
+
+def _queue_item_response_for_service(service: ReupQueueService, item: ReupQueueItem) -> ReupQueueItemResponse:
+    return _queue_item_response(item, display_job=service.resolve_display_job(item))
 
 
 @router.get("/reup-queue/items", response_model=ReupQueueListResponse)
@@ -163,7 +182,7 @@ def list_reup_queue_items(
         offset=offset,
     )
     return ReupQueueListResponse(
-        items=[_queue_item_response(item) for item in items],
+        items=[_queue_item_response_for_service(service, item) for item in items],
         total_count=total,
         limit=limit,
         offset=offset,
@@ -180,7 +199,7 @@ def get_reup_queue_item(
         item = service.get_item(item_id)
     except ReupQueueError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail={"code": exc.code, "message": exc.message}) from exc
-    return _queue_item_response(item)
+    return _queue_item_response_for_service(service, item)
 
 
 @router.post("/reup-queue/items/{item_id}/actions", response_model=ReupQueueActionResponse)
@@ -200,7 +219,7 @@ def run_reup_queue_action(
         )
     except ReupQueueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail={"code": exc.code, "message": exc.message}) from exc
-    return ReupQueueActionResponse(item=_queue_item_response(item))
+    return ReupQueueActionResponse(item=_queue_item_response_for_service(service, item))
 
 
 @router.post("/reup-queue/batch-actions", response_model=BatchOperationResponse)
@@ -239,7 +258,7 @@ def enqueue_reup_candidates(
         queued_count=result.queued_count,
         already_queued_count=result.already_queued_count,
         skipped_count=result.skipped_count,
-        items=[_queue_item_response(item) for item in result.items],
+        items=[_queue_item_response_for_service(service, item) for item in result.items],
         skipped_candidate_ids=result.skipped_candidate_ids,
     )
 

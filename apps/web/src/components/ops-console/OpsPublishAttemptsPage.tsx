@@ -4,9 +4,12 @@ import Link from "next/link";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { fetchPublishAttemptList } from "../../lib/api";
 import { useT } from "../../lib/i18n";
+import { useLatestRequest } from "../../lib/useLatestRequest";
 import type { PublishAttempt } from "../../types/publish-draft";
 import { OpsConsoleShell } from "../app-shell/OpsConsoleShell";
 import { TopbarRefreshButton } from "../app-shell/TopbarRefreshButton";
+import { AsyncContentBoundary } from "../shared/AsyncContentBoundary";
+import { useNotice } from "../shared/NoticeCenter";
 import { OpsState, formatDateTime, statusTone, type OpsTone } from "./OpsShared";
 
 type StatusFilter = "ALL" | "SUCCEEDED" | "FAILED" | "NEEDS_RECONCILIATION";
@@ -68,22 +71,22 @@ function AttemptsChip({ label, tone }: { label: string; tone: OpsTone }) {
 export function OpsPublishAttemptsPage() {
   const t = useT();
   const [attempts, setAttempts] = useState<PublishAttempt[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [loadedAt, setLoadedAt] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("ALL");
   const [page, setPage] = useState(1);
+  const request = useLatestRequest();
+  const { notify } = useNotice();
 
   async function load() {
-    setLoading(true);
-    setError(null);
+    const mode = loadedAt ? "refresh" : "initial";
     try {
-      setAttempts(await fetchPublishAttemptList(undefined, 100));
-      setLoadedAt(new Date().toISOString());
+      await request.run(() => fetchPublishAttemptList(undefined, 100), (nextAttempts) => {
+        setAttempts(nextAttempts);
+        setLoadedAt(new Date().toISOString());
+      }, mode);
+      if (mode === "refresh") notify({ id: "ops-attempts-refresh", message: "Publish attempts refreshed.", tone: "success" });
     } catch (err) {
-      setError(err instanceof Error ? err.message : t("opsPublishAttempts.unavailableTitle"));
-    } finally {
-      setLoading(false);
+      if (mode === "refresh") notify({ id: "ops-attempts-refresh", message: err instanceof Error ? err.message : t("opsPublishAttempts.unavailableTitle"), tone: "error" });
     }
   }
 
@@ -129,29 +132,29 @@ export function OpsPublishAttemptsPage() {
   ];
 
   const refreshAction = (
-    <TopbarRefreshButton busy={loading && attempts.length > 0} disabled={loading && attempts.length === 0} onClick={() => void load()} />
+    <TopbarRefreshButton busy={request.refreshing} disabled={request.initialLoading} onClick={() => void load()} />
   );
 
-  if (loading && attempts.length === 0) {
+  if (!loadedAt && !request.error) {
     return (
       <OpsConsoleShell actions={refreshAction} description={t("opsPublishAttempts.description")} title={t("opsPublishAttempts.title")}>
-        <OpsState title={t("opsPublishAttempts.loadingTitle")} detail={t("opsPublishAttempts.loadingDetail")} />
+        <AsyncContentBoundary skeletonVariant="list" status="loading"><span /></AsyncContentBoundary>
       </OpsConsoleShell>
     );
   }
 
-  if (error && attempts.length === 0) {
+  if (request.error && !loadedAt) {
     return (
       <OpsConsoleShell actions={refreshAction} description={t("opsPublishAttempts.description")} title={t("opsPublishAttempts.title")}>
-        <OpsState title={t("opsPublishAttempts.unavailableTitle")} detail={error} retry={() => void load()} />
+        <AsyncContentBoundary errorState={<OpsState title={t("opsPublishAttempts.unavailableTitle")} detail={request.error.message} retry={() => void load()} />} skeletonVariant="list" status="error"><span /></AsyncContentBoundary>
       </OpsConsoleShell>
     );
   }
 
   return (
     <OpsConsoleShell actions={refreshAction} description={t("opsPublishAttempts.description")} title={t("opsPublishAttempts.title")}>
+      <AsyncContentBoundary refreshing={request.refreshing} skeletonVariant="list" status="success">
       <main className="ops-page ops-attempts-page">
-        {error ? <div className="inline-error">{error}</div> : null}
 
         <p className="ops-attempts-freshness">
           {t("opsPublishAttempts.loadedAt")}{" "}
@@ -299,6 +302,7 @@ export function OpsPublishAttemptsPage() {
           ) : null}
         </section>
       </main>
+      </AsyncContentBoundary>
     </OpsConsoleShell>
   );
 }

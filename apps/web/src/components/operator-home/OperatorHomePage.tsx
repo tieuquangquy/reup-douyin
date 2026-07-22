@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useT } from "../../lib/i18n";
+import { useLatestRequest } from "../../lib/useLatestRequest";
 import {
   fetchCandidates,
   fetchDouyinExtensionStatus,
@@ -13,6 +14,8 @@ import {
 } from "../../lib/api";
 import { OperatorStudioShell } from "../app-shell/OperatorStudioShell";
 import { TopbarRefreshButton } from "../app-shell/TopbarRefreshButton";
+import { AsyncContentBoundary } from "../shared/AsyncContentBoundary";
+import { useNotice } from "../shared/NoticeCenter";
 import {
   buildActionQueue,
   buildContinueItems,
@@ -57,35 +60,27 @@ type OperatorHomeSnapshot = {
 export function OperatorHomePage() {
   const t = useT();
   const [snapshot, setSnapshot] = useState<OperatorHomeSnapshot | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const request = useLatestRequest();
+  const { notify } = useNotice();
 
   async function load() {
-    setLoading(true);
-    setError(null);
+    const mode = snapshot ? "refresh" : "initial";
     try {
-      const [candidateResult, jobsPayload, health, queue, optimization, pipeline, extension] = await Promise.all([
-        fetchCandidates(DEFAULT_FILTERS),
-        fetchJobs(undefined, { limit: 25 }),
-        fetchPublishHealthDashboard("last_7_days"),
-        fetchPublishControlQueue(),
-        fetchOptimizationDashboard(),
-        fetchPipelineDashboard().catch(() => null),
-        fetchDouyinExtensionStatus().catch(() => null)
-      ]);
-      setSnapshot({
-        candidates: candidateResult.candidates,
-        jobs: jobsPayload.jobs,
-        health,
-        queue,
-        optimization,
-        pipeline,
-        extension
-      });
+      const result = await request.run(async () => {
+        const [candidateResult, jobsPayload, health, queue, optimization, pipeline, extension] = await Promise.all([
+          fetchCandidates(DEFAULT_FILTERS),
+          fetchJobs(undefined, { limit: 25 }),
+          fetchPublishHealthDashboard("last_7_days"),
+          fetchPublishControlQueue(),
+          fetchOptimizationDashboard(),
+          fetchPipelineDashboard().catch(() => null),
+          fetchDouyinExtensionStatus().catch(() => null)
+        ]);
+        return { candidates: candidateResult.candidates, jobs: jobsPayload.jobs, health, queue, optimization, pipeline, extension };
+      }, setSnapshot, mode);
+      if (mode === "refresh" && result) notify({ id: "home-refresh", message: "Home refreshed.", tone: "success" });
     } catch (err) {
-      setError(err instanceof Error ? err.message : t("operatorHome.loadError"));
-    } finally {
-      setLoading(false);
+      if (mode === "refresh") notify({ id: "home-refresh", message: err instanceof Error ? err.message : t("operatorHome.loadError"), tone: "error" });
     }
   }
 
@@ -148,23 +143,18 @@ export function OperatorHomePage() {
 
   return (
     <OperatorStudioShell
-      actions={<TopbarRefreshButton busy={loading && Boolean(snapshot)} disabled={loading && !snapshot} onClick={() => void load()} />}
+      actions={<TopbarRefreshButton busy={request.refreshing} disabled={request.initialLoading} onClick={() => void load()} />}
       description={t("home.description")}
       title={t("home.title")}
     >
-      {loading && !snapshot ? <div className="state-panel skeleton">{t("common.loading")} {t("home.title")}</div> : null}
-
-      {error && !snapshot ? (
-        <div className="state-panel">
-          <h1>{t("operatorHome.couldNotLoad")}</h1>
-          <p>{error}</p>
-          <button type="button" onClick={() => void load()}>{t("common.retry")}</button>
-        </div>
-      ) : null}
-
+      <AsyncContentBoundary
+        errorState={<div><h1>{t("operatorHome.couldNotLoad")}</h1><p>{request.error?.message}</p><button type="button" onClick={() => void load()}>{t("common.retry")}</button></div>}
+        refreshing={request.refreshing}
+        skeletonVariant="gallery"
+        status={!snapshot ? (request.error ? "error" : "loading") : "success"}
+      >
       {snapshot && freshness && extensionSignal && publishSuccess ? (
         <div className="operator-home">
-          {error ? <div className="inline-error">{error}</div> : null}
           <FreshnessStrip freshness={freshness} extension={extensionSignal} publishSuccess={publishSuccess} />
           <OverviewCards metrics={metrics} />
           <NextWorkPanel items={nextWork} />
@@ -197,6 +187,7 @@ export function OperatorHomePage() {
           </section>
         </div>
       ) : null}
+      </AsyncContentBoundary>
     </OperatorStudioShell>
   );
 }

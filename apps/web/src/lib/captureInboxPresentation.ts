@@ -9,21 +9,23 @@ export type ReupScoreBreakdownBar = {
 };
 
 const REUP_SCORE_BAR_MAX: Record<Exclude<keyof DouyinReupScoreComponents, "penalty">, number> = {
-  performance: 25,
-  engagement: 25,
-  shareability: 15,
-  duration_fit: 15,
-  recency: 10,
-  metadata_quality: 10
+  performance: 20,
+  engagement: 20,
+  virality_retention: 20,
+  duration_fit: 10,
+  recency: 20,
+  metadata_quality: 10,
+  outlier_bonus: 15
 };
 
 const REUP_SCORE_BAR_LABELS: Record<Exclude<keyof DouyinReupScoreComponents, "penalty">, string> = {
   performance: "Performance",
   engagement: "Engagement",
-  shareability: "Shareability",
+  virality_retention: "Virality & retention",
   duration_fit: "Duration fit",
   recency: "Recency",
-  metadata_quality: "Metadata"
+  metadata_quality: "Metadata",
+  outlier_bonus: "Outlier bonus"
 };
 
 export function shouldShowCaptureInboxTileMetrics(_item: CapturedItem): boolean {
@@ -33,13 +35,15 @@ export function shouldShowCaptureInboxTileMetrics(_item: CapturedItem): boolean 
 }
 
 export function buildReupScoreBreakdownBars(score: DouyinReupScore): ReupScoreBreakdownBar[] {
-  const bars: ReupScoreBreakdownBar[] = (Object.keys(REUP_SCORE_BAR_MAX) as Array<Exclude<keyof DouyinReupScoreComponents, "penalty">>).map((key) => ({
-    key,
-    label: REUP_SCORE_BAR_LABELS[key],
-    value: Math.max(0, score.reup_score_components[key]),
-    max: REUP_SCORE_BAR_MAX[key],
-    tone: "positive"
-  }));
+  const bars: ReupScoreBreakdownBar[] = (Object.keys(REUP_SCORE_BAR_MAX) as Array<Exclude<keyof DouyinReupScoreComponents, "penalty">>)
+    .filter((key) => key !== "outlier_bonus" || score.reup_score_components.outlier_bonus > 0)
+    .map((key) => ({
+      key,
+      label: REUP_SCORE_BAR_LABELS[key],
+      value: Math.max(0, score.reup_score_components[key]),
+      max: REUP_SCORE_BAR_MAX[key],
+      tone: "positive"
+    }));
 
   if (score.reup_score_components.penalty < 0) {
     bars.push({

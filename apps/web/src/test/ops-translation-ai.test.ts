@@ -169,7 +169,7 @@ assert.equal(urlopenTimeout.message, "Could not reach the provider. Check networ
 assert.doesNotMatch(urlopenTimeout.message, /urlopen|WinError|10060/i);
 
 assert.match(sharedSource, /profile_id:\s*editingProfileId/, "Model list must send editing profile_id for stored key");
-assert.match(sharedSource, /modelsRequestIdRef/, "Model list must ignore stale auto-load responses");
+assert.match(sharedSource, /useLatestRequest/, "Model list must ignore stale auto-load responses");
 assert.match(
   sharedSource,
   /setTimeout\(\(\) => \{\s*void refreshModels\(\);\s*\}, 700\)/,

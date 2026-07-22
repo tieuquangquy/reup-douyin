@@ -26,6 +26,8 @@ import {
   validateIntakeForm
 } from "../../lib/intakeState";
 import { useT } from "../../lib/i18n";
+import { useAsyncAction } from "../../lib/useAsyncAction";
+import { useLatestRequest } from "../../lib/useLatestRequest";
 import type {
   IntakeDiscoverResponse,
   IntakeFormValues,
@@ -42,12 +44,29 @@ import type {
 import type { DouyinAccount } from "../../types/douyin-accounts";
 import type { FilterPreset } from "../../types/review-board";
 import { OperatorStudioShell } from "../app-shell/OperatorStudioShell";
+import { AsyncButton } from "../shared/AsyncButton";
+import { useNotice } from "../shared/NoticeCenter";
 
 const RECENT_INTAKE_STORAGE_KEY = "reup-douyin:last-intake-setup";
 const SHOW_LEGACY_DOUYIN_DEBUG_SURFACES = process.env.NEXT_PUBLIC_DOUYIN_ENABLE_LEGACY_DEBUG_SURFACES === "true";
 
+async function latestOnly<T>(signal: AbortSignal, request: () => Promise<T>): Promise<T> {
+  try {
+    const value = await request();
+    if (signal.aborted) throw new DOMException("Request superseded", "AbortError");
+    return value;
+  } catch (reason) {
+    if (signal.aborted) throw new DOMException("Request superseded", "AbortError");
+    throw reason;
+  }
+}
+
 export function IntakePage() {
   const t = useT();
+  const asyncAction = useAsyncAction();
+  const runDetailRequest = useLatestRequest();
+  const compareRequest = useLatestRequest();
+  const { notify } = useNotice();
   const [values, setValues] = useState<IntakeFormValues>(DEFAULT_INTAKE_FORM);
   const [errors, setErrors] = useState<IntakeValidationErrors>({});
   const [presets, setPresets] = useState<FilterPreset[]>([]);
@@ -58,7 +77,6 @@ export function IntakePage() {
   const [savedPresets, setSavedPresets] = useState<IntakeSavedPresetResponse[]>([]);
   const [recentProfiles, setRecentProfiles] = useState<IntakeRecentProfileResponse[]>([]);
   const [latestSuccessShortcuts, setLatestSuccessShortcuts] = useState<IntakeLatestSuccessShortcutResponse[]>([]);
-  const [savingPreset, setSavingPreset] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState<IntakeDiscoverResponse | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -67,12 +85,12 @@ export function IntakePage() {
   const [runHistoryError, setRunHistoryError] = useState<string | null>(null);
   const [selectedRunId, setSelectedRunId] = useState<string>("");
   const [selectedRunDetail, setSelectedRunDetail] = useState<IntakeRunDetailResponse | null>(null);
-  const [runDetailLoading, setRunDetailLoading] = useState(false);
+  const runDetailLoading = runDetailRequest.pending;
   const [runDetailError, setRunDetailError] = useState<string | null>(null);
   const [compareLeftRunId, setCompareLeftRunId] = useState<string>("");
   const [compareRightRunId, setCompareRightRunId] = useState<string>("");
   const [compareResult, setCompareResult] = useState<IntakeRunCompareResponse | null>(null);
-  const [compareLoading, setCompareLoading] = useState(false);
+  const compareLoading = compareRequest.pending;
   const [compareError, setCompareError] = useState<string | null>(null);
   const [readyCheck, setReadyCheck] = useState<IntakeReadyCheckResponse | null>(null);
   const [readyCheckLoading, setReadyCheckLoading] = useState(false);
@@ -188,26 +206,16 @@ export function IntakePage() {
       setRunDetailError(null);
       return;
     }
-    let active = true;
-    setRunDetailLoading(true);
     setRunDetailError(null);
-    fetchIntakeRun(selectedRunId)
-      .then((payload) => {
-        if (!active) return;
-        setSelectedRunDetail(payload);
-      })
+    void runDetailRequest.run(
+      (signal) => latestOnly(signal, () => fetchIntakeRun(selectedRunId)),
+      (payload) => setSelectedRunDetail(payload)
+    )
       .catch((err) => {
-        if (!active) return;
         setSelectedRunDetail(null);
         setRunDetailError(err instanceof Error ? err.message : t("intake.runDetailLoadError"));
-      })
-      .finally(() => {
-        if (!active) return;
-        setRunDetailLoading(false);
       });
-    return () => {
-      active = false;
-    };
+    return runDetailRequest.cancel;
   }, [selectedRunId, t]);
 
   useEffect(() => {
@@ -216,26 +224,16 @@ export function IntakePage() {
       setCompareError(null);
       return;
     }
-    let active = true;
-    setCompareLoading(true);
     setCompareError(null);
-    compareIntakeRuns(compareLeftRunId, compareRightRunId)
-      .then((payload) => {
-        if (!active) return;
-        setCompareResult(payload);
-      })
+    void compareRequest.run(
+      (signal) => latestOnly(signal, () => compareIntakeRuns(compareLeftRunId, compareRightRunId)),
+      (payload) => setCompareResult(payload)
+    )
       .catch((err) => {
-        if (!active) return;
         setCompareResult(null);
         setCompareError(err instanceof Error ? err.message : t("intake.runCompareLoadError"));
-      })
-      .finally(() => {
-        if (!active) return;
-        setCompareLoading(false);
       });
-    return () => {
-      active = false;
-    };
+    return compareRequest.cancel;
   }, [compareLeftRunId, compareRightRunId, t]);
 
   const selectedPreset = useMemo(
@@ -266,6 +264,12 @@ export function IntakePage() {
       const payload = buildIntakeDiscoverRequest(values);
       const nextResult = await discoverIntakeCandidates(payload);
       setResult(nextResult);
+      const issue = isFetchStageIssue(nextResult.fetch_stage_code) || nextResult.candidates_matched_count === 0;
+      notify({
+        id: `intake-discovery-${nextResult.crawl_session_id}`,
+        message: nextResult.fetch_stage_message ?? (issue ? t("intake.statusNoCandidates") : t("intake.statusSuccess")),
+        tone: issue ? "warning" : "success"
+      });
       const nextRecent = {
         profileUrl: values.profileUrl.trim(),
         presetName: values.presetName,
@@ -295,6 +299,11 @@ export function IntakePage() {
         douyin_account_connection_id: values.douyinAccountConnectionId || null
       });
       setReadyCheck(summary);
+      notify({
+        id: "intake-ready-check",
+        message: summary.summary_message,
+        tone: summary.safe_to_run_intake_now ? "success" : "warning"
+      });
     } catch (err) {
       setReadyCheckError(err instanceof Error ? err.message : t("intake.readyCheckError"));
     } finally {
@@ -310,6 +319,7 @@ export function IntakePage() {
     try {
       await startDouyinBrowserConnect({ account_connection_id: readyCheck.resolved_account_id });
       setReadyCheckActionMessage(t("intake.readyCheckReopenDone"));
+      notify({ id: "intake-reopen", message: t("intake.readyCheckReopenDone"), tone: "success" });
       await loadAccounts(readyCheck.resolved_account_id);
     } catch (err) {
       setReadyCheckError(err instanceof Error ? err.message : t("intake.readyCheckReopenError"));
@@ -327,6 +337,7 @@ export function IntakePage() {
       await validateDouyinAccount(readyCheck.resolved_account_id);
       await loadAccounts(readyCheck.resolved_account_id);
       setReadyCheckActionMessage(t("intake.readyCheckValidateDone"));
+      notify({ id: "intake-validate", message: t("intake.readyCheckValidateDone"), tone: "success" });
       const summary = await runIntakeReadyCheck({
         profile_url: values.profileUrl.trim() || null,
         douyin_account_connection_id: readyCheck.resolved_account_id
@@ -407,7 +418,6 @@ export function IntakePage() {
     const presetName = window.prompt("Saved preset name", "");
     if (!presetName || !presetName.trim()) return;
 
-    setSavingPreset(true);
     try {
       const payload = buildIntakeDiscoverRequest(values);
       const created = await createIntakeSavedPreset({
@@ -422,8 +432,6 @@ export function IntakePage() {
       setSavedPresets((current) => [created, ...current]);
     } catch (err) {
       setSubmitError(err instanceof Error ? err.message : "Failed to save intake preset");
-    } finally {
-      setSavingPreset(false);
     }
   }
 
@@ -489,7 +497,10 @@ export function IntakePage() {
         </div>
 
         <div className="intake-layout">
-          <form className="intake-form operator-panel" onSubmit={(event) => void submit(event)}>
+          <form
+            className="intake-form operator-panel"
+            onSubmit={(event) => void asyncAction.run("discover", () => submit(event))}
+          >
             <section className="intake-section">
               <div className="operator-panel-heading">
                 <div>
@@ -552,32 +563,50 @@ export function IntakePage() {
                 </div>
               ) : null}
               <div className="intake-actions">
-                <button disabled={readyCheckLoading || readyCheckActionBusy} onClick={() => void executeReadyCheck()} type="button">
-                  {readyCheckLoading ? t("intake.readyCheckRunning") : t("intake.readyCheck")}
-                </button>
+                <AsyncButton
+                  pending={asyncAction.isPending("ready-check")}
+                  pendingLabel={t("intake.readyCheckRunning")}
+                  disabled={readyCheckActionBusy}
+                  onClick={() => void asyncAction.run("ready-check", executeReadyCheck)}
+                >
+                  {t("intake.readyCheck")}
+                </AsyncButton>
                 {readyCheck ? (
-                  <button disabled={readyCheckLoading || readyCheckActionBusy} onClick={() => void executeReadyCheck()} type="button">
+                  <AsyncButton
+                    pending={asyncAction.isPending("ready-check")}
+                    disabled={readyCheckActionBusy}
+                    onClick={() => void asyncAction.run("ready-check", executeReadyCheck)}
+                  >
                     {t("intake.readyCheckRetry")}
-                  </button>
+                  </AsyncButton>
                 ) : null}
                 {readyCheck?.safe_to_run_intake_now ? (
-                  <button
-                    disabled={submitting || readyCheckLoading || readyCheckActionBusy}
-                    onClick={() => void runDiscovery()}
-                    type="button"
+                  <AsyncButton
+                    pending={asyncAction.isPending("discover")}
+                    pendingLabel={t("intake.discovering")}
+                    disabled={readyCheckLoading || readyCheckActionBusy}
+                    onClick={() => void asyncAction.run("discover", runDiscovery)}
                   >
                     {t("intake.readyCheckRunNow")}
-                  </button>
+                  </AsyncButton>
                 ) : null}
                 {readyCheck?.recommended_action === "revalidate_account" && readyCheck.resolved_account_id ? (
-                  <button disabled={readyCheckLoading || readyCheckActionBusy} onClick={() => void validateReadyCheckAccount()} type="button">
+                  <AsyncButton
+                    pending={asyncAction.isPending("validate-account")}
+                    disabled={readyCheckLoading || readyCheckActionBusy}
+                    onClick={() => void asyncAction.run("validate-account", validateReadyCheckAccount)}
+                  >
                     {t("intake.readyCheckValidate")}
-                  </button>
+                  </AsyncButton>
                 ) : null}
                 {readyCheck && readyCheck.browser_reopen_needed && readyCheck.browser_reopen_result !== "reopened" && readyCheck.resolved_account_id ? (
-                  <button disabled={readyCheckLoading || readyCheckActionBusy} onClick={() => void reopenReadyCheckProfile()} type="button">
+                  <AsyncButton
+                    pending={asyncAction.isPending("reopen-profile")}
+                    disabled={readyCheckLoading || readyCheckActionBusy}
+                    onClick={() => void asyncAction.run("reopen-profile", reopenReadyCheckProfile)}
+                  >
                     {t("intake.readyCheckReopen")}
-                  </button>
+                  </AsyncButton>
                 ) : null}
                 {readyCheck ? <a className="operator-inline-link" href="/accounts/douyin">{t("intake.manageDouyinAccounts")}</a> : null}
               </div>
@@ -792,12 +821,23 @@ export function IntakePage() {
 
             {errors.form ? <div className="inline-error compact">{errors.form}</div> : null}
             <div className="intake-actions">
-              <button className="primary intake-primary-action" disabled={submitting || forceLiveBlocked} type="submit">
-                {submitting ? t("intake.discovering") : t("intake.discover")}
-              </button>
-              <button disabled={submitting || savingPreset} onClick={() => void saveCurrentAsPreset()} type="button">
-                {savingPreset ? t("intake.savingPreset") : t("intake.saveAsPreset")}
-              </button>
+              <AsyncButton
+                className="primary intake-primary-action"
+                pending={asyncAction.isPending("discover")}
+                pendingLabel={t("intake.discovering")}
+                disabled={forceLiveBlocked}
+                type="submit"
+              >
+                {t("intake.discover")}
+              </AsyncButton>
+              <AsyncButton
+                pending={asyncAction.isPending("save-preset")}
+                pendingLabel={t("intake.savingPreset")}
+                disabled={submitting}
+                onClick={() => void asyncAction.run("save-preset", saveCurrentAsPreset)}
+              >
+                {t("intake.saveAsPreset")}
+              </AsyncButton>
               <button disabled={submitting} onClick={reset} type="button">{t("intake.reset")}</button>
               {result ? <a className="operator-inline-link" href={result.next_suggested_route}>{t("intake.openFreshReviewBoard")}</a> : null}
             </div>

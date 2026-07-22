@@ -171,6 +171,11 @@ class OcrPipelineService:
 
         with tempfile.TemporaryDirectory(prefix="ocr-e2e-") as tmp:
             cleaned_path = Path(tmp) / "cleaned.mp4"
+            ocr_cache_path = (
+                Path(video_path).parent
+                / ".ocr_cache"
+                / f"{source_video.id}.ocr-authority-v3.2.json"
+            )
             try:
                 e2e = run_hardsub_phases_1_to_4(
                     video_path,
@@ -184,6 +189,8 @@ class OcrPipelineService:
                     band_ratio=request.hard_sub_band_ratio,
                     on_progress=_progress,
                     render_progress=_render_progress,
+                    ocr_cache_path=ocr_cache_path,
+                    force_refresh=bool(request.force_refresh),
                 )
             except OcrFilteringError as exc:
                 raise OcrPipelineError(

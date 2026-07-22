@@ -1,24 +1,40 @@
 "use client";
 
+import { useRef, useState } from "react";
 import { useT } from "../../lib/i18n";
 import { OperatorStudioShell } from "../app-shell/OperatorStudioShell";
-import { TranscriptEditorPage } from "../transcript-editor/TranscriptEditorPage";
+import { TopbarRefreshButton } from "../app-shell/TopbarRefreshButton";
+import {
+  TranscriptEditorPage,
+  type TranscriptEditorPageHandle
+} from "../transcript-editor/TranscriptEditorPage";
 
 export function OperatorTranscriptEditorPage({ sourceVideoId }: { sourceVideoId: string }) {
   const t = useT();
+  const editorRef = useRef<TranscriptEditorPageHandle>(null);
+  const [refreshing, setRefreshing] = useState(false);
+
   return (
     <OperatorStudioShell
       actions={
-        <>
-          <a href="/selection/review-board">{t("nav.reviewBoard")}</a>
-          <a href={`/production/final-review/${sourceVideoId}`}>{t("nav.finalReview")}</a>
-          <a href="/">{t("common.home")}</a>
-        </>
+        <TopbarRefreshButton
+          busy={refreshing}
+          onClick={() => {
+            void (async () => {
+              setRefreshing(true);
+              try {
+                await editorRef.current?.refresh();
+              } finally {
+                setRefreshing(false);
+              }
+            })();
+          }}
+        />
       }
       description={t("operatorRoutes.transcriptEditorDesc")}
       title={t("operatorRoutes.transcriptEditorTitle")}
     >
-      <TranscriptEditorPage sourceVideoId={sourceVideoId} />
+      <TranscriptEditorPage ref={editorRef} sourceVideoId={sourceVideoId} />
     </OperatorStudioShell>
   );
 }

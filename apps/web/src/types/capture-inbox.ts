@@ -17,6 +17,8 @@ export type CapturedItemStatus =
   | "PROMOTED"
   | "FAILED";
 
+export type StudioItemStatusFilter = "all" | "ready" | "needs_action" | "failed" | "duplicate" | "promoted";
+
 export type CaptureInboxAction =
   | "retry_enrich"
   | "retry_preview"
@@ -34,11 +36,12 @@ export type DouyinReupScoreLevel = "excellent" | "good" | "average" | "low" | "n
 export type DouyinReupScoreComponents = {
   performance: number;
   engagement: number;
-  shareability: number;
+  virality_retention: number;
   duration_fit: number;
   recency: number;
   metadata_quality: number;
   penalty: number;
+  outlier_bonus: number;
 };
 
 export type MetadataGroupStatus = "captured" | "missing" | "failed" | "pending";
@@ -95,6 +98,9 @@ export type CapturedItem = {
   share_count_text: string | null;
   favorite_count?: number | null;
   favorite_count_text?: string | null;
+  /** Author follower count when captured — required for Outlier Bonus scoring. */
+  follower_count?: number | null;
+  follower_count_text?: string | null;
   estimated_views_text_raw?: string | null;
   estimated_views_display?: string | null;
   estimated_views_min?: number | null;
@@ -262,6 +268,7 @@ export type CaptureSessionListResponse = {
 export type CapturedItemListResponse = {
   items: CapturedItem[];
   total_count: number;
+  status_counts: Record<StudioItemStatusFilter, number>;
 };
 
 export type CaptureInboxAdvancedFilter = {
@@ -290,6 +297,7 @@ export type CaptureInboxAdvancedFilter = {
 export type CaptureInboxItemQueryRequest = {
   capture_session_id: string;
   status?: CapturedItemStatus;
+  studio_status?: StudioItemStatusFilter;
   search?: string;
   limit?: number;
   offset?: number;

@@ -55,6 +55,7 @@ def queue_item(**overrides):
         "completed_at": None,
         "cancelled_at": None,
         "job_id": uuid4(),
+        "metadata_json": {},
         "source_video": None,
         "video_candidate": None,
     }
@@ -74,6 +75,29 @@ class PauseDuringProgressTests(unittest.TestCase):
         actions = available_action_values(item)
         self.assertIn(ReupQueueAction.RESUME, actions)
         self.assertNotIn(ReupQueueAction.HOLD, actions)
+
+    def test_waiting_for_metadata_offers_retry_when_analyze_failed(self) -> None:
+        job_id = uuid4()
+        item = queue_item(
+            status=ReupQueueStatus.WAITING_FOR_METADATA,
+            media_prep_status=ReupQueueMediaPrepStatus.WAITING_FOR_METADATA,
+            job_id=job_id,
+            job=SimpleNamespace(id=job_id, job_type="ANALYZE_AUDIO", status=JobStatus.FAILED),
+        )
+        actions = available_action_values(item)
+        self.assertIn(ReupQueueAction.RETRY, actions)
+        self.assertIn(ReupQueueAction.MARK_MEDIA_READY, actions)
+
+    def test_waiting_for_metadata_hides_retry_when_analyze_still_running(self) -> None:
+        job_id = uuid4()
+        item = queue_item(
+            status=ReupQueueStatus.WAITING_FOR_METADATA,
+            media_prep_status=ReupQueueMediaPrepStatus.WAITING_FOR_METADATA,
+            job_id=job_id,
+            job=SimpleNamespace(id=job_id, job_type="ANALYZE_AUDIO", status=JobStatus.RUNNING),
+        )
+        actions = available_action_values(item)
+        self.assertNotIn(ReupQueueAction.RETRY, actions)
 
     def test_hold_during_progress_cancels_job_and_sets_held(self) -> None:
         job_id = uuid4()
@@ -147,6 +171,84 @@ class PauseDuringProgressTests(unittest.TestCase):
         request_arg = download_service.create_download_job.call_args.args[0]
         self.assertTrue(getattr(request_arg, "force_refresh", False))
         self.assertNotEqual(stale_job.idempotency_key, logical_key)
+
+    def test_hold_during_metadata_keeps_transcript_stage(self) -> None:
+        job_id = uuid4()
+        item = queue_item(
+            job_id=job_id,
+            status=ReupQueueStatus.WAITING_FOR_METADATA,
+            media_prep_status=ReupQueueMediaPrepStatus.WAITING_FOR_METADATA,
+            media_ready_at=datetime(2026, 7, 14, tzinfo=UTC),
+        )
+        fake_db = FakeActionDb(item)
+        cancel = MagicMock(return_value=SimpleNamespace(id=job_id, status=JobStatus.CANCELLED))
+
+        with patch("src.services.job_service.JobService") as job_service_cls:
+            job_service_cls.return_value.cancel_job = cancel
+            updated = ReupQueueService(fake_db).apply_action(
+                item.id,
+                action=ReupQueueAction.HOLD,
+                note="Operator paused transcript",
+            )
+
+        cancel.assert_called_once_with(job_id)
+        self.assertIsNotNone(updated.held_at)
+        self.assertEqual(updated.status, ReupQueueStatus.WAITING_FOR_METADATA)
+        self.assertEqual(updated.media_prep_status, ReupQueueMediaPrepStatus.WAITING_FOR_METADATA)
+        self.assertIsNotNone(updated.media_ready_at)
+
+    def test_mark_media_ready_clears_held_at(self) -> None:
+        analyze_job = uuid4()
+        item = queue_item(
+            held_at=datetime(2026, 7, 14, tzinfo=UTC),
+            status=ReupQueueStatus.WAITING_FOR_MEDIA,
+            job_id=None,
+        )
+        fake_db = FakeActionDb(item)
+        audio_service = MagicMock()
+        audio_service.create_analysis_job.return_value = SimpleNamespace(id=analyze_job)
+
+        updated = ReupQueueService(fake_db, audio_analysis_service=audio_service).apply_action(
+            item.id,
+            action=ReupQueueAction.MARK_MEDIA_READY,
+            media_prep_notes="Operator confirmed media; enqueue audio analysis.",
+            media_prep_status=ReupQueueMediaPrepStatus.WAITING_FOR_METADATA,
+        )
+
+        self.assertIsNone(updated.held_at)
+        self.assertEqual(updated.status, ReupQueueStatus.WAITING_FOR_METADATA)
+        self.assertEqual(updated.job_id, analyze_job)
+
+    def test_resume_during_metadata_restarts_analyze_not_download(self) -> None:
+        old_job = uuid4()
+        new_job = uuid4()
+        item = queue_item(
+            job_id=old_job,
+            held_at=datetime(2026, 7, 14, tzinfo=UTC),
+            status=ReupQueueStatus.WAITING_FOR_METADATA,
+            media_prep_status=ReupQueueMediaPrepStatus.WAITING_FOR_METADATA,
+            media_ready_at=datetime(2026, 7, 14, tzinfo=UTC),
+            metadata_json={"analyze_audio_job_id": str(old_job)},
+        )
+        logical_key = f"reup-queue:{item.id}:analyze-audio"
+        stale_job = SimpleNamespace(id=old_job, status=JobStatus.CANCELLED, idempotency_key=logical_key)
+        fake_db = FakeActionDb(item, job=stale_job)
+        audio_service = MagicMock()
+        audio_service.create_analysis_job.return_value = SimpleNamespace(id=new_job)
+        download_service = MagicMock()
+
+        updated = ReupQueueService(
+            fake_db,
+            download_service=download_service,
+            audio_analysis_service=audio_service,
+        ).apply_action(item.id, action=ReupQueueAction.RESUME)
+
+        self.assertIsNone(updated.held_at)
+        self.assertEqual(updated.status, ReupQueueStatus.WAITING_FOR_METADATA)
+        self.assertEqual(updated.media_prep_status, ReupQueueMediaPrepStatus.WAITING_FOR_METADATA)
+        self.assertEqual(updated.job_id, new_job)
+        audio_service.create_analysis_job.assert_called_once()
+        download_service.create_download_job.assert_not_called()
 
 
 if __name__ == "__main__":

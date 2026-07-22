@@ -4,10 +4,13 @@ import Link from "next/link";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { fetchAllPlatformAccounts, fetchPublishControlQueue } from "../../lib/api";
 import { useT } from "../../lib/i18n";
+import { useLatestRequest } from "../../lib/useLatestRequest";
 import type { PlatformAccount } from "../../types/publish-draft";
 import type { PublishControlQueue } from "../../types/publish-control";
 import { OpsConsoleShell } from "../app-shell/OpsConsoleShell";
 import { TopbarRefreshButton } from "../app-shell/TopbarRefreshButton";
+import { AsyncContentBoundary } from "../shared/AsyncContentBoundary";
+import { useNotice } from "../shared/NoticeCenter";
 import { OpsState, formatDateTime, statusTone, type OpsTone } from "./OpsShared";
 
 type AccountRow = PlatformAccount & {
@@ -62,22 +65,24 @@ export function OpsAccountsPage() {
   const t = useT();
   const [accounts, setAccounts] = useState<PlatformAccount[]>([]);
   const [queue, setQueue] = useState<PublishControlQueue | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [loadedAt, setLoadedAt] = useState<string | null>(null);
+  const request = useLatestRequest();
+  const { notify } = useNotice();
 
   async function load() {
-    setLoading(true);
-    setError(null);
+    const mode = loadedAt ? "refresh" : "initial";
     try {
-      const [accountPayload, queuePayload] = await Promise.all([fetchAllPlatformAccounts(), fetchPublishControlQueue()]);
-      setAccounts(accountPayload);
-      setQueue(queuePayload);
-      setLoadedAt(new Date().toISOString());
+      await request.run(async () => {
+        const [accountPayload, queuePayload] = await Promise.all([fetchAllPlatformAccounts(), fetchPublishControlQueue()]);
+        return { accountPayload, queuePayload };
+      }, ({ accountPayload, queuePayload }) => {
+        setAccounts(accountPayload);
+        setQueue(queuePayload);
+        setLoadedAt(new Date().toISOString());
+      }, mode);
+      if (mode === "refresh") notify({ id: "ops-accounts-refresh", message: "Accounts refreshed.", tone: "success" });
     } catch (err) {
-      setError(err instanceof Error ? err.message : t("opsAccounts.unavailableTitle"));
-    } finally {
-      setLoading(false);
+      if (mode === "refresh") notify({ id: "ops-accounts-refresh", message: err instanceof Error ? err.message : t("opsAccounts.unavailableTitle"), tone: "error" });
     }
   }
 
@@ -117,29 +122,29 @@ export function OpsAccountsPage() {
   const unhealthyCount = unhealthyIds.size;
 
   const refreshAction = (
-    <TopbarRefreshButton busy={loading && accounts.length > 0} disabled={loading && accounts.length === 0} onClick={() => void load()} />
+    <TopbarRefreshButton busy={request.refreshing} disabled={request.initialLoading} onClick={() => void load()} />
   );
 
-  if (loading && accounts.length === 0) {
+  if (!loadedAt && !request.error) {
     return (
       <OpsConsoleShell actions={refreshAction} description={t("opsAccounts.description")} title={t("opsAccounts.title")}>
-        <OpsState title={t("opsAccounts.loadingTitle")} detail={t("opsAccounts.loadingDetail")} />
+        <AsyncContentBoundary skeletonVariant="list" status="loading"><span /></AsyncContentBoundary>
       </OpsConsoleShell>
     );
   }
 
-  if (error && accounts.length === 0) {
+  if (request.error && !loadedAt) {
     return (
       <OpsConsoleShell actions={refreshAction} description={t("opsAccounts.description")} title={t("opsAccounts.title")}>
-        <OpsState title={t("opsAccounts.unavailableTitle")} detail={error} retry={() => void load()} />
+        <AsyncContentBoundary errorState={<OpsState title={t("opsAccounts.unavailableTitle")} detail={request.error.message} retry={() => void load()} />} skeletonVariant="list" status="error"><span /></AsyncContentBoundary>
       </OpsConsoleShell>
     );
   }
 
   return (
     <OpsConsoleShell actions={refreshAction} description={t("opsAccounts.description")} title={t("opsAccounts.title")}>
+      <AsyncContentBoundary refreshing={request.refreshing} skeletonVariant="list" status="success">
       <main className="ops-page ops-accounts-page">
-        {error ? <div className="inline-error">{error}</div> : null}
 
         <p className="ops-accounts-freshness">
           {t("opsAccounts.loadedAt")}{" "}
@@ -243,6 +248,7 @@ export function OpsAccountsPage() {
           ) : null}
         </section>
       </main>
+      </AsyncContentBoundary>
     </OpsConsoleShell>
   );
 }

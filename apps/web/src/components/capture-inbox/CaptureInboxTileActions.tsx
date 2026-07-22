@@ -1,117 +1,124 @@
 import type { CapturedItem, CaptureInboxAction } from "../../types/capture-inbox";
+import { captureInboxDetailsActionModel } from "../../lib/captureInboxUx";
+import { AsyncButton } from "../shared/AsyncButton";
 import { WorkItemActionIcon } from "../shared/WorkItemActionIcon";
 
 type CaptureInboxTileActionsProps = {
   item: CapturedItem;
   mutating: boolean;
   onAction: (item: CapturedItem, action: CaptureInboxAction) => void;
-  onFocusItem: (itemId: string) => void;
-  promotable: boolean;
-  workingAction: CaptureInboxAction | "delete_session" | "refresh" | null;
+  pendingAction?: CaptureInboxAction | null;
+  /** @deprecated Prefer captureInboxDetailsActionModel — kept for call-site compatibility. */
+  promotable?: boolean;
+  workingAction?: CaptureInboxAction | "delete_session" | "refresh" | null;
+  variant?: "tile" | "inspector";
 };
-
-function actionLabel(base: string, apiAction: CaptureInboxAction, workingAction: CaptureInboxTileActionsProps["workingAction"]): string {
-  return workingAction === apiAction ? "Working..." : base;
-}
 
 export function CaptureInboxTileActions({
   item,
   mutating,
   onAction,
-  onFocusItem,
-  promotable,
-  workingAction
+  pendingAction = null,
+  variant = "tile"
 }: CaptureInboxTileActionsProps) {
   const disabled = mutating;
-  const promoted = item.status === "PROMOTED";
-  const reviewBoardHref = item.promoted_video_candidate_id
-    ? `/selection/review-board?candidate=${encodeURIComponent(item.promoted_video_candidate_id)}`
-    : undefined;
+  const model = captureInboxDetailsActionModel(item);
+  const barClass = [
+    "review-board-tile-action-bar",
+    "review-board-tile-action-grid",
+    variant === "inspector" ? "is-inspector" : "is-tile",
+    "capture-inbox-tile-action-bar"
+  ].join(" ");
 
-  if (promoted) {
+  if (model.kind === "promoted") {
     return (
-      <div
-        aria-label="Item actions"
-        className="review-board-tile-action-bar review-board-tile-action-grid is-tile is-promoted-pair capture-inbox-tile-action-bar"
-      >
+      <div aria-label="Item actions" className={barClass}>
         <a
-          aria-disabled={!reviewBoardHref ? true : undefined}
+          aria-disabled={!model.reviewBoardHref ? true : undefined}
           className="review-board-tile-btn is-primary is-promoted-open"
-          href={reviewBoardHref}
-          onClick={!reviewBoardHref ? (event) => event.preventDefault() : undefined}
-          tabIndex={!reviewBoardHref ? -1 : undefined}
+          href={model.reviewBoardHref}
+          onClick={!model.reviewBoardHref ? (event) => event.preventDefault() : undefined}
+          tabIndex={!model.reviewBoardHref ? -1 : undefined}
           title="Open promoted candidate on Review Board"
         >
           <WorkItemActionIcon kind="open" />
           Open candidate
         </a>
-        <button
-          className="review-board-tile-btn is-secondary is-promoted-details"
-          disabled={disabled}
-          onClick={() => onFocusItem(item.id)}
-          title="Inspect item details"
-          type="button"
-        >
-          <WorkItemActionIcon kind="details" />
-          Details
-        </button>
       </div>
     );
   }
 
-  const recheckDisabled = disabled;
-  const deleteDisabled = disabled;
+  if (!model.showPromote && !model.showRecheck && !model.showDelete) {
+    return null;
+  }
+
+  const recoverPrimary = !model.showPromote && model.showRecheck;
 
   return (
-    <div
-      aria-label="Item actions"
-      className="review-board-tile-action-bar review-board-tile-action-grid is-tile capture-inbox-tile-action-bar"
-    >
-      <div className="review-board-tile-action-primary">
-        <button
-          className="review-board-tile-btn is-primary"
-          disabled={disabled || !promotable}
-          onClick={() => onAction(item, "promote_now")}
-          title={promotable ? "Promote to review" : "Item is not ready to promote"}
-          type="button"
-        >
-          <WorkItemActionIcon kind="promote" />
-          {actionLabel("Promote", "promote_now", workingAction)}
-        </button>
-      </div>
+    <div aria-label="Item actions" className={barClass}>
+      {model.showPromote ? (
+        <div className="review-board-tile-action-primary">
+          <AsyncButton
+            className="review-board-tile-btn is-primary"
+            disabled={disabled}
+            leadingIcon={<WorkItemActionIcon kind="promote" />}
+            onClick={() => onAction(item, "promote_now")}
+            pending={pendingAction === "promote_now"}
+            pendingLabel="Promoting…"
+            title="Promote to review"
+            type="button"
+          >
+            Promote
+          </AsyncButton>
+        </div>
+      ) : null}
 
-      <div className="review-board-tile-action-row is-split">
-        <button
-          className="review-board-tile-btn is-muted"
-          disabled={recheckDisabled}
-          onClick={() => onAction(item, "re_evaluate_intake")}
-          type="button"
-        >
-          <WorkItemActionIcon kind="recheck" />
-          {actionLabel("Re-check", "re_evaluate_intake", workingAction)}
-        </button>
-        <button
-          className="review-board-tile-btn is-danger"
-          disabled={deleteDisabled}
-          onClick={() => onAction(item, "delete_items")}
-          type="button"
-        >
-          <WorkItemActionIcon kind="delete" />
-          {actionLabel("Delete", "delete_items", workingAction)}
-        </button>
-      </div>
+      {recoverPrimary ? (
+        <div className="review-board-tile-action-primary">
+          <AsyncButton
+            className="review-board-tile-btn is-primary is-recover is-no-arrow"
+            disabled={disabled}
+            leadingIcon={<WorkItemActionIcon kind="recheck" />}
+            onClick={() => onAction(item, "re_evaluate_intake")}
+            pending={pendingAction === "re_evaluate_intake"}
+            pendingLabel="Re-checking…"
+            type="button"
+          >
+            Re-check
+          </AsyncButton>
+        </div>
+      ) : null}
 
-      <div className="review-board-tile-action-row is-tertiary">
-        <button
-          className="review-board-tile-btn is-ghost"
-          disabled={disabled}
-          onClick={() => onFocusItem(item.id)}
-          type="button"
-        >
-          <WorkItemActionIcon kind="details" />
-          View details
-        </button>
-      </div>
+      {model.showRecheck || model.showDelete ? (
+        <div className={`review-board-tile-action-row ${model.showRecheck && model.showDelete && !recoverPrimary ? "is-split" : "is-secondary"}`}>
+          {model.showRecheck && !recoverPrimary ? (
+            <AsyncButton
+              className="review-board-tile-btn is-muted"
+              disabled={disabled}
+              leadingIcon={<WorkItemActionIcon kind="recheck" />}
+              onClick={() => onAction(item, "re_evaluate_intake")}
+              pending={pendingAction === "re_evaluate_intake"}
+              pendingLabel="Re-checking…"
+              type="button"
+            >
+              Re-check
+            </AsyncButton>
+          ) : null}
+          {model.showDelete ? (
+            <AsyncButton
+              className="review-board-tile-btn is-danger"
+              disabled={disabled}
+              leadingIcon={<WorkItemActionIcon kind="delete" />}
+              onClick={() => onAction(item, "delete_items")}
+              pending={pendingAction === "delete_items"}
+              pendingLabel="Deleting…"
+              type="button"
+            >
+              Delete
+            </AsyncButton>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }

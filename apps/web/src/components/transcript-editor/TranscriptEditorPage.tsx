@@ -1,7 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { useT } from "../../lib/i18n";
+import { useAsyncAction } from "../../lib/useAsyncAction";
+import { useNotice } from "../shared/NoticeCenter";
+import { AsyncContentBoundary } from "../shared/AsyncContentBoundary";
 import {
   createAudioAnalysis,
   createTtsJob,
@@ -29,6 +32,10 @@ import {
   validateTranscriptSegments
 } from "../../lib/transcriptEditorState";
 import {
+  fingerprintVietnameseDraft,
+  ttsViFingerprintStorageKey
+} from "../../lib/transcriptEditorPipeline";
+import {
   pickActiveTranscriptJob,
   transcriptJobKindFromType,
   type TranscriptActiveJobKind
@@ -49,13 +56,19 @@ import {
   isNoDialogueAnalysisSummary,
   TranscriptEmptyState,
   TranscriptErrorState,
-  TranscriptLoadingState,
   TranscriptNoDialogueState
 } from "./TranscriptStates";
 import { UnsavedChangesGuard } from "./UnsavedChangesGuard";
 
-export function TranscriptEditorPage({ sourceVideoId }: { sourceVideoId: string }) {
+export type TranscriptEditorPageHandle = {
+  refresh: () => Promise<void>;
+};
+
+export const TranscriptEditorPage = forwardRef<TranscriptEditorPageHandle, { sourceVideoId: string }>(
+  function TranscriptEditorPage({ sourceVideoId }, ref) {
   const t = useT();
+  const asyncAction = useAsyncAction();
+  const { notify } = useNotice();
   const [state, setState] = useState<TranscriptEditorState | null>(null);
   const [savedState, setSavedState] = useState<TranscriptEditorState | null>(null);
   const [summary, setSummary] = useState<AudioAnalysisSummaryResponse | null>(null);
@@ -65,6 +78,7 @@ export function TranscriptEditorPage({ sourceVideoId }: { sourceVideoId: string 
   const [translating, setTranslating] = useState(false);
   const [synthesizingTts, setSynthesizingTts] = useState(false);
   const [joinedTtsAssetId, setJoinedTtsAssetId] = useState<string | null>(null);
+  const [ttsSourceFingerprint, setTtsSourceFingerprint] = useState<string | null>(null);
   const [ttsSummary, setTtsSummary] = useState<TtsSummaryResponse | null>(null);
   const [analyzeJobId, setAnalyzeJobId] = useState<string | null>(null);
   const [jobProgressPercent, setJobProgressPercent] = useState<number | null>(null);
@@ -72,13 +86,18 @@ export function TranscriptEditorPage({ sourceVideoId }: { sourceVideoId: string 
   const cancelRequestedRef = useRef(false);
   const resumeAttemptedRef = useRef(false);
   const jobBusyRef = useRef(false);
+  const ttsPendingFingerprintRef = useRef<string | null>(null);
+  const stateRef = useRef(state);
+  stateRef.current = state;
   const [error, setError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [cancelledMessage, setCancelledMessage] = useState<string | null>(null);
   const [playRequestId, setPlayRequestId] = useState(0);
+  const [pauseRequestId, setPauseRequestId] = useState(0);
+  const [isPlaying, setIsPlaying] = useState(false);
 
-  const loadData = useCallback(async () => {
-    setLoading(true);
+  const loadData = useCallback(async (mode: "initial" | "refresh" = "initial") => {
+    if (mode === "initial") setLoading(true);
     setError(null);
     try {
       const [transcript, translation, nextSummary] = await Promise.all([
@@ -98,15 +117,34 @@ export function TranscriptEditorPage({ sourceVideoId }: { sourceVideoId: string 
         setTtsSummary(null);
         setJoinedTtsAssetId(null);
       }
+      try {
+        const storedFp = sessionStorage.getItem(ttsViFingerprintStorageKey(sourceVideoId));
+        setTtsSourceFingerprint(storedFp);
+      } catch {
+        setTtsSourceFingerprint(null);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : t("transcriptEditorPage.loadError"));
     } finally {
-      setLoading(false);
+      if (mode === "initial") setLoading(false);
     }
   }, [sourceVideoId, t]);
 
+  useImperativeHandle(
+    ref,
+    () => ({
+      refresh: async () => {
+        if (state && hasUnsavedChanges(state) && !window.confirm(t("transcriptEditorPage.refreshUnsavedConfirm"))) {
+          return;
+        }
+        await loadData("refresh");
+      }
+    }),
+    [loadData, state, t]
+  );
+
   useEffect(() => {
-    void loadData();
+    void loadData("initial");
   }, [loadData]);
 
   useEffect(() => {
@@ -257,7 +295,20 @@ export function TranscriptEditorPage({ sourceVideoId }: { sourceVideoId: string 
         const nextTtsSummary = await fetchTtsSummary(sourceVideoId);
         setTtsSummary(nextTtsSummary);
         setJoinedTtsAssetId(findJoinedTtsAssetId(nextTtsSummary));
+        const fp =
+          ttsPendingFingerprintRef.current ??
+          (stateRef.current ? fingerprintVietnameseDraft(stateRef.current.segments) : null);
+        ttsPendingFingerprintRef.current = null;
+        if (fp) {
+          setTtsSourceFingerprint(fp);
+          try {
+            sessionStorage.setItem(ttsViFingerprintStorageKey(sourceVideoId), fp);
+          } catch {
+            // Best-effort freshness marker; UI still works without persistence.
+          }
+        }
         setSuccessMessage(t("transcriptEditorPage.ttsSuccess"));
+        notify({ id: `transcript-tts-${sourceVideoId}`, message: t("transcriptEditorPage.ttsSuccess"), tone: "success" });
         return;
       }
       if (kind === "translate") {
@@ -279,15 +330,18 @@ export function TranscriptEditorPage({ sourceVideoId }: { sourceVideoId: string 
           );
         } else {
           setSuccessMessage(t("transcriptEditorPage.translateSuccess"));
+          notify({ id: `transcript-translate-${sourceVideoId}`, message: t("transcriptEditorPage.translateSuccess"), tone: "success" });
         }
         return;
       }
       await loadData();
       setSuccessMessage(t("transcriptEditorPage.reanalyzeSuccess"));
+      notify({ id: `transcript-reanalyze-${sourceVideoId}`, message: t("transcriptEditorPage.reanalyzeSuccess"), tone: "success" });
       return;
     }
     if (settled.outcome === "cancelled") {
       setCancelledMessage(t("transcriptEditorPage.jobCancelled"));
+      notify({ id: `transcript-cancel-${sourceVideoId}`, message: t("transcriptEditorPage.jobCancelled"), tone: "info" });
       return;
     }
     if (settled.outcome === "failed") {
@@ -390,10 +444,12 @@ export function TranscriptEditorPage({ sourceVideoId }: { sourceVideoId: string 
     if (hasUnsavedChanges(state) && !window.confirm(t("transcriptEditorPage.ttsUnsavedConfirm"))) {
       return;
     }
+    ttsPendingFingerprintRef.current = fingerprintVietnameseDraft(state.segments);
     try {
       const created = await createTtsJob(sourceVideoId);
       await trackJob("tts", created.job_id);
     } catch (err) {
+      ttsPendingFingerprintRef.current = null;
       setError(err instanceof Error ? err.message : t("transcriptEditorPage.ttsError"));
     }
   }
@@ -404,7 +460,15 @@ export function TranscriptEditorPage({ sourceVideoId }: { sourceVideoId: string 
     void resumeActiveTranscriptJob();
   }, [loading, state, sourceVideoId]);
 
-  if (loading) return <TranscriptLoadingState />;
+  if (loading) {
+    return (
+      <main className="transcript-editor">
+        <AsyncContentBoundary status="loading" skeletonVariant="detail" loadingLabel={t("transcriptEditorStates.loading")}>
+          {null}
+        </AsyncContentBoundary>
+      </main>
+    );
+  }
   if (error && !state) return <TranscriptErrorState message={error} onRetry={loadData} />;
   if (!state || state.segments.length === 0) {
     if (isNoDialogueAnalysisSummary(summary)) {
@@ -418,18 +482,19 @@ export function TranscriptEditorPage({ sourceVideoId }: { sourceVideoId: string 
       <UnsavedChangesGuard enabled={dirtyCount > 0 || jobBusy} />
       <TranscriptEditorHeader
         state={state}
-        summary={summary}
         dirtyCount={dirtyCount}
         blockingCount={blockingWarnings.length}
-        saving={saving}
-        reanalyzing={reanalyzing}
-        translating={translating}
-        synthesizingTts={synthesizingTts}
-        onSave={() => void saveDraft()}
+        saving={saving || asyncAction.isPending("save")}
+        reanalyzing={reanalyzing || asyncAction.isPending("reanalyze")}
+        translating={translating || asyncAction.isPending("translate")}
+        synthesizingTts={synthesizingTts || asyncAction.isPending("tts")}
+        hasJoinedTts={Boolean(joinedTtsAssetId)}
+        ttsSourceFingerprint={ttsSourceFingerprint}
+        onSave={() => void asyncAction.run("save", saveDraft)}
         onDiscard={discardChanges}
-        onTranslateLiteral={(preset) => void translateLiteral(preset)}
-        onReanalyze={(preset) => void reanalyzeAudio(preset)}
-        onGenerateTts={() => void generateTts()}
+        onTranslateLiteral={(preset) => void asyncAction.run("translate", () => translateLiteral(preset))}
+        onReanalyze={(preset) => void asyncAction.run("reanalyze", () => reanalyzeAudio(preset))}
+        onGenerateTts={() => void asyncAction.run("tts", generateTts)}
       />
       {jobBusyKind ? (
         <div className="transcript-job-strip">
@@ -438,7 +503,7 @@ export function TranscriptEditorPage({ sourceVideoId }: { sourceVideoId: string 
             jobId={analyzeJobId}
             progressPercent={jobProgressPercent}
             cancelling={cancellingJob}
-            onCancel={() => void cancelRunningJob()}
+            onCancel={() => void asyncAction.run("cancel-job", cancelRunningJob)}
           />
         </div>
       ) : null}
@@ -470,7 +535,9 @@ export function TranscriptEditorPage({ sourceVideoId }: { sourceVideoId: string 
             summary={summary}
             selectedSegment={selectedSegment}
             playRequestId={playRequestId}
+            pauseRequestId={pauseRequestId}
             joinedTtsAssetId={joinedTtsAssetId}
+            onPlayingChange={setIsPlaying}
           />
           <TranscriptBeatRail
             segments={state.segments}
@@ -503,9 +570,14 @@ export function TranscriptEditorPage({ sourceVideoId }: { sourceVideoId: string 
                 )
               }
               onPlay={() => {
+                if (isPlaying) {
+                  setPauseRequestId((current) => current + 1);
+                  return;
+                }
                 setState((current) => (current ? selectSegment(current, selectedSegment.localId) : current));
                 setPlayRequestId((current) => current + 1);
               }}
+              isPlaying={isPlaying}
               onMergePrevious={() => void mergeSegment(selectedSegment.localId, "previous")}
               onMergeNext={() => void mergeSegment(selectedSegment.localId, "next")}
               onSplit={() => void splitSegment(selectedSegment)}
@@ -520,14 +592,14 @@ export function TranscriptEditorPage({ sourceVideoId }: { sourceVideoId: string 
         dirtyCount={dirtyCount}
         warningCount={warnings.length}
         blockingCount={blockingWarnings.length}
-        saving={saving}
+        saving={saving || asyncAction.isPending("save")}
         jobBusy={jobBusy}
-        onSave={() => void saveDraft()}
+        onSave={() => void asyncAction.run("save", saveDraft)}
         onDiscard={discardChanges}
       />
     </main>
   );
-}
+});
 
 function splitText(text: string): [string, string] {
   const trimmed = text.trim();

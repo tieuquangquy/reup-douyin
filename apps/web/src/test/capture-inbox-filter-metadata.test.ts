@@ -243,15 +243,15 @@ const strongScore = calculateDouyinReupScore(
   { ...baseItem, estimated_views_mid: 120000, like_count: 5000, comment_count: 600, share_count: 400, favorite_count: 300, engagement_rate: 0.052, metadata_status: "complete", status: "READY", has_all_core_metadata: true, missing_metadata_fields: [] },
   { now: new Date("2026-04-28T00:00:00.000Z") }
 );
-assert.equal(strongScore.reup_score_components.performance, 22, "Performance component must use the 0-25 weight");
-assert.equal(strongScore.reup_score_components.engagement, 21, "Engagement component must use the 0-25 weight");
-assert.equal(strongScore.reup_score_components.shareability, 10, "Shareability component must use the 0-15 weight");
-assert.equal(strongScore.reup_score_components.duration_fit, 15, "Duration-fit component must use the 0-15 weight");
-assert.equal(strongScore.reup_score_components.recency, 10, "Recency component must use the 0-10 weight");
+assert.equal(strongScore.reup_score_components.performance, 20, "Performance component must use the 0-20 sweet-spot weight");
+assert.equal(strongScore.reup_score_components.engagement, 10, "Engagement component must use likes+comments rate with 0-20 weight");
+assert.equal(strongScore.reup_score_components.virality_retention, 10, "Virality component must use shares+favorites rate with 0-20 weight");
+assert.equal(strongScore.reup_score_components.duration_fit, 10, "Duration-fit component must use the 0-10 weight");
+assert.equal(strongScore.reup_score_components.recency, 20, "Recency component must use the 0-20 weight");
 assert.equal(strongScore.reup_score_components.metadata_quality, 10, "Metadata-quality component must use the 0-10 weight");
 assert.equal(strongScore.reup_score_components.penalty, 0, "Complete ready items should avoid metadata penalties");
 assert.equal(strongScore.reup_score_label, "Excellent");
-assert.ok(strongScore.reup_score_reasons.includes("Strong estimated views"));
+assert.ok(strongScore.reup_score_reasons.includes("Sweet-spot view range"));
 assert.ok(strongScore.reup_score_reasons.length <= 4, "Score reasons must stay compact");
 
 const missingMetadataScore = calculateDouyinReupScore({ ...missingViewsItem, thumbnail_url: null, duration_seconds: null, duration_text: null, posted_at: null, posted_text: null, posted_display: null, like_count: null, comment_count: null, share_count: null, favorite_count: null, metadata_status: "missing", has_thumbnail: false, has_duration: false, has_posted: false, has_views: false, missing_metadata_fields: ["thumbnail", "duration", "posted", "views", "likes", "comments", "shares"] });
@@ -260,8 +260,27 @@ assert.equal(missingMetadataScore.reup_score_label, "Needs metadata");
 assert.equal(missingMetadataScore.reup_score_level, "needs_metadata");
 assert.equal(missingMetadataScore.reup_score_components.penalty, -30, "Penalty must clamp at -30");
 
-const backendScore = getReupScoreForCaptureItem({ ...baseItem, reup_score: 88, reup_score_label: "Excellent", reup_score_level: "excellent", reup_score_components: strongScore.reup_score_components, reup_score_reasons: ["Backend score"] });
-assert.equal(backendScore.reup_score, calculateDouyinReupScore({ ...baseItem, reup_score: 88, reup_score_label: "Excellent", reup_score_level: "excellent", reup_score_components: strongScore.reup_score_components, reup_score_reasons: ["Backend score"] }).reup_score, "Operator score must always use the shared canonical formula");
+const staleItem = {
+  ...baseItem,
+  estimated_views_mid: 120_000,
+  like_count: 5000,
+  comment_count: 600,
+  share_count: 400,
+  favorite_count: 300,
+  engagement_rate: 0.052,
+  metadata_status: "complete",
+  status: "READY",
+  has_all_core_metadata: true,
+  missing_metadata_fields: [],
+  reup_score: 88,
+  reup_score_label: "Excellent",
+  reup_score_level: "excellent",
+  reup_score_components: strongScore.reup_score_components,
+  reup_score_reasons: ["Backend score"]
+};
+const backendScore = getReupScoreForCaptureItem(staleItem, { now: new Date("2026-04-28T00:00:00.000Z") });
+assert.equal(backendScore.reup_score, strongScore.reup_score, "Stale persisted reup_score must be ignored; operator score always recomputes");
+assert.notEqual(backendScore.reup_score, 88, "Persisted legacy score must not override canonical formula");
 
 const derivedEngagementMetadata = getDouyinItemMetadataForFilters({
   ...baseItem,
@@ -286,6 +305,9 @@ const needsActionItem: CapturedItem = { ...completeReadyItem, id: "needs-action"
 const lowPriorityItem: CapturedItem = {
   ...completeReadyItem,
   id: "low-priority",
+  reup_score: null,
+  reup_score_label: null,
+  reup_score_level: null,
   estimated_views_mid: 1200,
   estimated_views_min: 900,
   estimated_views_max: 1500,

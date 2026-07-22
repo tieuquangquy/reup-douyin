@@ -20,10 +20,15 @@ import {
   validateDouyinAccount
 } from "../../lib/api";
 import { useT } from "../../lib/i18n";
+import { useAsyncAction } from "../../lib/useAsyncAction";
+import { useLatestRequest, type LatestRequestMode } from "../../lib/useLatestRequest";
 import type { DouyinAccount, DouyinBrowserConnectSession, DouyinCurrentPageDetectionResponse } from "../../types/douyin-accounts";
 import { OperatorStudioShell } from "../app-shell/OperatorStudioShell";
 import { PageShell } from "../app-shell/PageShell";
 import { StatusBadge } from "../app-shell/StatusBadge";
+import { AsyncButton } from "../shared/AsyncButton";
+import { AsyncContentBoundary } from "../shared/AsyncContentBoundary";
+import { useNotice } from "../shared/NoticeCenter";
 
 type FormState = {
   displayName: string;
@@ -64,12 +69,9 @@ export function DouyinAccountsPage() {
   const t = useT();
   const [accounts, setAccounts] = useState<DouyinAccount[]>([]);
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
-  const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [startingBrowserConnect, setStartingBrowserConnect] = useState(false);
   const [checkingActiveConnect, setCheckingActiveConnect] = useState(false);
-  const [resettingBrowserConnect, setResettingBrowserConnect] = useState(false);
-  const [retryingValidation, setRetryingValidation] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [browserForm, setBrowserForm] = useState<BrowserConnectFormState>(EMPTY_BROWSER_FORM);
   const [browserConnect, setBrowserConnect] = useState<DouyinBrowserConnectSession | null>(null);
@@ -77,21 +79,36 @@ export function DouyinAccountsPage() {
   const [message, setMessage] = useState<string | null>(null);
   const [currentPageByAccount, setCurrentPageByAccount] = useState<Record<string, DouyinCurrentPageDetectionResponse>>({});
   const activeConnectSessionIdRef = useRef<string | null>(null);
+  const action = useAsyncAction();
+  const request = useLatestRequest();
+  const { notify } = useNotice();
 
-  async function load() {
-    setLoading(true);
+  function showSuccess(nextMessage: string) {
+    setMessage(nextMessage);
+    notify({ message: nextMessage, tone: "success" });
+  }
+
+  function showError(nextError: string) {
+    setError(nextError);
+    notify({ message: nextError, tone: "error" });
+  }
+
+  function runAccountAction(account: DouyinAccount, operation: string, task: () => Promise<void>) {
+    return action.run(`account-${account.id}:${operation}`, task);
+  }
+
+  async function load(mode: LatestRequestMode = accounts.length ? "refresh" : "initial") {
     setError(null);
     try {
-      setAccounts(await fetchDouyinAccounts());
+      await request.run(() => fetchDouyinAccounts(), setAccounts, mode);
     } catch (err) {
-      setError(err instanceof Error ? err.message : t("douyinAccounts.loadError"));
-    } finally {
-      setLoading(false);
+      const nextError = err instanceof Error ? err.message : t("douyinAccounts.loadError");
+      if (accounts.length) showError(nextError);
     }
   }
 
   useEffect(() => {
-    void load();
+    void load("initial");
     void loadActiveBrowserConnect();
   }, []);
 
@@ -112,65 +129,71 @@ export function DouyinAccountsPage() {
     setError(null);
     setMessage(null);
     if (!form.displayName.trim() || !form.sessionCookie.trim()) {
-      setError(t("douyinAccounts.requiredError"));
+      showError(t("douyinAccounts.requiredError"));
       return;
     }
-    setSaving(true);
-    try {
-      const created = await createDouyinAccount({
-        display_name: form.displayName.trim(),
-        session_cookie: form.sessionCookie.trim(),
-        user_agent: form.userAgent.trim() || null,
-        proxy_url: form.proxyUrl.trim() || null,
-        is_default: form.isDefault,
-        metadata_json: { connection_source: "manual_import" },
-        notes: form.notes.trim() || null
-      });
-      setForm(EMPTY_FORM);
-      setMessage(buildManualImportResultMessage(created, t));
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("douyinAccounts.saveError"));
-    } finally {
-      setSaving(false);
-    }
+    await action.run("manual-import", async () => {
+      setSaving(true);
+      try {
+        const created = await createDouyinAccount({
+          display_name: form.displayName.trim(),
+          session_cookie: form.sessionCookie.trim(),
+          user_agent: form.userAgent.trim() || null,
+          proxy_url: form.proxyUrl.trim() || null,
+          is_default: form.isDefault,
+          metadata_json: { connection_source: "manual_import" },
+          notes: form.notes.trim() || null
+        });
+        setForm(EMPTY_FORM);
+        showSuccess(buildManualImportResultMessage(created, t));
+        await load("refresh");
+      } catch (err) {
+        showError(err instanceof Error ? err.message : t("douyinAccounts.saveError"));
+      } finally {
+        setSaving(false);
+      }
+    });
   }
 
   async function startBrowserConnect() {
-    setError(null);
-    setMessage(null);
-    setStartingBrowserConnect(true);
-    try {
-      const connect = await startDouyinBrowserConnect(browserConnectPayload(browserForm));
-      setBrowserConnect(connect);
-      activeConnectSessionIdRef.current = connect.id;
-      if (connect.can_resume) {
-        setMessage(t("douyinAccounts.activeConnectFound"));
+    await action.run("browser-start", async () => {
+      setError(null);
+      setMessage(null);
+      setStartingBrowserConnect(true);
+      try {
+        const connect = await startDouyinBrowserConnect(browserConnectPayload(browserForm));
+        setBrowserConnect(connect);
+        activeConnectSessionIdRef.current = connect.id;
+        if (connect.can_resume) {
+          showSuccess(t("douyinAccounts.activeConnectFound"));
+        }
+      } catch (err) {
+        showError(err instanceof Error ? err.message : t("douyinAccounts.browserStartError"));
+      } finally {
+        setStartingBrowserConnect(false);
       }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("douyinAccounts.browserStartError"));
-    } finally {
-      setStartingBrowserConnect(false);
-    }
+    });
   }
 
   async function openBrowserProfile(account: DouyinAccount) {
-    setBusyId(account.id);
-    setError(null);
-    setMessage(null);
-    setStartingBrowserConnect(true);
-    try {
-      const connect = await startDouyinBrowserConnect(browserConnectPayload(browserForm, account));
-      setBrowserConnect(connect);
-      activeConnectSessionIdRef.current = connect.id;
-      setMessage(t("douyinAccounts.browserProfileOpened"));
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("douyinAccounts.browserStartError"));
-    } finally {
-      setStartingBrowserConnect(false);
-      setBusyId(null);
-    }
+    await runAccountAction(account, "open-browser", async () => {
+      setBusyId(account.id);
+      setError(null);
+      setMessage(null);
+      setStartingBrowserConnect(true);
+      try {
+        const connect = await startDouyinBrowserConnect(browserConnectPayload(browserForm, account));
+        setBrowserConnect(connect);
+        activeConnectSessionIdRef.current = connect.id;
+        showSuccess(t("douyinAccounts.browserProfileOpened"));
+        await load("refresh");
+      } catch (err) {
+        showError(err instanceof Error ? err.message : t("douyinAccounts.browserStartError"));
+      } finally {
+        setStartingBrowserConnect(false);
+        setBusyId(null);
+      }
+    });
   }
 
   async function loadActiveBrowserConnect() {
@@ -190,78 +213,80 @@ export function DouyinAccountsPage() {
 
   async function resumeBrowserConnect() {
     if (!browserConnect) return;
-    setError(null);
-    setMessage(null);
-    try {
-      activeConnectSessionIdRef.current = browserConnect.id;
-      const next = await fetchDouyinBrowserConnect(browserConnect.id);
-      setBrowserConnect(next);
-      setMessage(t("douyinAccounts.browserResumed"));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("douyinAccounts.browserResumeError"));
-    }
+    await action.run("browser-resume", async () => {
+      setError(null);
+      setMessage(null);
+      try {
+        activeConnectSessionIdRef.current = browserConnect.id;
+        const next = await fetchDouyinBrowserConnect(browserConnect.id);
+        setBrowserConnect(next);
+        showSuccess(t("douyinAccounts.browserResumed"));
+      } catch (err) {
+        showError(err instanceof Error ? err.message : t("douyinAccounts.browserResumeError"));
+      }
+    });
   }
 
   async function forceRestartBrowserConnect() {
     if (!browserConnect) return;
-    setError(null);
-    setMessage(null);
-    setStartingBrowserConnect(true);
-    try {
-      const targetAccount = accounts.find((account) => account.id === browserConnect.derived_account_id) ?? browserConnect.account ?? null;
-      const next = await restartDouyinBrowserConnect(browserConnect.id, browserConnectPayload(browserForm, targetAccount ?? undefined));
-      setBrowserConnect(next);
-      activeConnectSessionIdRef.current = next.id;
-      setMessage(t("douyinAccounts.browserRestarted"));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("douyinAccounts.browserRestartError"));
-    } finally {
-      setStartingBrowserConnect(false);
-    }
+    await action.run("browser-restart", async () => {
+      setError(null);
+      setMessage(null);
+      setStartingBrowserConnect(true);
+      try {
+        const targetAccount = accounts.find((account) => account.id === browserConnect.derived_account_id) ?? browserConnect.account ?? null;
+        const next = await restartDouyinBrowserConnect(browserConnect.id, browserConnectPayload(browserForm, targetAccount ?? undefined));
+        setBrowserConnect(next);
+        activeConnectSessionIdRef.current = next.id;
+        showSuccess(t("douyinAccounts.browserRestarted"));
+      } catch (err) {
+        showError(err instanceof Error ? err.message : t("douyinAccounts.browserRestartError"));
+      } finally {
+        setStartingBrowserConnect(false);
+      }
+    });
   }
 
   async function resetBrowserConnectState() {
     const confirmed = window.confirm(t("douyinAccounts.resetConnectConfirm"));
     if (!confirmed) return;
-    setError(null);
-    setMessage(null);
-    setResettingBrowserConnect(true);
-    try {
-      const result = await resetDouyinBrowserConnectState();
-      setBrowserConnect(null);
-      activeConnectSessionIdRef.current = null;
-      setMessage(
-        result.reset_count > 0
-          ? `${t("douyinAccounts.resetConnectDone")}: ${result.reset_count}`
-          : t("douyinAccounts.resetConnectNothing")
-      );
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("douyinAccounts.resetConnectError"));
-    } finally {
-      setResettingBrowserConnect(false);
-    }
+    await action.run("browser-reset", async () => {
+      setError(null);
+      setMessage(null);
+      try {
+        const result = await resetDouyinBrowserConnectState();
+        setBrowserConnect(null);
+        activeConnectSessionIdRef.current = null;
+        showSuccess(
+          result.reset_count > 0
+            ? `${t("douyinAccounts.resetConnectDone")}: ${result.reset_count}`
+            : t("douyinAccounts.resetConnectNothing")
+        );
+      } catch (err) {
+        showError(err instanceof Error ? err.message : t("douyinAccounts.resetConnectError"));
+      }
+    });
   }
 
   async function retryBrowserConnectValidation() {
     if (!browserConnect) return;
-    setError(null);
-    setMessage(null);
-    setRetryingValidation(true);
-    try {
-      const next = await retryDouyinBrowserConnectValidation(browserConnect.id);
-      setBrowserConnect(next);
-      activeConnectSessionIdRef.current = next.id;
-      if (next.status === "COMPLETED") {
-        setMessage(t("douyinAccounts.validationRetryPassed"));
-        await load();
-      } else {
-        setMessage(t("douyinAccounts.validationRetryFinished"));
+    await action.run("browser-retry-validation", async () => {
+      setError(null);
+      setMessage(null);
+      try {
+        const next = await retryDouyinBrowserConnectValidation(browserConnect.id);
+        setBrowserConnect(next);
+        activeConnectSessionIdRef.current = next.id;
+        if (next.status === "COMPLETED") {
+          showSuccess(t("douyinAccounts.validationRetryPassed"));
+          await load("refresh");
+        } else {
+          showSuccess(t("douyinAccounts.validationRetryFinished"));
+        }
+      } catch (err) {
+        showError(err instanceof Error ? err.message : t("douyinAccounts.validationRetryError"));
       }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("douyinAccounts.validationRetryError"));
-    } finally {
-      setRetryingValidation(false);
-    }
+    });
   }
 
   async function pollBrowserConnect(connectSessionId: string) {
@@ -272,131 +297,145 @@ export function DouyinAccountsPage() {
       }
       setBrowserConnect(next);
       if (next.status === "COMPLETED") {
-        setMessage(t("douyinAccounts.browserCompleted"));
+        showSuccess(t("douyinAccounts.browserCompleted"));
         setBrowserForm(EMPTY_BROWSER_FORM);
-        await load();
+        await load("refresh");
       } else if (next.outcome === "timed_out") {
-        setMessage(t("douyinAccounts.browserTimedOut"));
+        showSuccess(t("douyinAccounts.browserTimedOut"));
       } else if (next.status === "CANCELLED") {
-        setMessage(t("douyinAccounts.browserCancelled"));
+        showSuccess(t("douyinAccounts.browserCancelled"));
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : t("douyinAccounts.browserPollError"));
+      showError(err instanceof Error ? err.message : t("douyinAccounts.browserPollError"));
     }
   }
 
   async function cancelBrowserConnect() {
     if (!browserConnect) return;
-    setError(null);
-    try {
-      setBrowserConnect(await cancelDouyinBrowserConnect(browserConnect.id));
-      setMessage(t("douyinAccounts.browserCancelled"));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("douyinAccounts.browserCancelError"));
-    }
+    await action.run("browser-cancel", async () => {
+      setError(null);
+      try {
+        setBrowserConnect(await cancelDouyinBrowserConnect(browserConnect.id));
+        showSuccess(t("douyinAccounts.browserCancelled"));
+      } catch (err) {
+        showError(err instanceof Error ? err.message : t("douyinAccounts.browserCancelError"));
+      }
+    });
   }
 
   async function validate(account: DouyinAccount) {
-    setBusyId(account.id);
-    setError(null);
-    setMessage(null);
-    try {
-      const result = await validateDouyinAccount(account.id);
-      const preflightSummary = result.account.manual_import_preflight?.summary;
-      setMessage(
-        result.valid
-          ? (preflightSummary ?? t("douyinAccounts.validationPassed"))
-          : `${t("douyinAccounts.validationFailed")}: ${preflightSummary ?? result.reason}`
-      );
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("douyinAccounts.validateError"));
-    } finally {
-      setBusyId(null);
-    }
+    await runAccountAction(account, "validate", async () => {
+      setBusyId(account.id);
+      setError(null);
+      setMessage(null);
+      try {
+        const result = await validateDouyinAccount(account.id);
+        const preflightSummary = result.account.manual_import_preflight?.summary;
+        showSuccess(
+          result.valid
+            ? (preflightSummary ?? t("douyinAccounts.validationPassed"))
+            : `${t("douyinAccounts.validationFailed")}: ${preflightSummary ?? result.reason}`
+        );
+        await load("refresh");
+      } catch (err) {
+        showError(err instanceof Error ? err.message : t("douyinAccounts.validateError"));
+      } finally {
+        setBusyId(null);
+      }
+    });
   }
 
   async function markChallengeSolved(account: DouyinAccount) {
-    setBusyId(account.id);
-    setError(null);
-    setMessage(null);
-    try {
-      const result = await markDouyinAccountChallengeSolved(account.id);
-      const postCheck = postChallengeRecheckResultLabel(result.post_challenge_recheck_result, t);
-      const intakeReady = result.intake_ready_after_recheck ? t("douyinAccounts.intakeReadyAfterRecheck") : t("douyinAccounts.intakeStillBlockedAfterRecheck");
-      const sameProfile = result.same_profile_reused ? t("douyinAccounts.sameProfileReused") : t("douyinAccounts.sameProfileNotConfirmed");
-      setMessage(`${t("douyinAccounts.challengeSolvedPostcheckCompleted")}: ${postCheck} · ${sameProfile} · ${intakeReady}`);
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("douyinAccounts.challengeActionError"));
-    } finally {
-      setBusyId(null);
-    }
+    await runAccountAction(account, "mark-challenge-solved", async () => {
+      setBusyId(account.id);
+      setError(null);
+      setMessage(null);
+      try {
+        const result = await markDouyinAccountChallengeSolved(account.id);
+        const postCheck = postChallengeRecheckResultLabel(result.post_challenge_recheck_result, t);
+        const intakeReady = result.intake_ready_after_recheck ? t("douyinAccounts.intakeReadyAfterRecheck") : t("douyinAccounts.intakeStillBlockedAfterRecheck");
+        const sameProfile = result.same_profile_reused ? t("douyinAccounts.sameProfileReused") : t("douyinAccounts.sameProfileNotConfirmed");
+        showSuccess(`${t("douyinAccounts.challengeSolvedPostcheckCompleted")}: ${postCheck} · ${sameProfile} · ${intakeReady}`);
+        await load("refresh");
+      } catch (err) {
+        showError(err instanceof Error ? err.message : t("douyinAccounts.challengeActionError"));
+      } finally {
+        setBusyId(null);
+      }
+    });
   }
 
   async function recheckChallenge(account: DouyinAccount) {
-    setBusyId(account.id);
-    setError(null);
-    setMessage(null);
-    try {
-      const result = await recheckDouyinAccountChallenge(account.id);
-      setMessage(
-        result.valid
-          ? `${t("douyinAccounts.challengeRecheckPassed")}: ${postChallengeRecheckResultLabel(result.post_challenge_recheck_result, t)}`
-          : `${t("douyinAccounts.challengeRecheckStillBlocked")}: ${postChallengeRecheckResultLabel(result.post_challenge_recheck_result, t)} · ${result.reason ?? challengeStateLabel(result.challenge_state, t)}`
-      );
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("douyinAccounts.challengeActionError"));
-    } finally {
-      setBusyId(null);
-    }
+    await runAccountAction(account, "recheck-challenge", async () => {
+      setBusyId(account.id);
+      setError(null);
+      setMessage(null);
+      try {
+        const result = await recheckDouyinAccountChallenge(account.id);
+        showSuccess(
+          result.valid
+            ? `${t("douyinAccounts.challengeRecheckPassed")}: ${postChallengeRecheckResultLabel(result.post_challenge_recheck_result, t)}`
+            : `${t("douyinAccounts.challengeRecheckStillBlocked")}: ${postChallengeRecheckResultLabel(result.post_challenge_recheck_result, t)} · ${result.reason ?? challengeStateLabel(result.challenge_state, t)}`
+        );
+        await load("refresh");
+      } catch (err) {
+        showError(err instanceof Error ? err.message : t("douyinAccounts.challengeActionError"));
+      } finally {
+        setBusyId(null);
+      }
+    });
   }
 
   async function detectCurrentPage(account: DouyinAccount) {
-    setBusyId(account.id);
-    setError(null);
-    setMessage(null);
-    try {
-      const result = await detectDouyinCurrentPage(account.id);
-      setCurrentPageByAccount((current) => ({ ...current, [account.id]: result }));
-      setMessage(buildCurrentPageDetectionMessage(result, t));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("douyinAccounts.currentPageDetectError"));
-    } finally {
-      setBusyId(null);
-    }
+    await runAccountAction(account, "detect-current-page", async () => {
+      setBusyId(account.id);
+      setError(null);
+      setMessage(null);
+      try {
+        const result = await detectDouyinCurrentPage(account.id);
+        setCurrentPageByAccount((current) => ({ ...current, [account.id]: result }));
+        showSuccess(buildCurrentPageDetectionMessage(result, t));
+      } catch (err) {
+        showError(err instanceof Error ? err.message : t("douyinAccounts.currentPageDetectError"));
+      } finally {
+        setBusyId(null);
+      }
+    });
   }
 
   async function captureCurrentPage(account: DouyinAccount) {
-    setBusyId(account.id);
-    setError(null);
-    setMessage(null);
-    try {
-      const result = await captureDouyinCurrentPage(account.id, { persist: true, max_videos: 50 });
-      setMessage(buildCurrentPageCaptureMessage(result, t));
-      const detection = await detectDouyinCurrentPage(account.id);
-      setCurrentPageByAccount((current) => ({ ...current, [account.id]: detection }));
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("douyinAccounts.currentPageCaptureError"));
-    } finally {
-      setBusyId(null);
-    }
+    await runAccountAction(account, "capture-current-page", async () => {
+      setBusyId(account.id);
+      setError(null);
+      setMessage(null);
+      try {
+        const result = await captureDouyinCurrentPage(account.id, { persist: true, max_videos: 50 });
+        showSuccess(buildCurrentPageCaptureMessage(result, t));
+        const detection = await detectDouyinCurrentPage(account.id);
+        setCurrentPageByAccount((current) => ({ ...current, [account.id]: detection }));
+        await load("refresh");
+      } catch (err) {
+        showError(err instanceof Error ? err.message : t("douyinAccounts.currentPageCaptureError"));
+      } finally {
+        setBusyId(null);
+      }
+    });
   }
 
   async function queueHealthSweep() {
-    setBusyId("health-sweep");
-    setError(null);
-    setMessage(null);
-    try {
-      const job = await enqueueDouyinAccountsRevalidateDueJob({ due_only: true });
-      setMessage(`${t("douyinAccounts.healthSweepQueued")}: ${job.job_id} (${job.queued_accounts_count ?? 0})`);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("douyinAccounts.revalidateError"));
-    } finally {
-      setBusyId(null);
-    }
+    await action.run("health-sweep", async () => {
+      setBusyId("health-sweep");
+      setError(null);
+      setMessage(null);
+      try {
+        const job = await enqueueDouyinAccountsRevalidateDueJob({ due_only: true });
+        showSuccess(`${t("douyinAccounts.healthSweepQueued")}: ${job.job_id} (${job.queued_accounts_count ?? 0})`);
+      } catch (err) {
+        showError(err instanceof Error ? err.message : t("douyinAccounts.revalidateError"));
+      } finally {
+        setBusyId(null);
+      }
+    });
   }
 
   function useInIntake(account: DouyinAccount) {
@@ -407,19 +446,21 @@ export function DouyinAccountsPage() {
   async function deleteAccount(account: DouyinAccount) {
     const confirmed = window.confirm(buildDeleteConfirm(account, accounts, t));
     if (!confirmed) return;
-    setBusyId(account.id);
-    setError(null);
-    setMessage(null);
-    try {
-      const result = await deleteDouyinAccount(account.id);
-      const warningSuffix = result.warnings.length > 0 ? ` (${result.warnings.join(", ")})` : "";
-      setMessage(`${t("douyinAccounts.deleteSuccess")}${warningSuffix}`);
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("douyinAccounts.deleteError"));
-    } finally {
-      setBusyId(null);
-    }
+    await runAccountAction(account, "delete", async () => {
+      setBusyId(account.id);
+      setError(null);
+      setMessage(null);
+      try {
+        const result = await deleteDouyinAccount(account.id);
+        const warningSuffix = result.warnings.length > 0 ? ` (${result.warnings.join(", ")})` : "";
+        showSuccess(`${t("douyinAccounts.deleteSuccess")}${warningSuffix}`);
+        await load("refresh");
+      } catch (err) {
+        showError(err instanceof Error ? err.message : t("douyinAccounts.deleteError"));
+      } finally {
+        setBusyId(null);
+      }
+    });
   }
 
   return (
@@ -467,12 +508,12 @@ export function DouyinAccountsPage() {
                   <p>{t("douyinAccounts.browserLegacyControlsDescription")}</p>
                 </div>
                 <div className="intake-actions">
-                  <button disabled={startingBrowserConnect} type="button" onClick={() => void startBrowserConnect()}>
-                    {startingBrowserConnect ? t("douyinAccounts.browserStarting") : t("douyinAccounts.connectWithBrowser")}
-                  </button>
-                  <button disabled={resettingBrowserConnect} type="button" onClick={() => void resetBrowserConnectState()}>
-                    {resettingBrowserConnect ? t("douyinAccounts.resetConnectRunning") : t("douyinAccounts.resetConnectState")}
-                  </button>
+                  <AsyncButton pending={action.isPending("browser-start")} pendingLabel={t("douyinAccounts.browserStarting")} type="button" onClick={() => void startBrowserConnect()}>
+                    {t("douyinAccounts.connectWithBrowser")}
+                  </AsyncButton>
+                  <AsyncButton pending={action.isPending("browser-reset")} pendingLabel={t("douyinAccounts.resetConnectRunning")} type="button" onClick={() => void resetBrowserConnectState()}>
+                    {t("douyinAccounts.resetConnectState")}
+                  </AsyncButton>
                 </div>
               </div>
               <div className="filter-grid">
@@ -503,20 +544,20 @@ export function DouyinAccountsPage() {
               <p>{t("douyinAccounts.troubleshootingDescription")}</p>
               <div className="intake-actions">
                 {browserConnect?.can_resume ? (
-                  <button type="button" onClick={() => void resumeBrowserConnect()}>{t("douyinAccounts.resumeConnect")}</button>
+                  <AsyncButton pending={action.isPending("browser-resume")} type="button" onClick={() => void resumeBrowserConnect()}>{t("douyinAccounts.resumeConnect")}</AsyncButton>
                 ) : null}
                 {browserConnect?.can_cancel ? (
-                  <button type="button" onClick={() => void cancelBrowserConnect()}>{t("douyinAccounts.cancelConnect")}</button>
+                  <AsyncButton pending={action.isPending("browser-cancel")} type="button" onClick={() => void cancelBrowserConnect()}>{t("douyinAccounts.cancelConnect")}</AsyncButton>
                 ) : null}
                 {browserConnect?.can_force_restart ? (
-                  <button disabled={startingBrowserConnect} type="button" onClick={() => void forceRestartBrowserConnect()}>{t("douyinAccounts.forceRestartConnect")}</button>
+                  <AsyncButton pending={action.isPending("browser-restart")} type="button" onClick={() => void forceRestartBrowserConnect()}>{t("douyinAccounts.forceRestartConnect")}</AsyncButton>
                 ) : null}
                 {browserConnect?.can_retry_validation ? (
-                  <button disabled={retryingValidation} type="button" onClick={() => void retryBrowserConnectValidation()}>
-                    {retryingValidation ? t("douyinAccounts.retryingValidation") : t("douyinAccounts.retryValidation")}
-                  </button>
+                  <AsyncButton pending={action.isPending("browser-retry-validation")} pendingLabel={t("douyinAccounts.retryingValidation")} type="button" onClick={() => void retryBrowserConnectValidation()}>
+                    {t("douyinAccounts.retryValidation")}
+                  </AsyncButton>
                 ) : null}
-                <button disabled={busyId === "health-sweep"} type="button" onClick={() => void queueHealthSweep()}>{t("douyinAccounts.queueHealthSweep")}</button>
+                <AsyncButton pending={action.isPending("health-sweep")} type="button" onClick={() => void queueHealthSweep()}>{t("douyinAccounts.queueHealthSweep")}</AsyncButton>
               </div>
               {checkingActiveConnect ? <p className="muted">{t("douyinAccounts.checkingActiveConnect")}</p> : null}
               {browserConnect ? (
@@ -571,7 +612,7 @@ export function DouyinAccountsPage() {
                     </span>
                   </label>
                   <div className="intake-actions">
-                    <button className="primary" disabled={saving} type="submit">{saving ? t("douyinAccounts.saving") : t("douyinAccounts.importAccount")}</button>
+                    <AsyncButton className="primary" pending={action.isPending("manual-import")} pendingLabel={t("douyinAccounts.saving")} type="submit">{t("douyinAccounts.importAccount")}</AsyncButton>
                     <button disabled={saving} type="button" onClick={() => setForm(EMPTY_FORM)}>{t("common.cancel")}</button>
                   </div>
                 </form>
@@ -604,9 +645,18 @@ export function DouyinAccountsPage() {
               <h2>{t("douyinAccounts.connectedAccounts")}</h2>
               <p>{t("douyinAccounts.connectedDescription")}</p>
             </div>
-            <button type="button" onClick={() => void load()}>{loading ? t("common.loading") : t("common.refresh")}</button>
+            <AsyncButton pending={request.refreshing} pendingLabel={t("common.loading")} type="button" onClick={() => void load("refresh")}>
+              {t("common.refresh")}
+            </AsyncButton>
           </div>
-          <table className="health-table">
+          <AsyncContentBoundary
+            emptyState={<p className="muted">{t("douyinAccounts.noAccounts")}</p>}
+            errorState={<div className="inline-error">{request.error?.message ?? t("douyinAccounts.loadError")}</div>}
+            refreshing={request.refreshing}
+            skeletonVariant="list"
+            status={request.initialLoading ? "loading" : request.error && accounts.length === 0 ? "error" : accounts.length === 0 ? "empty" : "success"}
+          >
+            <table className="health-table">
             <thead>
               <tr>
                 <th>{t("douyinAccounts.account")}</th>
@@ -621,7 +671,6 @@ export function DouyinAccountsPage() {
               </tr>
             </thead>
             <tbody>
-              {accounts.length === 0 ? <tr><td colSpan={9}>{t("douyinAccounts.noAccounts")}</td></tr> : null}
               {accounts.map((account) => (
                 <tr key={account.id}>
                   <td>
@@ -838,33 +887,34 @@ export function DouyinAccountsPage() {
                       const captureReady = Boolean(!quarantined && currentPage?.supported_capture && currentPage?.managed_runtime_status === "managed_runtime_active");
                       return (
                         <>
-                          <button disabled={busyId === account.id || startingBrowserConnect} type="button" onClick={() => void openBrowserProfile(account)}>
+                          <AsyncButton disabled={busyId === account.id || startingBrowserConnect} pending={action.isPending(`account-${account.id}:open-browser`)} type="button" onClick={() => void openBrowserProfile(account)}>
                             {account.browser_context_status === "profile_saved" ? t("douyinAccounts.reopenBrowserProfile") : t("douyinAccounts.openBrowserProfile")}
-                          </button>
-                          <button disabled={busyId === account.id || !managedRuntimeActive} title={!managedRuntimeActive ? t("douyinAccounts.detectCurrentPageRuntimeMissing") : undefined} type="button" onClick={() => void detectCurrentPage(account)}>{t("douyinAccounts.detectCurrentPage")}</button>
-                          <button disabled={busyId === account.id || !captureReady} title={quarantined ? t("douyinAccounts.profileQuarantineCaptureBlocked") : !captureReady ? t("douyinAccounts.captureCurrentPageDisabled") : undefined} type="button" onClick={() => void captureCurrentPage(account)}>{t("douyinAccounts.captureCurrentPage")}</button>
+                          </AsyncButton>
+                          <AsyncButton disabled={busyId === account.id || !managedRuntimeActive} pending={action.isPending(`account-${account.id}:detect-current-page`)} title={!managedRuntimeActive ? t("douyinAccounts.detectCurrentPageRuntimeMissing") : undefined} type="button" onClick={() => void detectCurrentPage(account)}>{t("douyinAccounts.detectCurrentPage")}</AsyncButton>
+                          <AsyncButton disabled={busyId === account.id || !captureReady} pending={action.isPending(`account-${account.id}:capture-current-page`)} title={quarantined ? t("douyinAccounts.profileQuarantineCaptureBlocked") : !captureReady ? t("douyinAccounts.captureCurrentPageDisabled") : undefined} type="button" onClick={() => void captureCurrentPage(account)}>{t("douyinAccounts.captureCurrentPage")}</AsyncButton>
                         </>
                       );
                     })()}
                     {SHOW_LEGACY_DOUYIN_DEBUG_SURFACES ? (
-                      <button disabled={busyId === account.id || isChallengeCooldownActive(account)} title={isChallengeCooldownActive(account) ? t("douyinAccounts.challengeCooldownActionBlocked") : undefined} type="button" onClick={() => void validate(account)}>{t("douyinAccounts.validate")}</button>
+                      <AsyncButton disabled={busyId === account.id || isChallengeCooldownActive(account)} pending={action.isPending(`account-${account.id}:validate`)} title={isChallengeCooldownActive(account) ? t("douyinAccounts.challengeCooldownActionBlocked") : undefined} type="button" onClick={() => void validate(account)}>{t("douyinAccounts.validate")}</AsyncButton>
                     ) : null}
                     {isActionableChallenge(account) ? (
-                      <button disabled={busyId === account.id} type="button" onClick={() => void markChallengeSolved(account)}>{t("douyinAccounts.markChallengeSolved")}</button>
+                      <AsyncButton disabled={busyId === account.id} pending={action.isPending(`account-${account.id}:mark-challenge-solved`)} type="button" onClick={() => void markChallengeSolved(account)}>{t("douyinAccounts.markChallengeSolved")}</AsyncButton>
                     ) : null}
                     {account.browser_health_alignment.challenge_state === "challenge_recently_solved_pending_recheck" ? (
-                      <button disabled={busyId === account.id} type="button" onClick={() => void recheckChallenge(account)}>{t("douyinAccounts.recheckChallenge")}</button>
+                      <AsyncButton disabled={busyId === account.id} pending={action.isPending(`account-${account.id}:recheck-challenge`)} type="button" onClick={() => void recheckChallenge(account)}>{t("douyinAccounts.recheckChallenge")}</AsyncButton>
                     ) : null}
                     <button disabled={busyId === account.id || isChallengeCooldownActive(account) || isProfileQuarantined(account)} title={isProfileQuarantined(account) ? t("douyinAccounts.profileQuarantineUseInIntakeBlocked") : isChallengeCooldownActive(account) ? t("douyinAccounts.challengeCooldownActionBlocked") : undefined} type="button" onClick={() => useInIntake(account)}>{t("douyinAccounts.useInIntake")}</button>
-                    <button disabled={resettingBrowserConnect} type="button" onClick={() => void resetBrowserConnectState()}>
-                      {resettingBrowserConnect ? t("douyinAccounts.resetConnectRunning") : t("douyinAccounts.resetConnectState")}
-                    </button>
-                    <button className="danger" disabled={busyId === account.id} type="button" onClick={() => void deleteAccount(account)}>{t("douyinAccounts.deleteAccount")}</button>
+                    <AsyncButton pending={action.isPending("browser-reset")} pendingLabel={t("douyinAccounts.resetConnectRunning")} type="button" onClick={() => void resetBrowserConnectState()}>
+                      {t("douyinAccounts.resetConnectState")}
+                    </AsyncButton>
+                    <AsyncButton className="danger" disabled={busyId === account.id} pending={action.isPending(`account-${account.id}:delete`)} type="button" onClick={() => void deleteAccount(account)}>{t("douyinAccounts.deleteAccount")}</AsyncButton>
                   </td>
                 </tr>
               ))}
             </tbody>
-          </table>
+            </table>
+          </AsyncContentBoundary>
         </section>
       </PageShell>
     </OperatorStudioShell>

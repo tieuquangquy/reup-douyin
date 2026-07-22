@@ -4,26 +4,29 @@ import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { useT } from "../../lib/i18n";
 import { fetchOptimizationDashboard, fetchOptimizationSchedulingHints } from "../../lib/api";
+import { useLatestRequest } from "../../lib/useLatestRequest";
 import { automationReadinessLabel, groupTone, optimizationHeadline } from "../../lib/optimizationState";
 import type { OptimizationDashboard, OutcomeGroupSummary, RoutingHints, SchedulingHints } from "../../types/optimization";
+import { AsyncButton } from "../shared/AsyncButton";
+import { AsyncContentBoundary } from "../shared/AsyncContentBoundary";
+import { useNotice } from "../shared/NoticeCenter";
 
 export function OptimizationPage() {
   const t = useT();
   const [snapshot, setSnapshot] = useState<OptimizationDashboard | null>(null);
   const [selectedSchedule, setSelectedSchedule] = useState<SchedulingHints | null>(null);
-  const [loading, setLoading] = useState(true);
   const [loadingScheduleId, setLoadingScheduleId] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const request = useLatestRequest();
+  const scheduleRequest = useLatestRequest();
+  const { notify } = useNotice();
 
   async function load() {
-    setLoading(true);
-    setError(null);
+    const mode = snapshot ? "refresh" : "initial";
     try {
-      setSnapshot(await fetchOptimizationDashboard());
+      const result = await request.run(() => fetchOptimizationDashboard(), setSnapshot, mode);
+      if (mode === "refresh" && result) notify({ id: "optimization-refresh", message: "Optimization refreshed.", tone: "success" });
     } catch (err) {
-      setError(err instanceof Error ? err.message : t("optimizationPage.loadError"));
-    } finally {
-      setLoading(false);
+      if (mode === "refresh") notify({ id: "optimization-refresh", message: err instanceof Error ? err.message : t("optimizationPage.loadError"), tone: "error" });
     }
   }
 
@@ -33,28 +36,24 @@ export function OptimizationPage() {
 
   async function loadScheduleHint(draftId: string) {
     setLoadingScheduleId(draftId);
-    setError(null);
     try {
-      setSelectedSchedule(await fetchOptimizationSchedulingHints(draftId));
+      const result = await scheduleRequest.run(() => fetchOptimizationSchedulingHints(draftId), setSelectedSchedule, "refresh");
+      if (result) notify({ id: "schedule-hints", message: "Schedule hints loaded.", tone: "success" });
     } catch (err) {
-      setError(err instanceof Error ? err.message : t("optimizationPage.scheduleHintError"));
+      notify({ id: "schedule-hints", message: err instanceof Error ? err.message : t("optimizationPage.scheduleHintError"), tone: "error" });
     } finally {
       setLoadingScheduleId(null);
     }
   }
 
-  if (loading && !snapshot) {
-    return <main className="optimization-page"><div className="state-panel skeleton">{t("optimizationPage.loading")}</div></main>;
+  if (!snapshot && !request.error) {
+    return <main className="optimization-page"><AsyncContentBoundary skeletonVariant="detail" status="loading"><span /></AsyncContentBoundary></main>;
   }
 
-  if (error && !snapshot) {
+  if (request.error && !snapshot) {
     return (
       <main className="optimization-page">
-        <div className="state-panel">
-          <h1>{t("optimizationPage.unavailable")}</h1>
-          <p>{error}</p>
-          <button type="button" onClick={() => void load()}>{t("optimizationPage.retry")}</button>
-        </div>
+        <AsyncContentBoundary errorState={<div><h1>{t("optimizationPage.unavailable")}</h1><p>{request.error.message}</p><button type="button" onClick={() => void load()}>{t("optimizationPage.retry")}</button></div>} skeletonVariant="detail" status="error"><span /></AsyncContentBoundary>
       </main>
     );
   }
@@ -67,11 +66,10 @@ export function OptimizationPage() {
           <h1>{t("optimizationPage.pageTitle")}</h1>
           <p>{snapshot ? optimizationHeadline(snapshot) : t("optimizationPage.feedbackLoopDesc")}</p>
         </div>
-        <button type="button" onClick={() => void load()}>{t("optimizationPage.refresh")}</button>
+        <AsyncButton pending={request.refreshing} pendingLabel={t("common.refreshing")} onClick={() => void load()}>{t("optimizationPage.refresh")}</AsyncButton>
       </header>
 
-      {error ? <div className="inline-error">{error}</div> : null}
-
+      <AsyncContentBoundary refreshing={request.refreshing} skeletonVariant="detail" status="success">
       {snapshot ? (
         <section className="optimization-layout">
           <div className="optimization-main">
@@ -108,7 +106,7 @@ export function OptimizationPage() {
               <div className="routing-hint-list">
                 {snapshot.ready_draft_routing_hints.length === 0 ? <p className="muted">{t("optimizationPage.noRoutingHints")}</p> : null}
                 {snapshot.ready_draft_routing_hints.map((hint) => (
-                  <RoutingHintCard key={hint.publish_draft_id} hint={hint} loadingScheduleId={loadingScheduleId} onSchedule={loadScheduleHint} />
+                  <RoutingHintCard key={hint.publish_draft_id} hint={hint} loadingScheduleId={scheduleRequest.pending ? loadingScheduleId : null} onSchedule={loadScheduleHint} />
                 ))}
               </div>
             </Panel>
@@ -153,6 +151,7 @@ export function OptimizationPage() {
           </aside>
         </section>
       ) : null}
+      </AsyncContentBoundary>
     </main>
   );
 }
@@ -208,9 +207,9 @@ function RoutingHintCard({
         <p className="muted">{t("optimizationPage.noRecommendation")}</p>
       )}
       {hint.automation_policy.blocking_reasons?.[0] ? <small className="warning-text">{hint.automation_policy.blocking_reasons[0]}</small> : null}
-      <button type="button" disabled={loadingScheduleId === hint.publish_draft_id} onClick={() => void onSchedule(hint.publish_draft_id)}>
-        {loadingScheduleId === hint.publish_draft_id ? t("optimizationPage.loadingSlots") : t("optimizationPage.viewScheduleHints")}
-      </button>
+      <AsyncButton pending={loadingScheduleId === hint.publish_draft_id} pendingLabel={t("optimizationPage.loadingSlots")} onClick={() => void onSchedule(hint.publish_draft_id)}>
+        {t("optimizationPage.viewScheduleHints")}
+      </AsyncButton>
     </div>
   );
 }

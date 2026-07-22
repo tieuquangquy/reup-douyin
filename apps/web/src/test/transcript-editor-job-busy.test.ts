@@ -49,7 +49,7 @@ assert.match(noticeSource, /autoDismissMs/, "Notice component must support auto-
 assert.match(noticeSource, /TRANSCRIPT_SUCCESS_NOTICE_AUTO_DISMISS_MS/, "Notice must export success auto-dismiss constant");
 assert.match(cssSource, /transcript-job-strip/, "Job banner must sit in separated strip from header");
 
-assert.match(headerSource, /is-busy/, "Active command buttons must show is-busy while running");
+assert.match(headerSource, /AsyncButton[\s\S]*pending=/, "Active command buttons must show pending feedback while running");
 assert.match(apiSource, /export async function cancelJob/, "API must expose cancelJob");
 
 {

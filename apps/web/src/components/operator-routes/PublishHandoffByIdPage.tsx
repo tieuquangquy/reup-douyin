@@ -2,37 +2,37 @@
 
 import { useEffect, useState } from "react";
 import { fetchPublishHandoff } from "../../lib/api";
+import { useLatestRequest, type LatestRequestMode } from "../../lib/useLatestRequest";
 import type { PublishHandoff } from "../../types/export-handoff";
 import { OperatorStudioShell } from "../app-shell/OperatorStudioShell";
 import { TopbarRefreshButton } from "../app-shell/TopbarRefreshButton";
+import { AsyncContentBoundary } from "../shared/AsyncContentBoundary";
 import { OpsDetailPanel, OpsDetailSection, OpsMetadataList, OpsStatePanel, OpsSummaryCards, statusTone, type OpsSummaryCardItem } from "../ops-console/OpsShared";
 
 export function PublishHandoffByIdPage({ handoffId }: { handoffId: string }) {
   const [handoff, setHandoff] = useState<PublishHandoff | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const request = useLatestRequest();
 
-  async function load() {
-    setLoading(true);
-    setError(null);
-    try {
-      setHandoff(await fetchPublishHandoff(handoffId));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load Publish Handoff");
-    } finally {
-      setLoading(false);
-    }
+  async function load(mode: LatestRequestMode = handoff ? "refresh" : "initial") {
+    if (mode === "initial") setHandoff(null);
+    await request.run(
+      async () => fetchPublishHandoff(handoffId),
+      setHandoff,
+      mode
+    ).catch(() => undefined);
   }
 
   useEffect(() => {
-    void load();
+    void load("initial");
   }, [handoffId]);
+
+  const boundaryStatus = request.initialLoading && !handoff ? "loading" : request.error && !handoff ? "error" : handoff ? "success" : "empty";
 
   return (
     <OperatorStudioShell
       actions={
         <>
-          <TopbarRefreshButton busy={loading && Boolean(handoff)} disabled={loading && !handoff} onClick={() => void load()} />
+          <TopbarRefreshButton busy={request.refreshing} disabled={request.initialLoading} onClick={() => void load("refresh")} />
           <a href="/publishing/publish-handoffs">All Publish Handoffs</a>
           {handoff ? <a href={`/publishing/export-packages/${handoff.export_package_id}`}>Open Export Package</a> : null}
           <a href="/selection/reup-queue">Reup Queue</a>
@@ -41,16 +41,20 @@ export function PublishHandoffByIdPage({ handoffId }: { handoffId: string }) {
       description="Inspect handoff payloads before manual downstream publishing. Publish Handoff records do not call platform APIs or auto-publish."
       title="Publish Handoff detail"
     >
-      {loading ? <OpsStatePanel detail="Loading manual handoff payload and diagnostics." title="Loading Publish Handoff" variant="loading" /> : null}
-      {!loading && (error || !handoff) ? (
-        <OpsStatePanel
-          action={<button type="button" onClick={() => void load()}>Retry</button>}
-          detail={error ?? "Publish Handoff not found"}
-          title="Could not load Publish Handoff"
-          variant="error"
-        />
-      ) : null}
-      {!loading && handoff ? (
+      <AsyncContentBoundary
+        refreshing={request.refreshing}
+        status={boundaryStatus}
+        skeleton={<OpsStatePanel detail="Loading manual handoff payload and diagnostics." title="Loading Publish Handoff" variant="loading" />}
+        errorState={
+          <OpsStatePanel
+            action={<button type="button" onClick={() => void load("initial")}>Retry</button>}
+            detail={request.error?.message ?? "Publish Handoff not found"}
+            title="Could not load Publish Handoff"
+            variant="error"
+          />
+        }
+      >
+      {handoff ? (
         <>
           <OpsSummaryCards cards={summaryCardsForHandoff(handoff)} title="Handoff state summary" />
 
@@ -87,6 +91,7 @@ export function PublishHandoffByIdPage({ handoffId }: { handoffId: string }) {
           </OpsDetailPanel>
         </>
       ) : null}
+      </AsyncContentBoundary>
     </OperatorStudioShell>
   );
 }

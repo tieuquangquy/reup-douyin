@@ -13,9 +13,14 @@ import {
 import { useT } from "../../lib/i18n";
 import { defaultAssignmentReason, healthTone, queueAttentionCount } from "../../lib/publishControlState";
 import { humanizeStatus } from "../../lib/statusLabels";
+import { useAsyncAction } from "../../lib/useAsyncAction";
+import { useLatestRequest, type LatestRequestMode } from "../../lib/useLatestRequest";
 import type { AccountHealthSummary, PublishControlQueue, PublishQueueItem, RoutingRule } from "../../types/publish-control";
 import { OpsConsoleShell } from "../app-shell/OpsConsoleShell";
 import { TopbarRefreshButton } from "../app-shell/TopbarRefreshButton";
+import { AsyncButton } from "../shared/AsyncButton";
+import { AsyncContentBoundary } from "../shared/AsyncContentBoundary";
+import { useNotice } from "../shared/NoticeCenter";
 import { OpsState, formatDateTime, type OpsTone } from "../ops-console/OpsShared";
 
 type QueueFilter = "UNASSIGNED" | "ASSIGNED" | "ALL";
@@ -66,30 +71,25 @@ export function PublishControlPlanePage() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkAccountId, setBulkAccountId] = useState("");
   const [queueFilter, setQueueFilter] = useState<QueueFilter>("UNASSIGNED");
-  const [loading, setLoading] = useState(true);
-  const [savingId, setSavingId] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const action = useAsyncAction();
+  const request = useLatestRequest();
+  const { notify } = useNotice();
 
-  async function load() {
-    setLoading(true);
-    setError(null);
-    try {
-      const [queuePayload, rulesPayload] = await Promise.all([fetchPublishControlQueue(), fetchRoutingRules()]);
-      setQueue(queuePayload);
-      setRules(rulesPayload.rules);
-      if (!bulkAccountId && queuePayload.accounts[0]) {
-        setBulkAccountId(queuePayload.accounts[0].platform_account_id);
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("publishControlPage.loadError"));
-    } finally {
-      setLoading(false);
-    }
+  async function load(mode: LatestRequestMode = queue ? "refresh" : "initial") {
+    await request.run(
+      async () => Promise.all([fetchPublishControlQueue(), fetchRoutingRules()]),
+      ([queuePayload, rulesPayload]) => {
+        setQueue(queuePayload);
+        setRules(rulesPayload.rules);
+        setBulkAccountId((current) => current || queuePayload.accounts[0]?.platform_account_id || "");
+      },
+      mode
+    ).catch(() => undefined);
   }
 
   useEffect(() => {
-    void load();
+    void load("initial");
   }, [t]);
 
   const allDrafts = useMemo(
@@ -110,77 +110,80 @@ export function PublishControlPlanePage() {
 
   async function assignRecommended(item: PublishQueueItem) {
     if (!item.recommended_platform_account_id) return;
-    setSavingId(item.publish_draft_id);
-    setError(null);
-    setMessage(null);
-    try {
-      await assignPublishDraft(item.publish_draft_id, {
-        platform_account_id: item.recommended_platform_account_id,
-        reason: defaultAssignmentReason(item),
-        assigned_by: "local_operator",
-      });
-      setMessage(t("publishControlPage.assignSuccess"));
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("publishControlPage.assignError"));
-    } finally {
-      setSavingId(null);
-    }
+    await action.run(`assign-${item.publish_draft_id}`, async () => {
+      setActionError(null);
+      try {
+        await assignPublishDraft(item.publish_draft_id, {
+          platform_account_id: item.recommended_platform_account_id!,
+          reason: defaultAssignmentReason(item),
+          assigned_by: "local_operator",
+        });
+        notify({ message: t("publishControlPage.assignSuccess"), tone: "success" });
+        await load("refresh");
+      } catch (err) {
+        const message = err instanceof Error ? err.message : t("publishControlPage.assignError");
+        setActionError(message);
+        notify({ message, tone: "error" });
+      }
+    });
   }
 
   async function unassign(item: PublishQueueItem) {
-    setSavingId(item.publish_draft_id);
-    setError(null);
-    setMessage(null);
-    try {
-      await unassignPublishDraft(item.publish_draft_id);
-      setMessage(t("publishControlPage.unassignSuccess"));
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("publishControlPage.unassignError"));
-    } finally {
-      setSavingId(null);
-    }
+    await action.run(`unassign-${item.publish_draft_id}`, async () => {
+      setActionError(null);
+      try {
+        await unassignPublishDraft(item.publish_draft_id);
+        notify({ message: t("publishControlPage.unassignSuccess"), tone: "success" });
+        await load("refresh");
+      } catch (err) {
+        const message = err instanceof Error ? err.message : t("publishControlPage.unassignError");
+        setActionError(message);
+        notify({ message, tone: "error" });
+      }
+    });
   }
 
   async function bulkAssign() {
     if (!bulkAccountId || selectedIds.size === 0) return;
-    setSavingId("bulk");
-    setError(null);
-    setMessage(null);
-    try {
-      await bulkAssignPublishDrafts({
-        publish_draft_ids: Array.from(selectedIds),
-        platform_account_id: bulkAccountId,
-        reason: "Bulk manual routing from publish control plane",
-        assigned_by: "local_operator",
-      });
-      setSelectedIds(new Set());
-      setMessage(t("publishControlPage.bulkAssignSuccess"));
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("publishControlPage.bulkAssignError"));
-    } finally {
-      setSavingId(null);
-    }
+    await action.run("bulk-assign", async () => {
+      setActionError(null);
+      try {
+        await bulkAssignPublishDrafts({
+          publish_draft_ids: Array.from(selectedIds),
+          platform_account_id: bulkAccountId,
+          reason: "Bulk manual routing from publish control plane",
+          assigned_by: "local_operator",
+        });
+        setSelectedIds(new Set());
+        notify({ message: t("publishControlPage.bulkAssignSuccess"), tone: "success" });
+        await load("refresh");
+      } catch (err) {
+        const message = err instanceof Error ? err.message : t("publishControlPage.bulkAssignError");
+        setActionError(message);
+        notify({ message, tone: "error" });
+      }
+    });
   }
 
   async function toggleHold(account: AccountHealthSummary) {
-    setSavingId(account.platform_account_id);
-    setError(null);
-    setMessage(null);
-    try {
-      await updatePlatformAccount(account.platform_account_id, {
-        is_on_hold: !account.is_on_hold,
-        hold_reason: account.is_on_hold ? null : "Manual hold from publish control plane",
-      });
-      setMessage(account.is_on_hold ? t("publishControlPage.holdRemoved") : t("publishControlPage.holdPlaced"));
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("publishControlPage.holdError"));
-    } finally {
-      setSavingId(null);
-    }
+    await action.run(`hold-${account.platform_account_id}`, async () => {
+      setActionError(null);
+      try {
+        await updatePlatformAccount(account.platform_account_id, {
+          is_on_hold: !account.is_on_hold,
+          hold_reason: account.is_on_hold ? null : "Manual hold from publish control plane",
+        });
+        notify({
+          message: account.is_on_hold ? t("publishControlPage.holdRemoved") : t("publishControlPage.holdPlaced"),
+          tone: "success",
+        });
+        await load("refresh");
+      } catch (err) {
+        const message = err instanceof Error ? err.message : t("publishControlPage.holdError");
+        setActionError(message);
+        notify({ message, tone: "error" });
+      }
+    });
   }
 
   function toggle(id: string) {
@@ -191,32 +194,23 @@ export function PublishControlPlanePage() {
   }
 
   const refreshAction = (
-    <TopbarRefreshButton busy={loading && Boolean(queue)} disabled={loading && !queue} onClick={() => void load()} />
+    <TopbarRefreshButton busy={request.refreshing} disabled={request.initialLoading} onClick={() => void load("refresh")} />
   );
-
-  if (loading && !queue) {
-    return (
-      <OpsConsoleShell actions={refreshAction} description={t("publishControlPage.pageDesc")} title={t("publishControlPage.pageTitle")}>
-        <OpsState title={t("publishControlPage.loading")} detail={t("publishControlPage.loadingDetail")} />
-      </OpsConsoleShell>
-    );
-  }
-
-  if (error && !queue) {
-    return (
-      <OpsConsoleShell actions={refreshAction} description={t("publishControlPage.pageDesc")} title={t("publishControlPage.pageTitle")}>
-        <OpsState title={t("publishControlPage.unavailable")} detail={error} retry={() => void load()} />
-      </OpsConsoleShell>
-    );
-  }
+  const boundaryStatus = request.initialLoading && !queue ? "loading" : request.error && !queue ? "error" : "success";
+  const inlineError = actionError ?? (queue ? request.error?.message ?? null : null);
 
   const showAttention = attentionDrafts.length > 0 || holdAccounts.length > 0;
 
   return (
     <OpsConsoleShell actions={refreshAction} description={t("publishControlPage.pageDesc")} title={t("publishControlPage.pageTitle")}>
+      <AsyncContentBoundary
+        refreshing={request.refreshing}
+        status={boundaryStatus}
+        skeleton={<OpsState title={t("publishControlPage.loading")} detail={t("publishControlPage.loadingDetail")} />}
+        errorState={<OpsState title={t("publishControlPage.unavailable")} detail={request.error?.message ?? t("publishControlPage.loadError")} retry={() => void load("initial")} />}
+      >
       <main className="ops-page ops-control-page">
-        {error ? <div className="inline-error">{error}</div> : null}
-        {message ? <div className="ops-control-notice">{message}</div> : null}
+        {inlineError ? <div className="inline-error">{inlineError}</div> : null}
 
         <p className="ops-control-freshness">
           {t("publishControlPage.metricsGenerated")}{" "}
@@ -324,18 +318,16 @@ export function PublishControlPlanePage() {
                           <span>{account.assigned_draft_count}</span>
                           <span>{account.scheduled_draft_count}</span>
                           <span>{account.needs_reconciliation_count}</span>
-                          <button
-                            type="button"
+                          <AsyncButton
                             className="ops-control-row__action"
-                            disabled={savingId === account.platform_account_id}
+                            pending={action.isPending(`hold-${account.platform_account_id}`)}
+                            pendingLabel={t("publishControlPage.updating")}
                             onClick={() => void toggleHold(account)}
                           >
-                            {savingId === account.platform_account_id
-                              ? t("publishControlPage.updating")
-                              : account.is_on_hold
+                            {account.is_on_hold
                                 ? t("publishControlPage.removeHold")
                                 : t("publishControlPage.putOnHold")}
-                          </button>
+                          </AsyncButton>
                         </li>
                       ))}
                     </ul>
@@ -358,9 +350,14 @@ export function PublishControlPlanePage() {
                         </option>
                       ))}
                     </select>
-                    <button type="button" disabled={selectedCount === 0 || savingId === "bulk"} onClick={() => void bulkAssign()}>
-                      {savingId === "bulk" ? t("publishControlPage.assigning") : t("publishControlPage.bulkAssign")}
-                    </button>
+                    <AsyncButton
+                      disabled={selectedCount === 0}
+                      pending={action.isPending("bulk-assign")}
+                      pendingLabel={t("publishControlPage.assigning")}
+                      onClick={() => void bulkAssign()}
+                    >
+                      {t("publishControlPage.bulkAssign")}
+                    </AsyncButton>
                     <button type="button" onClick={() => setSelectedIds(new Set())}>
                       {t("publishControlPage.clear")}
                     </button>
@@ -400,22 +397,24 @@ export function PublishControlPlanePage() {
                             {item.warnings[0] ?? "—"}
                           </span>
                           <div className="ops-control-draft__actions">
-                            <button
-                              type="button"
+                            <AsyncButton
                               className="ops-control-row__action"
-                              disabled={!item.recommended_platform_account_id || savingId === item.publish_draft_id}
+                              disabled={!item.recommended_platform_account_id}
+                              pending={action.isPending(`assign-${item.publish_draft_id}`)}
+                              pendingLabel={t("publishControlPage.assigning")}
                               onClick={() => void assignRecommended(item)}
                             >
                               {t("publishControlPage.useRec")}
-                            </button>
-                            <button
-                              type="button"
+                            </AsyncButton>
+                            <AsyncButton
                               className="ops-control-row__action"
-                              disabled={!item.assigned_platform_account_id || savingId === item.publish_draft_id}
+                              disabled={!item.assigned_platform_account_id}
+                              pending={action.isPending(`unassign-${item.publish_draft_id}`)}
+                              pendingLabel={t("publishControlPage.updating")}
                               onClick={() => void unassign(item)}
                             >
                               {t("publishControlPage.unassign")}
-                            </button>
+                            </AsyncButton>
                           </div>
                         </li>
                       ))}
@@ -520,6 +519,7 @@ export function PublishControlPlanePage() {
           </>
         ) : null}
       </main>
+      </AsyncContentBoundary>
     </OpsConsoleShell>
   );
 }

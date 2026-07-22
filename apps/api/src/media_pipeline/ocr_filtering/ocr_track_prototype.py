@@ -155,6 +155,7 @@ def run_ocr_track_prototype(
     out_json: Path,
     overlay_dir: Path | None = None,
     overlay_indices: list[int] | None = None,
+    overlay_all: bool = False,
     min_confidence: float = DEFAULT_MIN_CONFIDENCE,
     concurrency: int | None = 2,
     use_dual_band: bool = False,
@@ -357,6 +358,7 @@ def run_ocr_track_prototype(
                     dense,
                     overlay_dir,
                     indices=overlay_indices,
+                    overlay_all=overlay_all,
                 )
 
             return payload
@@ -397,12 +399,15 @@ def _write_overlays(
     overlay_dir: Path,
     *,
     indices: list[int] | None,
+    overlay_all: bool = False,
 ) -> None:
     from PIL import Image, ImageDraw
 
     overlay_dir.mkdir(parents=True, exist_ok=True)
     by_idx = {int(f["frame_index"]): f for f in dense_frames}
-    if indices is None:
+    if overlay_all:
+        indices = sorted(by_idx.keys())
+    elif indices is None:
         with_boxes = [f for f in dense_frames if f.get("boxes")]
         if not with_boxes:
             return
@@ -437,10 +442,12 @@ def _write_overlays(
             rgb = Image.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
             draw = ImageDraw.Draw(rgb)
             for b in entry.get("boxes") or []:
+                bw = float(b.get("w") if "w" in b else b.get("width") or 0.01)
+                bh = float(b.get("h") if "h" in b else b.get("height") or 0.01)
                 x0 = int(round(float(b["x"]) * w))
                 y0 = int(round(float(b["y"]) * h))
-                x1 = int(round((float(b["x"]) + float(b["w"])) * w))
-                y1 = int(round((float(b["y"]) + float(b["h"])) * h))
+                x1 = int(round((float(b["x"]) + bw) * w))
+                y1 = int(round((float(b["y"]) + bh) * h))
                 draw.rectangle([x0, y0, x1, y1], outline=(255, 220, 0), width=3)
                 label = (b.get("text") or "").strip()
                 if label:
@@ -496,6 +503,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--consensus-min-hits", type=int, default=2)
     parser.add_argument(
+        "--overlay-all",
+        action="store_true",
+        help="Write overlay JPG for every densified frame (default: auto pick 8)",
+    )
+    parser.add_argument(
         "--overlay-indices",
         default=None,
         help="Comma-separated frame indices (default: auto pick 8)",
@@ -521,6 +533,7 @@ def main(argv: list[str] | None = None) -> int:
         out_json=Path(args.out),
         overlay_dir=Path(args.overlay_dir) if args.overlay_dir else None,
         overlay_indices=indices,
+        overlay_all=bool(args.overlay_all),
         min_confidence=args.min_confidence,
         concurrency=args.concurrency,
         use_dual_band=bool(args.dual_band),
