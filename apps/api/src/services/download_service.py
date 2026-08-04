@@ -340,8 +340,6 @@ class DownloadService:
             return existing
 
         version = (existing.version + 1) if existing else 1
-        if existing:
-            existing.is_current = False
 
         # RAW leaves keep operator-facing names; sidecars keep version prefix for refreshes.
         leaf = filename if asset_type == MediaAssetType.SOURCE_VIDEO_RAW else f"v{version}_{filename}"
@@ -353,6 +351,41 @@ class DownloadService:
 
         if write_result.size_bytes <= 0:
             raise DownloadError(DownloadErrorCode.VALIDATION_FAILED, "Written file is empty")
+
+        metadata_json = {
+            "absolute_path": write_result.absolute_path,
+            **(extra_metadata or {}),
+        }
+        reusable = self._asset_by_storage_key(source_video.workspace_id, write_result.storage_key)
+        if reusable is not None:
+            # Re-download writes the same file path (RAW leaves keep operator-facing
+            # names), so a new row would break uq_media_assets_workspace_storage_key.
+            if existing is not None and existing is not reusable:
+                existing.is_current = False
+            reusable.source_video_id = source_video.id
+            reusable.asset_type = asset_type
+            reusable.status = MediaAssetStatus.AVAILABLE
+            reusable.storage_provider = write_result.storage_provider
+            reusable.logical_key = logical_key
+            reusable.relative_path = write_result.relative_path
+            reusable.manifest_group = "source_download"
+            reusable.is_current = True
+            reusable.created_by_job_id = job_id
+            reusable.source_url = source_url
+            reusable.mime_type = mime_type
+            reusable.size_bytes = write_result.size_bytes
+            reusable.checksum_sha256 = write_result.checksum_sha256
+            reusable.metadata_json = metadata_json
+            reusable.error_message = None
+            self.db.flush()
+            logger.info(
+                "asset_refreshed_in_place",
+                extra={"source_video_id": str(source_video.id), "asset_type": asset_type},
+            )
+            return reusable
+
+        if existing is not None:
+            existing.is_current = False
 
         asset = MediaAsset(
             workspace_id=source_video.workspace_id,
@@ -371,10 +404,7 @@ class DownloadService:
             mime_type=mime_type,
             size_bytes=write_result.size_bytes,
             checksum_sha256=write_result.checksum_sha256,
-            metadata_json={
-                "absolute_path": write_result.absolute_path,
-                **(extra_metadata or {}),
-            },
+            metadata_json=metadata_json,
         )
         self.db.add(asset)
         self.db.flush()
@@ -392,10 +422,29 @@ class DownloadService:
     ) -> MediaAsset:
         existing = self._current_asset(source_video.id, asset_type)
         version = (existing.version + 1) if existing else 1
-        if existing:
-            existing.is_current = False
 
         logical_key = asset_logical_key(context, asset_type, filename="failed.placeholder")
+        reusable = self._asset_by_storage_key(source_video.workspace_id, logical_key)
+        if reusable is not None:
+            # The placeholder key is constant, so repeated failures must reuse the row.
+            if existing is not None and existing is not reusable:
+                existing.is_current = False
+            reusable.source_video_id = source_video.id
+            reusable.asset_type = asset_type
+            reusable.status = MediaAssetStatus.FAILED
+            reusable.is_current = True
+            reusable.logical_key = logical_key
+            reusable.relative_path = logical_key
+            reusable.manifest_group = "source_download"
+            reusable.created_by_job_id = job_id
+            reusable.source_url = source_url
+            reusable.error_message = f"{error.code}: {error.message}"
+            self.db.flush()
+            return reusable
+
+        if existing is not None:
+            existing.is_current = False
+
         asset = MediaAsset(
             workspace_id=source_video.workspace_id,
             source_video_id=source_video.id,
@@ -422,6 +471,15 @@ class DownloadService:
                 MediaAsset.source_video_id == source_video_id,
                 MediaAsset.asset_type == asset_type,
                 MediaAsset.is_current.is_(True),
+            )
+        )
+
+    def _asset_by_storage_key(self, workspace_id: UUID, storage_key: str) -> MediaAsset | None:
+        """Row that already owns this storage key (uq_media_assets_workspace_storage_key)."""
+        return self.db.scalar(
+            select(MediaAsset).where(
+                MediaAsset.workspace_id == workspace_id,
+                MediaAsset.storage_key == storage_key,
             )
         )
 

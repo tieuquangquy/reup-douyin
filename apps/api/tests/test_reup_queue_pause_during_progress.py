@@ -64,11 +64,34 @@ def queue_item(**overrides):
 
 
 class PauseDuringProgressTests(unittest.TestCase):
-    def test_waiting_for_media_offers_hold_when_not_paused(self) -> None:
-        item = queue_item(held_at=None)
+    def test_waiting_for_media_offers_hold_while_download_running(self) -> None:
+        job_id = uuid4()
+        item = queue_item(
+            held_at=None,
+            job_id=job_id,
+            job=SimpleNamespace(id=job_id, job_type="DOWNLOAD_VIDEO", status=JobStatus.RUNNING),
+        )
         actions = available_action_values(item)
         self.assertIn(ReupQueueAction.HOLD, actions)
         self.assertNotIn(ReupQueueAction.RESUME, actions)
+
+    def test_waiting_for_media_offers_resume_when_download_idle(self) -> None:
+        """Stuck/cancelled download must expose Resume/restart without Pause first."""
+        job_id = uuid4()
+        item = queue_item(
+            held_at=None,
+            job_id=job_id,
+            job=SimpleNamespace(id=job_id, job_type="DOWNLOAD_VIDEO", status=JobStatus.CANCELLED),
+        )
+        actions = available_action_values(item)
+        self.assertIn(ReupQueueAction.RESUME, actions)
+        self.assertNotIn(ReupQueueAction.HOLD, actions)
+
+    def test_waiting_for_media_offers_resume_when_no_job(self) -> None:
+        item = queue_item(held_at=None, job_id=None, job=None)
+        actions = available_action_values(item)
+        self.assertIn(ReupQueueAction.RESUME, actions)
+        self.assertNotIn(ReupQueueAction.HOLD, actions)
 
     def test_waiting_for_media_offers_resume_when_paused(self) -> None:
         item = queue_item(held_at=datetime(2026, 7, 14, tzinfo=UTC))
@@ -171,6 +194,47 @@ class PauseDuringProgressTests(unittest.TestCase):
         request_arg = download_service.create_download_job.call_args.args[0]
         self.assertTrue(getattr(request_arg, "force_refresh", False))
         self.assertNotEqual(stale_job.idempotency_key, logical_key)
+
+    def test_auto_pipeline_resume_after_pause_recreates_download_job(self) -> None:
+        """Pause cancels DOWNLOAD; auto Resume must not reuse the cancelled job_id."""
+        old_job = uuid4()
+        new_job = uuid4()
+        item = queue_item(
+            job_id=old_job,
+            held_at=datetime(2026, 7, 14, tzinfo=UTC),
+            status=ReupQueueStatus.WAITING_FOR_MEDIA,
+            metadata_json={
+                "pipeline_mode": "auto_to_tts",
+                "pipeline_hold": True,
+                "pipeline_step": "download",
+            },
+        )
+        logical_key = f"reup-queue:{item.id}:download"
+        stale_job = SimpleNamespace(
+            id=old_job,
+            status=JobStatus.CANCELLED,
+            idempotency_key=f"{logical_key}:cancelled:{old_job}",
+            job_type="DOWNLOAD_VIDEO",
+        )
+        fake_db = FakeActionDb(item, job=stale_job)
+        download_service = MagicMock()
+        download_service.create_download_job.return_value = SimpleNamespace(job_id=str(new_job))
+
+        with patch.object(ReupQueueService, "_get_download_service", return_value=download_service):
+            updated = ReupQueueService(fake_db, download_service=download_service).apply_action(
+                item.id,
+                action=ReupQueueAction.RESUME,
+            )
+
+        self.assertIsNone(updated.held_at)
+        self.assertEqual(updated.metadata_json.get("pipeline_hold"), False)
+        self.assertEqual(updated.job_id, new_job)
+        self.assertEqual(updated.status, ReupQueueStatus.WAITING_FOR_MEDIA)
+        download_service.create_download_job.assert_called_once()
+        self.assertEqual(
+            download_service.create_download_job.call_args.kwargs.get("idempotency_key"),
+            logical_key,
+        )
 
     def test_hold_during_metadata_keeps_transcript_stage(self) -> None:
         job_id = uuid4()

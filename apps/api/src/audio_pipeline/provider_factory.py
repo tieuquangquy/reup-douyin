@@ -19,7 +19,7 @@ from src.audio_pipeline.translation_llm import (
     OpenAiCompatibleHttpClient,
 )
 from src.core.settings import get_settings
-from src.storage.local import LocalStorageBackend
+from src.storage.local import LocalStorageBackend, to_windows_long_path
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +32,8 @@ def build_default_stt_provider(*, settings: Any | None = None, storage_root: str
     def resolve_audio_path(storage_key: str) -> str | None:
         try:
             path = storage.resolve(storage_key).absolute_path
-            return str(path) if Path(path).exists() else None
+            filesystem_path = to_windows_long_path(Path(path))
+            return str(filesystem_path) if filesystem_path.exists() else None
         except Exception:
             return None
 
@@ -65,25 +66,56 @@ def _build_from_env(cfg: Any) -> TranslationProvider:
     ollama_model = str(getattr(cfg, "ollama_translation_model", "qwen2.5:14b") or "qwen2.5:14b")
     gemini_model = str(getattr(cfg, "gemini_translation_model", "gemini-2.5-flash") or "gemini-2.5-flash")
 
-    gemini = GeminiHttpClient(api_key=gemini_key, model=gemini_model) if gemini_key else None
+    gemini_interval = float(
+        getattr(cfg, "gemini_translation_min_request_interval_seconds", 13.0) or 0.0
+    )
+    gemini = (
+        GeminiHttpClient(
+            api_key=gemini_key,
+            model=gemini_model,
+            min_request_interval_seconds=gemini_interval,
+        )
+        if gemini_key
+        else None
+    )
     ollama = OllamaHttpClient(base_url=ollama_base, model=ollama_model) if ollama_enabled else None
 
     if mode == "gemini":
         if gemini is None:
             logger.warning("gemini_translation_requested_without_key_using_placeholder")
             return PlaceholderVietnameseTranslationProvider()
-        return DurationConstrainedTranslationProvider(primary=gemini, fallback=ollama)
+        return DurationConstrainedTranslationProvider(
+            primary=gemini,
+            fallback=ollama,
+            max_rewrite_rounds=2,
+            allow_machine_translate_recovery=False,
+        )
 
     if mode in {"qwen", "ollama"}:
         if ollama is None:
             return PlaceholderVietnameseTranslationProvider()
-        return DurationConstrainedTranslationProvider(primary=ollama, fallback=None)
+        return DurationConstrainedTranslationProvider(
+            primary=ollama,
+            fallback=None,
+            max_rewrite_rounds=2,
+            allow_machine_translate_recovery=False,
+        )
 
     # auto
     if gemini is not None:
-        return DurationConstrainedTranslationProvider(primary=gemini, fallback=ollama)
+        return DurationConstrainedTranslationProvider(
+            primary=gemini,
+            fallback=ollama,
+            max_rewrite_rounds=2,
+            allow_machine_translate_recovery=False,
+        )
     if ollama is not None:
-        return DurationConstrainedTranslationProvider(primary=ollama, fallback=None)
+        return DurationConstrainedTranslationProvider(
+            primary=ollama,
+            fallback=None,
+            max_rewrite_rounds=2,
+            allow_machine_translate_recovery=False,
+        )
     logger.info("translation_provider_placeholder_no_llm_configured")
     return PlaceholderVietnameseTranslationProvider()
 
@@ -130,7 +162,12 @@ def _build_from_workspace_ai(workspace_ai: Any, *, env_settings: Any) -> Transla
             prefer_env_key_when_empty=True,
         )
 
-    return DurationConstrainedTranslationProvider(primary=primary, fallback=fallback)
+    return DurationConstrainedTranslationProvider(
+        primary=primary,
+        fallback=fallback,
+        max_rewrite_rounds=2,
+        allow_machine_translate_recovery=False,
+    )
 
 
 def _make_llm_client(
@@ -177,7 +214,15 @@ def _make_llm_client(
         )
         if not key:
             return None
-        return GeminiHttpClient(api_key=key, model=chosen_model, timeout_seconds=timeout_seconds)
+        return GeminiHttpClient(
+            api_key=key,
+            model=chosen_model,
+            timeout_seconds=timeout_seconds,
+            min_request_interval_seconds=float(
+                getattr(env_settings, "gemini_translation_min_request_interval_seconds", 13.0)
+                or 0.0
+            ),
+        )
 
     if mode == "ollama":
         chosen_base = base_url or str(

@@ -26,6 +26,38 @@ DENSE_UI_KIND = "dense_ui"
 DENSE_UI_PANEL_INSET = 0.04
 DENSE_UI_BOTTOM_GAP = 0.02
 
+# Cover-safety (all videos): refuse detector false-positives that are too big
+# to be a subtitle / UI label line — those wipe food when covered.
+# Thresholds from size-class invariants (line/label vs mid-frame slab), not one clip.
+# Keep compact vertical labels (e.g. 加盐): small area + height under the line cap.
+MAX_TEXT_COVER_HEIGHT = 0.12
+MAX_TEXT_COVER_AREA = 0.05
+MAX_TEXT_COVER_WIDTH = 0.92
+
+
+def is_plausible_text_cover_segment(seg: OverlaySegment) -> bool:
+    """
+    True when ``seg`` is small enough to be on-screen text cover.
+
+    Oversized mid-frame boxes (food mis-detected as text) must not be painted.
+    Dense UI panels are always allowed (explicit full-card wipe).
+    Compact vertical labels stay allowed when under height/area caps.
+    """
+    kind = str(getattr(seg, "kind", "") or "")
+    if kind == DENSE_UI_KIND:
+        return True
+    width = float(getattr(seg, "width", 0.0) or 0.0)
+    height = float(getattr(seg, "height", 0.0) or 0.0)
+    if width <= 0.0 or height <= 0.0:
+        return False
+    if width > MAX_TEXT_COVER_WIDTH:
+        return False
+    if (width * height) > MAX_TEXT_COVER_AREA:
+        return False
+    if height > MAX_TEXT_COVER_HEIGHT:
+        return False
+    return True
+
 
 def dense_ui_content_panel(
     *,
@@ -47,16 +79,39 @@ def dense_ui_content_panel(
 
 def is_artifact_vi_text(text: str) -> bool:
     """True for pipeline/filename strings that must never be burned as captions."""
-    raw = (text or "").strip().lower()
+    raw = (text or "").strip()
     if not raw:
         return False
-    if "ocr_pipeline" in raw:
+    if raw == "...":
         return True
-    if raw.endswith(".mp4") or raw.endswith(".mp"):
+    if raw.startswith("[vi]") or (raw.startswith("[") and raw.endswith("]")):
         return True
-    if "__v" in raw and "_cleaned" in raw:
+    lowered = raw.lower()
+    if "ocr_pipeline" in lowered:
+        return True
+    if lowered.endswith(".mp4") or lowered.endswith(".mp"):
+        return True
+    if "__v" in lowered and "_cleaned" in lowered:
         return True
     return False
+
+
+def gate_vi_for_burn(text: str) -> str:
+    """
+    Fail-closed for burn-in: empty / ``...`` / artifact / residual CJK → ``\"\"``.
+
+    Cover geometry still runs; only the Vietnamese draw string is suppressed.
+    """
+    from src.media_pipeline.ocr_filtering.script_filter import contains_cjk
+
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    if is_artifact_vi_text(raw):
+        return ""
+    if contains_cjk(raw):
+        return ""
+    return raw
 
 
 @dataclass(frozen=True)
@@ -299,6 +354,7 @@ def overlays_from_ocr_payload(
             continue
         time_ms = int(frame.get("time_ms") or 0)
         frame_id = str(frame.get("frame_id") or f"t{time_ms}")
+        frame_state = str(frame.get("frame_state") or "").strip().lower()
 
         text_boxes = [
             b for b in raw_boxes if str(b.get("text") or "").strip()
@@ -329,9 +385,11 @@ def overlays_from_ocr_payload(
         dense_endcard = bool(cjk_items) and is_endcard_dense(
             [item[0] for item in cjk_items]
         )
+        # Prefer per-box cover for text_only endcards (full panel blur samples
+        # food background and paints an ugly brown slate).
         force_panel = dense_endcard and endcard_mode != "text_only"
 
-        if not cjk_items and not force_panel:
+        if not cjk_items and not cover_only_boxes and not force_panel:
             continue
 
         if force_panel:
@@ -358,24 +416,25 @@ def overlays_from_ocr_payload(
             )
             bounds = _authority_bounds_from_box(source) if source is not None else None
             prepared.append((time_ms, frame_id, box_index, xywh, kind, bounds))
+
+        # Cover-only geometry (chrome / missed OCR) — every frame, not only endcard.
+        for box in cover_only_boxes:
+            x, y, w, h = box_norm_xywh(box)
+            prepared.append(
+                (
+                    time_ms,
+                    frame_id,
+                    -2,
+                    (x, y, w, h),
+                    "ui",
+                    _authority_bounds_from_box(box),
+                )
+            )
         if dense_endcard and endcard_mode == "text_only":
             for box in text_boxes:
                 text = str(box.get("text") or "").strip()
                 if contains_cjk(text):
                     continue
-                x, y, w, h = box_norm_xywh(box)
-                # Negative index means cover-only: no Vietnamese burn-in.
-                prepared.append(
-                    (
-                        time_ms,
-                        frame_id,
-                        -2,
-                        (x, y, w, h),
-                        "ui",
-                        _authority_bounds_from_box(box),
-                    )
-                )
-            for box in cover_only_boxes:
                 x, y, w, h = box_norm_xywh(box)
                 prepared.append(
                     (
@@ -421,8 +480,7 @@ def overlays_from_ocr_payload(
                 frame_id=frame_id,
                 cluster_index=box_index,
             )
-            if is_artifact_vi_text(text_vi):
-                text_vi = ""
+            text_vi = gate_vi_for_burn(text_vi)
         overlays.append(
             OverlaySegment(
                 start_ms=time_ms,

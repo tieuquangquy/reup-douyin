@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Sequence
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
@@ -20,6 +21,27 @@ class RiskServiceError(ValueError):
     pass
 
 
+def statuses_superseded_by_rescan() -> frozenset[RiskFlagStatus]:
+    """Active operator-visible statuses replaced by a newer scan run."""
+    return frozenset({RiskFlagStatus.OPEN, RiskFlagStatus.ACKNOWLEDGED})
+
+
+def flags_for_latest_scan(flags: Sequence[object]) -> list:
+    """Keep only flags from the newest scan_run_id so rescan does not stack history."""
+    with_run = [flag for flag in flags if getattr(flag, "scan_run_id", None) is not None]
+    if not with_run:
+        return []
+    latest = max(
+        with_run,
+        key=lambda flag: (
+            getattr(flag, "detected_at", None) or datetime.min.replace(tzinfo=UTC),
+            str(getattr(flag, "scan_run_id")),
+        ),
+    )
+    latest_run_id = getattr(latest, "scan_run_id")
+    return [flag for flag in flags if getattr(flag, "scan_run_id", None) == latest_run_id]
+
+
 class RiskService:
     def __init__(self, db: Session):
         self.db = db
@@ -28,10 +50,10 @@ class RiskService:
         target = self._resolve_target(target_type, target_id)
         scan_run_id = uuid4()
         findings = self._scan_target(target_type, target_id)
-        self._mark_stale_open_flags(target)
+        self._supersede_active_flags(target)
         flags = [self._create_flag(target, finding, scan_run_id) for finding in findings]
         self.db.commit()
-        current_flags = self.list_flags(target_type=target_type, target_id=target_id)
+        current_flags = self.list_current_flags(target_type=target_type, target_id=target_id)
         return scan_run_id, current_flags, self.gate_summary(target_type, target_id)
 
     def list_flags(
@@ -52,6 +74,10 @@ class RiskService:
         if status is not None:
             stmt = stmt.where(RiskFlag.status == status)
         return list(self.db.scalars(stmt))
+
+    def list_current_flags(self, *, target_type: RiskTargetType, target_id: UUID) -> list[RiskFlag]:
+        """Operator working set: flags from the latest scan only."""
+        return flags_for_latest_scan(self.list_flags(target_type=target_type, target_id=target_id))
 
     def get_flag(self, flag_id: UUID) -> RiskFlag:
         flag = self.db.get(RiskFlag, flag_id)
@@ -79,7 +105,7 @@ class RiskService:
         decided_by: str | None = "local_operator",
     ) -> OperatorRiskDecision:
         target = self._resolve_target(target_type, target_id)
-        flags = self.list_flags(target_type=target_type, target_id=target_id)
+        flags = self.list_current_flags(target_type=target_type, target_id=target_id)
         gate = evaluate_gate(flags)
         decision = OperatorRiskDecision(
             workspace_id=target.workspace_id,
@@ -106,7 +132,7 @@ class RiskService:
         )
 
     def gate_summary(self, target_type: RiskTargetType, target_id: UUID) -> RiskGateSummary:
-        flags = self.list_flags(target_type=target_type, target_id=target_id)
+        flags = self.list_current_flags(target_type=target_type, target_id=target_id)
         return evaluate_gate(flags, self.latest_decision(target_type, target_id))
 
     def _resolve_target(self, target_type: RiskTargetType, target_id: UUID) -> RiskTarget:
@@ -132,8 +158,11 @@ class RiskService:
             return scan_render_output(self.db.get(RenderOutput, target_id))
         return scan_publish_draft(self.db.get(PublishDraft, target_id))
 
-    def _mark_stale_open_flags(self, target: RiskTarget) -> None:
-        for flag in self.list_flags(target_type=target.target_type, target_id=target.target_id, status=RiskFlagStatus.OPEN):
+    def _supersede_active_flags(self, target: RiskTarget) -> None:
+        superseded = statuses_superseded_by_rescan()
+        for flag in self.list_flags(target_type=target.target_type, target_id=target.target_id):
+            if flag.status not in superseded:
+                continue
             flag.status = RiskFlagStatus.RESOLVED
             flag.resolved_at = datetime.now(UTC)
             flag.resolution_note = "Superseded by a newer risk scan run."

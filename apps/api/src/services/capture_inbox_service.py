@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 CAPTURE_SOURCE_EXTENSION = "douyin_extension_current_tab"
 CAPTURE_INBOX_CRAWL_MODE = "extension_capture_inbox_promotion"
-CAPTURE_INBOX_ROUTE = "/ops/extensions/douyin/capture-inbox"
+CAPTURE_INBOX_ROUTE = "/selection/capture-inbox"
 _CAPTURED_ITEM_LIST_ORDER = (CapturedItem.created_at.desc(), CapturedItem.id.desc())
 
 

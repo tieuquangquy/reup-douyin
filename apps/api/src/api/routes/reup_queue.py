@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -21,9 +22,16 @@ from src.schemas.reup_queue import (
     ReupQueuePurgeResponse,
 )
 from src.schemas.candidates import CandidateSourceVideoSummary
+from src.schemas.capture_inbox import CaptureSessionListResponse, CaptureSessionResponse
 from src.services.export_handoff_service import BatchOperationResult, ExportHandoffError, ExportHandoffService
 from src.services.reup_queue_download_sync import next_action_for_item
-from src.services.reup_queue_service import ReupQueueError, ReupQueueService, available_actions_for_item, bucket_for_status
+from src.services.reup_queue_service import (
+    ReupQueueError,
+    ReupQueueIntakeSession,
+    ReupQueueService,
+    available_actions_for_item,
+    bucket_for_status,
+)
 
 router = APIRouter(tags=["reup-queue"])
 
@@ -34,6 +42,13 @@ def get_reup_queue_service(db: Session = Depends(get_db_session)) -> ReupQueueSe
 
 def get_export_handoff_service(db: Session = Depends(get_db_session)) -> ExportHandoffService:
     return ExportHandoffService(db)
+
+
+def _intake_session_response(entry: ReupQueueIntakeSession) -> CaptureSessionResponse:
+    session = entry.session
+    payload = CaptureSessionResponse.model_validate(session, from_attributes=True)
+    # Remap the count the shared picker label reads so it shows queue membership.
+    return payload.model_copy(update={"promoted_item_count": entry.queued_item_count})
 
 
 def _batch_response(result: BatchOperationResult) -> BatchOperationResponse:
@@ -163,12 +178,28 @@ def _queue_item_response_for_service(service: ReupQueueService, item: ReupQueueI
     return _queue_item_response(item, display_job=service.resolve_display_job(item))
 
 
+@router.get("/reup-queue/intake-sessions", response_model=CaptureSessionListResponse)
+def list_reup_queue_intake_sessions(
+    include_dismissed: bool = Query(default=False),
+    limit: int = Query(default=50, ge=1, le=200),
+    service: ReupQueueService = Depends(get_reup_queue_service),
+) -> CaptureSessionListResponse:
+    sessions = service.list_intake_sessions(include_dismissed=include_dismissed, limit=limit)
+    return CaptureSessionListResponse(
+        sessions=[_intake_session_response(entry) for entry in sessions],
+        total_count=len(sessions),
+    )
+
+
 @router.get("/reup-queue/items", response_model=ReupQueueListResponse)
 def list_reup_queue_items(
     status_filter: ReupQueueStatus | None = Query(default=None, alias="status"),
     statuses: list[ReupQueueStatus] | None = Query(default=None),
     include_dismissed: bool = Query(default=False),
     sort: str | None = Query(default="active_first"),
+    capture_session_id: UUID | None = Query(default=None),
+    created_after: datetime | None = Query(default=None),
+    created_before: datetime | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=250),
     offset: int = Query(default=0, ge=0),
     service: ReupQueueService = Depends(get_reup_queue_service),
@@ -178,6 +209,9 @@ def list_reup_queue_items(
         statuses=statuses,
         include_dismissed=include_dismissed,
         sort=sort,
+        capture_session_id=capture_session_id,
+        created_after=created_after,
+        created_before=created_before,
         limit=limit,
         offset=offset,
     )
@@ -216,6 +250,7 @@ def run_reup_queue_action(
             blocked_reason=request.blocked_reason,
             media_prep_notes=request.media_prep_notes,
             media_prep_status=request.media_prep_status,
+            pipeline_mode=request.pipeline_mode,
         )
     except ReupQueueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail={"code": exc.code, "message": exc.message}) from exc
@@ -233,6 +268,7 @@ def run_reup_queue_batch_action(
             item_ids=request.item_ids,
             note=request.note,
             target_platform=request.target_platform,
+            pipeline_mode=request.pipeline_mode,
         )
     except ExportHandoffError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail={"code": exc.code, "message": exc.message}) from exc

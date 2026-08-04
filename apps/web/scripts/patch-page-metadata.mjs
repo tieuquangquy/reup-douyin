@@ -12,7 +12,7 @@ const staticPages = [
   ["intake/crawl-sessions/page.tsx", "../../../lib/pageMetadata", "pageMetadata.intakeCrawlSessions"],
   ["selection/review-board/page.tsx", "../../../lib/pageMetadata", "pageMetadata.reviewBoard"],
   ["selection/reup-queue/page.tsx", "../../../lib/pageMetadata", "pageMetadata.reupQueue"],
-  ["ops/extensions/douyin/capture-inbox/page.tsx", "../../../../../lib/pageMetadata", "pageMetadata.captureInbox"],
+  ["selection/capture-inbox/page.tsx", "../../../lib/pageMetadata", "pageMetadata.captureInbox"],
   ["accounts/douyin/page.tsx", "../../../lib/pageMetadata", "pageMetadata.douyinAccounts"],
   ["setup/douyin-extension/page.tsx", "../../../lib/pageMetadata", "pageMetadata.douyinExtensionSetup"],
   ["ops/extensions/douyin/page.tsx", "../../../../lib/pageMetadata", "pageMetadata.douyinExtensionManager"],

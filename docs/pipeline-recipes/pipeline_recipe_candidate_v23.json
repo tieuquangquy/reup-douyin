@@ -1,0 +1,199 @@
+{
+  "schema_version": "pipeline_recipe_candidate_v1",
+  "status": "VALIDATED_CANDIDATE_WITH_GAPS",
+  "candidate_at": "2026-08-01T05:44:46.348969+00:00",
+  "release_label": "V23",
+  "base_recipe": {
+    "path": "docs/pipeline-recipes/pipeline_recipe_current.json",
+    "file_sha256": "ac023fd2ce8503bfef52790b1155f4f0670726f7c87c8a60e2c95034f2136ebf",
+    "recipe_sha256": "c60a27e2fc756607edfcded77c4774c05e5ebebc3c511f1181b9527630d027ac"
+  },
+  "phase1": {
+    "extractor": "v58_candidate",
+    "step": 1,
+    "pad": 1,
+    "authority": "master_timeline.json",
+    "authority_v3_6_full_duration": false,
+    "scorer": "score_phase1_pass",
+    "final_coverage_fade_tail_max_frames": 5,
+    "post_refinement_sparse_compact_guard": {
+      "policy_version": "post_refinement_sparse_compact_text_consensus_v1",
+      "max_width_frac": 0.08,
+      "max_height_frac": 0.065,
+      "visual_normalized_height": 64,
+      "texture_max_laplacian_variance": 150.0,
+      "texture_max_edge_density": 0.1,
+      "texture_min_saturation": 120.0,
+      "recognizer_failure_policy": "fail_soft_to_operator_review"
+    }
+  },
+  "phase2": {
+    "provider": "local",
+    "model_versions": [
+      "ppocrv6-medium-det-8e0f56fb_rec-e5a92bcb_paddleocr-3.8.0.dev11-g2661c7c0e"
+    ],
+    "geometry_authority": "master_timeline.json",
+    "output_artifact": "phase2_ocr_timeline.json",
+    "overwrite_master_timeline": false,
+    "approval_policy": "exact_operator_review",
+    "llm_context_correction_allowed": true,
+    "llm_correction_is_approval_authority": false,
+    "residual_remediation": {
+      "active_pointer_schema": "phase2_residual_remediation_active_v1",
+      "generation_policy": "cumulative_versioned_hash_bound",
+      "ocr_probe_policy": "phase2_hash_bound_detector_probe_v1",
+      "visual_override_policy": "phase2_operator_visual_override_v1"
+    }
+  },
+  "phase3": {
+    "scope": "title_labels_ingredients_units_endcard",
+    "duplicate_transition_policy": "translate_once_cover_all_geometry_refs",
+    "duration_policy": "meaning_preserving_compaction_then_measured_audio_fit",
+    "approval_policy": "operator_locked_translation",
+    "additive_approval_rebind_policy": "exact_content_plus_hash_bound_geometry_v2"
+  },
+  "tts": {
+    "provider": "auto",
+    "voice_id": "vi-VN-HoaiMyNeural",
+    "speaking_rate": 1.0,
+    "timing_policy": "measured_duration_segment_fit",
+    "atempo_policy": "bounded_only_after_text_compaction"
+  },
+  "render": {
+    "renderer": "phase4_adaptive_pts_preserving",
+    "role_policy_version": "phase4_role_policy_v10",
+    "timing_normalization_policy_version": "transition_boundary_v2",
+    "video_encoder_policy": "auto",
+    "hardware_smoke_probe": true,
+    "hardware_fallback_enabled": true,
+    "background_mix_gain": 1.0,
+    "loudness_target_lufs": -14.0,
+    "narration_only_loudness": {
+      "policy_version": "two_pass_loudnorm_aac_headroom_v1",
+      "measurement": "ffmpeg_loudnorm_two_pass",
+      "encode_true_peak_db": -2.7,
+      "aac_headroom_db": 1.2
+    },
+    "residual_cjk_policy": {
+      "policy_version": "source_intrinsic_cjk_v10_bounded_pixel_binding",
+      "source_intrinsic_edge_print_requires_source_ocr_match": true,
+      "texture_false_positive": {
+        "max_area": 0.0006,
+        "max_pixel_aspect": 0.55,
+        "max_mean_abs_delta": 4.0,
+        "max_p95_abs_delta": 10.0,
+        "active_cover_overlap_blocks_exclusion": true
+      }
+    },
+    "invisible_perturbation": false,
+    "mirror": false,
+    "duplicate_detection_evasion": false,
+    "layout_policies": {
+      "dense_group": "source_relative_dense_group_v1",
+      "semantic_dedup": "semantic_render_dedup_v1"
+    },
+    "source_text_provenance": {
+      "moving_object_region": "operator_hash_bound_moving_object_region_v1",
+      "operator_approval_required": true,
+      "source_pixels_preserved": true
+    }
+  },
+  "audio_authority": {
+    "no_dialogue_source_audio": {
+      "policy_version": "verified_silero_no_dialogue_source_audio_v1",
+      "vad_provider": "silero_vad",
+      "requires_measured_execution": true,
+      "requires_zero_speech_seconds": true,
+      "requires_zero_speech_segments": true,
+      "operator_audio_approval_required": true,
+      "source_hash_binding_required": true
+    }
+  },
+  "operator_gates": [
+    "OCR_APPROVED",
+    "TRANSLATION_APPROVED",
+    "VISUAL_APPROVED",
+    "AUDIO_APPROVED",
+    "FINAL_APPROVED",
+    "METADATA_APPROVED",
+    "SOURCE_RIGHTS_AND_MUSIC_APPROVED"
+  ],
+  "execution": {
+    "resume": true,
+    "idempotent_stage_checks": true,
+    "transient_retry_policy": "pipeline_retry_policy",
+    "external_publish": false
+  },
+  "evidence": {
+    "batch_report": {
+      "path": "apps/api/regression_runs/pipeline_v22_remediation_v22_1_20260729/pipeline_regression_report.json",
+      "file_sha256": "b17f8b880dec7d62f1ffd41bd8ae0c4cc8e3e2ce8bae097103fa407bf165c4e7",
+      "report_sha256": "cba94bd965ccaf9024a779c9186e9703558fe9b3e70a5888e7c05087da613374"
+    },
+    "final_fixture": {
+      "path": "docs/pipeline-final-regression-fixtures-v23.json",
+      "file_sha256": "c7532cc88777cd07cf6332bb8b0a054ec4f18f38752311acb2bff1f0054d2b42",
+      "fixture_sha256": "0f029a691f2eea3200b09ce5426b4362957d4b419b25647b0690b7dd31118b0a"
+    },
+    "final_fixture_report": {
+      "path": "apps/api/regression_runs/pipeline_v22_remediation_v22_1_20260729/pipeline_final_regression_fixture_report_v23.json",
+      "file_sha256": "e6ba3bcd5ff531a0418d87b98563155150586b119a9acf22ae7e36458e1c67a9",
+      "report_sha256": "702fecde44cb16be9fed110ab015a15cc1a864067eaec1146982c56c25b518fb",
+      "case_count": 1,
+      "passed_count": 1
+    },
+    "e2e_report": {
+      "path": "apps/api/regression_runs/pipeline_v22_remediation_v22_1_20260729/pipeline_e2e_regression_report.json",
+      "file_sha256": "3cec21df39ac284c84f311be36cf71dba897be7b756359f207ef99b7f20e6ed3",
+      "report_sha256": "13455c7af40dce7b8f47c379b7c13c81495e3924e0e99a5debce573cb84d4e3b",
+      "case_count": 6,
+      "passed_count": 6,
+      "excluded_case_count": 0
+    },
+    "corpus_gaps": {
+      "orientation": [
+        "portrait"
+      ],
+      "resolution": [
+        "720p_or_lower"
+      ],
+      "timebase": [
+        "VFR"
+      ],
+      "frame_rate": [
+        "above_30fps"
+      ],
+      "lighting": [
+        "dark"
+      ],
+      "motion": [
+        "low",
+        "medium"
+      ],
+      "audio": [
+        "absent"
+      ],
+      "text_density": [
+        "dense",
+        "light",
+        "medium"
+      ]
+    }
+  },
+  "claims": {
+    "universal_video_support": false,
+    "automated_batch_execution_pass": true,
+    "final_fixture_pass": true,
+    "included_cases_end_to_end_pass": true,
+    "full_batch_end_to_end_pass": true,
+    "candidate_case_count": 6,
+    "final_fixture_case_count": 1,
+    "pending_rights_review_count": 0,
+    "recipe_lock_recommended": true
+  },
+  "blockers": [],
+  "limitations": [
+    "DECLARED_CORPUS_COVERAGE_GAPS"
+  ],
+  "candidate_sha256": "90379f8ffa9c35cdf3f1a2ffea973715fcd65085f05cf8b6dd3f7ff5b21bb08a"
+}

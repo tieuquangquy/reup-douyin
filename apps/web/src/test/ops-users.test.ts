@@ -22,6 +22,7 @@ assert.doesNotMatch(
   /label: "nav\.users"/,
   "Users must not appear in Operator Studio nav"
 );
+
 assert.match(apiSource, /\/auth\/workspace\/members/, "Web API must call workspace members endpoint");
 assert.match(apiSource, /createWorkspaceInvite/, "Web API must support invite create");
 assert.match(apiSource, /updateWorkspaceMember/, "Web API must support member update");
@@ -33,86 +34,65 @@ assert.match(apiSource, /address/, "Web API member patch must support address");
 assert.match(apiSource, /notes/, "Web API member patch must support notes");
 assert.match(apiSource, /lastSeenAt|last_seen_at/, "Web API members must expose last seen");
 
-assert.match(pageSource, /OpsConsoleShell/, "Users page must own Ops shell so refresh can live in the topbar");
-assert.match(pageSource, /TopbarRefreshButton/, "Users page must use icon refresh in the topbar");
-assert.doesNotMatch(pageSource, /OpsPageHeader/, "Users page must not duplicate shell title with OpsPageHeader");
-assert.match(pageSource, /ops-users-sheet/, "Users page must use a polished sheet surface around the roster");
-assert.match(pageSource, /ops-users-chrome/, "Filters and invite must live in compact chrome");
-assert.match(pageSource, /ops-users-table/, "Members must use a table skeleton");
-assert.match(pageSource, /<table[\s\S]*ops-users-table/, "Members roster must be a real HTML table");
-assert.match(pageSource, /ops-users-toolbar/, "Members toolbar must host search");
-assert.doesNotMatch(pageSource, /ops-users-gallery/, "Gallery card deck must be retired");
-assert.doesNotMatch(pageSource, /ops-users-deck/, "Card deck grid must be retired");
-assert.doesNotMatch(pageSource, /ops-users-card/, "Gallery cards must be retired");
-assert.doesNotMatch(pageSource, /ops-users-atelier/, "Atelier split-pane shell must stay retired");
-assert.doesNotMatch(pageSource, /ops-users-band/, "Dark band header must stay retired");
-assert.doesNotMatch(pageSource, /ops-users-split/, "Split ledger + inspect layout must stay retired");
-assert.doesNotMatch(pageSource, /ops-users-ledger/, "Left ledger pane must stay retired");
-assert.doesNotMatch(pageSource, /ops-users-inspect/, "Sparse inspect panel must stay retired");
-assert.doesNotMatch(pageSource, /ops-users-masthead/, "Marketing masthead layout must stay retired");
-assert.doesNotMatch(pageSource, /ops-users-seg/, "Segmented pill strip must stay retired");
-assert.doesNotMatch(pageSource, /ops-users-directory/, "Single-column directory card must stay retired");
-assert.doesNotMatch(pageSource, /ops-users-person/, "Sparse person rows must stay retired");
-assert.doesNotMatch(pageSource, /ops-users-metrics/, "Large metric card strip must stay removed");
-assert.doesNotMatch(pageSource, /ops-users-rail/, "Left filter rail must stay removed");
-assert.match(
-  globalCssSource,
-  /\.ops-users-sheet-page\s+\.ops-users-table\s*\{[^}]*table-layout:\s*fixed/,
-  "Users roster must use table-layout:fixed so columns distribute evenly"
-);
-assert.match(
-  globalCssSource,
-  /\.ops-users-sheet-page\s+\.ops-users-table\s+th:nth-child\(2\)[\s\S]*?width:\s*15%/,
-  "Role/Status/date columns must share even widths (not shrink-wrap 1%)"
-);
-assert.match(
-  globalCssSource,
-  /\.ops-users-sheet-page\s+\.ops-users-table\s+th:nth-child\(6\)[\s\S]*?width:\s*12%/,
-  "Actions column must keep a real share of the row width"
-);
-assert.match(
-  globalCssSource,
-  /\.ops-users-table\s+\.ops-users-member-row\s*\{[^}]*display:\s*table-row/,
-  "Table rows must remain display:table-row (never grid on tr)"
-);
+assert.match(pageSource, /OpsConsoleShell/, "Users page must own the Ops shell");
+assert.match(pageSource, /TopbarRefreshButton/, "Refresh must remain in the Ops topbar");
+assert.doesNotMatch(pageSource, /OpsPageHeader/, "Users page must not duplicate the shell title");
+assert.match(pageSource, /<section className="ops-users-command-table"/, "Users must use the flat Command Table concept");
+assert.match(pageSource, /<table className="ops-users-command-table__table">/, "Members must use a semantic HTML table");
+assert.match(pageSource, /ops-users-command-table__command[\s\S]*ops-users-search[\s\S]*setRoleFilter[\s\S]*setAccessFilter/, "Search and filters must share one command bar");
+assert.match(pageSource, /ops-users-command-table__tabs[\s\S]*summary\.total[\s\S]*summary\.pending/, "Member and invite views must expose truthful backend counts");
+assert.match(pageSource, /criticalSignalCount \+ watchSignalCount > 0[\s\S]*signalsNeedReview/, "Review count must only render when a real signal exists");
+assert.match(pageSource, /toggleMemberSort[\s\S]*memberSortDirection/, "Directory columns must support deterministic client-side sorting");
+assert.match(pageSource, /sortedFilteredMembers\.map[\s\S]*primarySignalKind[\s\S]*ops-users-command-review/, "Each member row must derive its review state from real member data");
+assert.match(pageSource, /className=\{`ops-users-command-row is-\$\{primarySignalKind \?\? "clear"\}/, "Review severity must also drive the row rail");
+assert.match(pageSource, /ops-users-command-identity[\s\S]*onClick=\{\(\) => openEditDrawer\(member\)\}/, "Clicking member identity must open the edit drawer directly");
+assert.match(pageSource, /ops-users-command-access[\s\S]*ops-tts-setup-switch[\s\S]*checked=\{member\.isActive\}/, "Access must remain an inline switch bound to backend state");
+assert.match(pageSource, /ops-users-command-session[\s\S]*member\.lastSeenAt[\s\S]*member\.createdAt/, "Session cell must show last sign-in and joined dates");
+assert.match(pageSource, /String\(date\.getDate\(\)\)\.padStart[\s\S]*String\(date\.getMonth\(\) \+ 1\)\.padStart/, "Roster dates must use deterministic numeric formatting");
+assert.match(pageSource, /ops-users-command-invite-table/, "Invitations must use the matching Command Table model");
+assert.match(pageSource, /filteredInvites/, "Pending invites must share search and role filtering");
+assert.match(pageSource, /invite\.createdAt/, "Invitations must show when they were created");
+
+assert.doesNotMatch(pageSource, /ops-users-permission-grid|ops-users-permission-table|ops-users-permission-role/, "The rejected Permission Grid must stay retired");
+assert.doesNotMatch(pageSource, /selectedMemberId|ops-users-permission-grid__selection/, "The distracting selected-member toolbar must stay retired");
+assert.doesNotMatch(pageSource, /ops-users-attention/, "The extra attention banner must stay retired");
+assert.doesNotMatch(pageSource, /ROLE_OPTIONS\.map\(\(role\)[\s\S]*role-track/, "Rows must not repeat a four-column role matrix");
+assert.doesNotMatch(pageSource, /lastSignInPosition|signInPosition/, "The rejected sign-in micro timeline must stay retired");
+assert.doesNotMatch(pageSource, /groupByRole|ledgerGroups|collapsedRoles|expandedMemberId|ops-users-ledger/, "People Ledger grouping must stay retired");
+assert.doesNotMatch(pageSource, /ops-users-identity-atlas|ops-users-access-matrix|ops-users-atlas-node|ops-users-matrix-row/, "Atlas and Access Matrix layouts must stay retired");
+assert.doesNotMatch(pageSource, /ops-users-v2-command|ops-users-v3-strip|ops-users-board-shell|ops-users-role-board|ops-users-lane-member/, "Previous KPI and role-lane layouts must stay retired");
+assert.doesNotMatch(pageSource, /ops-users-gallery|ops-users-deck|ops-users-card/, "Card-gallery layouts must stay retired");
+assert.doesNotMatch(pageSource, /ops-users-atelier|ops-users-band|ops-users-split|ops-users-inspect/, "Split and atelier layouts must stay retired");
+assert.doesNotMatch(pageSource, /ops-users-masthead|ops-users-seg|ops-users-person|ops-users-metrics|ops-users-rail/, "Decorative legacy layouts must stay retired");
+
+assert.match(globalCssSource, /\.ops-users-command-table__table\s*\{[^}]*table-layout:\s*fixed/, "Command Table must keep a stable fixed layout");
+assert.match(globalCssSource, /\.ops-users-command-row\s*\{[^}]*content-visibility:\s*auto/, "Large directories must skip off-screen row rendering");
+assert.match(globalCssSource, /\.ops-users-command-table__table\s*>\s*thead\s*\{[^}]*position:\s*sticky/, "Column labels must remain sticky while scanning");
+assert.match(globalCssSource, /\.ops-users-command-row\s+td:first-child\s*\{[^}]*position:\s*sticky/, "Member identity must remain sticky during horizontal scrolling");
+assert.match(globalCssSource, /\.ops-users-command-row\s+td:first-child::before\s*\{[^}]*width:\s*3px/, "Each row must expose a compact review-severity rail");
+assert.match(globalCssSource, /\.ops-users-command-review\.is-disabled[\s\S]*\.ops-users-command-review\.is-unseen[\s\S]*\.ops-users-command-review\.is-owner/, "Review signals must have distinct visual states");
+assert.match(globalCssSource, /@media \(max-width:\s*760px\)[\s\S]*?\.ops-users-command-table__table\s*\{[^}]*min-width:\s*900px/, "Mobile must preserve a horizontally scannable table");
+
+assert.match(pageSource, /protectedOwner/, "Last active owner must be visibly protected");
+assert.match(pageSource, /selfDisableBlocked|operatorId === me\?\.operatorId/, "Users UI must prevent self-disable lockout");
 assert.match(pageSource, /ops-users-drawer/, "Edit member must use a side drawer");
-assert.match(pageSource, /ops-users-drawer__body/, "Edit drawer must scroll body separately from chrome");
-assert.match(pageSource, /ops-users-drawer__footer/, "Edit drawer must pin Cancel/Save in a sticky footer");
-assert.match(pageSource, /ops-users-switch/, "Access control must use a custom switch, not a bare checkbox");
-assert.match(pageSource, /ops-users-email-readonly/, "Email must render as read-only identity text, not a disabled input");
-assert.match(globalCssSource, /\.ops-users-drawer__body/, "CSS must style scrollable drawer body");
-assert.match(globalCssSource, /\.ops-users-drawer__footer/, "CSS must style sticky drawer footer");
-assert.match(globalCssSource, /\.ops-users-switch/, "CSS must style accent access switch");
+assert.match(pageSource, /ops-users-drawer__body/, "Edit drawer body must scroll separately from its chrome");
+assert.match(pageSource, /ops-users-drawer__footer/, "Edit drawer must pin Cancel and Save actions");
+assert.match(pageSource, /ops-users-switch/, "Drawer access control must use a custom switch");
+assert.match(pageSource, /ops-users-email-readonly/, "Email must remain read-only identity text");
 assert.match(pageSource, /ops-users-modal/, "Invite must use a modal dialog");
-assert.match(pageSource, /ops-users-canvas/, "Users page must use a distinctive canvas surface");
-assert.match(pageSource, /ops-users-role-chip/, "Roles must use distinctive role chips");
-assert.match(pageSource, /opsUsers\.inviteMember|opsUsers\.addMember/, "Primary add CTA must be Invite member");
-assert.match(pageSource, /opsUsers\.editMember|opsUsers\.edit/, "Row must expose Edit action");
-assert.match(
-  pageSource,
-  /filteredMembers\.map[\s\S]*ops-tts-setup-switch[\s\S]*member\.isActive/,
-  "Members Status column must use an on/off switch bound to isActive"
-);
-assert.match(
-  pageSource,
-  /aria-label=\{t\("opsUsers\.editMember"\)\}/,
-  "Edit must be an icon button with aria-label (not text CTA)"
-);
-assert.match(
-  pageSource,
-  /ops-tts-setup-table__icon-btn|ops-users-icon-btn/,
-  "Edit must use an icon button chrome"
-);
-assert.doesNotMatch(
-  pageSource,
-  /filteredMembers\.map[\s\S]*?\{t\("opsUsers\.enable"\)\}/,
-  "Members Actions must not show Enable text button"
-);
-assert.doesNotMatch(
-  pageSource,
-  /filteredMembers\.map[\s\S]*?\{t\("opsUsers\.disable"\)\}/,
-  "Members Actions must not show Disable text button"
-);
+assert.match(pageSource, /ops-users-modal-heading[\s\S]*OpsUsersUiIcon kind="invite"/, "Invite modal must use a purposeful identity icon and stacked heading");
+assert.match(pageSource, /ops-users-modal-close[\s\S]*OpsUsersUiIcon kind="close"/, "Invite modal must expose an icon close action");
+assert.match(pageSource, /ops-users-form-label[\s\S]*kind="mail"[\s\S]*kind="access"/, "Invite fields must use meaningful label icons");
+assert.match(pageSource, /leadingIcon=\{<OpsUsersUiIcon kind="send" \/>\}/, "Create invite action must use a send icon");
+assert.match(pageSource, /ops-users-section-icon[\s\S]*kind="profile"[\s\S]*kind="access"[\s\S]*kind="security"/, "Edit drawer sections must have distinct semantic icons");
+assert.match(pageSource, /leadingIcon=\{<OpsUsersUiIcon kind="security" \/>\}[\s\S]*resetPassword/, "Reset password action must use a security icon");
+assert.match(pageSource, /leadingIcon=\{<OpsUsersUiIcon kind="save" \/>\}[\s\S]*saveChanges/, "Save changes action must use a confirmation icon");
+assert.match(pageSource, /ops-users-overlay-btn is-secondary[\s\S]*kind="cancel"/, "Overlay cancel actions must use a directional icon");
+assert.match(pageSource, /opsUsers\.inviteMember|opsUsers\.addMember/, "Primary CTA must invite a member");
+assert.match(pageSource, /aria-label=\{t\("opsUsers\.editMember"\)\}/, "Edit must expose an accessible icon action");
+assert.doesNotMatch(pageSource, /sortedFilteredMembers\.map[\s\S]*?\{t\("opsUsers\.enable"\)\}/, "Rows must not show an Enable text button");
+assert.doesNotMatch(pageSource, /sortedFilteredMembers\.map[\s\S]*?\{t\("opsUsers\.disable"\)\}/, "Rows must not show a Disable text button");
 assert.match(pageSource, /editDisplayName|displayName/, "Edit drawer must support display name");
 assert.match(pageSource, /editPhone|phone/, "Edit drawer must support phone");
 assert.match(pageSource, /editAddress|address/, "Edit drawer must support address");
@@ -120,33 +100,26 @@ assert.match(pageSource, /editNotes|notes/, "Edit drawer must support notes");
 assert.match(pageSource, /editActive|accessActive/, "Edit drawer must support access toggle");
 assert.match(pageSource, /roleHints/, "Edit drawer must explain role implications");
 assert.match(pageSource, /resetWorkspaceMemberPassword|resetPassword/, "Edit drawer must support password reset");
-assert.match(pageSource, /rotateWorkspaceInvite|copyNewLink/, "Pending invites must offer copy-new-link rotate");
-assert.match(pageSource, /lastActive|lastSeenAt/, "Members list must show last active");
-assert.match(pageSource, /accessFilter|filterAccess|applyMetric/, "Members list must support access views");
-assert.match(pageSource, /window\.confirm|ops-users-confirm/, "Disable/Remove/reset must confirm before applying");
-assert.match(pageSource, /searchQuery|setSearchQuery/, "Members list must support search");
-assert.match(pageSource, /roleFilter|setRoleFilter/, "Members list must support role filter");
-assert.match(pageSource, /ops-users-pending/, "Pending invites must render in the pending view");
-assert.doesNotMatch(pageSource, /ops-users-aside/, "Invite form must not permanently occupy a left column");
-assert.match(pageSource, /\/auth\/invite\?token=/, "Users page must build invite accept link");
+assert.match(pageSource, /rotateWorkspaceInvite|copyNewLink/, "Invites must support rotating and copying a fresh link");
+assert.match(pageSource, /window\.confirm/, "Risky access actions must confirm before applying");
+assert.match(pageSource, /\/auth\/invite\?token=/, "Users page must build the invite acceptance link");
 
-assert.match(enSource, /"inviteMember"/, "English i18n must include Invite member CTA");
-assert.match(enSource, /"editMember"/, "English i18n must include Edit member CTA");
+assert.match(enSource, /"inviteMember"/, "English i18n must include Invite member");
 assert.match(enSource, /"editMemberTitle"/, "English i18n must include Edit member title");
-assert.match(enSource, /"displayName"/, "English i18n must include display name field");
-assert.match(enSource, /"phone"/, "English i18n must include phone field");
-assert.match(enSource, /"address"/, "English i18n must include address field");
-assert.match(enSource, /"resetPassword"/, "English i18n must include reset password CTA");
-assert.match(enSource, /"copyNewLink"/, "English i18n must include copy new invite link CTA");
-assert.match(enSource, /"roleHints"/, "English i18n must include role hint copy");
-assert.match(enSource, /"searchPlaceholder"/, "English i18n must include search placeholder");
-assert.match(enSource, /"directoryEyebrow"/, "English i18n must include directory eyebrow copy");
+assert.match(enSource, /"roleHints"/, "English i18n must include role help");
+assert.match(enSource, /"searchPlaceholder"/, "English i18n must include search copy");
+assert.match(enSource, /"sessionTimeline"[\s\S]*"accessReview"[\s\S]*"stableShort"/, "English i18n must cover Command Table columns and stable state");
+assert.match(enSource, /"signalsNeedReview"[\s\S]*"showingCount"[\s\S]*"showingInvites"/, "English i18n must cover truthful Command Table counts");
 
-assert.match(globalCssSource, /\.ops-users-canvas/, "Global CSS must style Users canvas");
-assert.match(globalCssSource, /\.ops-users-drawer/, "Global CSS must style edit drawer");
-assert.match(globalCssSource, /\.ops-users-toolbar/, "Global CSS must style Users toolbar");
-assert.match(globalCssSource, /\.ops-users-modal/, "Global CSS must style Users modal");
-assert.match(globalCssSource, /\.ops-users-role-chip/, "Global CSS must style role chips");
+assert.match(globalCssSource, /\.ops-users-command-table\s*\{/, "Global CSS must style the Command Table surface");
+assert.match(globalCssSource, /\.ops-users-command-table__command/, "Global CSS must style the unified command bar");
+assert.match(globalCssSource, /\.ops-users-command-table__viewport/, "Global CSS must style the scalable viewport");
+assert.match(globalCssSource, /\.ops-users-command-invite-table/, "Global CSS must style the invitation table");
+assert.match(globalCssSource, /\.ops-users-drawer/, "Global CSS must style the edit drawer");
+assert.match(globalCssSource, /\.ops-users-modal/, "Global CSS must style the invite modal");
+assert.match(globalCssSource, /Ops Users V13[\s\S]*\.ops-users-modal-heading/, "Global CSS must style the polished modal hierarchy");
+assert.match(globalCssSource, /\.ops-users-section--access[\s\S]*\.ops-users-section--security/, "Drawer access and security sections must have distinct visual treatments");
+assert.match(globalCssSource, /\.ops-users-overlay-btn\.primary[\s\S]*linear-gradient/, "Primary overlay actions must have elevated button chrome");
 
 const pageExists = readFileSync(join(repoRoot, "apps/web/src/app/ops/users/page.tsx"), "utf8");
 assert.match(pageExists, /pageMetadata\.opsUsers/, "Users route must use opsUsers metadata");

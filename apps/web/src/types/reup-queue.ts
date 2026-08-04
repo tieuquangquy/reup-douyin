@@ -15,6 +15,8 @@ export type ReupQueueStatus =
 
 export type ReupQueueAction =
   | "START_PROCESSING"
+  | "START_AUTO_PIPELINE"
+  | "SET_AUTOMATION"
   | "MARK_MEDIA_READY"
   | "MARK_BLOCKED"
   | "HOLD"
@@ -99,6 +101,8 @@ export type ReupQueueActionRequest = {
   blocked_reason?: string | null;
   media_prep_notes?: string | null;
   media_prep_status?: ReupQueueMediaPrepStatus | null;
+  /** START_AUTO_PIPELINE: auto_to_tts (default) | auto_to_render */
+  pipeline_mode?: string | null;
 };
 
 export type ReupQueueActionResponse = {

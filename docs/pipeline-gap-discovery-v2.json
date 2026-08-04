@@ -1,0 +1,476 @@
+{
+  "schema_version": "pipeline_gap_discovery_v1",
+  "status": "CANDIDATES_FOUND",
+  "source_policy": {
+    "trusted_path_markers": [
+      "download_staging",
+      "raw",
+      "regression_gap_staging"
+    ],
+    "derived_path_markers_rejected": [
+      "export",
+      "export_packages",
+      "final",
+      "output",
+      "outputs",
+      "render",
+      "renders"
+    ],
+    "dedupe": "sha256_original_bytes",
+    "source_transformations": false,
+    "synthetic_gap_evidence_allowed": false
+  },
+  "target_gaps": {
+    "orientation": [
+      "portrait"
+    ],
+    "motion": [
+      "low",
+      "medium"
+    ],
+    "audio": [
+      "absent"
+    ]
+  },
+  "max_duration_seconds": 60.0,
+  "inventory": {
+    "input_file_count": 13,
+    "unique_source_count": 13,
+    "duplicate_file_count": 0,
+    "hash_failure_count": 0,
+    "probe_failure_count": 0,
+    "too_long_or_invalid_duration_count": 0,
+    "derived_or_untrusted_excluded_count": 0,
+    "dimension_counts": {
+      "orientation": {
+        "landscape": 10,
+        "portrait": 3
+      },
+      "motion": {
+        "high": 9,
+        "low": 2,
+        "medium": 2
+      },
+      "audio": {
+        "absent": 8,
+        "present": 5
+      }
+    }
+  },
+  "candidate_count": 10,
+  "candidates": [
+    {
+      "candidate_id": "real_a1d02d0ffbcbe497",
+      "source_path": ".douyin_profiles/regression_gap_staging/public_cc0_flameless_candle.webm",
+      "source_sha256": "a1d02d0ffbcbe4973586d0a2a11efdef544ba0cd678b7640daa8eaaa6a284f3a",
+      "size_bytes": 1891323,
+      "matched_gaps": [
+        "motion:low"
+      ],
+      "probe": {
+        "duration_seconds": 8.683,
+        "size_bytes": 1891323,
+        "width": 1920,
+        "height": 1080,
+        "r_frame_rate": "25/1",
+        "avg_frame_rate": "1000/1",
+        "has_audio": true
+      },
+      "visual_sample": {
+        "sample_count": 7,
+        "mean_brightness": 24.124,
+        "brightness_range": 0.772,
+        "mean_contrast": 42.905,
+        "mean_motion": 1.195,
+        "lighting": "dark",
+        "motion": "low"
+      },
+      "dimensions": {
+        "orientation": "landscape",
+        "resolution": "1080p_or_higher",
+        "timebase": "VFR",
+        "frame_rate": "30fps_or_lower",
+        "duration_band": "under_35s",
+        "audio": "present",
+        "lighting": "dark",
+        "motion": "low"
+      },
+      "source_integrity": "ORIGINAL_BYTES_UNCHANGED",
+      "status": "READY_FOR_OPERATOR_INTAKE_REVIEW"
+    },
+    {
+      "candidate_id": "real_6068276d37ad608f",
+      "source_path": ".douyin_profiles/regression_gap_staging/public_cc0_monument.webm",
+      "source_sha256": "6068276d37ad608f0019ebfbfceb14266681f50f4a029bf33c3fe36d0a0a90f8",
+      "size_bytes": 5386161,
+      "matched_gaps": [
+        "audio:absent"
+      ],
+      "probe": {
+        "duration_seconds": 23.256,
+        "size_bytes": 5386161,
+        "width": 1280,
+        "height": 720,
+        "r_frame_rate": "2997/100",
+        "avg_frame_rate": "2997/100",
+        "has_audio": false
+      },
+      "visual_sample": {
+        "sample_count": 7,
+        "mean_brightness": 97.215,
+        "brightness_range": 18.798,
+        "mean_contrast": 50.589,
+        "mean_motion": 36.054,
+        "lighting": "light",
+        "motion": "high"
+      },
+      "dimensions": {
+        "orientation": "landscape",
+        "resolution": "720p_or_lower",
+        "timebase": "CFR",
+        "frame_rate": "30fps_or_lower",
+        "duration_band": "under_35s",
+        "audio": "absent",
+        "lighting": "light",
+        "motion": "high"
+      },
+      "source_integrity": "ORIGINAL_BYTES_UNCHANGED",
+      "status": "READY_FOR_OPERATOR_INTAKE_REVIEW"
+    },
+    {
+      "candidate_id": "real_b51517e260e620b3",
+      "source_path": ".douyin_profiles/regression_gap_staging/public_ccbysa_blocked_pendulum.webm",
+      "source_sha256": "b51517e260e620b306a91f8b2dbd1cc8c2fa8d74250cc05e5210cfe7f8f4315a",
+      "size_bytes": 1759473,
+      "matched_gaps": [
+        "audio:absent",
+        "motion:low"
+      ],
+      "probe": {
+        "duration_seconds": 20.0,
+        "size_bytes": 1759473,
+        "width": 1280,
+        "height": 720,
+        "r_frame_rate": "30/1",
+        "avg_frame_rate": "30/1",
+        "has_audio": false
+      },
+      "visual_sample": {
+        "sample_count": 7,
+        "mean_brightness": 117.968,
+        "brightness_range": 4.012,
+        "mean_contrast": 52.696,
+        "mean_motion": 4.908,
+        "lighting": "light",
+        "motion": "low"
+      },
+      "dimensions": {
+        "orientation": "landscape",
+        "resolution": "720p_or_lower",
+        "timebase": "CFR",
+        "frame_rate": "30fps_or_lower",
+        "duration_band": "under_35s",
+        "audio": "absent",
+        "lighting": "light",
+        "motion": "low"
+      },
+      "source_integrity": "ORIGINAL_BYTES_UNCHANGED",
+      "status": "READY_FOR_OPERATOR_INTAKE_REVIEW"
+    },
+    {
+      "candidate_id": "real_3642f92bd71ca2cb",
+      "source_path": ".douyin_profiles/regression_gap_staging/public_ccbysa_cell_division.ogv",
+      "source_sha256": "3642f92bd71ca2cbc03f48b4e9230746ef18a877e1f95dd2c31ff880e1711b36",
+      "size_bytes": 1004635,
+      "matched_gaps": [
+        "audio:absent",
+        "motion:medium"
+      ],
+      "probe": {
+        "duration_seconds": 39.778,
+        "size_bytes": 1004635,
+        "width": 320,
+        "height": 208,
+        "r_frame_rate": "9/1",
+        "avg_frame_rate": "0/0",
+        "has_audio": false
+      },
+      "visual_sample": {
+        "sample_count": 7,
+        "mean_brightness": 12.235,
+        "brightness_range": 1.018,
+        "mean_contrast": 31.329,
+        "mean_motion": 10.463,
+        "lighting": "dark",
+        "motion": "medium"
+      },
+      "dimensions": {
+        "orientation": "landscape",
+        "resolution": "720p_or_lower",
+        "timebase": "VFR",
+        "frame_rate": "30fps_or_lower",
+        "duration_band": "35_to_45s",
+        "audio": "absent",
+        "lighting": "dark",
+        "motion": "medium"
+      },
+      "source_integrity": "ORIGINAL_BYTES_UNCHANGED",
+      "status": "READY_FOR_OPERATOR_INTAKE_REVIEW"
+    },
+    {
+      "candidate_id": "real_2b3e41f7cdc3310f",
+      "source_path": ".douyin_profiles/regression_gap_staging/public_ccbysa_organelle_motion.webm",
+      "source_sha256": "2b3e41f7cdc3310f553a84cce9ba5da5ef6e1d30c4b5c7e41553c410d4c1d4e3",
+      "size_bytes": 25360057,
+      "matched_gaps": [
+        "audio:absent",
+        "motion:medium"
+      ],
+      "probe": {
+        "duration_seconds": 20.834,
+        "size_bytes": 25360057,
+        "width": 1920,
+        "height": 1080,
+        "r_frame_rate": "24/1",
+        "avg_frame_rate": "24/1",
+        "has_audio": false
+      },
+      "visual_sample": {
+        "sample_count": 7,
+        "mean_brightness": 128.152,
+        "brightness_range": 4.812,
+        "mean_contrast": 18.004,
+        "mean_motion": 6.398,
+        "lighting": "light",
+        "motion": "medium"
+      },
+      "dimensions": {
+        "orientation": "landscape",
+        "resolution": "1080p_or_higher",
+        "timebase": "CFR",
+        "frame_rate": "30fps_or_lower",
+        "duration_band": "under_35s",
+        "audio": "absent",
+        "lighting": "light",
+        "motion": "medium"
+      },
+      "source_integrity": "ORIGINAL_BYTES_UNCHANGED",
+      "status": "READY_FOR_OPERATOR_INTAKE_REVIEW"
+    },
+    {
+      "candidate_id": "real_7444523959b035a1",
+      "source_path": ".douyin_profiles/regression_gap_staging/public_ccbysa_snail_portrait.webm",
+      "source_sha256": "7444523959b035a1aae67a2f071f2ec435b3921163417f7e06de6a60a80a25f1",
+      "size_bytes": 4570588,
+      "matched_gaps": [
+        "audio:absent",
+        "orientation:portrait"
+      ],
+      "probe": {
+        "duration_seconds": 10.933,
+        "size_bytes": 4570588,
+        "width": 1080,
+        "height": 1920,
+        "r_frame_rate": "30/1",
+        "avg_frame_rate": "30/1",
+        "has_audio": false
+      },
+      "visual_sample": {
+        "sample_count": 7,
+        "mean_brightness": 124.04,
+        "brightness_range": 1.32,
+        "mean_contrast": 58.505,
+        "mean_motion": 19.222,
+        "lighting": "light",
+        "motion": "high"
+      },
+      "dimensions": {
+        "orientation": "portrait",
+        "resolution": "1080p_or_higher",
+        "timebase": "CFR",
+        "frame_rate": "30fps_or_lower",
+        "duration_band": "under_35s",
+        "audio": "absent",
+        "lighting": "light",
+        "motion": "high"
+      },
+      "source_integrity": "ORIGINAL_BYTES_UNCHANGED",
+      "status": "READY_FOR_OPERATOR_INTAKE_REVIEW"
+    },
+    {
+      "candidate_id": "real_fc1c97cb97392b3b",
+      "source_path": ".douyin_profiles/regression_gap_staging/public_pd_nasa_arctic_vertical_noaudio.webm",
+      "source_sha256": "fc1c97cb97392b3b243690526d12aaa73357716219d7dcf705ef7407f9789666",
+      "size_bytes": 15407523,
+      "matched_gaps": [
+        "audio:absent",
+        "orientation:portrait"
+      ],
+      "probe": {
+        "duration_seconds": 53.834,
+        "size_bytes": 15407523,
+        "width": 1080,
+        "height": 1920,
+        "r_frame_rate": "60/1",
+        "avg_frame_rate": "60/1",
+        "has_audio": false
+      },
+      "visual_sample": {
+        "sample_count": 7,
+        "mean_brightness": 114.903,
+        "brightness_range": 73.857,
+        "mean_contrast": 81.901,
+        "mean_motion": 33.441,
+        "lighting": "mixed",
+        "motion": "high"
+      },
+      "dimensions": {
+        "orientation": "portrait",
+        "resolution": "1080p_or_higher",
+        "timebase": "CFR",
+        "frame_rate": "above_30fps",
+        "duration_band": "45_to_60s",
+        "audio": "absent",
+        "lighting": "mixed",
+        "motion": "high"
+      },
+      "source_integrity": "ORIGINAL_BYTES_UNCHANGED",
+      "status": "READY_FOR_OPERATOR_INTAKE_REVIEW"
+    },
+    {
+      "candidate_id": "real_6c40410e2cd614e4",
+      "source_path": ".douyin_profiles/regression_gap_staging/public_pd_nasa_m31_noaudio.mov",
+      "source_sha256": "6c40410e2cd614e44c42697c538f89b7cbb15f1a6c3b019f36099b9655913efd",
+      "size_bytes": 1514378,
+      "matched_gaps": [
+        "audio:absent"
+      ],
+      "probe": {
+        "duration_seconds": 20.02,
+        "size_bytes": 1514378,
+        "width": 360,
+        "height": 240,
+        "r_frame_rate": "2997/100",
+        "avg_frame_rate": "2997/100",
+        "has_audio": false
+      },
+      "visual_sample": {
+        "sample_count": 7,
+        "mean_brightness": 58.862,
+        "brightness_range": 188.415,
+        "mean_contrast": 50.101,
+        "mean_motion": 49.694,
+        "lighting": "mixed",
+        "motion": "high"
+      },
+      "dimensions": {
+        "orientation": "landscape",
+        "resolution": "720p_or_lower",
+        "timebase": "CFR",
+        "frame_rate": "30fps_or_lower",
+        "duration_band": "under_35s",
+        "audio": "absent",
+        "lighting": "mixed",
+        "motion": "high"
+      },
+      "source_integrity": "ORIGINAL_BYTES_UNCHANGED",
+      "status": "READY_FOR_OPERATOR_INTAKE_REVIEW"
+    },
+    {
+      "candidate_id": "real_7b937ac80394ec3c",
+      "source_path": ".douyin_profiles/regression_gap_staging/public_pd_nasa_ngc3393_noaudio.mov",
+      "source_sha256": "7b937ac80394ec3c6bfa35d3c97c4c1e030895d27a5a15a09a2804af33f1bd90",
+      "size_bytes": 479671,
+      "matched_gaps": [
+        "audio:absent"
+      ],
+      "probe": {
+        "duration_seconds": 20.02,
+        "size_bytes": 479671,
+        "width": 360,
+        "height": 240,
+        "r_frame_rate": "2997/100",
+        "avg_frame_rate": "2997/100",
+        "has_audio": false
+      },
+      "visual_sample": {
+        "sample_count": 7,
+        "mean_brightness": 39.782,
+        "brightness_range": 42.015,
+        "mean_contrast": 51.62,
+        "mean_motion": 15.263,
+        "lighting": "dark",
+        "motion": "high"
+      },
+      "dimensions": {
+        "orientation": "landscape",
+        "resolution": "720p_or_lower",
+        "timebase": "CFR",
+        "frame_rate": "30fps_or_lower",
+        "duration_band": "under_35s",
+        "audio": "absent",
+        "lighting": "dark",
+        "motion": "high"
+      },
+      "source_integrity": "ORIGINAL_BYTES_UNCHANGED",
+      "status": "READY_FOR_OPERATOR_INTAKE_REVIEW"
+    },
+    {
+      "candidate_id": "real_6a9e9b0c6fc7ee9b",
+      "source_path": ".douyin_profiles/regression_gap_staging/public_pd_nasa_spectra_vertical.webm",
+      "source_sha256": "6a9e9b0c6fc7ee9ba36c1428e121ccbe8a9fbc0edcac2d0c91cd57db567d7478",
+      "size_bytes": 28212430,
+      "matched_gaps": [
+        "orientation:portrait"
+      ],
+      "probe": {
+        "duration_seconds": 59.421,
+        "size_bytes": 28212430,
+        "width": 1080,
+        "height": 1920,
+        "r_frame_rate": "30000/1001",
+        "avg_frame_rate": "30000/1001",
+        "has_audio": true
+      },
+      "visual_sample": {
+        "sample_count": 6,
+        "mean_brightness": 36.725,
+        "brightness_range": 63.433,
+        "mean_contrast": 34.727,
+        "mean_motion": 44.404,
+        "lighting": "mixed",
+        "motion": "high"
+      },
+      "dimensions": {
+        "orientation": "portrait",
+        "resolution": "1080p_or_higher",
+        "timebase": "CFR",
+        "frame_rate": "30fps_or_lower",
+        "duration_band": "45_to_60s",
+        "audio": "present",
+        "lighting": "mixed",
+        "motion": "high"
+      },
+      "source_integrity": "ORIGINAL_BYTES_UNCHANGED",
+      "status": "READY_FOR_OPERATOR_INTAKE_REVIEW"
+    }
+  ],
+  "matched_gaps": {
+    "orientation": [
+      "portrait"
+    ],
+    "motion": [
+      "low",
+      "medium"
+    ],
+    "audio": [
+      "absent"
+    ]
+  },
+  "remaining_gaps": {},
+  "failures": {
+    "hash": [],
+    "probe": []
+  },
+  "discovery_sha256": "3165d6d4b1025e4cdb19267440d5d501e2175bc6a001f385ed43efd82ffa77fd"
+}

@@ -206,7 +206,8 @@ export function PublishControlPlanePage() {
       <AsyncContentBoundary
         refreshing={request.refreshing}
         status={boundaryStatus}
-        skeleton={<OpsState title={t("publishControlPage.loading")} detail={t("publishControlPage.loadingDetail")} />}
+        skeletonVariant="dashboard"
+        loadingLabel={t("publishControlPage.loadingDetail")}
         errorState={<OpsState title={t("publishControlPage.unavailable")} detail={request.error?.message ?? t("publishControlPage.loadError")} retry={() => void load("initial")} />}
       >
       <main className="ops-page ops-control-page">
@@ -228,27 +229,27 @@ export function PublishControlPlanePage() {
               />
               <ControlKpi
                 label={t("publishControlPage.unassignedLabel")}
-                value={String(queue.unassigned_drafts.length)}
+                value={String(queue.unassigned_total ?? queue.unassigned_drafts.length)}
                 detail={t("publishControlPage.readyDraftsNeedAccount")}
-                tone={queue.unassigned_drafts.length > 0 ? "warn" : "good"}
+                tone={(queue.unassigned_total ?? queue.unassigned_drafts.length) > 0 ? "warn" : "good"}
               />
               <ControlKpi
                 label={t("publishControlPage.assignedLabel")}
-                value={String(queue.assigned_drafts.length)}
+                value={String(queue.assigned_total ?? queue.assigned_drafts.length)}
                 detail={t("publishControlPage.readyDraftsRouted")}
                 tone="muted"
               />
               <ControlKpi
                 label={t("publishControlPage.scheduledLabel")}
-                value={String(queue.scheduled_drafts.length)}
+                value={String(queue.scheduled_total ?? queue.scheduled_drafts.length)}
                 detail={t("publishControlPage.plannedPerAccount")}
                 tone="muted"
               />
               <ControlKpi
                 label={t("publishControlPage.needsAttention")}
-                value={String(queue.needs_attention.length)}
+                value={String(queue.needs_attention_total ?? queue.needs_attention.length)}
                 detail={t("publishControlPage.failedOrBlocked")}
-                tone={queue.needs_attention.length > 0 ? "danger" : "good"}
+                tone={(queue.needs_attention_total ?? queue.needs_attention.length) > 0 ? "danger" : "good"}
               />
               <ControlKpi
                 label={t("publishControlPage.routingWarnings")}
@@ -262,12 +263,12 @@ export function PublishControlPlanePage() {
               <nav className="ops-control-filters" aria-label={t("publishControlPage.queueFilter")}>
                 {(
                   [
-                    { key: "UNASSIGNED" as const, label: t("publishControlPage.unassignedReady"), count: queue.unassigned_drafts.length },
-                    { key: "ASSIGNED" as const, label: t("publishControlPage.assignedReady"), count: queue.assigned_drafts.length },
+                    { key: "UNASSIGNED" as const, label: t("publishControlPage.unassignedReady"), count: queue.unassigned_total ?? queue.unassigned_drafts.length },
+                    { key: "ASSIGNED" as const, label: t("publishControlPage.assignedReady"), count: queue.assigned_total ?? queue.assigned_drafts.length },
                     {
                       key: "ALL" as const,
                       label: t("publishControlPage.filterAllReady"),
-                      count: queue.unassigned_drafts.length + queue.assigned_drafts.length,
+                      count: (queue.unassigned_total ?? queue.unassigned_drafts.length) + (queue.assigned_total ?? queue.assigned_drafts.length),
                     },
                   ] as const
                 ).map((option) => (
@@ -282,7 +283,7 @@ export function PublishControlPlanePage() {
                 ))}
               </nav>
               <nav className="ops-control-actions" aria-label={t("publishControlPage.triage")}>
-                <Link href="/ops/accounts">{t("publishControlPage.openAccounts")}</Link>
+                <Link href="/publishing/accounts">{t("publishControlPage.openAccounts")}</Link>
                 <Link href="/ops/routing-rules">{t("publishControlPage.openRoutingRules")}</Link>
                 <Link href="/ops/reconciliation">{t("publishControlPage.openReconciliation")}</Link>
               </nav>

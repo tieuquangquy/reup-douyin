@@ -73,7 +73,7 @@ export function PublishHandoffsIndexPage() {
   if (!loadedAt && !request.error) {
     return (
       <OperatorStudioShell actions={refreshAction} description={t("opsPublishHandoffs.description")} title={t("opsPublishHandoffs.title")}>
-        <AsyncContentBoundary skeletonVariant="list" status="loading"><span /></AsyncContentBoundary>
+        <AsyncContentBoundary skeletonVariant="table" loadingLabel={t("opsPublishHandoffs.loadingDetail")} status="loading"><span /></AsyncContentBoundary>
       </OperatorStudioShell>
     );
   }
@@ -81,14 +81,14 @@ export function PublishHandoffsIndexPage() {
   if (request.error && !loadedAt) {
     return (
       <OperatorStudioShell actions={refreshAction} description={t("opsPublishHandoffs.description")} title={t("opsPublishHandoffs.title")}>
-        <AsyncContentBoundary errorState={<OpsState title={t("opsPublishHandoffs.unavailableTitle")} detail={request.error.message} retry={() => void load()} />} skeletonVariant="list" status="error"><span /></AsyncContentBoundary>
+        <AsyncContentBoundary errorState={<OpsState title={t("opsPublishHandoffs.unavailableTitle")} detail={request.error.message} retry={() => void load()} />} skeletonVariant="table" status="error"><span /></AsyncContentBoundary>
       </OperatorStudioShell>
     );
   }
 
   return (
     <OperatorStudioShell actions={refreshAction} description={t("opsPublishHandoffs.description")} title={t("opsPublishHandoffs.title")}>
-      <AsyncContentBoundary refreshing={request.refreshing} skeletonVariant="list" status="success">
+      <AsyncContentBoundary refreshing={request.refreshing} skeletonVariant="table" status="success">
       <main className="ops-page ops-handoffs-page">
 
         <div className="ops-handoffs-freshness">

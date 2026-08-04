@@ -180,6 +180,7 @@ export function selectAllVisibleReupQueueItems(visible: ReupQueueItem[]): Set<st
 
 const BATCH_ACTION_TYPES: ReupQueueBatchAction[] = [
   "START_PROCESSING",
+  "START_AUTO_PIPELINE",
   "HOLD",
   "RESUME",
   "RETRY",
@@ -209,6 +210,8 @@ export function selectAllActionableReupQueueItems(visible: ReupQueueItem[]): Set
 
 export type ReupQueueSelectionEligibility = {
   start: number;
+  startAuto: number;
+  setAutomation: number;
   export: number;
   handoff: number;
   hold: number;
@@ -223,6 +226,8 @@ export type ReupQueueSelectionEligibility = {
 export function buildSelectionEligibility(selected: ReupQueueItem[]): ReupQueueSelectionEligibility {
   return {
     start: eligibleBatchCount(selected, "START_PROCESSING"),
+    startAuto: eligibleBatchCount(selected, "START_AUTO_PIPELINE"),
+    setAutomation: selected.filter(canChangeAutomation).length,
     export: eligibleBatchCount(selected, "CREATE_EXPORT_PACKAGE"),
     handoff: eligibleBatchCount(selected, "CREATE_PUBLISH_HANDOFF"),
     hold: eligibleBatchCount(selected, "HOLD"),
@@ -236,7 +241,7 @@ export function buildSelectionEligibility(selected: ReupQueueItem[]): ReupQueueS
 }
 
 export function primaryBulkEligibilityTotal(eligibility: ReupQueueSelectionEligibility): number {
-  return eligibility.start + eligibility.export + eligibility.handoff;
+  return eligibility.startAuto + eligibility.start + eligibility.export + eligibility.handoff;
 }
 
 export function secondaryBulkEligibilityTotal(eligibility: ReupQueueSelectionEligibility): number {
@@ -295,6 +300,7 @@ export function bulkSelectionGuidance(selectedCount: number, eligibility: ReupQu
 export type InspectorLifecycleActionGroup = "primary" | "neutral" | "danger" | "quiet";
 
 const INSPECTOR_SPOTLIGHT_ACTIONS: ReupQueueAction[] = [
+  "START_AUTO_PIPELINE",
   "START_PROCESSING",
   "RETRY",
   "HOLD",
@@ -306,6 +312,7 @@ const INSPECTOR_SPOTLIGHT_ACTIONS: ReupQueueAction[] = [
 /** Recover/forward first, pause next, dismiss last within a group. */
 const INSPECTOR_LIFECYCLE_ACTION_ORDER: ReupQueueAction[] = [
   "RESUME",
+  "START_AUTO_PIPELINE",
   "START_PROCESSING",
   "MARK_MEDIA_READY",
   "RETRY",
@@ -410,6 +417,8 @@ export function filterInspectorCompanionActions(
 ): ReupQueueAvailableAction[] {
   return actions
     .filter((entry) => {
+      // SET_AUTOMATION needs a mode argument; it has its own picker instead of a button.
+      if (entry.action === "SET_AUTOMATION") return false;
       if (entry.action === "MARK_MEDIA_READY") return shouldShowInspectorMarkMediaReady(item);
       return true;
     })
@@ -421,9 +430,10 @@ export function filterInspectorCompanionActions(
     });
 }
 
-/** Final review is only useful once a render output exists (or export/handoff stages that imply it). */
+/** Final review is useful once render exists, export stages imply it, or auto pipeline reached ready_final. */
 function canOpenFinalReview(item: ReupQueueItem): boolean {
   if (!item.source_video_id) return false;
+  if (isAutoPipelineReadyForFinal(item)) return true;
   if (item.render_output_id) return true;
   return item.status === "READY_TO_EXPORT" || isPastExport(item.status);
 }
@@ -608,8 +618,47 @@ export function isMissingSourceAssetAnalyzeFailure(item: ReupQueueItem): boolean
   );
 }
 
+/** Auto-pipeline step running after analyze: translation draft or Vietnamese TTS. */
+export function activePipelineStepLabel(item: ReupQueueItem): string | null {
+  const type = (item.job_type ?? "").toUpperCase();
+  if (!isActiveAnalyzeJobStatus(item.job_status)) return null;
+  if (type === "BUILD_TRANSLATION_DRAFT") return "Translating";
+  if (type === "SYNTHESIZE_TTS") return "Voicing";
+  if (type === "ANALYZE_OCR") return "Scanning OCR";
+  if (type === "RENDER_PREVIEW") return "Previewing";
+  if (type === "RENDER_FINAL") return "Rendering";
+  return null;
+}
+
+/** Any worker job the queue is waiting on — drives the worklist label and auto-refresh. */
+export function hasActivePipelineJob(item: ReupQueueItem): boolean {
+  if (!item.job_id) return false;
+  if (!isActiveAnalyzeJobStatus(item.job_status)) return false;
+  const type = (item.job_type ?? "").toUpperCase();
+  return (
+    type === "ANALYZE_AUDIO"
+    || type === "BUILD_TRANSLATION_DRAFT"
+    || type === "SYNTHESIZE_TTS"
+    || type === "ANALYZE_OCR"
+    || type === "RENDER_PREVIEW"
+    || type === "RENDER_FINAL"
+    || isAnalyzeAudioJob(item)
+  );
+}
+
+/** VAD measured speech the transcription could not decode — a human must judge this clip. */
+export function isDialogueUncertain(item: ReupQueueItem): boolean {
+  return item.dialogue_phase === "dialogue_uncertain";
+}
+
+export function dialogueUncertainHint(item: ReupQueueItem): string | null {
+  if (!isDialogueUncertain(item)) return null;
+  return "Speech detected but no transcript — review the clip, then re-run analyze or mark no dialogue";
+}
+
 /** ANALYZE_AUDIO finished with zero DialogueBeats (skip dubbing / caption-only video). */
 export function isNoDialogueAnalyzeResult(item: ReupQueueItem): boolean {
+  if (isDialogueUncertain(item)) return false;
   if (!isAudioAnalysisCompleted(item)) return false;
   if (item.dialogue_phase === "no_dialogue") return true;
   if (item.has_speech === false) return true;
@@ -637,7 +686,7 @@ export function transcriptStageDisabledTitle(item: ReupQueueItem): string {
 /** Worklist deep-link to Checkpoint #1 only when analyze produced spoken beats. */
 export function worklistTranscriptHref(item: ReupQueueItem): string | null {
   if (!item.source_video_id || !isAudioAnalysisCompleted(item)) return null;
-  if (isNoDialogueAnalyzeResult(item)) return null;
+  if (isNoDialogueAnalyzeResult(item) || isDialogueUncertain(item)) return null;
   return `/production/transcript-editor/${item.source_video_id}`;
 }
 
@@ -678,10 +727,22 @@ export function queueTileFailureAlert(item: ReupQueueItem): QueueTileFailureAler
   return null;
 }
 
+/** Thumbnail bottom strip — skip when message duplicates the stage chip. */
+export function queueTileFailureStrip(item: ReupQueueItem): QueueTileFailureAlert | null {
+  const alert = queueTileFailureAlert(item);
+  if (!alert) return null;
+  const normalize = (value: string) => value.trim().toLowerCase().replace(/\s+/g, " ");
+  if (normalize(alert.message) === normalize(queueStageLabel(item))) return null;
+  return alert;
+}
+
 /** Visible next-step copy when gallery primary CTA is wait/inspect (not Confirm/Start). */
 export function queueTileNextStepHint(item: ReupQueueItem): string | null {
   // Failure tiles use queueTileFailureAlert — avoid stacked error + long hint.
   if (queueTileFailureAlert(item)) return null;
+  if (isAwaitingPipelineSlot(item)) {
+    return "Queued for auto — starts automatically when a slot frees";
+  }
   if (item.status === "WAITING_FOR_MEDIA") {
     if (isDownloadReadyForConfirm(item)) return null;
     if (isProgressPaused(item)) return "Paused — Resume from Details";
@@ -695,6 +756,27 @@ export function queueTileNextStepHint(item: ReupQueueItem): string | null {
     return "Waiting for download job — open Details if stuck";
   }
   if (item.status !== "WAITING_FOR_METADATA") return null;
+  if (isAutoPipelineReadyForFinal(item)) return "Auto done — Open Final Review for OCR/Render";
+  const autoChip = pipelineStepChipLabel(item);
+  if (autoChip && !isAutoPipelineReadyForFinal(item)) {
+    if (item.held_at || item.metadata_json?.pipeline_hold === true) {
+      return "Auto paused — Resume from Details or edit in Transcript";
+    }
+    const step = getPipelineStep(item);
+    if (step === "translate" || step === "tts") {
+      return `${autoChip} — open Transcript to review anytime`;
+    }
+    const activeStep = activePipelineStepLabel(item);
+    const jobStatus = (item.job_status ?? "").toUpperCase();
+    if (
+      activeStep
+      && typeof item.job_progress_percent === "number"
+      && (jobStatus === "RUNNING" || jobStatus === "IN_PROGRESS" || jobStatus === "PROCESSING")
+    ) {
+      return `${activeStep} — ${clampJobProgressPercent(item.job_progress_percent)}%`;
+    }
+    return `${autoChip} — waiting for worker`;
+  }
   if (worklistTranscriptHref(item)) return null;
   if (isNoDialogueAnalyzeResult(item)) return worklistNoDialogueHint(item);
   if (isAnalyzeAudioJob(item) && isActiveAnalyzeJobStatus(item.job_status)) {
@@ -809,6 +891,8 @@ function pipelineStage(key: string, label: string, state: PipelineStageState): P
 
 function downloadStageState(item: ReupQueueItem, failed: boolean): PipelineStageState {
   if (failed && item.status === "FAILED_NEEDS_ATTENTION" && !item.media_ready_at) return "failed";
+  // Needs-start: chip/CTA own the truth — do not mark Download done from stale media_ready_at.
+  if (item.status === "READY_FOR_PROCESSING") return "pending";
   if (item.media_ready_at || item.status === "WAITING_FOR_METADATA" || isPastProduction(item.status)) return "done";
   if (item.status === "WAITING_FOR_MEDIA" || item.status === "PROCESSING" || item.job_id) return "active";
   return "pending";
@@ -946,6 +1030,8 @@ export function queueStageLabel(item: ReupQueueItem): string {
     return "Waiting for media";
   }
   if (item.status === "WAITING_FOR_METADATA") {
+    const pipelineStep = activePipelineStepLabel(item);
+    if (pipelineStep) return pipelineStep;
     if (isNoDialogueAnalyzeResult(item)) return "No dialogue";
     if (isAnalyzeAudioFailed(item)) return "Analyze failed";
     if (isAnalyzeAudioJob(item) && isActiveAnalyzeJobStatus(item.job_status)) return "Analyzing";
@@ -964,8 +1050,11 @@ export function queueStageLabel(item: ReupQueueItem): string {
 /** Short labels for dense Worklist rail — align with Pipeline stage chips; Gallery keeps queueStageLabel. */
 export function worklistStageLabel(item: ReupQueueItem): string {
   if (isProgressPaused(item)) return "Paused";
+  if (isDialogueUncertain(item)) return "Check dialogue";
   if (item.status === "READY_FOR_PROCESSING" || item.status === "WAITING_FOR_MEDIA") return "Download";
   if (item.status === "WAITING_FOR_METADATA") {
+    const pipelineStep = activePipelineStepLabel(item);
+    if (pipelineStep) return pipelineStep;
     if (isNoDialogueAnalyzeResult(item)) return "No dialogue";
     if (isAnalyzeAudioFailed(item)) return "Analyze failed";
     if (isAnalyzeAudioJob(item) && isActiveAnalyzeJobStatus(item.job_status)) return "Analyzing";
@@ -988,6 +1077,7 @@ export type WorklistStageTone = "active" | "good" | "muted" | "danger" | "warn";
 
 export function worklistStageTone(item: ReupQueueItem): WorklistStageTone {
   if (isProgressPaused(item)) return "muted";
+  if (isDialogueUncertain(item)) return "warn";
   if (isDownloadReadyForConfirm(item)) return "good";
   if (item.status === "WAITING_FOR_MEDIA" && hasActiveDownloadJob(item)) return "active";
   if (item.status === "WAITING_FOR_METADATA") {
@@ -1171,18 +1261,25 @@ function queueInspectorEngagementMetric(item: ReupQueueItem, textKey: string, co
 }
 
 export function primaryQueueAction(item: ReupQueueItem): ReupQueueAction | ReupQueueBatchAction | "inspect" | null {
+  if (item.available_actions.some((entry) => entry.action === "START_AUTO_PIPELINE")) return "START_AUTO_PIPELINE";
   if (item.available_actions.some((entry) => entry.action === "START_PROCESSING")) return "START_PROCESSING";
   if (item.status === "READY_TO_EXPORT" && item.media_prep_status === "READY_FOR_EXPORT") return "CREATE_EXPORT_PACKAGE";
   if (item.status === "READY_TO_PUBLISH") return "CREATE_PUBLISH_HANDOFF";
   if (item.available_actions.some((entry) => entry.action === "RETRY")) return "RETRY";
   if (item.status === "FAILED_NEEDS_ATTENTION") return "inspect";
-  if (isProgressPaused(item) && item.available_actions.some((entry) => entry.action === "RESUME")) {
+  // Resume when paused OR idle download restart (API offers RESUME without Pause first).
+  if (item.available_actions.some((entry) => entry.action === "RESUME")) {
     return "RESUME";
   }
+  if (isAutoPipelineReadyForFinal(item)) return "inspect";
   if (isAnalyzeAudioFailed(item) && item.available_actions.some((entry) => entry.action === "MARK_MEDIA_READY")) {
     return "MARK_MEDIA_READY";
   }
-  if (isDownloadReadyForConfirm(item) && item.available_actions.some((entry) => entry.action === "MARK_MEDIA_READY")) {
+  if (
+    isDownloadReadyForConfirm(item) &&
+    !isAutoPipeline(item) &&
+    item.available_actions.some((entry) => entry.action === "MARK_MEDIA_READY")
+  ) {
     return "MARK_MEDIA_READY";
   }
   if (hasActiveDownloadJob(item) && item.available_actions.some((entry) => entry.action === "HOLD")) {
@@ -1215,6 +1312,7 @@ export function queueTilePrimaryButtonTone(item: ReupQueueItem): QueueTilePrimar
   if (action === "RETRY" || action === "RESUME") return "recover";
   if (
     action === "START_PROCESSING"
+    || action === "START_AUTO_PIPELINE"
     || action === "MARK_MEDIA_READY"
     || action === "CREATE_EXPORT_PACKAGE"
     || action === "CREATE_PUBLISH_HANDOFF"
@@ -1237,11 +1335,128 @@ export function isDownloadReadyForConfirm(item: ReupQueueItem): boolean {
   return false;
 }
 
+export type ReupPipelineMode = "manual" | "auto_to_tts" | "auto_to_render";
+export type ReupPipelineStep =
+  | "download"
+  | "analyze_audio"
+  | "translate"
+  | "tts"
+  | "ocr"
+  | "render"
+  | "ready_final"
+  | "needs_attention";
+
+export function getPipelineMode(item: ReupQueueItem): ReupPipelineMode {
+  const mode = item.metadata_json?.pipeline_mode;
+  if (mode === "auto_to_tts" || mode === "auto_to_render" || mode === "manual") return mode;
+  return "manual";
+}
+
+export function isAutoPipeline(item: ReupQueueItem): boolean {
+  const mode = getPipelineMode(item);
+  return mode === "auto_to_tts" || mode === "auto_to_render";
+}
+
+export function getPipelineStep(item: ReupQueueItem): ReupPipelineStep | null {
+  const step = item.metadata_json?.pipeline_step;
+  if (typeof step !== "string" || !step) return null;
+  return step as ReupPipelineStep;
+}
+
+export type AutomationModeOption = {
+  mode: ReupPipelineMode;
+  label: string;
+  description: string;
+};
+
+/** Full auto first: it is the default path and what most items should stay on. */
+const AUTOMATION_MODE_OPTIONS: AutomationModeOption[] = [
+  {
+    mode: "auto_to_render",
+    label: "Full auto",
+    description: "Run every stage through render, then just review the finished video"
+  },
+  {
+    mode: "auto_to_tts",
+    label: "Auto → TTS",
+    description: "Stop after voice-over so you can edit before OCR and render"
+  },
+  {
+    mode: "manual",
+    label: "Manual",
+    description: "Stop advancing automatically; you drive each stage from here"
+  }
+];
+
+export function automationModeOptions(): AutomationModeOption[] {
+  return AUTOMATION_MODE_OPTIONS;
+}
+
+export function currentAutomationMode(item: ReupQueueItem): ReupPipelineMode {
+  return getPipelineMode(item);
+}
+
+export function canChangeAutomation(item: ReupQueueItem): boolean {
+  return item.available_actions.some((entry) => entry.action === "SET_AUTOMATION");
+}
+
+export function isAutoPipelineReadyForFinal(item: ReupQueueItem): boolean {
+  return isAutoPipeline(item) && getPipelineStep(item) === "ready_final";
+}
+
+export function isAutoPipelineNeedsAttention(item: ReupQueueItem): boolean {
+  return (
+    getPipelineStep(item) === "needs_attention" ||
+    (isAutoPipeline(item) && item.status === "FAILED_NEEDS_ATTENTION")
+  );
+}
+
+/** True when the work-in-progress cap accepted this clip but has not started it yet. */
+export function isAwaitingPipelineSlot(item: ReupQueueItem): boolean {
+  return item.metadata_json?.pipeline_awaiting_slot === true;
+}
+
+export function pipelineStepChipLabel(item: ReupQueueItem): string | null {
+  if (!isAutoPipeline(item)) return null;
+  if (item.held_at || item.metadata_json?.pipeline_hold === true) return "Auto · Paused";
+  if (isAwaitingPipelineSlot(item)) return "Auto · Queued";
+  const step = getPipelineStep(item);
+  if (step === "download") return "Auto · Download";
+  if (step === "analyze_audio") return "Auto · ASR";
+  if (step === "translate") return "Auto · Translate";
+  if (step === "tts") return "Auto · TTS";
+  if (step === "ocr") return "Auto · OCR";
+  if (step === "render") return "Auto · Render";
+  if (step === "ready_final") return "Auto · Ready for Final";
+  if (step === "needs_attention") return "Auto · Needs attention";
+  return "Auto pipeline";
+}
+
+export function pipelineRecipeChipLabel(item: ReupQueueItem): string | null {
+  const raw = item.metadata_json?.pipeline_recipe_lock;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const release = (raw as Record<string, unknown>).release_label;
+  const sha = (raw as Record<string, unknown>).recipe_sha256;
+  if (typeof release !== "string" || !release.trim()) return null;
+  if (typeof sha !== "string" || !/^[a-f0-9]{64}$/i.test(sha)) return null;
+  return `${release} locked · ${sha.slice(0, 8)}`;
+}
+
+export function worklistFinalReviewHref(item: ReupQueueItem): string | null {
+  if (!item.source_video_id) return null;
+  if (isAutoPipelineReadyForFinal(item)) return `/production/final-review/${item.source_video_id}`;
+  return null;
+}
+
 export function primaryQueueActionLabel(item: ReupQueueItem): string {
   const action = primaryQueueAction(item);
-  if (action === "inspect") return "Details";
+  if (action === "inspect") {
+    if (isAutoPipelineReadyForFinal(item)) return "Open Final Review";
+    return "Details";
+  }
   if (action === "CREATE_EXPORT_PACKAGE") return "Create export package";
   if (action === "CREATE_PUBLISH_HANDOFF") return "Create publish handoff";
+  if (action === "START_AUTO_PIPELINE") return "Start auto";
   if (action === "START_PROCESSING") return "Start processing";
   if (action === "MARK_MEDIA_READY") {
     return isAnalyzeAudioFailed(item) ? "Retry analyze" : "Mark media ready";
@@ -1252,7 +1467,7 @@ export function primaryQueueActionLabel(item: ReupQueueItem): string {
       : "Retry";
   }
   if (action === "HOLD") return "Pause";
-  if (action === "RESUME") return "Resume";
+  if (action === "RESUME") return isProgressPaused(item) ? "Resume" : "Restart download";
   if (action === "DISMISS") return "Dismiss";
   return action ? actionLabel(action) : "Details";
 }
@@ -1316,6 +1531,11 @@ function activeFirstPriority(item: ReupQueueItem): number {
   if (isProgressPaused(item)) return 2;
   if (item.status === "PROCESSING") return 0;
   if (hasActiveDownloadJob(item)) {
+    const status = (item.job_status ?? "").toUpperCase();
+    if (status === "RUNNING" || status === "IN_PROGRESS" || status === "PROCESSING") return 0;
+    return 1;
+  }
+  if (hasActivePipelineJob(item)) {
     const status = (item.job_status ?? "").toUpperCase();
     if (status === "RUNNING" || status === "IN_PROGRESS" || status === "PROCESSING") return 0;
     return 1;

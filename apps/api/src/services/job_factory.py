@@ -1,3 +1,4 @@
+from datetime import datetime
 from uuid import UUID
 
 from src.enums import JobStatus, JobStepStatus, JobType
@@ -20,6 +21,7 @@ def build_job(
     priority: int = 0,
     max_attempts: int = 3,
     context_json: dict | None = None,
+    scheduled_at: datetime | None = None,
 ) -> Job:
     steps = [
         JobStep(
@@ -50,8 +52,8 @@ def build_job(
         payload_json=payload_json,
         input_json=payload_json,
         context_json=context_json,
+        scheduled_at=scheduled_at,
         steps=steps,
     )
     apply_job_progress(job)
     return job
-

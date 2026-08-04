@@ -160,7 +160,7 @@ export function buildOperatorMetrics({
         ? `${capture.primary_label}; ${capture.secondary_count} ${capture.secondary_label.toLowerCase()}`
         : "Open Capture Inbox to stage Douyin items.",
       tone: captureWaiting > 0 ? "warn" : "good",
-      href: operatorSafeHref(capture?.href, "/ops/extensions/douyin/capture-inbox")
+      href: operatorSafeHref(capture?.href, "/selection/capture-inbox")
     },
     {
       key: "review_waiting",
@@ -228,7 +228,7 @@ export function buildNextWork(pipeline: PipelineDashboardResponse | null | undef
 }
 
 function operatorFallbackForStage(stageKey: PipelineStageKey): string {
-  if (stageKey === "capture") return "/ops/extensions/douyin/capture-inbox";
+  if (stageKey === "capture") return "/selection/capture-inbox";
   if (stageKey === "review") return "/selection/review-board";
   if (stageKey === "reup_queue") return "/selection/reup-queue";
   if (stageKey === "export_package") return "/publishing/export-packages";

@@ -1,14 +1,28 @@
 from datetime import UTC, datetime
 from types import SimpleNamespace
 import unittest
+from uuid import uuid4
+
+from sqlalchemy import select
 
 from src.analytics.services.publish_health_helpers import percent, resolve_time_window
 from src.analytics.services.publish_health_service import PublishHealthService
 from src.enums import ExternalPublicationStatus, OperatorFeedbackQualityLabel, PublishAttemptStatus, PublishDraftStatus
 from src.schemas.analytics import PublicationOutcomeItem
+from src.models.publish import PublishDraft
 
 
 class PublishHealthAnalyticsTests(unittest.TestCase):
+    def test_workspace_scope_is_applied_to_publish_queries(self) -> None:
+        service = object.__new__(PublishHealthService)
+        service.workspace_id = uuid4()
+
+        statement = service._scoped(select(PublishDraft), PublishDraft)
+        compiled = str(statement.compile(compile_kwargs={"literal_binds": True}))
+
+        self.assertIn("publish_drafts.workspace_id", compiled)
+        self.assertIn(service.workspace_id.hex, compiled)
+
     def test_percent_handles_empty_total(self) -> None:
         self.assertEqual(percent(1, 0), 0.0)
         self.assertEqual(percent(1, 4), 25.0)

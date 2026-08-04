@@ -43,6 +43,7 @@ import { useLatestRequest } from "../../lib/useLatestRequest";
 import {
   formatLlmProbeSuccess,
   formatProviderError,
+  providerTestErrorHint,
   type ConnectionTestResult,
   type ProviderErrorView
 } from "../../lib/opsTranslationAiFormat";
@@ -52,7 +53,7 @@ import { AsyncButton } from "../shared/AsyncButton";
 import { AsyncContentBoundary } from "../shared/AsyncContentBoundary";
 import { useNotice } from "../shared/NoticeCenter";
 import { OpsCaptionSettingsTabs } from "./OpsCaptionSettingsTabs";
-import { OpsPanel, OpsState } from "./OpsShared";
+import { OpsPanel } from "./OpsShared";
 import { OpsTranslationSettingsTabs } from "./OpsTranslationSettingsTabs";
 
 export type LlmAiVariant = "translation" | "caption";
@@ -91,6 +92,16 @@ function showsBaseUrl(provider: string): boolean {
 
 function showsApiKey(provider: string): boolean {
   return showsLlmApiKey(provider);
+}
+
+function compactEndpointLabel(raw: string): string {
+  const value = raw.trim();
+  if (!value) return "";
+  try {
+    return new URL(value).host || value;
+  } catch {
+    return value.replace(/^https?:\/\//i, "").split("/")[0] || value;
+  }
 }
 
 function toForm(data: TranslationAiResponse): FormState {
@@ -461,6 +472,7 @@ export function OpsLlmAiSetupsPage({ variant }: { variant: LlmAiVariant }) {
       rateLimited: t(`${i18n}.errorRateLimited`),
       failed: t(`${i18n}.errorFailed`),
       checkKey: t(`${i18n}.errorCheckKey`),
+      checkForbidden: t(`${i18n}.errorCheckForbidden`),
       checkEndpoint: t(`${i18n}.errorCheckEndpoint`)
     };
   }
@@ -727,7 +739,6 @@ export function OpsLlmAiSetupsPage({ variant }: { variant: LlmAiVariant }) {
     if (!payload) return;
     setTesting(true);
     setError(null);
-    setTestResult(null);
     try {
       const result = await api.testConnection({
         ...payload,
@@ -738,11 +749,13 @@ export function OpsLlmAiSetupsPage({ variant }: { variant: LlmAiVariant }) {
         provider: result.provider,
         detail: result.detail
       });
-      notify({
-        id: `${idPrefix}-test`,
-        message: result.ok ? t(`${i18n}.testOk`) : t(`${i18n}.testFail`),
-        tone: result.ok ? "success" : "warning"
-      });
+      if (result.ok) {
+        notify({
+          id: `${idPrefix}-test`,
+          message: t(`${i18n}.testOk`),
+          tone: "success"
+        });
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : t(`${i18n}.testError`));
     } finally {
@@ -793,7 +806,7 @@ export function OpsLlmAiSetupsPage({ variant }: { variant: LlmAiVariant }) {
     );
     return (
       <OpsConsoleShell actions={refreshAction} description={navDesc} title={navTitle}>
-        <main className="ops-page ops-page--settings ops-ai-page is-compact">
+        <main className={`ops-page ops-page--settings ops-ai-page is-compact ops-ai-control-center is-${variant}`}>
           {error ? <div className="inline-error">{error}</div> : null}
           <div className="ops-tts-list-header">
             {settingsTabs}
@@ -831,19 +844,24 @@ export function OpsLlmAiSetupsPage({ variant }: { variant: LlmAiVariant }) {
             <p className="ops-tts-empty">{t(`${i18n}.profileEmpty`)}</p>
           ) : (
             <div className="ops-tts-setup-table-wrap">
-              <table className="ops-tts-setup-table">
+              <table className="ops-tts-setup-table ops-ai-registry-table is-llm">
+                <colgroup>
+                  <col className="ops-ai-col-drag" />
+                  <col className="ops-ai-col-setup" />
+                  <col className="ops-ai-col-runtime" />
+                  <col className="ops-ai-col-connection" />
+                  <col className="ops-ai-col-active" />
+                  <col className="ops-ai-col-actions" />
+                </colgroup>
                 <thead>
                   <tr>
                     <th scope="col" className="ops-tts-setup-table__drag-col">
                       <span className="visually-hidden">{t("common.dragToReorder")}</span>
                     </th>
                     <th scope="col">{t(`${i18n}.profileNameCol`)}</th>
+                    <th scope="col">{t(`${i18n}.runtimeCol`)}</th>
+                    <th scope="col">{t(`${i18n}.connectionCol`)}</th>
                     <th scope="col">{t(`${i18n}.profileActiveCol`)}</th>
-                    <th scope="col">{t(`${i18n}.apiKey`)}</th>
-                    <th scope="col">{t(`${i18n}.provider`)}</th>
-                    <th scope="col">{t(`${i18n}.model`)}</th>
-                    <th scope="col">{t(`${i18n}.baseUrl`)}</th>
-                    <th scope="col">{t(`${i18n}.fallbackProvider`)}</th>
                     <th scope="col">{t(`${i18n}.profileActionsCol`)}</th>
                   </tr>
                 </thead>
@@ -851,6 +869,10 @@ export function OpsLlmAiSetupsPage({ variant }: { variant: LlmAiVariant }) {
                   {profiles.map((profile) => {
                     const isActive = Boolean(profile.is_active) || profile.id === activeProfileId;
                     const isOn = isActive && Boolean(profile.enabled);
+                    const providerLabel = llmProviderLabel(profile.provider) || profile.provider || "auto";
+                    const hasFallback = Boolean(
+                      profile.fallback_provider?.trim() && profile.fallback_provider.trim().toLowerCase() !== "none"
+                    );
                     const canDrag = !profileBusy && renamingProfileId !== profile.id;
                     const rowClass = [
                       isOn ? "is-active" : "",
@@ -900,31 +922,31 @@ export function OpsLlmAiSetupsPage({ variant }: { variant: LlmAiVariant }) {
                           </span>
                         </td>
                         <td className="ops-tts-setup-table__name">
-                          {renamingProfileId === profile.id ? (
-                            <input
-                              ref={renameInputRef}
-                              className="ops-tts-setup-table__rename-input"
-                              type="text"
-                              value={renameDraft}
-                              maxLength={80}
-                              disabled={profileBusy}
-                              aria-label={t(`${i18n}.profileRename`)}
-                              onChange={(e) => setRenameDraft(e.target.value)}
-                              onKeyDown={(e) => {
-                                if (e.key === "Enter") {
-                                  e.preventDefault();
-                                  void commitRenameProfile();
-                                } else if (e.key === "Escape") {
-                                  e.preventDefault();
-                                  cancelRenameProfile();
-                                }
-                              }}
-                              onBlur={() => {
-                                if (!profileBusy) void commitRenameProfile();
-                              }}
-                            />
-                          ) : (
-                            <>
+                          <div className="ops-ai-setup-identity">
+                            {renamingProfileId === profile.id ? (
+                              <input
+                                ref={renameInputRef}
+                                className="ops-tts-setup-table__rename-input"
+                                type="text"
+                                value={renameDraft}
+                                maxLength={80}
+                                disabled={profileBusy}
+                                aria-label={t(`${i18n}.profileRename`)}
+                                onChange={(e) => setRenameDraft(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter") {
+                                    e.preventDefault();
+                                    void commitRenameProfile();
+                                  } else if (e.key === "Escape") {
+                                    e.preventDefault();
+                                    cancelRenameProfile();
+                                  }
+                                }}
+                                onBlur={() => {
+                                  if (!profileBusy) void commitRenameProfile();
+                                }}
+                              />
+                            ) : (
                               <button
                                 type="button"
                                 className="ops-tts-setup-table__name-btn"
@@ -934,75 +956,69 @@ export function OpsLlmAiSetupsPage({ variant }: { variant: LlmAiVariant }) {
                               >
                                 {profile.name}
                               </button>
-                            </>
-                          )}
+                            )}
+                          </div>
                         </td>
                         <td>
-                          <label
-                            className="ops-tts-setup-switch"
-                            title={t(`${i18n}.profileActiveHint`)}
+                          <div
+                            className="ops-ai-inline-config"
+                            title={[providerLabel, profile.model?.trim(), hasFallback ? `FB: ${profile.fallback_provider}` : ""]
+                              .filter(Boolean)
+                              .join(" · ")}
                           >
-                            <input
-                              type="checkbox"
-                              checked={isOn}
-                              disabled={profileBusy}
-                              aria-label={
-                                isOn
-                                  ? t(`${i18n}.profileOn`)
-                                  : t(`${i18n}.profileOff`)
-                              }
-                              onChange={(e) => void onSetActive(profile.id, e.target.checked)}
-                            />
-                            <span className="ops-tts-setup-switch__track" aria-hidden="true" />
-                          </label>
+                            <strong>{providerLabel}</strong>
+                            <span aria-hidden="true">·</span>
+                            <span>{profile.model?.trim() || "—"}</span>
+                            {hasFallback ? (
+                              <span className="is-muted">· FB: {profile.fallback_provider}{profile.fallback_model?.trim() ? ` / ${profile.fallback_model}` : ""}</span>
+                            ) : null}
+                          </div>
                         </td>
-                        <td
-                          className="ops-tts-setup-table__api-key"
-                          title={
-                            profile.api_key_set
-                              ? profile.api_key || profile.api_key_masked || t(`${i18n}.profileKeySet`)
-                              : t(`${i18n}.profileKeyUnset`)
-                          }
-                        >
-                          {profile.api_key_set ? (
-                            <code>{profile.api_key || profile.api_key_masked || t(`${i18n}.profileKeySet`)}</code>
-                          ) : (
-                            <span className="ops-tts-setup-table__api-key--empty">
-                              {t(`${i18n}.profileKeyUnset`)}
-                            </span>
-                          )}
-                        </td>
-                        <td>{llmProviderLabel(profile.provider) || profile.provider || "auto"}</td>
-                        <td title={profile.model || undefined}>{profile.model?.trim() || "—"}</td>
                         <td title={profile.base_url || undefined}>
-                          {profile.base_url?.trim() || "—"}
+                          <div className={`ops-ai-inline-connection ${showsApiKey(profile.provider) ? (profile.api_key_set ? "is-key-set" : "is-key-missing") : "is-keyless"}`}>
+                            <span className="ops-ai-inline-dot" aria-hidden="true" />
+                            <span>{showsApiKey(profile.provider) ? (profile.api_key_set ? t(`${i18n}.profileKeySet`) : t(`${i18n}.profileKeyUnset`)) : t(`${i18n}.keyNotRequired`)}</span>
+                            {profile.base_url?.trim() ? <><span aria-hidden="true">·</span><span>{compactEndpointLabel(profile.base_url)}</span></> : null}
+                          </div>
                         </td>
                         <td>
-                          {profile.fallback_provider && profile.fallback_provider !== "none"
-                            ? profile.fallback_provider
-                            : "—"}
+                          <div className="ops-ai-inline-status">
+                            <label className="ops-tts-setup-switch" title={t(`${i18n}.profileActiveHint`)}>
+                              <input
+                                type="checkbox"
+                                checked={isOn}
+                                disabled={profileBusy}
+                                aria-label={isOn ? t(`${i18n}.profileOn`) : t(`${i18n}.profileOff`)}
+                                onChange={(e) => void onSetActive(profile.id, e.target.checked)}
+                              />
+                              <span className="ops-tts-setup-switch__track" aria-hidden="true" />
+                            </label>
+                            <span className="ops-ai-active-label">{isOn ? t(`${i18n}.profileOn`) : t(`${i18n}.profileOff`)}</span>
+                          </div>
                         </td>
                         <td className="ops-tts-setup-table__actions">
-                          <button
-                            type="button"
-                            className="ops-tts-setup-table__icon-btn"
-                            disabled={profileBusy}
-                            aria-label={t(`${i18n}.profileEdit`)}
-                            title={t(`${i18n}.profileEdit`)}
-                            onClick={() => void openEditor(profile.id)}
-                          >
-                            <SetupActionIcon kind="edit" />
-                          </button>
-                          <button
-                            type="button"
-                            className="ops-tts-setup-table__icon-btn ops-tts-setup-table__icon-btn--danger"
-                            disabled={profileBusy || profiles.length <= 1}
-                            aria-label={t(`${i18n}.profileDelete`)}
-                            title={t(`${i18n}.profileDelete`)}
-                            onClick={() => void onDeleteProfile(profile.id, profile.name)}
-                          >
-                            <SetupActionIcon kind="delete" />
-                          </button>
+                          <div className="ops-ai-row-actions">
+                            <button
+                              type="button"
+                              className="ops-tts-setup-table__icon-btn"
+                              disabled={profileBusy}
+                              aria-label={t(`${i18n}.profileEdit`)}
+                              title={t(`${i18n}.profileEdit`)}
+                              onClick={() => void openEditor(profile.id)}
+                            >
+                              <SetupActionIcon kind="edit" />
+                            </button>
+                            <button
+                              type="button"
+                              className="ops-tts-setup-table__icon-btn ops-tts-setup-table__icon-btn--danger"
+                              disabled={profileBusy || profiles.length <= 1}
+                              aria-label={t(`${i18n}.profileDelete`)}
+                              title={t(`${i18n}.profileDelete`)}
+                              onClick={() => void onDeleteProfile(profile.id, profile.name)}
+                            >
+                              <SetupActionIcon kind="delete" />
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     );
@@ -1019,7 +1035,9 @@ export function OpsLlmAiSetupsPage({ variant }: { variant: LlmAiVariant }) {
   if (!form) {
     return (
       <OpsConsoleShell actions={refreshAction} description={navDesc} title={navTitle}>
-        <OpsState title={t("ops.loadingTitle")} detail={t(`${i18n}.loadingDetail`)} />
+        <AsyncContentBoundary status="loading" skeletonVariant="form" loadingLabel={t(`${i18n}.loadingDetail`)}>
+          <span />
+        </AsyncContentBoundary>
       </OpsConsoleShell>
     );
   }
@@ -1151,7 +1169,14 @@ export function OpsLlmAiSetupsPage({ variant }: { variant: LlmAiVariant }) {
           <span className="ops-tts-test-banner__message">
             {testFailure?.message || testResult.detail}
           </span>
-          <span className="ops-tts-test-banner__hint">{t(`${i18n}.testErrorHint`)}</span>
+          <span className="ops-tts-test-banner__hint">
+            {providerTestErrorHint(testFailure?.httpStatus, {
+              key: t(`${i18n}.testErrorHintKey`),
+              forbidden: t(`${i18n}.testErrorHintForbidden`),
+              quota: t(`${i18n}.testErrorHintQuota`),
+              generic: t(`${i18n}.testErrorHint`)
+            })}
+          </span>
         </div>
         <button
           type="button"
@@ -1374,7 +1399,7 @@ export function OpsLlmAiSetupsPage({ variant }: { variant: LlmAiVariant }) {
                     <span>{manualModel ? t(`${i18n}.useModelList`) : t(`${i18n}.typeModelManually`)}</span>
                   </button>
                 </div>
-                {modelListError
+                {modelListError && !testFailure && !testing
                   ? renderProviderAlert(modelListError, t(`${i18n}.modelsErrorHint`))
                   : null}
               </div>

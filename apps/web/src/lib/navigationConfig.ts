@@ -1,11 +1,35 @@
 export type NavSurface = "operator" | "ops";
 
+export type NavIconName =
+  | "home"
+  | "pipeline"
+  | "inbox"
+  | "review"
+  | "queue"
+  | "output"
+  | "transcript"
+  | "final"
+  | "draft"
+  | "package"
+  | "handoff"
+  | "extension"
+  | "dashboard"
+  | "health"
+  | "jobs"
+  | "users"
+  | "accounts"
+  | "translation"
+  | "caption"
+  | "voice"
+  | "settings";
+
 export type NavItem = {
   /** i18n key, e.g. "nav.home" */
   label: string;
   href: string;
   /** i18n key, e.g. "nav.homeDesc" */
   description: string;
+  icon: NavIconName;
   status?: "available" | "placeholder" | "context";
   activePatterns?: string[];
   external?: boolean;
@@ -32,12 +56,14 @@ export const operatorNavSections: NavSection[] = [
       {
         label: "nav.home",
         href: "/",
+        icon: "home",
         description: "nav.homeDesc",
         status: "available"
       },
       {
         label: "nav.pipelineDashboard",
         href: "/ops/pipeline",
+        icon: "pipeline",
         description: "nav.pipelineDashboardDesc",
         status: "available",
         activePatterns: ["/ops/pipeline"]
@@ -49,14 +75,16 @@ export const operatorNavSections: NavSection[] = [
     items: [
       {
         label: "nav.captureInbox",
-        href: "/ops/extensions/douyin/capture-inbox",
+        href: "/selection/capture-inbox",
+        icon: "inbox",
         description: "nav.captureInboxDesc",
         status: "available",
-        activePatterns: ["/ops/extensions/douyin/capture-inbox"]
+        activePatterns: ["/selection/capture-inbox", "/ops/extensions/douyin/capture-inbox"]
       },
       {
         label: "nav.reviewBoard",
         href: "/selection/review-board",
+        icon: "review",
         description: "nav.reviewBoardDesc",
         status: "available",
         activePatterns: ["/selection/review-board", "/selection/candidates", "/review-board"]
@@ -64,6 +92,7 @@ export const operatorNavSections: NavSection[] = [
       {
         label: "nav.reupQueue",
         href: "/selection/reup-queue",
+        icon: "queue",
         description: "nav.reupQueueDesc",
         status: "available",
         activePatterns: ["/selection/reup-queue"]
@@ -74,8 +103,17 @@ export const operatorNavSections: NavSection[] = [
     title: "nav.sectionProduction",
     items: [
       {
+        label: "nav.outputReview",
+        href: "/production/output-review",
+        icon: "output",
+        description: "nav.outputReviewDesc",
+        status: "available",
+        activePatterns: ["/production/output-review"]
+      },
+      {
         label: "nav.transcriptEditor",
         href: "/selection/review-board",
+        icon: "transcript",
         description: "nav.transcriptEditorDesc",
         status: "context",
         sourceVideoTarget: "transcript-editor",
@@ -88,6 +126,7 @@ export const operatorNavSections: NavSection[] = [
       {
         label: "nav.finalReview",
         href: "/publishing/drafts",
+        icon: "final",
         description: "nav.finalReviewDesc",
         status: "context",
         sourceVideoTarget: "final-review",
@@ -105,13 +144,31 @@ export const operatorNavSections: NavSection[] = [
       {
         label: "nav.publishDrafts",
         href: "/publishing/drafts",
+        icon: "draft",
         description: "nav.publishDraftsDesc",
         status: "available",
         activePatterns: ["/publishing/drafts", "/publishing/drafts/*", "/source-videos/*/publish"]
       },
       {
+        label: "nav.accounts",
+        href: "/publishing/accounts",
+        icon: "accounts",
+        description: "nav.accountsDesc",
+        status: "available",
+        activePatterns: ["/publishing/accounts"]
+      },
+      {
+        label: "nav.publications",
+        href: "/publishing/publications",
+        icon: "draft",
+        description: "nav.publicationsDesc",
+        status: "available",
+        activePatterns: ["/publishing/publications"]
+      },
+      {
         label: "nav.exportPackages",
         href: "/publishing/export-packages",
+        icon: "package",
         description: "nav.exportPackagesDesc",
         status: "available",
         activePatterns: ["/publishing/export-packages", "/publishing/export-packages/*"]
@@ -119,9 +176,23 @@ export const operatorNavSections: NavSection[] = [
       {
         label: "nav.publishHandoffs",
         href: "/publishing/publish-handoffs",
+        icon: "handoff",
         description: "nav.publishHandoffsDesc",
         status: "available",
         activePatterns: ["/publishing/publish-handoffs", "/publishing/publish-handoffs/*"]
+      }
+    ]
+  },
+  {
+    title: "nav.sectionPublishingSettings",
+    items: [
+      {
+        label: "nav.publishingSettings",
+        href: "/publishing/settings/content-intelligence",
+        icon: "settings",
+        description: "nav.publishingSettingsDesc",
+        status: "available",
+        activePatterns: ["/publishing/settings/content-intelligence", "/publishing/settings/affiliate-catalog", "/publishing/settings/affiliate-comments"]
       }
     ]
   },
@@ -131,6 +202,7 @@ export const operatorNavSections: NavSection[] = [
       {
         label: "nav.douyinExtensionSetup",
         href: "/setup/douyin-extension",
+        icon: "extension",
         description: "nav.douyinExtensionSetupDesc",
         status: "available",
         activePatterns: ["/setup/douyin-extension"]
@@ -147,24 +219,28 @@ export const opsNavSections: NavSection[] = [
       {
         label: "nav.opsHome",
         href: "/ops",
+        icon: "dashboard",
         description: "nav.opsHomeDesc",
         status: "available"
       },
       {
         label: "nav.systemHealth",
         href: "/ops/health",
+        icon: "health",
         description: "nav.systemHealthDesc",
         status: "available"
       },
       {
         label: "nav.jobMonitor",
         href: "/ops/jobs",
+        icon: "jobs",
         description: "nav.jobMonitorDesc",
         status: "available"
       },
       {
         label: "nav.users",
         href: "/ops/users",
+        icon: "users",
         description: "nav.usersDesc",
         status: "available",
         activePatterns: ["/ops/users"]
@@ -177,6 +253,7 @@ export const opsNavSections: NavSection[] = [
       {
         label: "nav.translationSettings",
         href: "/ops/translation-ai",
+        icon: "translation",
         description: "nav.translationSettingsDesc",
         status: "available",
         activePatterns: ["/ops/translation-ai", "/ops/translation-prompt"]
@@ -184,6 +261,7 @@ export const opsNavSections: NavSection[] = [
       {
         label: "nav.captionAiSettings",
         href: "/ops/caption-ai",
+        icon: "caption",
         description: "nav.captionAiSettingsDesc",
         status: "available",
         activePatterns: ["/ops/caption-ai", "/ops/caption-prompt"]
@@ -191,6 +269,7 @@ export const opsNavSections: NavSection[] = [
       {
         label: "nav.ttsSettings",
         href: "/ops/tts-ai",
+        icon: "voice",
         description: "nav.ttsSettingsDesc",
         status: "available",
         activePatterns: ["/ops/tts-ai"]
@@ -202,10 +281,10 @@ export const opsNavSections: NavSection[] = [
 const breadcrumbRules: Array<{ patterns: string[]; crumbs: BreadcrumbItem[] }> = [
   { patterns: ["/"], crumbs: [{ label: "nav.home" }] },
   {
-    patterns: ["/ops/extensions/douyin/capture-inbox"],
+    patterns: ["/selection/capture-inbox", "/ops/extensions/douyin/capture-inbox"],
     crumbs: [
       { label: "nav.home", href: "/" },
-      { label: "nav.sectionWork", href: "/ops/extensions/douyin/capture-inbox" },
+      { label: "nav.sectionWork", href: "/selection/capture-inbox" },
       { label: "nav.captureInbox" }
     ]
   },
@@ -228,6 +307,14 @@ const breadcrumbRules: Array<{ patterns: string[]; crumbs: BreadcrumbItem[] }> =
   {
     patterns: ["/production/downloads"],
     crumbs: [{ label: "nav.home", href: "/" }, { label: "nav.sectionProduction" }, { label: "nav.downloads" }]
+  },
+  {
+    patterns: ["/production/output-review"],
+    crumbs: [
+      { label: "nav.home", href: "/" },
+      { label: "nav.sectionProduction", href: "/selection/review-board" },
+      { label: "nav.outputReview" }
+    ]
   },
   {
     patterns: ["/production/transcript-editor/*", "/source-videos/*/transcript-editor"],
@@ -259,6 +346,46 @@ const breadcrumbRules: Array<{ patterns: string[]; crumbs: BreadcrumbItem[] }> =
       { label: "nav.home", href: "/" },
       { label: "nav.sectionPublishing", href: "/publishing/drafts" },
       { label: "nav.publishDraft" }
+    ]
+  },
+  {
+    patterns: ["/publishing/publications"],
+    crumbs: [
+      { label: "nav.home", href: "/" },
+      { label: "nav.sectionPublishing", href: "/publishing/drafts" },
+      { label: "nav.publications" }
+    ]
+  },
+  {
+    patterns: ["/publishing/settings/content-intelligence"],
+    crumbs: [
+      { label: "nav.home", href: "/" },
+      { label: "nav.sectionPublishingSettings", href: "/publishing/settings/content-intelligence" },
+      { label: "nav.contentIntelligenceSettings" }
+    ]
+  },
+  {
+    patterns: ["/publishing/settings/affiliate-catalog"],
+    crumbs: [
+      { label: "nav.home", href: "/" },
+      { label: "nav.sectionPublishingSettings", href: "/publishing/settings/content-intelligence" },
+      { label: "nav.affiliateCatalog" }
+    ]
+  },
+  {
+    patterns: ["/publishing/settings/affiliate-comments"],
+    crumbs: [
+      { label: "nav.home", href: "/" },
+      { label: "nav.sectionPublishingSettings", href: "/publishing/settings/content-intelligence" },
+      { label: "nav.affiliateComments" }
+    ]
+  },
+  {
+    patterns: ["/publishing/accounts"],
+    crumbs: [
+      { label: "nav.home", href: "/" },
+      { label: "nav.sectionPublishing", href: "/publishing/drafts" },
+      { label: "nav.accounts" }
     ]
   },
   {
@@ -349,7 +476,6 @@ const breadcrumbRules: Array<{ patterns: string[]; crumbs: BreadcrumbItem[] }> =
     patterns: ["/ops/reconciliation"],
     crumbs: [{ label: "nav.opsConsole", href: "/ops" }, { label: "nav.reconciliation" }]
   },
-  { patterns: ["/ops/accounts"], crumbs: [{ label: "nav.opsConsole", href: "/ops" }, { label: "nav.accounts" }] },
   {
     patterns: ["/ops/routing-rules"],
     crumbs: [{ label: "nav.opsConsole", href: "/ops" }, { label: "nav.routingRules" }]

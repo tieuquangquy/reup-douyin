@@ -1,0 +1,87 @@
+{
+  "schema_version": "phase4_regression_corpus_v1",
+  "policy_version": "phase4_role_policy_v2",
+  "principle": "fixtures_validate_general_policy_only",
+  "required_dimensions": {
+    "orientation": ["landscape", "portrait"],
+    "lighting": ["light", "dark", "mixed"],
+    "background_motion": ["static", "moving"],
+    "text_layout": [
+      "large_title",
+      "one_line_hardsub",
+      "two_line_hardsub",
+      "multiple_labels",
+      "dense_endcard",
+      "near_edge"
+    ],
+    "timebase": ["CFR", "VFR"],
+    "resolution": ["720p_or_lower", "1080p_or_higher"],
+    "audio": ["source_preview", "joined_tts_final"],
+    "encoder": ["libx264", "hardware_h264"]
+  },
+  "cases": [
+    {
+      "case_id": "real_landscape_vfr_food_001",
+      "kind": "real_video",
+      "status": "PASS_FINAL_HARDWARE",
+      "fixture_ref": "apps/api/tmp_phase2_v2_final_local_7450099336215579915",
+      "covers": {
+        "orientation": ["landscape"],
+        "lighting": ["light", "dark", "mixed"],
+        "background_motion": ["moving"],
+        "text_layout": [
+          "large_title",
+          "one_line_hardsub",
+          "multiple_labels",
+          "dense_endcard",
+          "near_edge"
+        ],
+        "timebase": ["VFR"],
+        "resolution": ["1080p_or_higher"],
+        "audio": ["source_preview", "joined_tts_final"],
+        "encoder": ["libx264", "hardware_h264"]
+      },
+      "evidence": {
+        "output_qa": "qa/phase4_adaptive_final_output_qa.json",
+        "frame_count": 694,
+        "duration_seconds": 27.133045,
+        "residual_cjk": 0,
+        "max_extra_flicker": 4.7476,
+        "encoder": "h264_nvenc",
+        "runtime_fallback": false,
+        "audio_strategy": "narration_with_background_stem",
+        "background_gain": 0.4,
+        "integrated_lufs": -14.38,
+        "true_peak_db": -1.44,
+        "output_sha256": "4188c474f7fcb0365541aa95bcf2feb867c1aa443a2de89f5c0776230b090953"
+      }
+    },
+    {
+      "case_id": "synthetic_policy_and_quality_unit_suite",
+      "kind": "synthetic",
+      "status": "PASS",
+      "test_refs": [
+        "apps/api/tests/test_adaptive_typography.py",
+        "apps/api/tests/test_adaptive_render_quality.py",
+        "apps/api/tests/test_adaptive_frame_renderer.py",
+        "apps/api/tests/test_adaptive_output_qa.py",
+        "apps/api/tests/test_render_authority_v2.py"
+      ],
+      "covers": {
+        "background_motion": ["static", "moving"],
+        "text_layout": ["two_line_hardsub", "dense_endcard", "near_edge"],
+        "timebase": ["CFR", "VFR"],
+        "encoder": ["libx264", "hardware_h264"]
+      },
+      "note": "Unit coverage validates policy branches but does not replace encoded real-video regression."
+    }
+  ],
+  "real_video_gaps": [
+    "portrait",
+    "static_background",
+    "two_line_hardsub",
+    "CFR",
+    "720p_or_lower"
+  ],
+  "closure_rule": "Do not claim universal Phase 4 closure until each real_video_gap has at least one PASS encoded-output fixture."
+}

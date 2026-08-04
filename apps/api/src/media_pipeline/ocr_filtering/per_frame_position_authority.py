@@ -63,7 +63,7 @@ from src.media_pipeline.ocr_filtering.hybrid_glyph_ocr import (
     sample_subtitle_glyph_segments,
     subtitle_glyph_mask,
 )
-from src.media_pipeline.ocr_filtering.overlay_zones import is_mid_title_box
+from src.media_pipeline.ocr_filtering.overlay_zones import is_compact_overlay_label, is_mid_title_box
 from src.media_pipeline.ocr_filtering.ocr_authority_v3 import (
     EndcardSegment,
     FrameEvidence,
@@ -71,6 +71,7 @@ from src.media_pipeline.ocr_filtering.ocr_authority_v3 import (
     classify_frame_state,
     detect_endcard_segments,
     local_verified_title_boxes,
+    merge_local_cover_only,
     verified_endcard_boxes,
 )
 from src.media_pipeline.ocr_filtering.per_frame_ink_scan import scan_hardsub_ink_box
@@ -353,23 +354,34 @@ def detect_position_boxes_on_frame(
                 width=float(tb.width),
                 height=float(tb.height),
             )
-            if not is_mid_title_box(det):
+            if not (is_mid_title_box(det) or is_compact_overlay_label(det)):
                 continue
             hint = _textbox_to_timed(tb)
+            compact_hint = is_compact_overlay_label(det)
             refined = refine_timed_boxes_on_frame(frame_bgr, [hint], expand_hardsub=False)
-            if refined:
-                r = refined[0]
-                if float(r.w) >= 0.12 and float(r.h) >= 0.025:
-                    out.append(
-                        TimedBox(
-                            x=r.x,
-                            y=r.y,
-                            w=r.w,
-                            h=r.h,
-                            text="",
-                            confidence=0.0,
-                        )
+            candidate = refined[0] if refined else hint
+            if compact_hint and refined and float(refined[0].w) < 0.05 <= float(hint.w):
+                # Ink snap can shrink short CJK labels (加盐) below the compact floor.
+                candidate = hint
+            cand_det = DetectedTextBox(
+                x=float(candidate.x),
+                y=float(candidate.y),
+                width=float(candidate.w),
+                height=float(candidate.h),
+            )
+            min_w = 0.04 if (compact_hint or is_compact_overlay_label(cand_det)) else 0.12
+            min_h = 0.025
+            if float(candidate.w) >= min_w and float(candidate.h) >= min_h:
+                out.append(
+                    TimedBox(
+                        x=candidate.x,
+                        y=candidate.y,
+                        w=candidate.w,
+                        h=candidate.h,
+                        text="",
+                        confidence=0.0,
                     )
+                )
     return out
 
 
@@ -726,6 +738,18 @@ def keep_rejected_hardsub_geometry(box: TimedBox) -> bool:
     )
 
 
+def keep_rejected_compact_label_geometry(box: TimedBox) -> bool:
+    """True when a mid action-label proposal should survive CTC/line-build drops."""
+    return is_compact_overlay_label(
+        {
+            "x": float(box.x),
+            "y": float(box.y),
+            "width": float(box.w),
+            "height": float(box.h),
+        }
+    )
+
+
 def append_raw_hardsub_geometry_keeps(
     *,
     raw_boxes: Sequence[TimedBox],
@@ -744,6 +768,37 @@ def append_raw_hardsub_geometry_keeps(
     }
     for box in raw_boxes:
         if not keep_rejected_hardsub_geometry(box):
+            continue
+        key = (round(box.x, 4), round(box.y, 4), round(box.w, 4), round(box.h, 4))
+        if key in seen:
+            continue
+        if any(box_iou(box, other) >= 0.50 for other in kept):
+            continue
+        geometry = TimedBox(
+            x=float(box.x),
+            y=float(box.y),
+            w=float(box.w),
+            h=float(box.h),
+        )
+        uncertain.append(geometry)
+        kept.append(geometry)
+        seen.add(key)
+
+
+def append_raw_compact_label_geometry_keeps(
+    *,
+    raw_boxes: Sequence[TimedBox],
+    accepted: Sequence[TimedBox],
+    uncertain: list[TimedBox],
+) -> None:
+    """Retain compact mid labels (加盐) when title CTC/line-build drops them."""
+    kept = list(accepted) + list(uncertain)
+    seen = {
+        (round(box.x, 4), round(box.y, 4), round(box.w, 4), round(box.h, 4))
+        for box in kept
+    }
+    for box in raw_boxes:
+        if not keep_rejected_compact_label_geometry(box):
             continue
         key = (round(box.x, 4), round(box.y, 4), round(box.w, 4), round(box.h, 4))
         if key in seen:
@@ -784,7 +839,7 @@ def _local_geometry_boxes_from_row(row: dict[str, Any]) -> list[TimedBox]:
         y = float(raw["y"])
         mapping = {"x": x, "y": y, "width": width, "height": height}
         center_y = y + height * 0.5
-        if not (center_y + 1e-9 >= band_top or is_mid_title_box(mapping)):
+        if not (center_y + 1e-9 >= band_top or is_mid_title_box(mapping) or is_compact_overlay_label(mapping)):
             continue
         key = (round(x, 4), round(y, 4), round(width, 4), round(height, 4))
         if key in seen:
@@ -976,6 +1031,10 @@ def verify_position_rows(
                             line_box
                         ):
                             uncertain.append(line_box)
+                        elif mode == "title" and keep_rejected_compact_label_geometry(
+                            line_box
+                        ):
+                            uncertain.append(line_box)
                 if mode == "endcard":
                     accepted.extend(verified_boxes)
                     current_verified = list(verified_boxes)
@@ -1025,6 +1084,11 @@ def verify_position_rows(
                 if current_verified:
                     previous[mode] = current_verified
             append_raw_hardsub_geometry_keeps(
+                raw_boxes=raw_boxes,
+                accepted=accepted,
+                uncertain=uncertain,
+            )
+            append_raw_compact_label_geometry_keeps(
                 raw_boxes=raw_boxes,
                 accepted=accepted,
                 uncertain=uncertain,
@@ -1846,7 +1910,10 @@ def merge_position_and_observation_timelines(
 
         approved_boxes = [
             with_authority_cover_bounds(box)
-            for box in activation["boxes"]
+            for box in merge_local_cover_only(
+                list(activation["boxes"]),
+                list(local_boxes),
+            )
         ]
         merged.append(
             {
@@ -2563,6 +2630,12 @@ def run_per_frame_position_authority(
     ocr_cache_path: Path | None = None,
     ocr_batch_size: int = DEFAULT_CACHE_BATCH_SIZE,
 ) -> dict[str, Any]:
+    """DEPRECATED for product E2E.
+
+    Geometry SSOT is now ``MasterPhase1Extractor`` / ``master_timeline.json``.
+    This entry remains for unit tests and offline diagnostics only; ``hardsub_e2e``
+    no longer calls it when ``OCR_QUALITY_PROFILE=best``.
+    """
     with resolve_video_source(video_source) as video_path:
         frame_times = _all_frame_times_ms(video_path)
         duration_ms = frame_times[-1] if frame_times else 0

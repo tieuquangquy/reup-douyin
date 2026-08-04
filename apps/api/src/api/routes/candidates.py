@@ -1,3 +1,4 @@
+from datetime import datetime
 from pathlib import Path
 from uuid import UUID
 
@@ -128,6 +129,9 @@ def list_candidates(
     max_score: float | None = Query(default=None, le=100),
     source_profile_id: UUID | None = None,
     search: str | None = Query(default=None, min_length=1, max_length=200),
+    capture_session_id: UUID | None = Query(default=None),
+    created_after: datetime | None = Query(default=None),
+    created_before: datetime | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     view: str = Query(default="summary", pattern="^(summary|detail)$"),
@@ -143,6 +147,9 @@ def list_candidates(
         max_score=max_score,
         source_profile_id=source_profile_id,
         search=search,
+        capture_session_id=capture_session_id,
+        created_after=created_after,
+        created_before=created_before,
     )
     if search and offset == 0 and total_count == 0:
         capture_inbox_service.repair_orphaned_handoffs_for_search(search)
@@ -152,12 +159,18 @@ def list_candidates(
             max_score=max_score,
             source_profile_id=source_profile_id,
             search=search,
+            capture_session_id=capture_session_id,
+            created_after=created_after,
+            created_before=created_before,
         )
     status_counts = service.count_candidates_by_status(
         min_score=min_score,
         max_score=max_score,
         source_profile_id=source_profile_id,
         search=search,
+        capture_session_id=capture_session_id,
+        created_after=created_after,
+        created_before=created_before,
     )
     if status_filter is None:
         total_count = sum(status_counts.values())
@@ -169,6 +182,9 @@ def list_candidates(
         max_score=max_score,
         source_profile_id=source_profile_id,
         search=search,
+        capture_session_id=capture_session_id,
+        created_after=created_after,
+        created_before=created_before,
         limit=limit,
         offset=offset,
         hydrate_from_capture_inbox=hydrate_from_capture_inbox,

@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { createPublishHandoff, fetchExportPackage } from "../../lib/api";
+import { useT } from "../../lib/i18n";
 import { useAsyncAction } from "../../lib/useAsyncAction";
 import { useLatestRequest, type LatestRequestMode } from "../../lib/useLatestRequest";
 import type { ExportPackage, PublishHandoff } from "../../types/export-handoff";
@@ -13,6 +14,7 @@ import { useNotice } from "../shared/NoticeCenter";
 import { OpsDetailPanel, OpsDetailSection, OpsItemCard, OpsMetadataList, OpsStatePanel, OpsSummaryCards, statusTone, type OpsItemAction, type OpsSummaryCardItem } from "../ops-console/OpsShared";
 
 export function ExportPackageByIdPage({ packageId }: { packageId: string }) {
+  const t = useT();
   const [item, setItem] = useState<ExportPackage | null>(null);
   const [createdHandoff, setCreatedHandoff] = useState<PublishHandoff | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -84,7 +86,8 @@ export function ExportPackageByIdPage({ packageId }: { packageId: string }) {
       <AsyncContentBoundary
         refreshing={request.refreshing}
         status={boundaryStatus}
-        skeleton={<OpsStatePanel detail="Loading package contents, manifest, and linked handoff references." title="Loading Export Package" variant="loading" />}
+        skeletonVariant="detail"
+        loadingLabel={t("opsExportPackages.loadingDetail")}
         errorState={
           <OpsStatePanel
             action={<button type="button" onClick={() => void load("initial")}>Retry</button>}

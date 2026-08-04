@@ -1,0 +1,413 @@
+{
+  "schema_version": "pipeline_regression_corpus_v1",
+  "policy_version": "pipeline_regression_policy_v1",
+  "status": "CORPUS_READY",
+  "case_count": 9,
+  "cases": [
+    {
+      "case_id": "local_public_pd_nasa_spectra_vertical",
+      "source_video_external_id": "public_pd_nasa_spectra_vertical",
+      "status": "READY_FOR_BATCH_REGRESSION",
+      "video_path": ".douyin_profiles/regression_gap_staging/public_pd_nasa_spectra_vertical.webm",
+      "phase1_artifact_root": "apps/api/regression_runs/pipeline_v14_grid_peer_guard_20260727/local_public_pd_nasa_spectra_vertical",
+      "probe": {
+        "duration_seconds": 59.421,
+        "size_bytes": 28212430,
+        "width": 1080,
+        "height": 1920,
+        "r_frame_rate": "30000/1001",
+        "avg_frame_rate": "30000/1001",
+        "has_audio": true
+      },
+      "visual_sample": {
+        "sample_count": 6,
+        "mean_brightness": 36.725,
+        "brightness_range": 63.433,
+        "mean_contrast": 34.727,
+        "mean_motion": 44.404,
+        "lighting": "mixed",
+        "motion": "high"
+      },
+      "phase1_baseline": {
+        "track_count": 45,
+        "hardsub_count": 45
+      },
+      "dimensions": {
+        "orientation": "portrait",
+        "resolution": "1080p_or_higher",
+        "timebase": "CFR",
+        "frame_rate": "30fps_or_lower",
+        "duration_band": "45_to_60s",
+        "audio": "present",
+        "lighting": "mixed",
+        "motion": "high",
+        "text_density": "dense"
+      }
+    },
+    {
+      "case_id": "local_public_pd_nasa_radio_signal_portrait",
+      "source_video_external_id": "public_pd_nasa_radio_signal_portrait",
+      "status": "READY_FOR_BATCH_REGRESSION",
+      "video_path": ".douyin_profiles/regression_gap_staging/public_pd_nasa_radio_signal_portrait.webm",
+      "phase1_artifact_root": "apps/api/regression_runs/pipeline_v14_grid_peer_guard_20260727/local_public_pd_nasa_radio_signal_portrait",
+      "probe": {
+        "duration_seconds": 4.966,
+        "size_bytes": 119964,
+        "width": 1080,
+        "height": 1920,
+        "r_frame_rate": "30/1",
+        "avg_frame_rate": "30/1",
+        "has_audio": false
+      },
+      "visual_sample": {
+        "sample_count": 7,
+        "mean_brightness": 66.851,
+        "brightness_range": 0.773,
+        "mean_contrast": 68.123,
+        "mean_motion": 0.139,
+        "lighting": "dark",
+        "motion": "low"
+      },
+      "phase1_baseline": {
+        "track_count": 2,
+        "hardsub_count": 2
+      },
+      "dimensions": {
+        "orientation": "portrait",
+        "resolution": "1080p_or_higher",
+        "timebase": "CFR",
+        "frame_rate": "30fps_or_lower",
+        "duration_band": "under_35s",
+        "audio": "absent",
+        "lighting": "dark",
+        "motion": "low",
+        "text_density": "light"
+      }
+    },
+    {
+      "case_id": "local_public_cc0_flameless_candle",
+      "source_video_external_id": "public_cc0_flameless_candle",
+      "status": "READY_FOR_BATCH_REGRESSION",
+      "video_path": ".douyin_profiles/regression_gap_staging/public_cc0_flameless_candle.webm",
+      "phase1_artifact_root": "apps/api/regression_runs/pipeline_v14_grid_peer_guard_20260727/local_public_cc0_flameless_candle",
+      "probe": {
+        "duration_seconds": 8.683,
+        "size_bytes": 1891323,
+        "width": 1920,
+        "height": 1080,
+        "r_frame_rate": "25/1",
+        "avg_frame_rate": "1000/1",
+        "has_audio": true
+      },
+      "visual_sample": {
+        "sample_count": 7,
+        "mean_brightness": 24.124,
+        "brightness_range": 0.772,
+        "mean_contrast": 42.905,
+        "mean_motion": 1.195,
+        "lighting": "dark",
+        "motion": "low"
+      },
+      "phase1_baseline": {
+        "track_count": 0,
+        "hardsub_count": 0
+      },
+      "dimensions": {
+        "orientation": "landscape",
+        "resolution": "1080p_or_higher",
+        "timebase": "VFR",
+        "frame_rate": "30fps_or_lower",
+        "duration_band": "under_35s",
+        "audio": "present",
+        "lighting": "dark",
+        "motion": "low",
+        "text_density": "light"
+      }
+    },
+    {
+      "case_id": "local_7450099336215579915",
+      "source_video_external_id": "7450099336215579915",
+      "status": "READY_FOR_BATCH_REGRESSION",
+      "video_path": ".douyin_profiles/download_staging/7450099336215579915.mp4",
+      "phase1_artifact_root": "apps/api/regression_runs/pipeline_v14_grid_peer_guard_20260727/local_7450099336215579915",
+      "probe": {
+        "duration_seconds": 27.133,
+        "size_bytes": 9388159,
+        "width": 1920,
+        "height": 1080,
+        "r_frame_rate": "30/1",
+        "avg_frame_rate": "10410/407",
+        "has_audio": true
+      },
+      "visual_sample": {
+        "sample_count": 7,
+        "mean_brightness": 124.959,
+        "brightness_range": 128.506,
+        "mean_contrast": 68.734,
+        "mean_motion": 83.659,
+        "lighting": "mixed",
+        "motion": "high"
+      },
+      "phase1_baseline": {
+        "track_count": 42,
+        "hardsub_count": 42
+      },
+      "dimensions": {
+        "orientation": "landscape",
+        "resolution": "1080p_or_higher",
+        "timebase": "VFR",
+        "frame_rate": "30fps_or_lower",
+        "duration_band": "under_35s",
+        "audio": "present",
+        "lighting": "mixed",
+        "motion": "high",
+        "text_density": "medium"
+      }
+    },
+    {
+      "case_id": "local_7472735913513078057",
+      "source_video_external_id": "7472735913513078057",
+      "status": "READY_FOR_BATCH_REGRESSION",
+      "video_path": ".douyin_profiles/download_staging/7472735913513078057.mp4",
+      "phase1_artifact_root": "apps/api/regression_runs/pipeline_v14_grid_peer_guard_20260727/local_7472735913513078057",
+      "probe": {
+        "duration_seconds": 29.467,
+        "size_bytes": 9828615,
+        "width": 1920,
+        "height": 1080,
+        "r_frame_rate": "30/1",
+        "avg_frame_rate": "5595/221",
+        "has_audio": true
+      },
+      "visual_sample": {
+        "sample_count": 7,
+        "mean_brightness": 91.378,
+        "brightness_range": 144.068,
+        "mean_contrast": 53.027,
+        "mean_motion": 68.026,
+        "lighting": "mixed",
+        "motion": "high"
+      },
+      "phase1_baseline": {
+        "track_count": 37,
+        "hardsub_count": 37
+      },
+      "dimensions": {
+        "orientation": "landscape",
+        "resolution": "1080p_or_higher",
+        "timebase": "VFR",
+        "frame_rate": "30fps_or_lower",
+        "duration_band": "under_35s",
+        "audio": "present",
+        "lighting": "mixed",
+        "motion": "high",
+        "text_density": "medium"
+      }
+    },
+    {
+      "case_id": "local_7543241784286465306",
+      "source_video_external_id": "7543241784286465306",
+      "status": "READY_FOR_BATCH_REGRESSION",
+      "video_path": ".douyin_profiles/download_staging/7543241784286465306.mp4",
+      "phase1_artifact_root": "apps/api/regression_runs/pipeline_v20_dense_grid_hardsub_guard_20260728/local_7543241784286465306",
+      "probe": {
+        "duration_seconds": 43.567,
+        "size_bytes": 25825343,
+        "width": 1920,
+        "height": 1080,
+        "r_frame_rate": "30/1",
+        "avg_frame_rate": "30/1",
+        "has_audio": true
+      },
+      "visual_sample": {
+        "sample_count": 7,
+        "mean_brightness": 107.398,
+        "brightness_range": 175.154,
+        "mean_contrast": 60.159,
+        "mean_motion": 77.668,
+        "lighting": "mixed",
+        "motion": "high"
+      },
+      "phase1_baseline": {
+        "track_count": 55,
+        "hardsub_count": 55
+      },
+      "dimensions": {
+        "orientation": "landscape",
+        "resolution": "1080p_or_higher",
+        "timebase": "CFR",
+        "frame_rate": "30fps_or_lower",
+        "duration_band": "35_to_45s",
+        "audio": "present",
+        "lighting": "mixed",
+        "motion": "high",
+        "text_density": "dense"
+      }
+    },
+    {
+      "case_id": "local_7632302211641623154",
+      "source_video_external_id": "7632302211641623154",
+      "status": "READY_FOR_BATCH_REGRESSION",
+      "video_path": ".douyin_profiles/download_staging/7632302211641623154.mp4",
+      "phase1_artifact_root": "apps/api/regression_runs/pipeline_v20_dense_grid_hardsub_guard_20260728/local_7632302211641623154",
+      "probe": {
+        "duration_seconds": 51.067,
+        "size_bytes": 20933260,
+        "width": 1920,
+        "height": 1080,
+        "r_frame_rate": "30/1",
+        "avg_frame_rate": "30/1",
+        "has_audio": true
+      },
+      "visual_sample": {
+        "sample_count": 7,
+        "mean_brightness": 111.894,
+        "brightness_range": 150.438,
+        "mean_contrast": 62.258,
+        "mean_motion": 78.354,
+        "lighting": "mixed",
+        "motion": "high"
+      },
+      "phase1_baseline": {
+        "track_count": 52,
+        "hardsub_count": 52
+      },
+      "dimensions": {
+        "orientation": "landscape",
+        "resolution": "1080p_or_higher",
+        "timebase": "CFR",
+        "frame_rate": "30fps_or_lower",
+        "duration_band": "45_to_60s",
+        "audio": "present",
+        "lighting": "mixed",
+        "motion": "high",
+        "text_density": "dense"
+      }
+    },
+    {
+      "case_id": "local_7429689966633979175",
+      "source_video_external_id": "7429689966633979175",
+      "status": "READY_FOR_BATCH_REGRESSION",
+      "video_path": ".douyin_profiles/regression_gap_staging/7429689966633979175.mp4",
+      "phase1_artifact_root": "apps/api/regression_runs/pipeline_v4_20260727_720p_guard/local_7429689966633979175",
+      "probe": {
+        "duration_seconds": 26.771,
+        "size_bytes": 10218017,
+        "width": 1280,
+        "height": 720,
+        "r_frame_rate": "60/1",
+        "avg_frame_rate": "2360/89",
+        "has_audio": true
+      },
+      "visual_sample": {
+        "sample_count": 7,
+        "mean_brightness": 85.198,
+        "brightness_range": 49.623,
+        "mean_contrast": 55.86,
+        "mean_motion": 54.473,
+        "lighting": "mixed",
+        "motion": "high"
+      },
+      "phase1_baseline": {
+        "track_count": 16,
+        "hardsub_count": 16
+      },
+      "dimensions": {
+        "orientation": "landscape",
+        "resolution": "720p_or_lower",
+        "timebase": "VFR",
+        "frame_rate": "above_30fps",
+        "duration_band": "under_35s",
+        "audio": "present",
+        "lighting": "mixed",
+        "motion": "high",
+        "text_density": "light"
+      }
+    },
+    {
+      "case_id": "local_public_ccbysa_organelle_motion",
+      "source_video_external_id": "public_ccbysa_organelle_motion",
+      "status": "READY_FOR_BATCH_REGRESSION",
+      "video_path": ".douyin_profiles/regression_gap_staging/public_ccbysa_organelle_motion.webm",
+      "phase1_artifact_root": "apps/api/regression_runs/pipeline_v6_public_short_gap_candidates_20260727/local_public_ccbysa_organelle_motion",
+      "probe": {
+        "duration_seconds": 20.834,
+        "size_bytes": 25360057,
+        "width": 1920,
+        "height": 1080,
+        "r_frame_rate": "24/1",
+        "avg_frame_rate": "24/1",
+        "has_audio": false
+      },
+      "visual_sample": {
+        "sample_count": 7,
+        "mean_brightness": 128.152,
+        "brightness_range": 4.812,
+        "mean_contrast": 18.004,
+        "mean_motion": 6.398,
+        "lighting": "light",
+        "motion": "medium"
+      },
+      "phase1_baseline": {
+        "track_count": 0,
+        "hardsub_count": 0
+      },
+      "dimensions": {
+        "orientation": "landscape",
+        "resolution": "1080p_or_higher",
+        "timebase": "CFR",
+        "frame_rate": "30fps_or_lower",
+        "duration_band": "under_35s",
+        "audio": "absent",
+        "lighting": "light",
+        "motion": "medium",
+        "text_density": "light"
+      }
+    }
+  ],
+  "coverage": {
+    "orientation": [
+      "landscape",
+      "portrait"
+    ],
+    "resolution": [
+      "1080p_or_higher",
+      "720p_or_lower"
+    ],
+    "timebase": [
+      "CFR",
+      "VFR"
+    ],
+    "frame_rate": [
+      "30fps_or_lower",
+      "above_30fps"
+    ],
+    "duration_band": [
+      "35_to_45s",
+      "45_to_60s",
+      "under_35s"
+    ],
+    "lighting": [
+      "dark",
+      "light",
+      "mixed"
+    ],
+    "motion": [
+      "high",
+      "low",
+      "medium"
+    ],
+    "audio": [
+      "absent",
+      "present"
+    ],
+    "text_density": [
+      "dense",
+      "light",
+      "medium"
+    ]
+  },
+  "real_video_gaps": {},
+  "closure_rule": "Do not claim universal closure while real_video_gaps is non-empty.",
+  "corpus_sha256": "d5603b78c8d9afe93d8cd3536b639c4e0c1305b493cc444703b290c80065f11f"
+}

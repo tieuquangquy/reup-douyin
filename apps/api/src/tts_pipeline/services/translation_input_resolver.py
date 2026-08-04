@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from src.models.artifacts import TranslationSegment
+from src.enums import TranscriptSegmentStatus
 from src.tts_pipeline.errors import TtsPipelineError, TtsPipelineErrorCode
 from src.tts_pipeline.types import TranslationInputSegment
 
@@ -32,6 +33,26 @@ class TranslationInputResolver:
         segments: list[TranslationInputSegment] = []
         for row in rows:
             transcript = row.transcript_segment
+            flags = {
+                str(value)
+                for value in list((row.quality_flags_json or {}).get("flags") or [])
+            }
+            review_flags = flags.intersection(
+                {
+                    "machine_translate_recovery",
+                    "translation_llm_unavailable",
+                    "translation_gate_failed",
+                    "translation_too_long_for_slot",
+                    "duration_rewrite_no_safe_candidate",
+                    "duration_adaptation_required",
+                }
+            )
+            if review_flags and row.status != TranscriptSegmentStatus.APPROVED:
+                raise TtsPipelineError(
+                    TtsPipelineErrorCode.TRANSLATION_REVIEW_REQUIRED,
+                    "Vietnamese translation requires operator review before TTS: "
+                    f"segment_index={row.segment_index} flags={','.join(sorted(review_flags))}",
+                )
             if not row.text.strip():
                 raise TtsPipelineError(TtsPipelineErrorCode.MISSING_TRANSLATION_SEGMENTS, "Translation text is empty")
             if transcript.end_ms <= transcript.start_ms or transcript.start_ms < 0:
@@ -48,7 +69,7 @@ class TranslationInputResolver:
                     duration_budget_ms=row.duration_budget_ms or (transcript.end_ms - transcript.start_ms),
                     translation_version=row.version,
                     translation_preset=row.translation_preset,
-                    quality_flags=(row.quality_flags_json or {}).get("flags", []),
+                    quality_flags=list(flags),
                 )
             )
         _validate_order(segments)

@@ -5,8 +5,10 @@ from enum import StrEnum
 
 class TtsPipelineErrorCode(StrEnum):
     MISSING_TRANSLATION_SEGMENTS = "missing_translation_segments"
+    TRANSLATION_REVIEW_REQUIRED = "translation_review_required"
     INVALID_SEGMENT_TIMING = "invalid_segment_timing"
     TTS_PROVIDER_FAILED = "tts_provider_failed"
+    TIMING_FIT_BLOCKED = "timing_fit_blocked"
     CLIP_PERSIST_FAILED = "clip_persist_failed"
     NARRATION_ASSEMBLY_FAILED = "narration_assembly_failed"
     SUBTITLE_BUILD_FAILED = "subtitle_build_failed"

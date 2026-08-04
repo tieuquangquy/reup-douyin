@@ -8,3 +8,12 @@ README_DEPLOY.md
 .gcloudignore
 .dockerignore
 .git/
+# Huge VL weights break Cloud Run startup probe unless startup timeout is raised.
+# Bake later with extended startupProbe; until then download on first /predict.
+models/**/*.safetensors
+models/**/.cache/
+_svc_export.yaml
+_patch_svc_yaml.py
+test_auto_deploy_flags.py
+.gitignore
+

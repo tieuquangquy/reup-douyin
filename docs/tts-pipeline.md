@@ -1,114 +1,118 @@
-# TTS Pipeline
+# TTS Pipeline V2
 
-The TTS pipeline converts current edited Vietnamese `TranslationSegment` rows into render-ready narration assets.
+The TTS pipeline converts the current, operator-locked Vietnamese translation into timeline-aligned narration and subtitle assets. It is local-first, but provider, storage and job boundaries remain replaceable for a future SaaS runtime.
 
-## Inputs
+## Input authority
 
-- Current `TranslationSegment` rows where `is_current = true`
-- Linked `TranscriptSegment` timing
-- Voice config from `POST /tts`
+- Current `TranslationSegment` rows (`is_current = true`).
+- Linked source timing from `TranscriptSegment`.
+- Source video duration.
+- Active Ops TTS profile, including provider, voice and speaking rate.
 
-The resolver validates that translation text exists, timing is positive, and current segments do not overlap.
+The service rejects missing text, invalid timing, overlapping segments and segments outside the source-video timeline. A SHA-256 of the resolved translation input is stored in the render-prep manifest.
+
+## Provider boundary
+
+The core pipeline calls a `TtsProvider` interface. A provider receives text, language, voice configuration and an optional duration target, and returns audio bytes plus duration, MIME type, metadata and warnings.
+
+Provider selection comes from the active Ops TTS profile, with environment configuration as fallback. Real local providers include Edge TTS, VieNeu and OmniVoice. `placeholder` is test-only and must not become production render authority.
+
+## Timing policy
+
+Every clip is normalized to mono PCM s16le at 48 kHz before persistence and assembly.
+
+- Clip duration less than or equal to its slot: keep the clip and leave tail silence.
+- Overrun from 0% through 7%: use FFmpeg `atempo` in the natural adjustment band.
+- Overrun above 7% through 15%: use FFmpeg `atempo`, emit `timing_adjustment_review_recommended`, and expose the review quality band.
+- Overrun greater than 15%: fail closed with `TIMING_FIT_BLOCKED`.
+
+Synthesized audio duration is always the final timing authority. A pre-synthesis speech-budget estimate is advisory: it improves translation review and diagnostics, but never bypasses the measured-audio gate or silently changes operator-approved text.
+
+## Duration-aware speech budget
+
+Before synthesis, Vietnamese text is counted as spoken units rather than raw characters. Common numbers and units such as `510 kcal`, `22.9 g`, `kg`, `ml` and `%` receive approximate spoken costs. The budget:
+
+- reserves 250 ms for each punctuation pause, capped at 40% of the slot;
+- keeps a 400 ms minimum speech window for very short slots;
+- defaults to 4.5 spoken units per second with a +/-20% fit range;
+- calibrates by provider, voice ID and speaking rate from matching prior clips after at least three valid samples;
+- uses a median rate and ignores implausible samples outside 2-9 units per second.
+
+Each clip persists the estimate, calibration source, observed duration, observed speech duration, observed units per second, actual timing ratio and `timing_quality_band` under `speech_budget`. Punctuation pause is subtracted from observed total duration when learning the rate so future estimates do not double-count pauses.
+
+The assembler places each clip at its exact `start_ms` on a full-duration silent timeline. It rejects overlap, spill and out-of-range placement. The joined WAV therefore has the same duration as the source video and no downstream renderer needs to reconstruct timing from concatenated clips.
+
+## Durable execution and idempotency
+
+The stable idempotency key covers source video ID, translation input hash and voice configuration. An identical rerun reuses the existing result; `force_refresh=true` intentionally creates a new current version.
+
+The `SYNTHESIZE_TTS` lifecycle is:
+
+1. Validate the source and resolve current translation segments.
+2. Synthesize each Vietnamese clip.
+3. Normalize audio format and apply the safe timing policy.
+4. Persist versioned `TTS_AUDIO_CLIP` assets.
+5. Assemble the full-duration `TTS_AUDIO_JOINED` timeline.
+6. Build subtitle rows plus `SUBTITLE_JSON` and `SUBTITLE_SRT`.
+7. Build `RENDER_PREP_MANIFEST_V2` with hashes and timing authority.
+8. Mark the job ready only after every required asset succeeds.
 
 ## Outputs
 
-- Segment-level `TTS_AUDIO_CLIP` assets
-- Joined `TTS_AUDIO_JOINED` narration asset
-- `SubtitleSegment` rows
-- `SUBTITLE_JSON` and `SUBTITLE_SRT` assets
-- `RENDER_PREP_MANIFEST` asset
+- Versioned segment-level `TTS_AUDIO_CLIP` assets.
+- One current, full-duration `TTS_AUDIO_JOINED` WAV.
+- Timing map, audio format, fit ratio and fit status metadata.
+- Per-clip `speech_budget` evidence and manifest-level `duration_gate_summary`.
+- `SubtitleSegment` rows and JSON/SRT subtitle assets.
+- `RENDER_PREP_MANIFEST_V2` with SHA-256 and size for current assets.
+- `audio_review.status = PENDING_AUDIO_REVIEW` until an operator approves the staged narration.
 
-## Provider Abstraction
+The manifest contains safe storage references only; it must not expose absolute local paths.
 
-The core pipeline calls a `TtsProvider` interface:
+## Phase 4 handoff
 
-- input: text, language, voice config, optional target duration
-- output: audio bytes, duration, MIME type, provider metadata, warnings
+Run from `apps/api`:
 
-Production default is resolved by `AUDIO_TTS_PROVIDER` / Ops **TTS settings**:
+```powershell
+python -m scripts.run_tts_v2_once <source-video-uuid>
+python -m scripts.run_phase4_approval stage-audio-from-db <artifact-root> <source-video-uuid>
+```
 
-- `edge` → `EdgeTtsProvider` (`edge-tts` + ffmpeg). Default voice `vi-VN-HoaiMyNeural`.
-- `vieneu` → `VieNeuTtsProvider` (`pip install vieneu`). Default voice `Phạm Tuyên`.
-- `auto` → prefer VieNeu if installed, else edge-tts, else placeholder.
-- Cloud / HTTP (`google`, `azure`, `elevenlabs`, `openai`, `openai_compatible`, `http_custom`) accept full credentials in Ops; synthesis adapters land in follow-up slices — set `fallback_provider=edge` or `vieneu` until then.
-- Custom Local/SDK slugs (e.g. `my_tts_sdk`) can be saved from Ops; use **Install** (`POST /ops/tts-ai/install`) for allowlisted `pip install <pkg>` or `git+https://…` into the API Python env. Synthesis still needs a known adapter or `fallback_provider` until a generic runner exists.
-- Ops ready chip (Install + Test): `unchecked` → `not_installed` / `installed` → `ready` (or `failed`). Voice & runtime presets stay editable before Ready.
-- After **Install**, API auto-runs probe+catalog and persists `runtime.last_install` / `runtime.last_probe` on the workspace (survives F5). **Test** also refreshes `last_probe`.
-- GET `/ops/tts-ai` returns `runtime` + `live_import_ok` (cheap import check). Ops UI hydrates Ready chip and Voice dropdown from the snapshot.
-- Ops **Preview speech** (`POST /ops/tts-ai/preview`): short sample text → one synthesize → base64 audio for in-page playback (not a durable Generate TTS job).
-- `placeholder` → tone WAV for tests.
+Staging copies the hash-verified narration to `phase4_joined_narration.wav` and preserves `PENDING_AUDIO_REVIEW`. After listening, the operator may approve it explicitly:
 
-Workspace authority: active profile at `/ops/tts-ai` drives Generate TTS (Preview parity), regardless of the Enabled toggle. Secrets are masked on GET. Env vars are fallbacks when Ops voice/provider fields are empty.
+```powershell
+python -m scripts.run_phase4_approval audio-from-db <artifact-root> <source-video-uuid> --operator <operator-id>
+```
 
-Ops supports **multiple named setups** under `tts_ai.profiles` with one `active_profile_id`. The Ops page is **list-first**: overview shows all setups with On/Off and Set active; **New** / **Edit** open the connection form. Save only persists connection fields (does not change active or On/Off). Legacy flat `tts_ai` blobs migrate to a single `Default` profile. Generate TTS / Test / Install / Preview use the active setup (editor Test/Install target the setup being edited via `profile_id`).
+This writes `phase4_audio_approval.json` and changes the manifest to `AUDIO_APPROVED`. Final render is fail-closed unless that approval and the narration SHA-256 both match.
 
-Generate TTS (`POST /tts` / `SYNTHESIZE_TTS`) always uses the active Ops profile for provider + `voice_id` / speaking rate / language (and related factory fields). Client defaults such as `vi-VN-HoaiMyNeural` must not override. Web `createTtsJob` sends empty `voice_id` so Ops/env resolve authority.
+## Background audio
 
-Operator requirements for real speech: install the chosen SDK (`edge-tts` and/or `vieneu`) via Ops **Install** or CLI, and keep ffmpeg on PATH for edge. Disable Ops install with `AUDIO_TTS_ALLOW_INSTALL=false`. Missing SDKs fail the job with an actionable `TtsPipelineError` (or use configured fallback).
+When audio analysis has a verified Demucs `no_vocals.wav` stem, its storage reference and SHA-256 are carried into the manifest. Phase 4 may mix it under Vietnamese narration. If no verified background stem exists, the safe strategy is narration-only; original Chinese vocals are never mixed into final output.
 
-## Segment Clip Strategy
+## OmniVoice engine catalog in Ops
 
-Each translation segment produces one TTS clip. The pipeline stores clip metadata:
+`/ops/tts-ai` exposes the full upstream OmniVoice Studio engine matrix through `GET /ops/tts-ai/engines`. Each row separates three independent facts:
 
-- `translation_segment_id`
-- actual duration
-- fit status
-- fit ratio
-- provider metadata
-- warnings
+- whether the dependency is installed on the current API host;
+- whether the engine is compatible with the current operating system;
+- whether `reup-douyin` has a production synthesize adapter for Preview and durable jobs.
 
-Phase 1 fails the whole job for invalid inputs or persistence errors. It does not silently skip broken segments.
+The UI may install only registry-owned recipes through `POST /ops/tts-ai/engines/{engine_id}/install`. A recipe may use an allowlisted pip package or a managed source checkout. Source recipes run disk/tool preflight, shallow-clone the fixed repository URL, create an isolated venv, install fixed arguments, optionally download fixed Hugging Face weights, and run an import probe. The browser cannot submit a repository URL, package name, install arguments, or shell command for this endpoint.
 
-## Joined Narration Strategy
+Engine install progress is available at `GET /ops/tts-ai/engines/install/status`. The API persists `install-state.json` after every step and writes `installed.json` only after the recipe completes. Retrying reuses a healthy checkout, venv and resumable model directory. `AUDIO_TTS_ENGINE_ROOT` controls the managed root (default `./data/tts-engines`); it must remain a data path, not a source-code path. Pip-only recipes still use the allowlisted API-environment installer because their future in-process adapters need that import.
 
-The joined narration asset concatenates generated WAV clips and stores a `timing_map`. It does not time-stretch clips. Render step should use the map and fit warnings to decide exact placement.
+This is deliberately not a universal GitHub installer. Every automated repository and argument must be reviewed and added to the backend registry. Engines needing a bundled binary, unsupported operating system, external API server, unautomated system dependency, or an unverified weights layout keep a setup guide instead of executing arbitrary repository instructions.
 
-## Timing Fit
+Completing an engine recipe does not make the engine selectable. Only engines with both a healthy installation and a wired synthesize adapter can be saved as `model_id`; this prevents Preview and worker jobs from accepting a configuration they cannot execute. Adding a future engine therefore requires both a reviewed install recipe and a tested provider adapter/factory route.
 
-TTS duration is compared with the segment slot:
+## Known limits
 
-- `fits_well`
-- `slightly_long`
-- `too_long`
-- `too_short`
-
-Mismatch is recorded as warnings and subtitle review flags. Phase 1 does not auto-compress audio.
-
-`GET /source-videos/{id}/tts-summary` exposes structured `clips[]` (`translation_segment_id`, `fit_status`, `fit_ratio`, `warnings`) and `timing_fit_summary` counts so Transcript Editor can badge beats that need shorter/longer VI or Ops rate changes.
-
-Phase 1 VieNeu on Windows: Ops `local_backend=auto` maps to ONNX in the API wrapper (avoids PyTorch+ModelScope MOSS tokenizer failures on GPU). Use `Ngọc Linh` etc. from the VieNeu catalog; set `fallback_provider=none` unless you explicitly want edge rescue.
-
-## Job Flow
-
-`SYNTHESIZE_TTS` steps:
-
-1. `validate_input`
-2. `resolve_translation_segments`
-3. `synthesize_segment_clips`
-4. `evaluate_timing_fit`
-5. `assemble_narration_track`
-6. `build_subtitle_segments`
-7. `export_subtitle_assets`
-8. `build_render_prep_manifest`
-9. `persist_outputs`
-10. `finalize`
-
-The local worker executes the real pipeline at `persist_outputs`.
-
-## Operator handoff (web)
-
-In Transcript Editor, after Translate saves VI text:
-
-1. **Generate TTS** creates `POST /tts` (`SYNTHESIZE_TTS`) and polls the job.
-2. On success, the bench loads `TTS_AUDIO_JOINED` via authenticated blob URL (`fetchMediaAssetObjectUrl`) into a compact `<audio controls>` player.
-3. Beat rail / focus editor show timing-fit badges from `tts-summary.clips` (problems only on the rail; full status + hint on the focused beat).
-
-## Phase 1 Limits
-
-- Switchable providers via Ops TTS settings / env (edge + VieNeu synthesize; cloud/HTTP settings saved with fallback).
-- No voice selection UI in Transcript Editor (voice via Ops/API/settings).
-- No time-stretching / atempo fit loop.
-- No BGM mix with Demucs stems.
-- No auto-enqueue TTS after Translate.
-- No lip-sync.
-- No final video render.
+- Timing compression is deliberately limited to 15%; text or voice settings require operator correction beyond that limit.
+- Spoken-unit counting is a deterministic Vietnamese heuristic, not phoneme alignment. Provider output duration remains authoritative.
+- Calibration needs at least three matching provider/voice/rate clips; new voices use the default rate until enough evidence exists.
+- Underfilled text is not automatically padded because invented filler can alter meaning; it is flagged for review instead.
+- The current final render uses single-pass FFmpeg loudness normalization. Output QA measures the encoded result and blocks duration, loudness or clipping failures.
+- Background preservation depends on a new audio-analysis run that persisted a verified no-vocals stem; older analyses remain narration-only.
+- No lip-sync is provided.
+- OmniVoice Studio engines other than `k2-fsa/OmniVoice` are discoverable/installable where safe, but remain unavailable to Preview/jobs until their individual adapters are implemented.

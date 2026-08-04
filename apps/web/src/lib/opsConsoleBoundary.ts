@@ -11,7 +11,6 @@ export const OPS_CONSOLE_PREFIXES = [
   "/ops/publish-health",
   "/ops/publish-attempts",
   "/ops/publish-control",
-  "/ops/accounts",
   "/ops/assets",
   "/ops/tools",
   "/ops/users",
@@ -30,7 +29,6 @@ const DRAFTS_FALLBACK_PREFIXES = [
   "/ops/publish-health",
   "/ops/publish-attempts",
   "/ops/publish-control",
-  "/ops/accounts",
   "/ops/routing-rules"
 ] as const;
 

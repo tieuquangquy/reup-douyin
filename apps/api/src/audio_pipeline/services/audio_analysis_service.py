@@ -69,16 +69,31 @@ class AudioAnalysisService:
         self.storage = storage or LocalStorageBackend(get_settings().local_storage_root)
         self.separation_provider = separation_provider or build_default_separation_provider()
         self.stt_provider = stt_provider or build_default_stt_provider()
+        self._translation_provider_explicit = translation_provider is not None
         self.translation_provider = translation_provider or build_default_translation_provider()
         self.vad_provider = vad_provider or build_default_vad_provider()
         self.transcript_builder = TranscriptBuilder()
         self.translation_builder = TranslationDraftBuilder(self.translation_provider)
 
     def _translation_builder_for_workspace(self, workspace_id: UUID) -> TranslationDraftBuilder:
+        if self._translation_provider_explicit:
+            return self.translation_builder
         """Resolve Translation AI (DB override → env) per job so Ops Save applies without restart."""
         workspace_ai = WorkspaceSettingsService(self.db).get_translation_ai(workspace_id)
         provider = build_default_translation_provider(workspace_ai=workspace_ai)
         return TranslationDraftBuilder(provider)
+
+    @staticmethod
+    def _translation_concurrency(builder: TranslationDraftBuilder) -> int:
+        configured = max(
+            1,
+            int(getattr(get_settings(), "audio_translation_max_concurrency", 1) or 1),
+        )
+        primary = getattr(builder.provider, "primary", None)
+        provider_name = str(getattr(primary, "provider_name", "") or "").strip().lower()
+        if provider_name == "gemini":
+            return 1
+        return configured
 
     def create_analysis_job(self, request: AudioAnalysisRequest, *, idempotency_key: str | None = None):
         source_video = self._load_source_video(request.source_video_id)
@@ -200,25 +215,27 @@ class AudioAnalysisService:
             phase("stt_skipped_no_speech", 55)
 
         empty_asr_after_speech_gate = bool(vad.has_speech and not units)
+        # Silero measured the waveform, so "ASR heard nothing" contradicts hard evidence
+        # instead of merely confirming a guess. That case needs an operator, not a silent skip.
+        vad_measured_speech = bool(vad.has_speech and "silero_vad_executed" in (vad.difficulty_flags or []))
+        dialogue_uncertain = bool(empty_asr_after_speech_gate and vad_measured_speech)
         if empty_asr_after_speech_gate:
-            # VAD guessed speech but ASR produced no spoken units (or FunASR unavailable).
             # Never fill DialogueBeats from Douyin caption/title/hashtags.
+            extra_flags = (
+                {"asr_empty_despite_vad_speech", "needs_operator_review", "no_asr_dialogue"}
+                if dialogue_uncertain
+                else {"skip_dubbing", "no_asr_dialogue", "caption_not_dialogue", "dialogue_unverified"}
+            )
             separation = SourceSeparationResult(
                 vocal_asset_id=separation.vocal_asset_id,
                 background_asset_id=separation.background_asset_id,
                 transcription_storage_key=separation.transcription_storage_key,
                 fallback_used=True,
-                difficulty_flags=list(
-                    {
-                        *separation.difficulty_flags,
-                        "skip_dubbing",
-                        "no_asr_dialogue",
-                        "caption_not_dialogue",
-                    }
-                ),
+                difficulty_flags=list({*separation.difficulty_flags, *extra_flags}),
                 metadata={
                     **separation.metadata,
-                    "reason": "empty_asr_no_caption_dialogue",
+                    "reason": "asr_empty_despite_vad_speech" if dialogue_uncertain else "empty_asr_no_caption_dialogue",
+                    "vad_speech_ratio": vad.speech_ratio,
                     "source_caption_present": bool((resolved_input.source_caption or "").strip()),
                 },
             )
@@ -239,15 +256,23 @@ class AudioAnalysisService:
             settings_svc = WorkspaceSettingsService(self.db)
             db_prompt = settings_svc.get_translation_user_prompt(source_video.workspace_id)
             builder = self._translation_builder_for_workspace(source_video.workspace_id)
-            translations = (
-                builder.build(
-                    transcript_drafts,
-                    preset=request.translation_preset,
-                    user_prompt=db_prompt,
+            max_concurrency = self._translation_concurrency(builder)
+            try:
+                translations = (
+                    builder.build(
+                        transcript_drafts,
+                        preset=request.translation_preset,
+                        user_prompt=db_prompt,
+                        max_concurrency=max_concurrency,
+                    )
+                    if transcript_drafts
+                    else []
                 )
-                if transcript_drafts
-                else []
-            )
+            except RuntimeError as exc:
+                raise AudioAnalysisError(
+                    AudioAnalysisErrorCode.TRANSLATION_FAILED,
+                    str(exc),
+                ) from exc
             phase("translation_built", 85)
         flags_summary = Counter(
             flag
@@ -256,7 +281,11 @@ class AudioAnalysisService:
         )
         flags_summary.update(flag for translation in translations for flag in translation.quality_flags)
         flags_summary.update(vad.difficulty_flags)
-        if empty_asr_after_speech_gate or not vad.has_speech:
+        if dialogue_uncertain:
+            flags_summary.update(["asr_empty_despite_vad_speech", "needs_operator_review"])
+        elif empty_asr_after_speech_gate:
+            flags_summary.update(["skip_dubbing", "caption_not_dialogue", "dialogue_unverified"])
+        elif not vad.has_speech:
             flags_summary.update(["skip_dubbing", "caption_not_dialogue"])
 
         version = self._next_analysis_version(source_video.id)
@@ -265,9 +294,11 @@ class AudioAnalysisService:
             transcript_rows = self._persist_transcripts(source_video, transcript_drafts, version, job_id)
             translation_rows = self._persist_translations(source_video, transcript_rows, translations, job_id)
             meta = dict(source_video.metadata_json or {})
-            meta["has_speech"] = bool(vad.has_speech and transcript_rows)
+            meta["has_speech"] = bool(vad.has_speech and (transcript_rows or dialogue_uncertain))
             dialogue_phase = "translated_draft"
-            if not transcript_rows:
+            if dialogue_uncertain:
+                dialogue_phase = "dialogue_uncertain"
+            elif not transcript_rows:
                 dialogue_phase = "no_dialogue"
             elif skip_translation:
                 dialogue_phase = self._machine_approve_source_beats(
@@ -284,6 +315,14 @@ class AudioAnalysisService:
                 "speech_ratio": vad.speech_ratio,
                 "difficulty_flags": vad.difficulty_flags,
                 "metadata": vad.metadata,
+            }
+            meta["separation"] = {
+                "provider": (
+                    self.separation_provider.provider_name if vad.has_speech else "skipped"
+                ),
+                "fallback_used": separation.fallback_used,
+                "difficulty_flags": list(separation.difficulty_flags),
+                "metadata": dict(separation.metadata or {}),
             }
             source_video.metadata_json = meta
             assets = [
@@ -446,8 +485,7 @@ class AudioAnalysisService:
         settings_svc = WorkspaceSettingsService(self.db)
         db_prompt = settings_svc.get_translation_user_prompt(source_video.workspace_id)
         builder = self._translation_builder_for_workspace(source_video.workspace_id)
-        app_settings = get_settings()
-        max_concurrency = max(1, int(getattr(app_settings, "audio_translation_max_concurrency", 4) or 4))
+        max_concurrency = self._translation_concurrency(builder)
 
         def _progress(completed: int, total: int, **_: object) -> None:
             if on_progress is None or total <= 0:
@@ -458,13 +496,19 @@ class AudioAnalysisService:
 
         if on_progress is not None:
             on_progress("translate_start", 5)
-        translations = builder.build(
-            draft_segments,
-            preset=translation_preset,
-            user_prompt=db_prompt,
-            max_concurrency=max_concurrency,
-            on_progress=_progress,
-        )
+        try:
+            translations = builder.build(
+                draft_segments,
+                preset=translation_preset,
+                user_prompt=db_prompt,
+                max_concurrency=max_concurrency,
+                on_progress=_progress,
+            )
+        except RuntimeError as exc:
+            raise AudioAnalysisError(
+                AudioAnalysisErrorCode.TRANSLATION_FAILED,
+                str(exc),
+            ) from exc
         if on_progress is not None:
             on_progress("translate_persist", 92)
         gated = [row for row in translations if "translation_gate_failed" in (row.quality_flags or [])]
@@ -705,12 +749,7 @@ class AudioAnalysisService:
         translations,
         job_id: UUID | None,
     ) -> list[TranslationSegment]:
-        """
-        Upsert VI drafts keyed by (transcript_segment_id, language_code, version).
-
-        Re-running Translate literal marks prior rows non-current but the unique
-        constraint still blocks a second INSERT at the same version — update in place.
-        """
+        """Persist immutable VI draft versions; only a retry may update its own row."""
         rows: list[TranslationSegment] = []
         transcript_by_index = {row.segment_index: row for row in transcripts}
         for translation in translations:
@@ -726,33 +765,48 @@ class AudioAnalysisService:
                 if translation.estimated_tts_duration_seconds is not None
                 else None
             )
-            existing = self.db.scalar(
-                select(TranslationSegment).where(
+            retry_row = (
+                self.db.scalar(
+                    select(TranslationSegment).where(
+                        TranslationSegment.transcript_segment_id == transcript.id,
+                        TranslationSegment.language_code == "vi",
+                        TranslationSegment.created_by_job_id == job_id,
+                    )
+                )
+                if job_id is not None
+                else None
+            )
+            if retry_row is not None:
+                retry_row.text = translation.translated_text
+                retry_row.status = status
+                retry_row.segment_index = translation.segment_index
+                retry_row.translation_preset = translation.translation_preset
+                retry_row.duration_budget_ms = duration_budget_ms
+                retry_row.estimated_tts_duration_ms = estimated_tts_duration_ms
+                retry_row.quality_flags_json = {"flags": translation.quality_flags}
+                retry_row.created_by_job_id = job_id
+                retry_row.is_current = True
+                retry_row.metadata_json = translation.metadata
+                rows.append(retry_row)
+                continue
+
+            max_version = self.db.scalar(
+                select(func.max(TranslationSegment.version)).where(
                     TranslationSegment.transcript_segment_id == transcript.id,
                     TranslationSegment.language_code == "vi",
-                    TranslationSegment.version == transcript.version,
                 )
             )
-            if existing is not None:
-                existing.text = translation.translated_text
-                existing.status = status
-                existing.segment_index = translation.segment_index
-                existing.translation_preset = translation.translation_preset
-                existing.duration_budget_ms = duration_budget_ms
-                existing.estimated_tts_duration_ms = estimated_tts_duration_ms
-                existing.quality_flags_json = {"flags": translation.quality_flags}
-                existing.created_by_job_id = job_id
-                existing.is_current = True
-                existing.metadata_json = translation.metadata
-                rows.append(existing)
-                continue
+            next_version = max(
+                int(transcript.version or 1),
+                int(max_version or 0) + 1,
+            )
 
             row = TranslationSegment(
                 workspace_id=source_video.workspace_id,
                 source_video_id=source_video.id,
                 transcript_segment_id=transcript.id,
                 language_code="vi",
-                version=transcript.version,
+                version=next_version,
                 text=translation.translated_text,
                 status=status,
                 segment_index=translation.segment_index,
@@ -828,6 +882,8 @@ class AudioAnalysisService:
         }
 
     def _translation_payload(self, row: TranslationSegment) -> dict:
+        raw_status = getattr(row, "status", TranscriptSegmentStatus.NEEDS_REVIEW)
+        metadata = getattr(row, "metadata_json", None)
         return {
             "id": str(row.id),
             "transcript_segment_id": str(row.transcript_segment_id),
@@ -837,4 +893,6 @@ class AudioAnalysisService:
             "duration_budget_seconds": (row.duration_budget_ms or 0) / 1000,
             "estimated_tts_duration_seconds": (row.estimated_tts_duration_ms / 1000) if row.estimated_tts_duration_ms else None,
             "quality_flags": (row.quality_flags_json or {}).get("flags", []),
+            "status": getattr(raw_status, "value", str(raw_status)),
+            "metadata": dict(metadata or {}),
         }

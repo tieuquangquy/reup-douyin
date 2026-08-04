@@ -375,7 +375,7 @@ Status: Completed for minimal operational console scope.
 - `/ops/assets`
 - `/ops/publish-attempts`
 - `/ops/reconciliation`
-- `/ops/accounts`
+- `/publishing/accounts`
 - `/ops/routing-rules`
 - `/ops/risk`
 - `/ops/tools`
@@ -465,7 +465,7 @@ Existing APIs reused:
 - `apps/web/src/app/ops/assets/page.tsx`
 - `apps/web/src/app/ops/publish-attempts/page.tsx`
 - `apps/web/src/app/ops/reconciliation/page.tsx`
-- `apps/web/src/app/ops/accounts/page.tsx`
+- `apps/web/src/app/publishing/accounts/page.tsx`
 - `apps/web/src/app/ops/routing-rules/page.tsx`
 - `apps/web/src/app/ops/risk/page.tsx`
 - `apps/web/src/app/ops/tools/page.tsx`
@@ -498,7 +498,7 @@ Existing APIs reused:
   - `/ops/assets`
   - `/ops/publish-attempts`
   - `/ops/reconciliation`
-  - `/ops/accounts`
+  - `/publishing/accounts`
   - `/ops/routing-rules`
   - `/ops/risk`
   - `/ops/tools`

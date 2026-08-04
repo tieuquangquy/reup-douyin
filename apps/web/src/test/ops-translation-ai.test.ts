@@ -36,6 +36,9 @@ assert.match(sharedSource, /editingProfileId/, "Shared page must track editingPr
 assert.match(sharedSource, /ops-tts-list-toolbar/, "Shared page list mode must reuse TTS list toolbar CSS chrome");
 assert.match(sharedSource, /ops-tts-list-header/, "Tabs + Active toolbar must share one list header row");
 assert.match(sharedSource, /ops-tts-setup-table/, "Shared page must reuse TTS setup table CSS");
+assert.match(sharedSource, /ops-ai-control-center is-\$\{variant\}/, "Translation and Caption lists must use the shared AI Setup Control Center surface");
+assert.match(sharedSource, /ops-ai-registry-table is-llm/, "Translation setups must use the condensed semantic registry table");
+assert.match(sharedSource, /runtimeCol[\s\S]*connectionCol/, "Translation registry must group related connection fields");
 assert.match(sharedSource, /isOn \? \"is-active\"/, "On row (active+enabled) must get is-active class");
 assert.match(
   sharedSource,
@@ -117,34 +120,59 @@ assert.ok(viJson.opsTranslationAi?.testOkHint, "vi.opsTranslationAi.testOkHint m
 assert.ok(viJson.opsTranslationAi?.testOkDraftHint, "vi.opsTranslationAi.testOkDraftHint must exist");
 assert.match(componentSource, /formatProviderError/, "Model list errors must use provider error formatter");
 assert.match(componentSource, /ops-field-alert/, "Model list errors must render as a field alert, not raw muted dump");
+assert.match(
+  sharedSource,
+  /modelListError\s*&&\s*!testFailure\s*&&\s*!testing/,
+  "Model list alert must hide while Test failure banner owns the error, and while a Test is in flight (avoids flicker)"
+);
+
+const providerErrorLabels = {
+  unauthorized: "Invalid API key",
+  forbidden: "Access denied",
+  notFound: "Endpoint not found",
+  rateLimited: "Rate limited",
+  failed: "Could not load models",
+  checkKey: "Check the API key and try again.",
+  checkForbidden: "The provider rejected this request. Check Base URL, key permissions, or a gateway/firewall block.",
+  checkEndpoint: "Check Base URL and provider, then try again."
+};
 
 const openai401 = formatProviderError(
   'list_models_http_401:{ "error": { "message": "Incorrect API key provided: sk-9bea4***************3270. You can find your API key at https://platform.openai.com/account/api-keys.", "type": "invalid_request_error" } }',
-  {
-    unauthorized: "Invalid API key",
-    forbidden: "Access denied",
-    notFound: "Endpoint not found",
-    rateLimited: "Rate limited",
-    failed: "Could not load models",
-    checkKey: "Check the API key and try again.",
-    checkEndpoint: "Check Base URL and provider, then try again."
-  }
+  providerErrorLabels
 );
 assert.equal(openai401.title, "Invalid API key");
 assert.equal(openai401.httpStatus, 401);
 assert.match(openai401.message, /Incorrect API key/i);
 
+const opaque403 = formatProviderError("openai_compatible_http_403: error code: 1010", providerErrorLabels);
+assert.equal(opaque403.title, "Access denied");
+assert.equal(opaque403.httpStatus, 403);
+assert.match(opaque403.message, /rejected|Base URL|gateway|firewall/i);
+assert.doesNotMatch(opaque403.message, /error code:\s*1010/i, "Opaque gateway codes must not be shown raw to operators");
+
+const onTestStart = sharedSource.indexOf("async function onTest(");
+const onTestEnd = sharedSource.indexOf("function onProviderChange(", onTestStart);
+const onTestChunk = sharedSource.slice(onTestStart, onTestEnd > onTestStart ? onTestEnd : onTestStart + 2000);
+assert.match(onTestChunk, /if\s*\(result\.ok\)\s*\{[\s\S]*?notify\(/, "Successful Test connection may toast");
+assert.doesNotMatch(
+  onTestChunk,
+  /notify\(\{[\s\S]*?testFail/,
+  "Failed Test connection must not toast a bare Failed notice; the form banner owns the detail"
+);
+assert.doesNotMatch(
+  onTestChunk,
+  /setTestResult\(null\)/,
+  "Re-Test must not clear the previous banner mid-flight (that briefly reveals the model-list error)"
+);
+assert.match(sharedSource, /testErrorHintForbidden|testFailureHint/, "Failed Test banner must use status-aware next-step hints");
+assert.ok(enJson.opsTranslationAi?.errorCheckForbidden, "EN must define forbidden check copy");
+assert.ok(enJson.opsTranslationAi?.testErrorHintForbidden, "EN must define forbidden test hint");
+assert.ok(viJson.opsTranslationAi?.errorCheckForbidden, "VI must define forbidden check copy");
+
 const gemini429 = formatProviderError(
   'gemini_http_429:{"error": {"code": 429, "message": "You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits"}}',
-  {
-    unauthorized: "Invalid API key",
-    forbidden: "Access denied",
-    notFound: "Endpoint not found",
-    rateLimited: "Rate limited",
-    failed: "Could not load models",
-    checkKey: "Check the API key and try again.",
-    checkEndpoint: "Check Base URL and provider, then try again."
-  }
+  providerErrorLabels
 );
 assert.equal(gemini429.title, "Rate limited");
 assert.equal(gemini429.httpStatus, 429);
@@ -160,7 +188,8 @@ const urlopenTimeout = formatProviderError(
     rateLimited: "Rate limited",
     failed: "Could not load models",
     checkKey: "Check the API key and try again.",
-    checkEndpoint: "Could not reach the provider. Check network, API key, and Base URL."
+    checkEndpoint: "Could not reach the provider. Check network, API key, and Base URL.",
+    checkForbidden: "The provider rejected this request. Check Base URL, key permissions, or a gateway/firewall block."
   }
 );
 assert.equal(urlopenTimeout.title, "Could not load models");
@@ -242,8 +271,9 @@ assert.match(
   /renderFormAlert/,
   "Editor validation notices must use compact form alert chrome"
 );
-assert.match(sharedSource, /profile\.api_key/, "Table and editor must read plaintext api_key from Ops response");
-assert.match(sharedSource, /profile\.api_key \|\| profile\.api_key_masked/, "Table must prefer plaintext api_key over mask");
+assert.match(sharedSource, /profile\.api_key/, "Editor must read plaintext api_key from Ops response");
+assert.match(sharedSource, /ops-ai-inline-connection/, "Table must show compact credential status instead of rendering key material");
+assert.doesNotMatch(sharedSource, /profile\.api_key \|\| profile\.api_key_masked/, "Compact table must not render plaintext or masked key material");
 assert.match(sharedSource, /apiKeyInput:\s*\(data\.api_key/, "Edit form must prefill saved api_key");
 assert.match(apiSource, /api_key\?:/, "TranslationAi types must include optional api_key");
 assert.doesNotMatch(

@@ -55,6 +55,7 @@ assert.match(transcriptPage, /cancelRunningJob/, "Transcript cancellation semant
 assert.match(transcriptPage, /resumeActiveTranscriptJob/, "Transcript job re-attachment must remain");
 assert.match(transcriptPage, /translatePartialAfterJob/, "Transcript partial translation must remain inline");
 assert.match(transcriptPage, /jobId=\{analyzeJobId\}/, "Transcript job ID must remain visible");
+assert.match(finalReviewPage, /resumeActiveOcrJob/, "Final Review OCR re-attachment must remain");
 assert.match(finalReviewPage, /maxAttempts:\s*900/, "Final Review OCR polling budget must remain");
 assert.match(finalReviewPage, /renderQueued[\s\S]*notify/, "Final Review queued render job ID must announce via toast");
 assert.doesNotMatch(
@@ -67,7 +68,7 @@ assert.doesNotMatch(
     /async function handleStartFirstRender\(\)[\s\S]*?(?=async function handleRerender\(\))/
   )?.[0] ?? "";
   const rerenderFn = finalReviewPage.match(
-    /async function handleRerender\(\)[\s\S]*?(?=async function handleAnalyzeOcr\(\))/
+    /async function handleRerender\(\)[\s\S]*?(?=async function (?:settleOcrJob|handleAnalyzeOcr)\()/
   )?.[0] ?? "";
   assert.doesNotMatch(startRenderFn, /setError\((?!null\))/, "Start render must not keep failed status inline");
   assert.doesNotMatch(rerenderFn, /setError\((?!null\))/, "Rerender must not keep failed status inline");

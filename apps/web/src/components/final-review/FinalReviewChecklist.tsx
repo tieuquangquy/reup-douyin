@@ -3,6 +3,7 @@
 import { useT } from "../../lib/i18n";
 import type { ChecklistState, FinalReviewChecklistKey } from "../../types/final-review";
 import { checklistComplete } from "../../lib/finalReviewState";
+import { WorkItemActionIcon } from "../shared/WorkItemActionIcon";
 
 export const FINAL_REVIEW_CHECKLIST_KEYS: FinalReviewChecklistKey[] = [
   "narration_clear",
@@ -30,18 +31,26 @@ export function FinalReviewChecklist({
     <section className="final-panel fr-check" aria-label={t("finalReviewChecklist.title")}>
       <div className="fr-check__head">
         <div className="fr-check__title-row">
-          <h2>{t("finalReviewChecklist.title")}</h2>
-          <span className={`pill ${complete ? "good" : ""}`}>
-            {checkedCount}/{FINAL_REVIEW_CHECKLIST_KEYS.length}
-          </span>
+          <div className="fr-check__title-cluster">
+            <h2>{t("finalReviewChecklist.title")}</h2>
+            <span className={`pill ${complete ? "good" : ""}`}>
+              {checkedCount}/{FINAL_REVIEW_CHECKLIST_KEYS.length}
+            </span>
+          </div>
+          <div className="fr-check__title-actions">
+            <button
+              type="button"
+              className="fr-check__bulk"
+              onClick={() => onSetAll(!complete)}
+            >
+              <WorkItemActionIcon
+                className="fr-check__bulk-icon"
+                kind={complete ? "clear-selection" : "approve"}
+              />
+              {complete ? t("finalReviewChecklist.clearAll") : t("finalReviewChecklist.markAll")}
+            </button>
+          </div>
         </div>
-        <button
-          type="button"
-          className="fr-check__bulk"
-          onClick={() => onSetAll(!complete)}
-        >
-          {complete ? t("finalReviewChecklist.clearAll") : t("finalReviewChecklist.markAll")}
-        </button>
       </div>
       <ul className="fr-check__list">
         {FINAL_REVIEW_CHECKLIST_KEYS.map((key) => (

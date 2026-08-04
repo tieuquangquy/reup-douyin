@@ -1,4 +1,6 @@
-# Hard-sub E2E orchestrator
+# Hard-sub E2E orchestrator (legacy sample/V3.6 path)
+
+> This orchestrator is not the current v58 Phase 2 authority. See [`phase2-v58-ocr-contract.md`](./phase2-v58-ocr-contract.md).
 
 Shared core: `apps/api/src/media_pipeline/hardsub_e2e.py` — Phase 1 → 2 → 2.5 → 3+4.
 

@@ -26,7 +26,7 @@
 - `/ops/publish-health`
 - `/ops/publish-control`
 - `/ops/jobs`
-- `/ops/accounts`
+- `/publishing/accounts`
 - `/ops/reconciliation`
 - `/ops/routing-rules`
 - `/ops/risk`
@@ -90,7 +90,7 @@ Groups:
     - `/dashboard/publish-health`
     - `/publish-control`
 - Accounts & Routing
-  - `/ops/accounts`
+  - `/publishing/accounts`
   - `/ops/routing-rules`
 - Risk & Tools
   - `/ops/risk`

@@ -98,6 +98,27 @@ class PublishLifecycleServiceTests(unittest.TestCase):
         self.assertIsNone(draft.canonical_publish_attempt_id)
         self.assertEqual(draft.current_publication_status, ExternalPublicationStatus.FAILED)
 
+    def test_queued_attempt_moves_draft_to_publishing(self) -> None:
+        draft = SimpleNamespace(
+            id=uuid4(),
+            latest_publish_attempt_id=None,
+            canonical_publish_attempt_id=None,
+            current_publication_status=ExternalPublicationStatus.UNKNOWN,
+            current_external_publish_id=None,
+            current_external_permalink=None,
+            published_at=None,
+            last_publish_synced_at=None,
+            publication_summary_json=None,
+            error_message=None,
+            status=PublishDraftStatus.READY,
+            updated_at=None,
+        )
+        attempt = _attempt(status=PublishAttemptStatus.QUEUED)
+
+        self.service.sync_attempt_to_draft(draft, [attempt])
+
+        self.assertEqual(draft.status, PublishDraftStatus.PUBLISHING)
+
 
 if __name__ == "__main__":
     unittest.main()

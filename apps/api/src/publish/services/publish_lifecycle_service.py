@@ -32,6 +32,7 @@ class PublishLifecycleService:
             draft.current_external_permalink = latest.external_permalink
             draft.last_publish_synced_at = latest.last_status_checked_at or latest.finished_at
             if latest.status in {
+                PublishAttemptStatus.QUEUED,
                 PublishAttemptStatus.RUNNING,
                 PublishAttemptStatus.UPLOADING,
                 PublishAttemptStatus.PUBLISHING,

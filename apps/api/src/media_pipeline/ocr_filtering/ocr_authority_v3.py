@@ -12,6 +12,7 @@ from typing import Any, Literal, Sequence
 
 from src.media_pipeline.ocr_filtering.box_timeline_tracker import TimedBox, box_iou
 from src.media_pipeline.ocr_filtering.overlay_zones import (
+    is_compact_overlay_label,
     is_endcard_dense,
     is_mid_title_box,
 )
@@ -192,7 +193,10 @@ def classify_frame_state(evidence: FrameEvidence) -> FrameState:
         return "endcard"
     if any(is_in_subtitle_band(_to_detected(box)) for box in verified):
         return "hardsub"
-    if any(is_mid_title_box(_to_detected(box)) for box in verified):
+    if any(
+        is_mid_title_box(_to_detected(box)) or is_compact_overlay_label(_to_detected(box))
+        for box in verified
+    ):
         return "title"
     return "blank"
 
@@ -205,6 +209,11 @@ def _plausible_local_hardsub(box: TimedBox) -> bool:
         and 0.01 <= float(box.h) <= MAX_HARDSUB_HEIGHT
         and float(box.w) * float(box.h) <= MAX_HARDSUB_AREA
     )
+
+
+def _plausible_local_overlay_label(box: TimedBox) -> bool:
+    detected = _to_detected(box)
+    return is_mid_title_box(detected) or is_compact_overlay_label(detected)
 
 
 def _center_distance(a: TimedBox, b: TimedBox) -> float:
@@ -258,12 +267,39 @@ def _has_local_hardsub_signal(
     return False
 
 
+def _has_local_label_signal(
+    ocr_box: TimedBox,
+    local_boxes: Sequence[TimedBox],
+) -> bool:
+    for local in local_boxes:
+        if not _plausible_local_overlay_label(local):
+            continue
+        if box_iou(local, ocr_box) >= 0.10 or _center_distance(local, ocr_box) <= 0.10:
+            return True
+    return False
+
+
+def _box_key(box: TimedBox) -> tuple[float, float, float, float, str]:
+    return (
+        round(float(box.x), 3),
+        round(float(box.y), 3),
+        round(float(box.w), 3),
+        round(float(box.h), 3),
+        str(box.text or ""),
+    )
+
+
 def authority_boxes_for_frame(
     evidence: FrameEvidence,
     *,
     min_confidence: float = DEFAULT_EVIDENCE_CONFIDENCE,
 ) -> list[TimedBox]:
-    """Return renderable boxes. Every result has verified CJK text evidence."""
+    """
+    Return renderable caption boxes (verified CJK) across **all** active zones.
+
+    Hardsub + mid-title + compact action labels may co-exist on one frame.
+    Local geometry alone still cannot invent caption text (cover-only is separate).
+    """
     all_verified = verified_endcard_boxes(
         evidence.ocr_boxes,
         min_confidence=min_confidence,
@@ -286,22 +322,97 @@ def authority_boxes_for_frame(
         return []
     if state == "endcard":
         return list(all_verified)
-    if state == "title":
-        title_boxes = [box for box in verified if is_mid_title_box(_to_detected(box))]
-        title_active = any(
-            is_mid_title_box(_to_detected(local))
-            and any(
-                box_iou(local, title) >= 0.10
-                or _center_distance(local, title) <= 0.10
+
+    out: list[TimedBox] = []
+    seen: set[tuple[float, float, float, float, str]] = set()
+
+    def _add(box: TimedBox) -> None:
+        key = _box_key(box)
+        if key in seen:
+            return
+        seen.add(key)
+        out.append(box)
+
+    title_boxes = [box for box in verified if is_mid_title_box(_to_detected(box))]
+    compact_boxes = [
+        box for box in verified if is_compact_overlay_label(_to_detected(box))
+    ]
+    title_active = any(
+        _plausible_local_overlay_label(local)
+        and any(
+            box_iou(local, title) >= 0.10 or _center_distance(local, title) <= 0.12
+            for title in (*title_boxes, *compact_boxes)
+        )
+        for local in evidence.local_boxes
+    )
+    if title_active:
+        for box in title_boxes:
+            _add(box)
+        # Co-visible compact mid labels (kcal / 加盐) while a title local is live.
+        for box in compact_boxes:
+            near_title = any(
+                box_iou(box, title) >= 0.05 or _center_distance(box, title) <= 0.22
                 for title in title_boxes
             )
-            for local in evidence.local_boxes
-        )
-        return title_boxes if title_active else []
+            if near_title or _has_local_label_signal(box, evidence.local_boxes):
+                _add(box)
 
-    hardsubs = [box for box in verified if is_in_subtitle_band(_to_detected(box))]
-    return [
-        _hardsub_geometry(box, evidence.local_boxes)
-        for box in hardsubs
-        if _has_local_hardsub_signal(box, evidence.local_boxes)
-    ]
+    for box in verified:
+        det = _to_detected(box)
+        if is_in_subtitle_band(det) and _has_local_hardsub_signal(
+            box, evidence.local_boxes
+        ):
+            _add(_hardsub_geometry(box, evidence.local_boxes))
+            continue
+        if is_mid_title_box(det):
+            continue  # handled via title cluster above
+        if is_compact_overlay_label(det) and _has_local_label_signal(
+            box, evidence.local_boxes
+        ):
+            _add(box)
+
+    return out
+
+
+def merge_local_cover_only(
+    approved: Sequence[TimedBox],
+    local_boxes: Sequence[TimedBox],
+    *,
+    iou_thresh: float = 0.20,
+) -> list[TimedBox]:
+    """
+    Attach unmatched local geometry as ``cover_only`` (no VI burn-in).
+
+    Used for chrome / secondary hardsub bands that OCR missed while ink/DBNet
+    still saw a text-shaped region. A left chrome island may IoU-overlap a wide
+    hardsub OCR box — still keep it when centers are far apart.
+    """
+    out = list(approved)
+    for local in local_boxes:
+        if float(local.w) <= 0.0 or float(local.h) <= 0.0:
+            continue
+        if not (
+            _plausible_local_hardsub(local) or _plausible_local_overlay_label(local)
+        ):
+            continue
+        duplicate = False
+        for existing in out:
+            if box_iou(local, existing) < float(iou_thresh):
+                continue
+            if _center_distance(local, existing) <= 0.12:
+                duplicate = True
+                break
+        if duplicate:
+            continue
+        out.append(
+            TimedBox(
+                x=float(local.x),
+                y=float(local.y),
+                w=float(local.w),
+                h=float(local.h),
+                text="",
+                confidence=0.0,
+                cover_only=True,
+            )
+        )
+    return out

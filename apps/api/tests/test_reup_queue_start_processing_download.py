@@ -5,19 +5,23 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from uuid import uuid4
 
-from src.enums import ReupQueueAction, ReupQueueMediaPrepStatus, ReupQueueStatus
+from src.enums import JobStatus, ReupQueueAction, ReupQueueMediaPrepStatus, ReupQueueStatus
 from src.services.download_service import DownloadJobResult
 from src.services.reup_queue_service import ReupQueueService
 
 
 class FakeActionDb:
-    def __init__(self, item):
+    def __init__(self, item, job=None):
         self.item = item
+        self.job = job
         self.committed = False
         self.refreshed = []
 
     def scalar(self, _stmt):
         return self.item
+
+    def get(self, _model, _pk):
+        return self.job
 
     def commit(self):
         self.committed = True
@@ -99,8 +103,9 @@ class ReupQueueStartProcessingDownloadTests(unittest.TestCase):
     def test_start_processing_reuses_existing_job_id(self) -> None:
         existing_job_id = uuid4()
         item = queue_item(status=ReupQueueStatus.READY_FOR_PROCESSING, job_id=existing_job_id)
+        live_job = SimpleNamespace(id=existing_job_id, status=JobStatus.RUNNING)
         download_service = FakeDownloadService()
-        updated = ReupQueueService(FakeActionDb(item), download_service=download_service).apply_action(
+        updated = ReupQueueService(FakeActionDb(item, job=live_job), download_service=download_service).apply_action(
             item.id,
             action=ReupQueueAction.START_PROCESSING,
         )

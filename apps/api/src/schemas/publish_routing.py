@@ -97,6 +97,10 @@ class PublishControlQueueResponse(BaseModel):
     assigned_drafts: list[PublishDraftQueueItem]
     scheduled_drafts: list[PublishDraftQueueItem]
     needs_attention: list[PublishDraftQueueItem]
+    unassigned_total: int = 0
+    assigned_total: int = 0
+    scheduled_total: int = 0
+    needs_attention_total: int = 0
 
 
 class PublishRoutingRuleResponse(BaseModel):

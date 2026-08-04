@@ -17,7 +17,11 @@ except ImportError:  # Allows `python src/main.py` from apps/worker during local
 
 ensure_api_src_on_path()
 
+from src.core.settings import get_settings
 from src.db.session import get_session_factory
+from src.analytics.services.publication_metric_cadence_service import PublicationMetricCadenceService
+from src.services.artifact_retention import sweep_reclaimable_artifacts
+from src.services.job_heartbeat import JobHeartbeat
 from src.services.job_runner import JobRunner, StepHandlerRegistry
 
 logger = logging.getLogger(__name__)
@@ -93,6 +97,8 @@ class LocalPollingWorker:
         self.handlers = handlers
         self.broker = RedisJobBroker(redis_url=redis_url, queue_name=redis_queue_name) if redis_url else None
         self._stop_requested = False
+        self._last_artifact_sweep_at: float | None = None
+        self._last_metric_schedule_sweep_at: float | None = None
 
     def stop(self) -> None:
         self._stop_requested = True
@@ -109,8 +115,89 @@ class LocalPollingWorker:
             job = runner.claim_next_job(self.worker_id)
             if job is None:
                 return False
-            runner.run_job(job.id)
+            # Long media steps (render, OCR) must refresh their lock, otherwise the stale
+            # sweeper judges them by wall clock since claim and requeues healthy work.
+            with JobHeartbeat(
+                session_factory=session_factory,
+                job_id=job.id,
+                worker_id=self.worker_id,
+                interval_seconds=float(getattr(get_settings(), "job_heartbeat_seconds", 30) or 30),
+            ):
+                runner.run_job(job.id)
             return True
+
+    def maybe_sweep_artifacts(self, *, now: float | None = None, interval_seconds: float | None = None) -> None:
+        """Reclaim finished clips' intermediates on a slow clock.
+
+        Housekeeping touches the filesystem, so it runs on its own interval rather than on
+        every poll, and a failure here must never disturb job execution.
+        """
+        now = time.monotonic() if now is None else now
+        if interval_seconds is None:
+            interval_seconds = float(getattr(get_settings(), "artifact_retention_sweep_interval_seconds", 900) or 900)
+        last = self._last_artifact_sweep_at
+        if last is not None and (now - last) < interval_seconds:
+            return
+        self._last_artifact_sweep_at = now
+        try:
+            with get_session_factory()() as db:
+                freed = sweep_reclaimable_artifacts(db)
+            if freed:
+                logger.info(
+                    "worker_reclaimed_artifacts",
+                    extra={"worker_id": self.worker_id, "bytes_reclaimed": freed},
+                )
+        except Exception:
+            logger.exception("worker_artifact_sweep_failed", extra={"worker_id": self.worker_id})
+
+    def maybe_dispatch_metric_schedules(
+        self,
+        *,
+        now: float | None = None,
+        interval_seconds: float | None = None,
+    ) -> None:
+        settings = get_settings()
+        if not bool(getattr(settings, "metrics_scheduler_enabled", False)):
+            return
+        now = time.monotonic() if now is None else now
+        if interval_seconds is None:
+            interval_seconds = float(
+                getattr(settings, "metrics_scheduler_sweep_interval_seconds", 60) or 60
+            )
+        last = self._last_metric_schedule_sweep_at
+        if last is not None and (now - last) < interval_seconds:
+            return
+        self._last_metric_schedule_sweep_at = now
+        try:
+            with get_session_factory()() as db:
+                summary = PublicationMetricCadenceService(db).dispatch_due(
+                    limit=max(1, int(getattr(settings, "metrics_scheduler_dispatch_limit", 20) or 20))
+                )
+            if summary["evaluated_count"]:
+                logger.info(
+                    "worker_metric_schedules_dispatched",
+                    extra={"worker_id": self.worker_id, **summary},
+                )
+        except Exception:
+            logger.exception(
+                "worker_metric_schedule_dispatch_failed",
+                extra={"worker_id": self.worker_id},
+            )
+
+    def _release_locks_after_failure(self) -> None:
+        try:
+            with get_session_factory()() as db:
+                released = JobRunner(db, handlers=self.handlers).release_orphaned_locks(self.worker_id)
+            if released:
+                logger.warning(
+                    "worker_released_locks_after_failure",
+                    extra={"worker_id": self.worker_id, "count": released},
+                )
+        except Exception:
+            logger.exception(
+                "worker_release_locks_after_failure_failed",
+                extra={"worker_id": self.worker_id},
+            )
 
     def run_forever(self) -> None:
         logger.info("worker_started", extra={"worker_id": self.worker_id, "redis_enabled": self.broker is not None})
@@ -119,11 +206,18 @@ class LocalPollingWorker:
         try:
             session_factory = get_session_factory()
             with session_factory() as db:
-                released = JobRunner(db, handlers=self.handlers).release_orphaned_locks(self.worker_id)
+                runner = JobRunner(db, handlers=self.handlers)
+                released = runner.release_orphaned_locks(self.worker_id)
                 if released:
                     logger.warning(
                         "worker_released_orphan_locks",
                         extra={"worker_id": self.worker_id, "count": released},
+                    )
+                stale = runner.release_stale_running_locks()
+                if stale:
+                    logger.warning(
+                        "worker_released_stale_locks",
+                        extra={"worker_id": self.worker_id, "count": stale},
                     )
         except Exception:
             logger.exception(
@@ -135,10 +229,29 @@ class LocalPollingWorker:
             if self.broker is not None:
                 message = self.broker.pop(timeout_seconds=max(1, int(self.poll_interval_seconds)))
             try:
+                # Reclaim hung downloads (e.g. register_assets stuck at ~71%) before claim.
+                try:
+                    with get_session_factory()() as db:
+                        stale = JobRunner(db, handlers=self.handlers).release_stale_running_locks()
+                        if stale:
+                            logger.warning(
+                                "worker_released_stale_locks",
+                                extra={"worker_id": self.worker_id, "count": stale},
+                            )
+                except Exception:
+                    logger.exception(
+                        "worker_release_stale_locks_failed",
+                        extra={"worker_id": self.worker_id},
+                    )
+                self.maybe_sweep_artifacts()
+                self.maybe_dispatch_metric_schedules()
                 did_work = self.run_once(message)
             except Exception:
                 logger.exception("worker_run_once_failed", extra={"worker_id": self.worker_id})
                 did_work = False
+                # The job this worker was executing is still RUNNING in the database.
+                # Requeue it now so a single crash cannot block the download slot.
+                self._release_locks_after_failure()
             if not did_work and self.broker is None:
                 time.sleep(self.poll_interval_seconds)
         logger.info("worker_stopped", extra={"worker_id": self.worker_id})

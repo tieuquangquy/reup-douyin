@@ -1,11 +1,13 @@
 /** TTS Ops provider taxonomy + local install recipes (UI authority). */
 
+import type { TtsAiCatalog } from "./api";
+
 export type TtsProviderKind = "local" | "cloud" | "http" | "system";
 
 export const TTS_KIND_ORDER: TtsProviderKind[] = ["local", "cloud", "http", "system"];
 
 export const TTS_PROVIDERS_BY_KIND: Record<TtsProviderKind, readonly string[]> = {
-  local: ["edge", "vieneu", "cli", "custom"],
+  local: ["edge", "vieneu", "omnivoice", "cli", "custom"],
   cloud: ["google", "azure", "elevenlabs", "openai"],
   http: ["openai_compatible", "http_custom"],
   system: ["auto", "placeholder"]
@@ -81,7 +83,7 @@ const LOCAL_RECIPES: Record<string, LocalInstallRecipe> = {
     installCommand: "pip install git+https://github.com/debpalash/OmniVoice-Studio.git",
     extraRequirement: "First run may download Hugging Face models; GPU optional",
     defaultVoice: "auto",
-    defaultModel: "omnivoice",
+    defaultModel: "k2-fsa/OmniVoice",
     defaultLanguage: "vi",
     providerSlug: "omnivoice",
     hintKey: "opsTtsAi.hintOmnivoice"
@@ -107,6 +109,9 @@ export const OMNIVOICE_CURATED_MODELS = [
   "confucius4-tts"
 ] as const;
 
+/** Models currently backed by a real reup-douyin synthesize adapter. */
+export const OMNIVOICE_SUPPORTED_MODELS = ["k2-fsa/OmniVoice"] as const;
+
 export const OMNIVOICE_CURATED_VOICES = [
   { id: "auto", label: "Auto (model picks voice)" },
   { id: "alloy", label: "alloy (OpenAI-compat)" },
@@ -128,6 +133,45 @@ export const OMNIVOICE_CURATED_VOICES = [
 
 export function getOmnivoiceCuratedCatalogCapabilities(): TtsFieldCapabilities {
   return { voice: true, model: true, styles: false, api_key: false, base_url: false, local_backend: false, cli_binary: false };
+}
+
+export function isOmnivoiceProvider(provider: string): boolean {
+  const mode = provider.trim().toLowerCase();
+  return mode === "omnivoice" || mode === "omnivoice-studio" || mode === "omnivoice_studio";
+}
+
+/**
+ * Hydrate a known provider catalog without re-running Install/Test.
+ *
+ * Older OmniVoice profiles may have a successful persisted probe without the
+ * catalog payload. Voice presets are deterministic, so the editor can safely
+ * use the curated fallback. Model choices stay limited to adapters that the
+ * worker can actually execute.
+ */
+export function resolveTtsCatalogForProvider(
+  provider: string,
+  persistedCatalog: TtsAiCatalog | null | undefined
+): TtsAiCatalog | null {
+  if (!isOmnivoiceProvider(provider)) return persistedCatalog ?? null;
+
+  const persistedVoices = persistedCatalog?.voices?.length ? persistedCatalog.voices : null;
+  const supportedModels = (persistedCatalog?.models || []).filter((model) =>
+    OMNIVOICE_SUPPORTED_MODELS.includes(model as (typeof OMNIVOICE_SUPPORTED_MODELS)[number])
+  );
+
+  return {
+    source: persistedCatalog?.source || "curated",
+    voices: persistedVoices
+      ? [...persistedVoices]
+      : OMNIVOICE_CURATED_VOICES.map((voice) => ({ id: voice.id, label: voice.label })),
+    styles: [...(persistedCatalog?.styles || [])],
+    models: supportedModels.length ? supportedModels : [...OMNIVOICE_SUPPORTED_MODELS],
+    default_voice_id: persistedCatalog?.default_voice_id || "auto",
+    warning: persistedCatalog?.warning || "",
+    sample_rate: persistedCatalog?.sample_rate ?? null,
+    backends: [...(persistedCatalog?.backends || [])],
+    capabilities: getOmnivoiceCuratedCatalogCapabilities()
+  };
 }
 
 /** Map common package / repo names → recipe key. */
@@ -164,7 +208,7 @@ export function resolveTtsProviderKind(provider: string): TtsProviderKind {
 
 export function isPresetLocalProvider(provider: string): boolean {
   const mode = provider.trim().toLowerCase();
-  return mode === "edge" || mode === "vieneu" || mode === "cli";
+  return mode === "edge" || mode === "vieneu" || mode === "omnivoice" || mode === "cli";
 }
 
 export function isCustomLocalProvider(provider: string): boolean {

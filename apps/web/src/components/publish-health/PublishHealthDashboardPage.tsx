@@ -119,7 +119,8 @@ export function PublishHealthDashboardPage() {
       <AsyncContentBoundary
         refreshing={request.refreshing}
         status={boundaryStatus}
-        skeleton={<OpsState title={t("publishHealthPage.loading")} detail={t("publishHealthPage.loadingDetail")} />}
+        skeletonVariant="dashboard"
+        loadingLabel={t("publishHealthPage.loadingDetail")}
         errorState={<OpsState title={t("publishHealthPage.unavailable")} detail={request.error?.message ?? t("publishHealthPage.loadError")} retry={() => void load("initial")} />}
       >
       <main className="ops-page ops-ph-page">
@@ -190,7 +191,7 @@ export function PublishHealthDashboardPage() {
               </label>
               <nav className="ops-ph-actions" aria-label={t("publishHealthPage.triage")}>
                 <Link href="/ops/reconciliation">{t("publishHealthPage.openReconciliation")}</Link>
-                <Link href="/ops/accounts">{t("publishHealthPage.openAccounts")}</Link>
+                <Link href="/publishing/accounts">{t("publishHealthPage.openAccounts")}</Link>
               </nav>
             </div>
 

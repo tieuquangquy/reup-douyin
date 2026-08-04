@@ -2,9 +2,12 @@
 
 import { useT } from "../../lib/i18n";
 import type { EditableSegment, TranscriptValidationWarning } from "../../types/transcript-editor";
-import type { TtsClipFit } from "../../types/tts";
-import { formatMs, formatTranslationAuthorityChip, resolveTranslationAuthority } from "../../lib/transcriptEditorState";
-import { flagToneClassName, resolveSegmentCompareState } from "../../lib/transcriptEditorPresentation";
+import { isTtsFitProblem, type TtsClipFit } from "../../types/tts";
+import { formatTranslationAuthorityChip, resolveTranslationAuthority } from "../../lib/transcriptEditorState";
+import {
+  flagsForFocusQuietSummary,
+  resolveSegmentCompareState
+} from "../../lib/transcriptEditorPresentation";
 import {
   classifyTtsFitTone,
   formatTtsFitRatio,
@@ -132,6 +135,7 @@ export function TranscriptFocusEditor({
 }: Props) {
   const t = useT();
   const flags = [...segment.difficultyFlags, ...segment.qualityFlags];
+  const quietSummaryFlags = flagsForFocusQuietSummary(flags, ttsClipFit?.fit_status);
   const compare = resolveSegmentCompareState(segment);
   const authority = formatTranslationAuthorityChip(resolveTranslationAuthority(allSegments));
   const cardWarnings = warnings.filter(
@@ -142,9 +146,10 @@ export function TranscriptFocusEditor({
       warning.code.includes("low_confidence") ||
       warning.code.includes("likely_mistranscribed")
   );
-  const rangeLabel = `${formatMs(segment.startMs)} – ${formatMs(segment.endMs)}`;
   const fitStatusKey = ttsFitStatusKey(ttsClipFit?.fit_status);
   const fitRatio = formatTtsFitRatio(ttsClipFit?.fit_ratio ?? null);
+  const showTtsFitBanner = Boolean(ttsClipFit?.fit_status && isTtsFitProblem(ttsClipFit.fit_status));
+  const fitTone = classifyTtsFitTone(ttsClipFit?.fit_status);
 
   return (
     <section className="transcript-focus-editor transcript-focus-editor--dual" aria-label={t("transcriptEditorBench.focusLabel")}>
@@ -154,22 +159,7 @@ export function TranscriptFocusEditor({
             {t("transcriptEditorBench.segmentTitle").replace("{index}", String(segment.segmentIndex))}
             {segment.isDirty ? <span className="dirty-dot">{t("transcriptEditorRow.edited")}</span> : null}
           </h2>
-          <p className="transcript-focus-chrome__range">{rangeLabel}</p>
         </div>
-
-        <details className="transcript-focus-chrome__run">
-          <summary>{t("transcriptEditorBench.runDetails")}</summary>
-          <div className="transcript-focus-chrome__run-body">
-            <span className="transcript-focus-editor__job-id">{sourceVideoId}</span>
-            {analysisVersion ? <span className="pill">{analysisVersion}</span> : null}
-            {translationPreset ? <span className="pill">{translationPreset}</span> : null}
-            {authority ? (
-              <span className="pill good translation-authority-chip" title={t("transcriptEditorHeader.translationAuthorityHint")}>
-                {authority}
-              </span>
-            ) : null}
-          </div>
-        </details>
 
         <div className="transcript-focus-chrome__toolbar">
           <TranscriptSegmentTimingEditor
@@ -177,7 +167,7 @@ export function TranscriptFocusEditor({
             endMs={segment.endMs}
             onChange={(patch) => onChange(patch)}
           />
-          <div className="transcript-focus-editor__actions segment-ops">
+          <div className="transcript-focus-editor__actions segment-ops segment-ops--toolbar">
             <button
               type="button"
               className={`segment-ops__btn segment-ops__btn--play${isPlaying ? " is-playing" : ""}`}
@@ -187,29 +177,31 @@ export function TranscriptFocusEditor({
               <SegmentOpsIcon kind={isPlaying ? "pause" : "play"} />
               <span>{t(isPlaying ? "transcriptEditorRow.pause" : "transcriptEditorRow.play")}</span>
             </button>
-            <button type="button" className="segment-ops__btn" onClick={onSplit}>
-              <SegmentOpsIcon kind="split" />
-              <span>{t("transcriptEditorRow.split")}</span>
-            </button>
-            <button type="button" className="segment-ops__btn" disabled={!canMergePrevious} onClick={onMergePrevious}>
-              <SegmentOpsIcon kind="merge-prev" />
-              <span>{t("transcriptEditorRow.mergePrev")}</span>
-            </button>
-            <button type="button" className="segment-ops__btn" disabled={!canMergeNext} onClick={onMergeNext}>
-              <SegmentOpsIcon kind="merge-next" />
-              <span>{t("transcriptEditorRow.mergeNext")}</span>
-            </button>
-            <button type="button" className="segment-ops__btn" onClick={onReset} disabled={!segment.isDirty}>
-              <SegmentOpsIcon kind="reset" />
-              <span>{t("transcriptEditorRow.reset")}</span>
-            </button>
+            <div className="segment-ops__group" role="group">
+              <button type="button" className="segment-ops__btn" onClick={onSplit}>
+                <SegmentOpsIcon kind="split" />
+                <span>{t("transcriptEditorRow.split")}</span>
+              </button>
+              <button type="button" className="segment-ops__btn" disabled={!canMergePrevious} onClick={onMergePrevious}>
+                <SegmentOpsIcon kind="merge-prev" />
+                <span>{t("transcriptEditorRow.mergePrev")}</span>
+              </button>
+              <button type="button" className="segment-ops__btn" disabled={!canMergeNext} onClick={onMergeNext}>
+                <SegmentOpsIcon kind="merge-next" />
+                <span>{t("transcriptEditorRow.mergeNext")}</span>
+              </button>
+              <button type="button" className="segment-ops__btn" onClick={onReset} disabled={!segment.isDirty}>
+                <SegmentOpsIcon kind="reset" />
+                <span>{t("transcriptEditorRow.reset")}</span>
+              </button>
+            </div>
           </div>
         </div>
       </header>
 
       <div className="transcript-dual-pane">
         <label className="transcript-dual-pane__zh">
-          <span className="transcript-dual-pane__tab is-active">{t("transcriptEditorBench.originalChinese")}</span>
+          <span className="transcript-dual-pane__tab">{t("transcriptEditorBench.originalChinese")}</span>
           <textarea
             className="source-textarea-primary"
             value={segment.sourceText}
@@ -241,18 +233,20 @@ export function TranscriptFocusEditor({
       </div>
 
       <div className="segment-meta">
-        {ttsClipFit?.fit_status ? (
-          <div className="transcript-tts-fit" aria-label={t("transcriptEditorTts.fitLabel")}>
-            <span className={flagToneClassName(classifyTtsFitTone(ttsClipFit.fit_status))}>
+        {showTtsFitBanner ? (
+          <div
+            className={`transcript-tts-fit is-${fitTone}`}
+            aria-label={t("transcriptEditorTts.fitLabel")}
+            role="status"
+          >
+            <strong className="transcript-tts-fit__title">
               {t(`transcriptEditorTts.fitStatus.${fitStatusKey}`)}
               {fitRatio ? ` · ${fitRatio}` : ""}
-            </span>
-            {fitStatusKey !== "fits_well" && fitStatusKey !== "unknown" ? (
-              <p className="transcript-tts-fit__hint">{t(`transcriptEditorTts.fitHint.${fitStatusKey}`)}</p>
-            ) : null}
+            </strong>
+            <p className="transcript-tts-fit__hint">{t(`transcriptEditorTts.fitHint.${fitStatusKey}`)}</p>
           </div>
         ) : null}
-        <TranscriptSegmentFlags flags={flags} mode="summary" />
+        <TranscriptSegmentFlags flags={quietSummaryFlags} mode="summary" />
       </div>
 
       {cardWarnings.length > 0 ? (
@@ -263,17 +257,33 @@ export function TranscriptFocusEditor({
         </ul>
       ) : null}
 
-      {flags.length > 0 ? (
-        <details className="compare-machine-details">
-          <summary>
-            <span className="compare-machine-details__title">{t("transcriptEditorCompare.machineDetails")}</span>
-            <span className="compare-machine-details__hint">{t("transcriptEditorCompare.machineDetailsHint")}</span>
-          </summary>
-          <div className="compare-machine-details__body">
-            <TranscriptSegmentFlags flags={flags} mode="all" operatorQuiet={false} />
+      <div className="transcript-focus-secondary">
+        <details className="transcript-focus-chrome__run">
+          <summary>{t("transcriptEditorBench.runDetails")}</summary>
+          <div className="transcript-focus-chrome__run-body">
+            <span className="transcript-focus-editor__job-id">{sourceVideoId}</span>
+            {analysisVersion ? <span className="pill">{analysisVersion}</span> : null}
+            {translationPreset ? <span className="pill">{translationPreset}</span> : null}
+            {authority ? (
+              <span className="pill good translation-authority-chip" title={t("transcriptEditorHeader.translationAuthorityHint")}>
+                {authority}
+              </span>
+            ) : null}
           </div>
         </details>
-      ) : null}
+
+        {flags.length > 0 ? (
+          <details className="compare-machine-details">
+            <summary>
+              <span className="compare-machine-details__title">{t("transcriptEditorCompare.machineDetails")}</span>
+              <span className="compare-machine-details__hint">{t("transcriptEditorCompare.machineDetailsHint")}</span>
+            </summary>
+            <div className="compare-machine-details__body">
+              <TranscriptSegmentFlags flags={flags} mode="all" operatorQuiet={false} />
+            </div>
+          </details>
+        ) : null}
+      </div>
     </section>
   );
 }

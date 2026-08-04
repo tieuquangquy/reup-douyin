@@ -78,6 +78,9 @@ class ReupQueueActionRequest(BaseModel):
     note: str | None = Field(default=None, max_length=1000)
     blocked_reason: str | None = Field(default=None, max_length=1000)
     media_prep_notes: str | None = Field(default=None, max_length=1000)
+    # START_AUTO_PIPELINE: auto_to_tts (default) | auto_to_render
+    # SET_AUTOMATION: manual | auto_to_tts | auto_to_render (required)
+    pipeline_mode: str | None = Field(default=None, max_length=40)
     media_prep_status: ReupQueueMediaPrepStatus | None = None
 
 

@@ -185,6 +185,7 @@ def render_video_single_pass(
     frame_width: int | None = None,
     frame_height: int | None = None,
     attached_pic: Path | str | None = None,
+    sample_dir: Path | str | None = None,
 ) -> Path:
     """
     Render once: mask Chinese + burn Vietnamese + anti-detection.
@@ -243,6 +244,7 @@ def render_video_single_pass(
             frame_width=frame_width,
             frame_height=frame_height,
             attached_pic=attached_pic,
+            sample_dir=sample_dir,
         )
 
     return _render_video_ffmpeg_delogo(

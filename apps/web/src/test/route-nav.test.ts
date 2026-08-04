@@ -5,7 +5,7 @@
  * 1. All unified operator routes resolve to existing page modules.
  * 2. Redirect routes map old paths to their canonical new paths.
  * 3. All hrefs produced by operatorHomeState.ts point to declared routes.
- * 4. Sidebar IA: Operator = day journey; Ops = monitor + AI settings.
+ * 4. Sidebar IA: Operator = day journey; Ops = monitor + AI settings + account setup.
  *
  * No live API, DB, or browser is required. Tests run with tsx.
  */
@@ -36,13 +36,19 @@ const OPERATOR_STUDIO_ROUTES = [
   "/selection/review-board",
   "/selection/candidates",
   "/selection/reup-queue",
+  "/selection/capture-inbox",
   // Production
   "/production/downloads",
+  "/production/output-review",
   "/production/transcript-editor/[sourceVideoId]",
   "/production/final-review/[sourceVideoId]",
   // Publishing
   "/publishing/drafts",
   "/publishing/drafts/[draftId]",
+  "/publishing/accounts",
+  "/publishing/publications",
+  "/publishing/settings/content-intelligence",
+  "/publishing/settings/affiliate-catalog",
   "/publishing/export-packages",
   "/publishing/export-packages/[packageId]",
   "/publishing/publish-handoffs",
@@ -51,7 +57,6 @@ const OPERATOR_STUDIO_ROUTES = [
   // Ops Console
   "/ops",
   "/ops/pipeline",
-  "/ops/accounts",
   "/ops/assets",
   "/ops/health",
   "/ops/jobs",
@@ -65,7 +70,6 @@ const OPERATOR_STUDIO_ROUTES = [
   "/ops/routing-rules",
   "/ops/tools",
   "/ops/extensions/douyin",
-  "/ops/extensions/douyin/capture-inbox",
   // Cross-cutting
   "/optimization",
   "/publish-control",
@@ -151,6 +155,7 @@ const KNOWN_LEGACY_REDIRECT_SOURCES = new Set<string>([
   "/source-videos/[id]/publish",
   "/review-board",
   "/publish-control",
+  "/ops/extensions/douyin/capture-inbox",
 ]);
 
 function isKnownLegacyRedirect(href: string): boolean {
@@ -215,6 +220,9 @@ assert.equal(opsLabels().includes("nav.tools"), false, "Tools must be removed fr
 assert.ok(opsLabels().includes("nav.jobMonitor"), "Job Monitor stays on Ops");
 assert.ok(opsLabels().includes("nav.users"), "Users stays on Ops");
 assert.ok(opsLabels().includes("nav.captionAiSettings"), "Caption AI stays on Ops");
+assert.ok(operatorLabels().includes("nav.accounts"), "Accounts must be directly accessible from Operator Publishing");
+assert.ok(operatorLabels().includes("nav.publishingSettings"), "Workspace Publishing Settings must be directly accessible from Operator Studio");
+assert.equal(opsLabels().includes("nav.accounts"), false, "Accounts must not require the Ops Console surface");
 assert.equal(opsLabels().includes("nav.swagger"), false, "Swagger must not appear in Ops sidebar");
 assert.equal(opsLabels().includes("nav.apiAuthUi"), false, "API login UI must not appear in Ops sidebar");
 assert.equal(
@@ -227,12 +235,16 @@ assert.equal(operatorLabels().includes("nav.douyinAccounts"), false, "Douyin Acc
 assert.ok(operatorLabels().includes("nav.douyinExtensionSetup"), "Extension Setup stays on Operator Studio");
 
 const operatorItemCount = operatorNavSections.reduce((n, s) => n + s.items.length, 0);
-assert.ok(operatorItemCount <= 12, `Operator sidebar should stay lean (got ${operatorItemCount})`);
+assert.ok(operatorItemCount <= 15, `Operator sidebar should stay lean after adding workspace Publishing Settings (got ${operatorItemCount})`);
 
 assert.ok(isNavItemActive(findNavItem("nav.home", undefined, "operator"), "/"), "Home must be active on /");
 assert.ok(
-  isNavItemActive(findNavItem("nav.captureInbox", undefined, "operator"), "/ops/extensions/douyin/capture-inbox"),
+  isNavItemActive(findNavItem("nav.captureInbox", undefined, "operator"), "/selection/capture-inbox"),
   "Capture Inbox must be active on Operator"
+);
+assert.ok(
+  isNavItemActive(findNavItem("nav.captureInbox", undefined, "operator"), "/ops/extensions/douyin/capture-inbox"),
+  "Capture Inbox must cover legacy Ops redirect route"
 );
 assert.ok(isNavItemActive(findNavItem("nav.douyinExtensionSetup", undefined, "operator"), "/setup/douyin-extension"), "Extension setup must be active");
 assert.ok(isNavItemActive(findNavItem("nav.reviewBoard", undefined, "operator"), "/selection/review-board"), "Review board must be active on canonical route");
@@ -249,9 +261,13 @@ assert.equal(
 );
 assert.ok(operatorLabels().includes("nav.pipelineDashboard"), "Pipeline Dashboard must appear on Operator Studio");
 assert.ok(isNavItemActive(findNavItem("nav.users", undefined, "ops"), "/ops/users"), "Users must be active on Ops");
+assert.ok(isNavItemActive(findNavItem("nav.accounts", "/publishing/accounts", "operator"), "/publishing/accounts"), "Accounts must be active in Publishing");
 assert.ok(isNavItemActive(findNavItem("nav.transcriptEditor", undefined, "operator"), "/production/transcript-editor/source-1"), "Transcript editor must highlight");
 assert.ok(isNavItemActive(findNavItem("nav.finalReview", undefined, "operator"), "/production/final-review/source-1"), "Final review must highlight");
 assert.ok(isNavItemActive(findNavItem("nav.publishDrafts", undefined, "operator"), "/source-videos/source-1/publish"), "Legacy publish draft route must highlight drafts");
+assert.ok(isNavItemActive(findNavItem("nav.publications", undefined, "operator"), "/publishing/publications"), "Publication Library must be active");
+assert.ok(isNavItemActive(findNavItem("nav.publishingSettings", undefined, "operator"), "/publishing/settings/content-intelligence"), "Content Intelligence settings must activate Publishing Settings");
+assert.ok(isNavItemActive(findNavItem("nav.publishingSettings", undefined, "operator"), "/publishing/settings/affiliate-catalog"), "Affiliate Catalog must activate Publishing Settings");
 
 assert.equal(
   operatorNavSections.some((section) =>
@@ -293,14 +309,20 @@ assert.equal(extractSourceVideoIdFromPath("/production/final-review/source-1"), 
 
 assert.deepEqual(getBreadcrumbs("/selection/review-board").map((item) => item.label), ["nav.home", "nav.sectionWork", "nav.reviewBoard"]);
 assert.deepEqual(getBreadcrumbs("/selection/reup-queue").map((item) => item.label), ["nav.home", "nav.sectionWork", "nav.reupQueue"]);
+assert.deepEqual(getBreadcrumbs("/selection/capture-inbox").map((item) => item.label), ["nav.home", "nav.sectionWork", "nav.captureInbox"]);
 assert.deepEqual(getBreadcrumbs("/ops/extensions/douyin/capture-inbox").map((item) => item.label), ["nav.home", "nav.sectionWork", "nav.captureInbox"]);
 assert.deepEqual(getBreadcrumbs("/intake").map((item) => item.label), ["nav.home", "nav.intake"]);
 assert.deepEqual(getBreadcrumbs("/accounts/douyin").map((item) => item.label), ["nav.home"]);
 assert.deepEqual(getBreadcrumbs("/setup/douyin-extension").map((item) => item.label), ["nav.home", "nav.sectionSetup", "nav.douyinExtensionSetup"]);
 assert.deepEqual(getBreadcrumbs("/ops/extensions/douyin").map((item) => item.label), ["nav.opsConsole"]);
+assert.deepEqual(getBreadcrumbs("/production/output-review").map((item) => item.label), ["nav.home", "nav.sectionProduction", "nav.outputReview"]);
 assert.deepEqual(getBreadcrumbs("/production/transcript-editor/source-1").map((item) => item.label), ["nav.home", "nav.sectionProduction", "nav.transcriptEditor"]);
 assert.deepEqual(getBreadcrumbs("/production/final-review/source-1").map((item) => item.label), ["nav.home", "nav.sectionProduction", "nav.finalReview"]);
 assert.deepEqual(getBreadcrumbs("/source-videos/source-1/publish").map((item) => item.label), ["nav.home", "nav.sectionPublishing", "nav.publishDraft"]);
+assert.deepEqual(getBreadcrumbs("/publishing/publications").map((item) => item.label), ["nav.home", "nav.sectionPublishing", "nav.publications"]);
+assert.deepEqual(getBreadcrumbs("/publishing/settings/content-intelligence").map((item) => item.label), ["nav.home", "nav.sectionPublishingSettings", "nav.contentIntelligenceSettings"]);
+assert.deepEqual(getBreadcrumbs("/publishing/settings/affiliate-catalog").map((item) => item.label), ["nav.home", "nav.sectionPublishingSettings", "nav.affiliateCatalog"]);
+assert.deepEqual(getBreadcrumbs("/publishing/accounts").map((item) => item.label), ["nav.home", "nav.sectionPublishing", "nav.accounts"]);
 assert.deepEqual(getBreadcrumbs("/dashboard/publish-health").map((item) => item.label), ["nav.opsConsole", "nav.publishHealth"]);
 assert.deepEqual(getBreadcrumbs("/publishing/export-packages").map((item) => item.label), ["nav.home", "nav.sectionPublishing", "nav.exportPackages"]);
 assert.deepEqual(getBreadcrumbs("/publishing/export-packages/package-1").map((item) => item.label), ["nav.home", "nav.sectionPublishing", "nav.exportPackage"]);

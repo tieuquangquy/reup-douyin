@@ -47,7 +47,7 @@ export function OptimizationPage() {
   }
 
   if (!snapshot && !request.error) {
-    return <main className="optimization-page"><AsyncContentBoundary skeletonVariant="detail" status="loading"><span /></AsyncContentBoundary></main>;
+    return <main className="optimization-page"><AsyncContentBoundary skeletonVariant="detail" loadingLabel={t("optimizationPage.loading")} status="loading"><span /></AsyncContentBoundary></main>;
   }
 
   if (request.error && !snapshot) {

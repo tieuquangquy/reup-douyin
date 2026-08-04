@@ -36,7 +36,7 @@ assert.doesNotMatch(popupSource, /\/extensions\/douyin\/review(?!-board)/, "popu
 assert.doesNotMatch(popupSource, /\/extensions\/douyin\/review-board/, "popup runtime must not emit /extensions/douyin/review-board CTA route");
 
 assert.match(readinessSource, /label: "Open Capture Inbox"/, "review CTA label must be Open Capture Inbox");
-assert.match(readinessSource, /Open \/extensions\/douyin\/capture-inbox to review collected videos\./, "review CTA copy must point to the locked capture-inbox route");
+assert.match(readinessSource, /Open \/selection\/capture-inbox to review collected videos\./, "review CTA copy must point to the locked capture-inbox route");
 assert.doesNotMatch(readinessSource, /Open Review Board/, "readiness copy must not mention Review Board");
 
 assert.match(viewModelSource, /export const PRODUCT_TERMS = \{/, "view-model layer must expose a shared terminology helper");

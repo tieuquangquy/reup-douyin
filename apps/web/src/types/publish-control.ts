@@ -70,6 +70,10 @@ export type PublishControlQueue = {
   assigned_drafts: PublishQueueItem[];
   scheduled_drafts: PublishQueueItem[];
   needs_attention: PublishQueueItem[];
+  unassigned_total?: number;
+  assigned_total?: number;
+  scheduled_total?: number;
+  needs_attention_total?: number;
 };
 
 export type RoutingRule = {
@@ -104,4 +108,3 @@ export type BulkAssignPayload = AssignDraftPayload & {
 };
 
 export type AssignmentResult = PublishDraft;
-

@@ -11,6 +11,7 @@ import { useAuth } from "../../lib/auth";
 import { useT } from "../../lib/i18n";
 
 const OPS_ADMIN_ROLES = new Set(["owner", "admin"]);
+const ACCOUNT_ROLE_PRIORITY = ["owner", "admin", "operator", "viewer"] as const;
 
 function roleMayOpenOps(roles: string[] | undefined): boolean {
   return (roles ?? []).some((role) => OPS_ADMIN_ROLES.has(role));
@@ -27,6 +28,10 @@ function shortAccountTriggerLabel(label: string): string {
   const trimmed = label.trim();
   if (trimmed.length <= 16) return trimmed;
   return `${trimmed.slice(0, 13)}...`;
+}
+
+function primaryAccountRole(roles: string[] | undefined): string {
+  return ACCOUNT_ROLE_PRIORITY.find((role) => roles?.includes(role)) ?? roles?.[0] ?? "operator";
 }
 
 function MenuCaretIcon() {
@@ -55,6 +60,22 @@ function WorkspaceSwitchIcon() {
   );
 }
 
+function MenuArrowIcon() {
+  return (
+    <span aria-hidden="true" className="app-topbar-menu-arrow">
+      <svg fill="none" viewBox="0 0 16 16"><path d="M3.5 8h9M9 4.5 12.5 8 9 11.5" /></svg>
+    </span>
+  );
+}
+
+function LogoutIcon() {
+  return (
+    <span aria-hidden="true" className="app-topbar-menu-icon">
+      <svg fill="none" viewBox="0 0 16 16"><path d="M6.5 3H4.2A1.2 1.2 0 0 0 3 4.2v7.6A1.2 1.2 0 0 0 4.2 13h2.3M9.5 5l3 3-3 3M6 8h6.5" /></svg>
+    </span>
+  );
+}
+
 export function Topbar({
   surface,
   title,
@@ -76,7 +97,12 @@ export function Topbar({
   // Fail-closed: switching surfaces goes through the destination login portal.
   const switchHref = surface === "operator" ? loginPathForSurface("ops") : loginPathForSurface("operator");
   const hasPageActions = Boolean(actions);
-  const accountLabel = me?.email || me?.displayName || t("topbar.account");
+  const accountEmail = me?.email || t("topbar.account");
+  const accountDisplayName = me?.displayName?.trim() || accountEmail;
+  const accountLabel = accountEmail;
+  const accountRole = primaryAccountRole(me?.roles);
+  const workspaceLabel = me?.workspaceSlug || t("common.localWorkspace");
+  const workspaceCount = me?.memberships.length ?? 0;
   const accountMenuRef = useRef<HTMLDetailsElement>(null);
 
   useEffect(() => {
@@ -90,20 +116,24 @@ export function Topbar({
   }, []);
 
   return (
-    <header className="app-topbar">
+    <header className={`app-topbar is-${surface}`}>
       <div className="app-topbar-context">
-        <nav className="app-breadcrumbs" aria-label={t("nav.breadcrumbs")}>
-          {breadcrumbs.map((crumb, index) => (
-            <span key={`${crumb.label}-${index}`}>
-              {crumb.href && index < breadcrumbs.length - 1 ? <a href={crumb.href}>{t(crumb.label)}</a> : <span>{t(crumb.label)}</span>}
-            </span>
-          ))}
-        </nav>
-        <h1>{title}</h1>
-        <div className="app-topbar-meta">
-          <span className="eyebrow">{t(getSurfaceLabelKey(surface))}</span>
-          <StatusBadge label={t("common.localWorkspace")} tone="muted" />
-          {description ? <p>{description}</p> : null}
+        <div className="app-topbar-context__copy">
+          <nav className="app-breadcrumbs" aria-label={t("nav.breadcrumbs")}>
+            {breadcrumbs.map((crumb, index) => (
+              <span key={`${crumb.label}-${index}`}>
+                {crumb.href && index < breadcrumbs.length - 1 ? <a href={crumb.href}>{t(crumb.label)}</a> : <span>{t(crumb.label)}</span>}
+              </span>
+            ))}
+          </nav>
+          <div className="app-topbar-title-row">
+            <h1>{title}</h1>
+            <StatusBadge label={t("common.localWorkspace")} tone="muted" />
+          </div>
+          <div className="app-topbar-meta">
+            <span className="eyebrow"><i aria-hidden="true" />{t(getSurfaceLabelKey(surface))}</span>
+            {description ? <p>{description}</p> : null}
+          </div>
         </div>
       </div>
       <div className="app-topbar-command-bar" aria-label={t("quickActions")}>
@@ -119,27 +149,42 @@ export function Topbar({
             </summary>
             <div className="app-topbar-menu-panel app-topbar-account-panel" role="menu">
               <div className="app-topbar-account-header">
-                <p className="app-topbar-account-summary" title={accountLabel}>
-                  {accountLabel}
-                </p>
-                <p className="app-topbar-account-surface">{t(getSurfaceLabelKey(surface))}</p>
+                <span aria-hidden="true" className="app-topbar-account-watermark">{accountInitial(accountLabel)}</span>
+                <span aria-hidden="true" className="app-topbar-account-avatar is-panel">{accountInitial(accountLabel)}</span>
+                <div className="app-topbar-account-identity">
+                  <p className="app-topbar-account-summary" title={accountDisplayName}>{accountDisplayName}</p>
+                  {accountDisplayName !== accountEmail ? <p className="app-topbar-account-email" title={accountEmail}>{accountEmail}</p> : null}
+                  <div className="app-topbar-account-badges">
+                    <p className="app-topbar-account-surface"><i aria-hidden="true" />{t(getSurfaceLabelKey(surface))}</p>
+                    <span className={`app-topbar-account-role is-${accountRole}`}>{t(`topbar.roles.${accountRole}`)}</span>
+                  </div>
+                </div>
+                <div className="app-topbar-account-workspace">
+                  <span>{t("topbar.workspace")}</span>
+                  <strong title={workspaceLabel}>{workspaceLabel}</strong>
+                  {workspaceCount > 1 ? <small>{t("topbar.workspaceCount").replace("{count}", String(workspaceCount))}</small> : null}
+                </div>
               </div>
-              {showWorkspaceSwitch ? (
-                <>
+              <div className="app-topbar-account-commands" role="none">
+                {showWorkspaceSwitch ? (
+                  <>
                   <a className="app-topbar-menu-link" href={switchHref} role="menuitem">
                     <WorkspaceSwitchIcon />
-                    <span>{switchLabel}</span>
+                    <span className="app-topbar-menu-copy">{switchLabel}</span>
+                    <MenuArrowIcon />
                   </a>
                   <div className="app-topbar-menu-separator" role="separator" />
-                </>
-              ) : null}
-              <div className="app-topbar-account-language" role="none">
-                <p className="app-topbar-menu-heading">{t("topbar.preferences")}</p>
-                <LanguageSwitcher />
+                  </>
+                ) : null}
+                <div className="app-topbar-account-language" role="none">
+                  <p className="app-topbar-menu-heading">{t("topbar.preferences")}</p>
+                  <LanguageSwitcher />
+                </div>
               </div>
               <div className="app-topbar-menu-separator" role="separator" />
               <button className="app-topbar-menu-button app-topbar-menu-logout" onClick={logout} role="menuitem" type="button">
-                {t("topbar.logout")}
+                <LogoutIcon />
+                <span>{t("topbar.logout")}</span>
               </button>
             </div>
           </details>

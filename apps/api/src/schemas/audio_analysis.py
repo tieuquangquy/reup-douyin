@@ -22,6 +22,18 @@ class ApproveSourceTranscriptResponse(BaseModel):
     dialogue_phase: str
 
 
+class ApproveTranslationDraftRequest(BaseModel):
+    operator_id: str = "frontend_operator"
+
+
+class ApproveTranslationDraftResponse(BaseModel):
+    source_video_id: UUID
+    approved_segments: int
+    binding_sha256: str
+    resumed_queue_items: int = 0
+    job_id: UUID | None = None
+
+
 class AudioAnalysisCreateResponse(BaseModel):
     job_id: UUID
     status: JobStatus

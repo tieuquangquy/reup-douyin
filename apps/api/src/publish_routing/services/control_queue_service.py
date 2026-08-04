@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from src.enums import PublishDraftStatus, PublishTargetPlatform
@@ -14,16 +14,20 @@ from src.schemas.publish_routing import PublishControlQueueResponse, PublishDraf
 
 
 class ControlQueueService:
-    def __init__(self, db: Session):
+    def __init__(self, db: Session, *, workspace_id: UUID | None = None):
         self.db = db
-        self.health_service = AccountHealthService(db)
+        self.workspace_id = workspace_id
+        self.health_service = AccountHealthService(db, workspace_id=workspace_id)
         self.recommendation_service = RoutingRecommendationService(db)
 
     def queue(self, *, platform: PublishTargetPlatform = PublishTargetPlatform.FACEBOOK_REELS, limit: int = 100) -> PublishControlQueueResponse:
+        base_filters = [PublishDraft.target_platform == platform.value]
+        if self.workspace_id is not None:
+            base_filters.append(PublishDraft.workspace_id == self.workspace_id)
         drafts = list(
             self.db.scalars(
                 select(PublishDraft)
-                .where(PublishDraft.target_platform == platform.value)
+                .where(*base_filters)
                 .order_by(PublishDraft.updated_at.desc())
                 .limit(limit)
             )
@@ -36,7 +40,14 @@ class ControlQueueService:
             assigned_drafts=[item for item in items if item.status == PublishDraftStatus.READY and item.assigned_platform_account_id is not None],
             scheduled_drafts=[item for item in items if item.status == PublishDraftStatus.SCHEDULED],
             needs_attention=[item for item in items if item.status in {PublishDraftStatus.NEEDS_ATTENTION, PublishDraftStatus.FAILED}],
+            unassigned_total=self._count_drafts(*base_filters, PublishDraft.status == PublishDraftStatus.READY, PublishDraft.assigned_platform_account_id.is_(None)),
+            assigned_total=self._count_drafts(*base_filters, PublishDraft.status == PublishDraftStatus.READY, PublishDraft.assigned_platform_account_id.is_not(None)),
+            scheduled_total=self._count_drafts(*base_filters, PublishDraft.status == PublishDraftStatus.SCHEDULED),
+            needs_attention_total=self._count_drafts(*base_filters, PublishDraft.status.in_([PublishDraftStatus.NEEDS_ATTENTION, PublishDraftStatus.FAILED])),
         )
+
+    def _count_drafts(self, *filters: object) -> int:
+        return int(self.db.scalar(select(func.count(PublishDraft.id)).where(*filters)) or 0)
 
     def _item(self, draft: PublishDraft) -> PublishDraftQueueItem:
         try:
@@ -63,4 +74,3 @@ class ControlQueueService:
             recommendation_reasons=reasons,
             warnings=warnings,
         )
-

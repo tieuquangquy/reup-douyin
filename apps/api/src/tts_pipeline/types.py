@@ -5,7 +5,7 @@ from enum import StrEnum
 from uuid import UUID
 
 
-TTS_PIPELINE_VERSION = "TTS_PIPELINE_V1"
+TTS_PIPELINE_VERSION = "TTS_PIPELINE_V2"
 
 
 class TimingFitStatus(StrEnum):
@@ -27,6 +27,9 @@ class TtsRequest:
     source_video_id: UUID
     voice_config: VoiceConfig = field(default_factory=VoiceConfig)
     force_refresh: bool = False
+    # Immutable auto-queue recipe authority. Manual Preview/Generate requests
+    # leave this unset and continue using the active Ops workspace profile.
+    runtime_authority: dict | None = None
 
 
 @dataclass(frozen=True)

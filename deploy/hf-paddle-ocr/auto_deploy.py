@@ -32,10 +32,23 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 README_DEPLOY = SCRIPT_DIR / "README_DEPLOY.md"
 REPO_ROOT = SCRIPT_DIR.parents[1]  # deploy/hf-paddle-ocr → deploy → repo
 ENV_PATH = REPO_ROOT / ".env"
+# Keep Local↔Cloud switchable from the same key in all app env files.
+ENV_PATHS = (
+    ENV_PATH,
+    REPO_ROOT / "apps" / "api" / ".env",
+    REPO_ROOT / "apps" / "worker" / ".env",
+)
 OCR_ENV_KEY = "OCR_ENDPOINT_URL"
 
-DEFAULT_SERVICE = "paddle-ocr-api"
-DEFAULT_REGION = "asia-southeast1"
+DEFAULT_SERVICE = "paddle-ocr-vl16"
+DEFAULT_REGION = "us-central1"
+# Cloud Run env for PaddleOCR-VL-1.6 (must match Dockerfile / README_DEPLOY).
+DEFAULT_SET_ENV_VARS = (
+    "OCR_PADDLE_ENGINE=vl16,"
+    "OCR_PADDLE_NO_FALLBACK=1,"
+    "OCR_PADDLE_VL_DEVICE=cpu,"
+    "OCR_PADDLE_VL_SKIP_PROBE=1"
+)
 
 RUN_APP_URL_RE = re.compile(
     r"https://[a-z0-9][a-z0-9\-]*\.a\.run\.app",
@@ -110,13 +123,14 @@ def parse_deploy_defaults_from_readme(readme: Path) -> dict[str, str]:
     defaults = {
         "service": DEFAULT_SERVICE,
         "region": DEFAULT_REGION,
-        "memory": "8Gi",
+        "memory": "16Gi",
         "cpu": "4",
-        "concurrency": "2",
+        "concurrency": "1",
         "min_instances": "0",
-        "max_instances": "5",
+        "max_instances": "1",
         "port": "8080",
-        "timeout": "300",
+        "timeout": "3600",
+        "set_env_vars": DEFAULT_SET_ENV_VARS,
     }
     if not readme.is_file():
         return defaults
@@ -139,6 +153,7 @@ def parse_deploy_defaults_from_readme(readme: Path) -> dict[str, str]:
         ("max_instances", r"--max-instances\s+(\S+)"),
         ("port", r"--port\s+(\S+)"),
         ("timeout", r"--timeout\s+(\S+)"),
+        ("set_env_vars", r"--set-env-vars\s+(\S+)"),
     ):
         hit = re.search(pattern, block)
         if hit:
@@ -147,6 +162,7 @@ def parse_deploy_defaults_from_readme(readme: Path) -> dict[str, str]:
 
 
 def build_deploy_command(cfg: dict[str, str], *, source_dir: Path) -> list[str]:
+    set_env = (cfg.get("set_env_vars") or DEFAULT_SET_ENV_VARS).strip()
     return [
         "gcloud",
         "run",
@@ -163,7 +179,7 @@ def build_deploy_command(cfg: dict[str, str], *, source_dir: Path) -> list[str]:
         "--cpu",
         cfg["cpu"],
         "--concurrency",
-        cfg.get("concurrency", "2"),
+        cfg.get("concurrency", "1"),
         "--min-instances",
         cfg["min_instances"],
         "--max-instances",
@@ -172,7 +188,9 @@ def build_deploy_command(cfg: dict[str, str], *, source_dir: Path) -> list[str]:
         "--port",
         cfg["port"],
         "--timeout",
-        cfg.get("timeout", "300"),
+        cfg.get("timeout", "900"),
+        "--set-env-vars",
+        set_env,
         "--quiet",
     ]
 
@@ -326,11 +344,14 @@ def main(argv: list[str] | None = None) -> int:
 
     base = service_url.rstrip("/")
     predict_url = base if base.endswith("/predict") else f"{base}/predict"
-    upsert_env_var(ENV_PATH, OCR_ENV_KEY, predict_url)
+    for env_path in ENV_PATHS:
+        if env_path.is_file() or env_path == ENV_PATH:
+            upsert_env_var(env_path, OCR_ENV_KEY, predict_url)
+            print(f"OK: wrote {env_path}")
     print(f"\nOK: service URL = {service_url}")
-    print(f"OK: wrote {ENV_PATH}")
     print(f"OK: {OCR_ENV_KEY}={predict_url}")
     print("\nPhase 2 will call this via os.environ / .env (RestOcrEndpointProvider).")
+    print("Restart API/worker after changing OCR_ENDPOINT_URL.")
     return 0
 
 

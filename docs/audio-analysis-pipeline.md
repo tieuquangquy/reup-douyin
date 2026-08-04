@@ -44,11 +44,21 @@ Future providers may also write:
 
 See also `docs/localization-reup-pipeline-design.md`.
 
-- **VAD:** `SileroVadProvider` (falls back to `HeuristicVadProvider` when torch/Silero unavailable). Result is persisted as `has_speech` on `SourceVideo.metadata_json` and in `AUDIO_ANALYSIS_METADATA`. When `has_speech` is false, STT/translation/separation are skipped (`skip_dubbing`).
+- **VAD:** `SileroVadProvider` runs Silero waveform inference when the `silero-vad` package is installed (`pip install silero-vad`; model weights ship with the wheel, no runtime download) and records measured `speech_seconds` / `speech_ratio` / `speech_segment_count` plus the `silero_vad_executed` flag. Speech shorter than `min_speech_seconds` (0.8s) does not open a dubbing lane (`speech_below_threshold`). Falls back to `HeuristicVadProvider` with `silero_unavailable` / `silero_failed` when the package is missing or inference raises. Result is persisted as `has_speech` on `SourceVideo.metadata_json` and in `AUDIO_ANALYSIS_METADATA`. When `has_speech` is false, STT/translation/separation are skipped (`skip_dubbing`).
 - **Source separation:** `DemucsSourceSeparationProvider` runs Demucs two-stem vocals when `demucs` is importable (`python -m demucs --two-stems=vocals`), caches `{stem}_vocals.wav`, and points STT at that key. Falls back with `demucs_unavailable` / `demucs_failed` when import or execution fails (never `demucs_not_executed`).
 - **Caption↔ASR consensus (ASR-first):** After STT with spoken units, `apply_caption_asr_consensus` only flags `caption_agreed` / `caption_asr_conflict` / `source_unverified`. **Caption never replaces DialogueBeat text** (Douyin title/hashtag is metadata/OCR later). Punctuation-only units (`!`) are dropped. Empty ASR never invents beats from caption.
-- **STT:** `FunasrSttProvider` (Paraformer-zh when `funasr` installed). If unavailable/timeout/empty → **no DialogueBeats** (Douyin title/hashtag caption is not speech). `dialogue_phase=no_dialogue` + `skip_dubbing`. Untimed FunASR blobs stay **one DialogueBeat** then `duration_fit` into the media window (no automatic `sentence_split`; operator may Split in Transcript Editor).
-- **Translation:** `DurationConstrainedTranslationProvider` — primary from Ops **Translation AI** DB override when enabled, else **Gemini** (`GEMINI_API_KEY`, `GEMINI_TRANSLATION_MODEL`) / Ollama / OpenAI-compatible; MyMemory zh→vi only for LLM-down / CJK recovery. Job `translation_count` = filled VI only.
+- **STT:** `FunasrSttProvider` (Paraformer-zh when `funasr` installed). `sentence_info`
+  remains the first timing authority. When Paraformer omits sentences but returns a
+  word-level `timestamp` array, the adapter now creates DialogueBeats at measured
+  pauses (700 ms) with an 8-second safety bound; it no longer stretches the whole
+  utterance into one full-video slot. This preserves the real gaps used by joined TTS
+  and prevents narration from playing only at the beginning of the video. A genuinely
+  untimed blob still stays one DialogueBeat and is `duration_fit` into the media window
+  for explicit operator splitting. If STT is unavailable/timeout/empty → **no
+  DialogueBeats** (Douyin title/hashtag caption is not speech). Outcome depends on VAD
+  evidence: measured speech plus empty ASR becomes `dialogue_uncertain`; without a
+  measurement it remains `no_dialogue` + `skip_dubbing`.
+- **Translation:** `DurationConstrainedTranslationProvider` — primary from Ops **Translation AI** DB override when enabled, else **Gemini** (`GEMINI_API_KEY`, `GEMINI_TRANSLATION_MODEL`) / Ollama / OpenAI-compatible. The production high-quality lane is fail-closed: an LLM/provider failure never silently injects MyMemory into the draft. Gemini free-tier calls are sequential and paced by `GEMINI_TRANSLATION_MIN_REQUEST_INTERVAL_SECONDS` (default 13 seconds); HTTP 429 retries wait at least 60 seconds. Job `translation_count` = filled VI only.
 
 ### Reup Queue wiring
 
@@ -89,6 +99,7 @@ Editors should only load `is_current = true` rows by default.
 - `transcription_failed`
 - `transcript_build_failed`
 - `translation_failed`
+- `translation_review_required` (durable queue checkpoint before TTS, not a provider failure)
 - `persistence_failed`
 
 ## Phase 1 Limits

@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
+import math
+import re
+import threading
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -11,15 +16,36 @@ from typing import Protocol
 
 from src.audio_pipeline.machine_translate import contains_cjk, mymemory_zh_to_vi
 from src.audio_pipeline.providers import estimate_tts_duration_seconds
+from src.audio_pipeline.speech_budget import (
+    DEFAULT_FIT_TOLERANCE,
+    DEFAULT_VI_UNITS_PER_SECOND,
+    assess_speech_budget,
+    extract_protected_tokens,
+    validate_protected_tokens,
+)
 from src.audio_pipeline.types import TranslationDraftSegment, TranslationPreset
 
 logger = logging.getLogger(__name__)
 
 # Approx Vietnamese spoken syllables per second for length budgets.
-VI_SYLLABLES_PER_SECOND = 4.5
+VI_SYLLABLES_PER_SECOND = DEFAULT_VI_UNITS_PER_SECOND
 FIT_RATIO = 1.15
 # Keep chat-LLM repair short; MT recovery is cheaper than multi-round Ollama.
 DEFAULT_CJK_REPAIR_ROUNDS = 1
+
+_PROVIDER_CONFIGURATION_FAILURE_MARKERS = (
+    "http_401",
+    "http_403",
+    "api key has expired",
+    "api key expired",
+    "api key đã hết hạn",
+    "api_key_missing",
+)
+
+
+def _is_provider_configuration_failure(exc: Exception) -> bool:
+    message = str(exc or "").strip().casefold()
+    return any(marker in message for marker in _PROVIDER_CONFIGURATION_FAILURE_MARKERS)
 
 
 class LlmClient(Protocol):
@@ -51,10 +77,14 @@ class GeminiHttpClient:
     timeout_seconds: float = 90.0
     provider_name: str = "gemini"
     opener: object | None = None
+    min_request_interval_seconds: float = 0.0
+    _request_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    _last_request_started_at: float | None = field(default=None, init=False, repr=False)
 
     def complete(self, prompt: str) -> str:
         if not self.api_key:
             raise RuntimeError("gemini_api_key_missing")
+        self._wait_for_rate_budget()
         url = (
             f"https://generativelanguage.googleapis.com/v1beta/models/"
             f"{self.model}:generateContent?key={self.api_key}"
@@ -78,6 +108,19 @@ class GeminiHttpClient:
             detail = exc.read().decode("utf-8", errors="replace")
             raise RuntimeError(f"gemini_http_{exc.code}:{detail[:200]}") from exc
         return _extract_gemini_text(payload)
+
+    def _wait_for_rate_budget(self) -> None:
+        interval = max(0.0, float(self.min_request_interval_seconds or 0.0))
+        if interval <= 0:
+            return
+        with self._request_lock:
+            now = time.monotonic()
+            previous = self._last_request_started_at
+            if previous is not None:
+                remaining = interval - (now - previous)
+                if remaining > 0:
+                    time.sleep(remaining)
+            self._last_request_started_at = time.monotonic()
 
 
 @dataclass
@@ -172,13 +215,19 @@ class DurationConstrainedTranslationProvider:
 
     primary: LlmClient
     fallback: LlmClient | None = None
-    max_rewrite_rounds: int = 2
+    max_rewrite_rounds: int = 4
     max_cjk_repair_rounds: int = DEFAULT_CJK_REPAIR_ROUNDS
     machine_translate: Callable[[str], str] | None = field(default=None)
+    # Legacy/manual callers may opt into literal MT recovery. The production
+    # high-quality provider factory disables it so one transient LLM failure
+    # cannot silently mix MyMemory text into an otherwise LLM-authored draft.
+    allow_machine_translate_recovery: bool = True
     # When set (incl. from DB workspace settings), overrides file/env/builtin prompts.
     user_prompt: str | None = None
     provider_name: str = "duration_constrained_llm"
     fit_ratio: float = FIT_RATIO
+    budget_units_per_second: float = VI_SYLLABLES_PER_SECOND
+    budget_tolerance: float = DEFAULT_FIT_TOLERANCE
 
     def __post_init__(self) -> None:
         if self.machine_translate is None:
@@ -230,6 +279,14 @@ class DurationConstrainedTranslationProvider:
             client_used, text = self._complete_with_fallback(translate_prompt)
         except Exception as exc:
             logger.warning("translation_llm_unavailable", extra={"error": str(exc)})
+            if _is_provider_configuration_failure(exc):
+                raise RuntimeError(
+                    f"translation_provider_auth_failed:{str(exc)[:240]}"
+                ) from exc
+            if not self.allow_machine_translate_recovery:
+                raise RuntimeError(
+                    f"translation_provider_unavailable:{str(exc)[:240]}"
+                ) from exc
             mt_recovery = self._try_machine_translate_recovery(source)
             if mt_recovery is not None:
                 estimated = estimate_tts_duration_seconds(mt_recovery)
@@ -297,57 +354,134 @@ class DurationConstrainedTranslationProvider:
                 metadata=metadata,
             )
 
-        rewrite_count = 0
-        for _ in range(max(0, self.max_rewrite_rounds)):
-            estimated = estimate_tts_duration_seconds(text)
-            if estimated <= duration_budget_seconds * self.fit_ratio:
-                break
-            rewrite_count += 1
-            try:
-                client_used, text = self._complete_with_fallback(
-                    _build_shorten_prompt(
-                        source,
-                        text,
-                        preset,
-                        duration_budget_seconds,
-                        user_prompt=self.user_prompt,
-                    )
-                )
-            except Exception as exc:
-                logger.warning("translation_rewrite_failed", extra={"error": str(exc)})
-                flags.append("duration_rewrite_failed")
-                break
-            metadata["llm_provider"] = client_used.provider_name
-            metadata["provider"] = client_used.provider_name
-            text, cjk_flags, cjk_meta = self._enforce_vietnamese_only(
-                source,
-                text,
-                preset=preset,
-                duration_budget_seconds=duration_budget_seconds,
+        original_text = text.strip()
+        original_budget = assess_speech_budget(
+            original_text,
+            slot_seconds=duration_budget_seconds,
+            units_per_second=self.budget_units_per_second,
+            fit_tolerance=self.budget_tolerance,
+        )
+        protected_tokens = tuple(
+            dict.fromkeys(
+                [
+                    *extract_protected_tokens(source),
+                    *extract_protected_tokens(original_text, include_acronyms=False),
+                ]
             )
-            flags.extend(cjk_flags)
-            metadata.update(cjk_meta)
-            if "translation_gate_failed" in cjk_flags:
-                flags.append("needs_operator_review")
-                return TranslationDraftSegment(
-                    segment_index=0,
-                    translated_text="",
-                    translation_preset=preset,
-                    duration_budget_seconds=duration_budget_seconds,
-                    estimated_tts_duration_seconds=0.0,
-                    quality_flags=list(dict.fromkeys(flags)),
-                    metadata=metadata,
-                )
+        )
+        adaptation = {
+            "schema_version": "duration_adaptation_v1",
+            "decision": "not_required",
+            "original_text_sha256": hashlib.sha256(original_text.encode("utf-8")).hexdigest(),
+            "protected_tokens": list(protected_tokens),
+            "budget": original_budget.to_dict(),
+            "max_rewrite_rounds": max(0, int(self.max_rewrite_rounds)),
+            "candidates": [],
+        }
+        metadata["speech_budget"] = original_budget.to_dict()
 
+        rewrite_count = 0
+        selected_text: str | None = None
+        selected_budget = None
+        if original_budget.status == "too_long":
+            for attempt in range(1, max(0, self.max_rewrite_rounds) + 1):
+                rewrite_count = attempt
+                try:
+                    client_used, candidate = self._complete_with_fallback(
+                        _build_shorten_prompt(
+                            source,
+                            original_text,
+                            preset,
+                            duration_budget_seconds,
+                            user_prompt=self.user_prompt,
+                            protected_tokens=protected_tokens,
+                            min_units=original_budget.min_units,
+                            max_units=original_budget.max_units,
+                            attempt=attempt,
+                        )
+                    )
+                except Exception as exc:
+                    logger.warning("translation_rewrite_failed", extra={"error": str(exc)})
+                    flags.append("duration_rewrite_failed")
+                    break
+                metadata["llm_provider"] = client_used.provider_name
+                metadata["provider"] = client_used.provider_name
+                candidate, cjk_flags, cjk_meta = self._enforce_vietnamese_only(
+                    source,
+                    candidate,
+                    preset=preset,
+                    duration_budget_seconds=duration_budget_seconds,
+                )
+                flags.extend(cjk_flags)
+                metadata.update(cjk_meta)
+                candidate_budget = assess_speech_budget(
+                    candidate,
+                    slot_seconds=duration_budget_seconds,
+                    units_per_second=self.budget_units_per_second,
+                    fit_tolerance=self.budget_tolerance,
+                )
+                protected = validate_protected_tokens(protected_tokens, candidate)
+                semantic_score = _semantic_retention_score(original_text, candidate)
+                candidate_record = {
+                    "attempt": attempt,
+                    "text": candidate,
+                    "text_sha256": hashlib.sha256(candidate.encode("utf-8")).hexdigest(),
+                    "speech_budget": candidate_budget.to_dict(),
+                    "protected_tokens_ok": protected.valid,
+                    "missing_protected_tokens": list(protected.missing_tokens),
+                    "semantic_retention_score": semantic_score,
+                    "semantic_review_required": semantic_score < 0.25,
+                    "accepted_for_operator_review": False,
+                }
+                adaptation["candidates"].append(candidate_record)
+                if not candidate or "translation_gate_failed" in cjk_flags:
+                    continue
+                if not protected.valid:
+                    flags.append("duration_rewrite_protected_token_mismatch")
+                    continue
+                if candidate_budget.status == "too_long":
+                    continue
+                candidate_record["accepted_for_operator_review"] = True
+                selected_text = candidate.strip()
+                selected_budget = candidate_budget
+                if semantic_score < 0.25:
+                    flags.append("duration_rewrite_semantic_review_required")
+                break
+
+            if selected_text is not None and selected_budget is not None:
+                text = selected_text
+                metadata["speech_budget"] = selected_budget.to_dict()
+                adaptation["decision"] = "review_candidate_selected"
+                adaptation["selected_attempt"] = rewrite_count
+                flags.extend(["duration_rewrite_applied", "needs_operator_review"])
+            else:
+                text = original_text
+                adaptation["decision"] = "keep_original_no_safe_candidate"
+                flags.extend(
+                    [
+                        "duration_adaptation_required",
+                        "duration_rewrite_no_safe_candidate",
+                        "needs_operator_review",
+                    ]
+                )
+        elif original_budget.status == "too_short":
+            adaptation["decision"] = "keep_original_underfilled_review"
+            flags.extend(["duration_underfilled_review", "needs_operator_review"])
+        metadata["duration_adaptation"] = adaptation
         if rewrite_count:
-            flags.append("duration_rewrite_applied")
             metadata["rewrite_rounds"] = rewrite_count
 
-        estimated = estimate_tts_duration_seconds(text)
+        final_budget = assess_speech_budget(
+            text,
+            slot_seconds=duration_budget_seconds,
+            units_per_second=self.budget_units_per_second,
+            fit_tolerance=self.budget_tolerance,
+        )
+        estimated = final_budget.estimated_duration_seconds
         if source_confidence is not None and source_confidence < 0.65:
             flags.append("low_confidence_source")
             flags.append("needs_operator_review")
-        if estimated > duration_budget_seconds * self.fit_ratio:
+        if final_budget.status == "too_long":
             flags.append("translation_too_long_for_slot")
             flags.append("needs_operator_review")
         if duration_budget_seconds < 0.8:
@@ -424,6 +558,8 @@ class DurationConstrainedTranslationProvider:
         return "", flags, metadata
 
     def _try_machine_translate_recovery(self, source: str) -> str | None:
+        if not self.allow_machine_translate_recovery:
+            return None
         mt_fn = self.machine_translate
         if mt_fn is None:
             return None
@@ -499,6 +635,8 @@ class DurationConstrainedTranslationProvider:
                 "translation_primary_failed",
                 extra={"provider": self.primary.provider_name, "error": str(primary_exc)},
             )
+            if _is_provider_configuration_failure(primary_exc):
+                raise
             if self.fallback is None:
                 raise
             try:
@@ -585,10 +723,22 @@ def _build_translate_prompt(
     else:
         custom = None
     source = (source_text or "").strip()
+    chinese_units = len(re.findall(r"[\u3400-\u4dbf\u4e00-\u9fff]", source))
+    duration_unit_cap = max(3, int(math.floor(max(0.1, budget_seconds) * 4.0)))
+    source_unit_cap = max(3, int(math.ceil(chinese_units * 1.15))) if chinese_units else duration_unit_cap
+    spoken_unit_cap = min(duration_unit_cap, source_unit_cap)
     if custom:
-        return f"{custom}\n\nChinese source:\n{source}"
+        return (
+            f"{custom}\n\n"
+            "Ignore any placeholder source inside the operator prompt; translate the actual Chinese source below.\n"
+            f"Physical dubbing constraint: the final Vietnamese line MUST contain at most {spoken_unit_cap} "
+            f"spoken units so it fits {budget_seconds:.1f} seconds. Be concise without losing facts.\n"
+            "Runtime output contract (mandatory): return ONLY the final Vietnamese dubbing line. "
+            "Do not show analysis, reasoning, drafts, headings, bullets, labels, or Markdown.\n\n"
+            f"Chinese source:\n{source}"
+        )
 
-    syllable_budget = max(4, int(round(budget_seconds * VI_SYLLABLES_PER_SECOND)))
+    syllable_budget = spoken_unit_cap
     if preset == TranslationPreset.LITERAL_SAFE:
         return (
             "You are doing a literal Chinese→Vietnamese translation for dubbed short video.\n"
@@ -639,9 +789,24 @@ def _build_shorten_prompt(
     budget_seconds: float,
     *,
     user_prompt: str | None = None,
+    protected_tokens: tuple[str, ...] = (),
+    min_units: int | None = None,
+    max_units: int | None = None,
+    attempt: int | None = None,
 ) -> str:
     del preset
     syllable_budget = max(4, int(round(budget_seconds * VI_SYLLABLES_PER_SECOND)))
+    target_range = (
+        f"Target spoken-unit range: {min_units}-{max_units}.\n"
+        if min_units is not None and max_units is not None
+        else ""
+    )
+    protected_rule = (
+        "Preserve these tokens exactly: " + ", ".join(protected_tokens) + ".\n"
+        if protected_tokens
+        else ""
+    )
+    attempt_rule = f"Candidate attempt: {attempt}. Use a different concise phrasing if needed.\n" if attempt else ""
     custom = (user_prompt or "").strip()
     if custom:
         # Operator Translation prompt is authority; only add the shorten task frame.
@@ -650,6 +815,10 @@ def _build_shorten_prompt(
             "Task: shorten the Vietnamese dubbing line so it can be spoken within the time budget "
             f"({budget_seconds:.1f}s, ~{syllable_budget} syllables). "
             "Still obey every operator rule above.\n"
+            f"{target_range}"
+            f"{protected_rule}"
+            f"{attempt_rule}"
+            "Keep every fact and intent from the current Vietnamese line. Do not add new facts.\n"
             "Return ONLY the revised Vietnamese text.\n\n"
             f"Chinese source:\n{source_text}\n\n"
             f"Current Vietnamese (too long):\n{previous_vi}"
@@ -657,6 +826,10 @@ def _build_shorten_prompt(
     return (
         "Shorten this Vietnamese dubbing line so it can be spoken within the time budget "
         f"({budget_seconds:.1f}s, ~{syllable_budget} syllables) while keeping the same meaning.\n"
+        f"{target_range}"
+        f"{protected_rule}"
+        f"{attempt_rule}"
+        "Keep every fact and intent from the current Vietnamese line. Do not add new facts.\n"
         "Output must be 100% Vietnamese with zero Chinese characters.\n"
         "Return ONLY the revised Vietnamese text.\n\n"
         f"Chinese source (meaning reference only):\n{source_text}\n\n"
@@ -695,11 +868,96 @@ def _build_cjk_repair_prompt(
 
 def _clean_model_text(text: str) -> str:
     cleaned = (text or "").strip()
+    if not cleaned:
+        raise RuntimeError("translation_model_output_invalid:empty")
+
     if cleaned.startswith("```"):
-        cleaned = cleaned.strip("`")
-        if "\n" in cleaned:
-            cleaned = cleaned.split("\n", 1)[-1].strip()
-    return cleaned.strip().strip('"').strip("'")
+        lines = cleaned.splitlines()
+        if lines and lines[0].lstrip().startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        cleaned = "\n".join(lines).strip()
+
+    final_match = re.search(
+        r"(?ims)^\s*(?:[-*]\s+)?(?:\*{1,2})?(?:final(?: answer)?|final translation|"
+        r"bản dịch cuối|kết quả)(?:\*{1,2})?\s*:\s*(.+)\Z",
+        cleaned,
+    )
+    if final_match:
+        cleaned = final_match.group(1).strip()
+    else:
+        lines = cleaned.splitlines()
+        while lines and re.match(
+            r"(?i)^\s*(?:#+\s*)?(?:\*{1,2})?(?:assembling|refining|analysis|reasoning|"
+            r"checking constraints?|translation process|drafting)(?:\b|\s|[:(])",
+            lines[0],
+        ):
+            lines.pop(0)
+        cleaned = "\n".join(lines).strip()
+        cleaned = re.sub(
+            r"(?is)^\s*(?:[-*]\s+)?(?:\*{1,2})?(?:draft|translation|vietnamese)(?:\*{1,2})?\s*:\s*(?:\*{1,2})?\s*",
+            "",
+            cleaned,
+            count=1,
+        ).strip()
+
+    cleaned = cleaned.strip().strip('"').strip("'").strip()
+    if not cleaned:
+        raise RuntimeError("translation_model_output_invalid:empty")
+    if re.search(
+        r"(?im)^\s*(?:#{1,6}\s+|[-*]\s+)?(?:analysis|reasoning|assembling|refining|"
+        r"checking constraints?|draft|final answer)\s*[:(]",
+        cleaned,
+    ):
+        raise RuntimeError("translation_model_output_invalid:meta_commentary")
+    return re.sub(r"\s*\n\s*", " ", cleaned).strip()
+
+
+_SEMANTIC_TOKEN_RE = re.compile(r"[^\W\d_]+|\d+(?:[.,]\d+)?", re.UNICODE)
+_VI_FUNCTION_WORDS = {
+    "à",
+    "bị",
+    "các",
+    "cái",
+    "cho",
+    "có",
+    "của",
+    "đã",
+    "đang",
+    "để",
+    "được",
+    "là",
+    "lại",
+    "mà",
+    "một",
+    "những",
+    "rồi",
+    "sẽ",
+    "thì",
+    "và",
+    "vào",
+    "với",
+}
+
+
+def _semantic_retention_score(original: str, candidate: str) -> float:
+    """Cheap, deterministic review signal; never treated as semantic authority."""
+
+    def content_tokens(value: str) -> set[str]:
+        return {
+            token.casefold()
+            for token in _SEMANTIC_TOKEN_RE.findall(str(value or ""))
+            if token.casefold() not in _VI_FUNCTION_WORDS
+        }
+
+    source_tokens = content_tokens(original)
+    candidate_tokens = content_tokens(candidate)
+    if not source_tokens or not candidate_tokens:
+        return 0.0
+    overlap = len(source_tokens & candidate_tokens)
+    denominator = max(1, min(len(source_tokens), len(candidate_tokens)))
+    return round(overlap / denominator, 4)
 
 
 def _extract_gemini_text(payload: dict) -> str:
@@ -707,7 +965,11 @@ def _extract_gemini_text(payload: dict) -> str:
     if not candidates:
         raise RuntimeError("gemini_empty_candidates")
     parts = (((candidates[0] or {}).get("content") or {}).get("parts")) or []
-    texts = [str(part.get("text") or "") for part in parts if isinstance(part, dict)]
+    texts = [
+        str(part.get("text") or "")
+        for part in parts
+        if isinstance(part, dict) and not bool(part.get("thought"))
+    ]
     joined = "\n".join(t for t in texts if t.strip()).strip()
     if not joined:
         raise RuntimeError("gemini_empty_text")

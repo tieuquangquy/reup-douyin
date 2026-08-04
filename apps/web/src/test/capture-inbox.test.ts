@@ -12,7 +12,8 @@ const tileActionsSource = readFileSync(join(repoRoot, "apps", "web", "src", "com
 const captureInboxUxSource = readFileSync(join(repoRoot, "apps", "web", "src", "lib", "captureInboxUx.ts"), "utf-8");
 const filterChipIconSource = readFileSync(join(repoRoot, "apps", "web", "src", "components", "capture-inbox", "CaptureInboxFilterChipIcon.tsx"), "utf-8");
 const captureInboxUiSource = `${pageSource}\n${tileActionsSource}\n${captureInboxUxSource}`;
-const routeSource = readFileSync(join(repoRoot, "apps", "web", "src", "app", "ops", "extensions", "douyin", "capture-inbox", "page.tsx"), "utf-8");
+const routeSource = readFileSync(join(repoRoot, "apps", "web", "src", "app", "selection", "capture-inbox", "page.tsx"), "utf-8");
+const legacyRouteSource = readFileSync(join(repoRoot, "apps", "web", "src", "app", "ops", "extensions", "douyin", "capture-inbox", "page.tsx"), "utf-8");
 const apiSource = readFileSync(join(repoRoot, "apps", "web", "src", "lib", "api.ts"), "utf-8");
 const typeSource = readFileSync(join(repoRoot, "apps", "web", "src", "types", "capture-inbox.ts"), "utf-8");
 const globalCssSource = readFileSync(join(repoRoot, "apps", "web", "src", "app", "globals.css"), "utf-8");
@@ -33,6 +34,7 @@ const studioFilterRenderSource = pageSource.slice(pageSource.indexOf("<CaptureIn
 const batchActionBarSource = pageSource.slice(pageSource.indexOf("function BatchActionBar"), pageSource.indexOf("function BulkActionConfirmationDialog"));
 
 assert.match(routeSource, /CaptureInboxPage/, "Capture Inbox route must render the CaptureInboxPage component");
+assert.match(legacyRouteSource, /redirect\(CAPTURE_INBOX_HREF\)/, "Legacy Ops Capture Inbox path must redirect to Operator Studio");
 assert.match(apiSource, /fetchCaptureInboxProfileSummary/, "API client must expose Capture Inbox profile summary loading");
 assert.match(apiSource, /fetchCaptureInboxProfileItems/, "API client must expose paginated Capture Inbox profile items loading");
 assert.match(apiSource, /fetchCaptureInboxItems/, "API client must expose paginated Capture Inbox session items loading");
@@ -94,7 +96,8 @@ assert.match(promoteSplitSource, /Go to Ready \(\$\{readyCount\}\)/, "Other tabs
 assert.match(promoteSplitSource, /capture-inbox-hero-promote-split/, "Promote split control must use hero rail styling");
 assert.match(promoteSplitSource, /capture-inbox-hero-promote-split__label/, "Promote split control must expose icon+text label");
 assert.match(pageSource, /Open Review Board/, "Capture Inbox must link forward to Review Board after staging");
-assert.match(pageSource, /CAPTURE_INBOX_REVIEW_BOARD_HREF/, "Review Board href must use the canonical selection route constant");
+assert.match(pageSource, /reviewBoardHrefForCaptureSession/, "Review Board href must come from the canonical selection route helper");
+assert.match(pageSource, /reviewBoardHrefForCaptureSession\(selectedSessionId\)/, "Opening Review Board must carry the selected batch so the operator sees what they just pushed");
 assert.match(captureInboxUiSource, /\/selection\/review-board/, "Capture Inbox must link to the canonical Review Board route");
 assert.doesNotMatch(pageSource, /\/extensions\/douyin\/review(?!-board)/, "No user-facing CTA may point to /extensions/douyin/review");
 assert.doesNotMatch(pageSource, /\/extensions\/douyin\/review-board/, "No user-facing CTA may point to /extensions/douyin/review-board");
@@ -295,9 +298,39 @@ assert.match(
   "Bulk-selected Capture tiles must expose is-bulk-selected for the shared green selection ring"
 );
 assert.match(
+  pageSource.slice(pageSource.indexOf("function MediaTile")),
+  /data-tone=\{ready \? "ready" : itemStatusTone\(item\.status\)\}/,
+  "Capture tiles must expose data-tone for status-tint hover"
+);
+assert.match(
   globalCssSource,
   /\.capture-inbox-media-tile\.is-bulk-selected(?:,[\s\S]*?\.review-board-media-tile\.is-bulk-selected)?\s*\{[^}]*border-color: var\(--accent\);[^}]*box-shadow: 0 0 0 2px color-mix\(in srgb, var\(--accent\) 38%, transparent\), var\(--shadow\);/,
   "Bulk-selected Capture tiles must use the same green outer ring as Review Board"
+);
+assert.match(
+  globalCssSource,
+  /\.capture-inbox-media-tile:hover\s*\{[^}]*translateY\(-2px\)/,
+  "Shared media tiles must lift on hover"
+);
+assert.match(
+  globalCssSource,
+  /\.capture-inbox-media-tile\[data-tone="ready"\]:hover(?:,[\s\S]*?\.capture-inbox-media-tile\[data-tone="good"\]:hover)?\s*\{[^}]*border-color:[^}]*var\(--accent\)/,
+  "Ready/good tiles must use accent tint on hover"
+);
+assert.match(
+  globalCssSource,
+  /\.capture-inbox-media-tile\[data-tone="warn"\]:hover\s*\{[^}]*var\(--warning\)/,
+  "Warn tiles must use warning tint on hover"
+);
+assert.match(
+  globalCssSource,
+  /\.capture-inbox-media-tile\[data-tone="danger"\]:hover\s*\{[^}]*var\(--danger\)/,
+  "Danger tiles must use danger tint on hover"
+);
+assert.match(
+  globalCssSource,
+  /@media \(prefers-reduced-motion:\s*reduce\)[\s\S]*?\.capture-inbox-media-tile:hover\s*\{[^}]*translateY\(0\)/,
+  "Reduced motion must disable tile hover lift"
 );
 assert.match(pageSource, /capture-inbox-media-frame/, "Media tiles must include a visual media frame");
 assert.match(pageSource, /capture-inbox-media-thumbnail/, "Media tiles must provide a thumbnail-first button region");
@@ -822,7 +855,7 @@ assert.match(pageSource, /function resolveSortableViewCount\(item: CapturedItem\
 assert.match(pageSource, /formatCaptureInboxTileMetadataGap\(item\)/, "Capture Inbox tiles must summarize missing metadata via canonical completeness");
 assert.doesNotMatch(pageSource, /capture-inbox-promote-success/, "Promote success must not duplicate its global toast with an inline panel");
 assert.match(pageSource, /buildPromoteSuccessSummary/, "Promote action must build a concise global toast summary");
-assert.match(pageSource, /CAPTURE_INBOX_REVIEW_BOARD_HREF/, "Review Board href must remain centralized for the header action");
+assert.match(pageSource, /reviewBoardHrefForCaptureSession/, "Review Board href must remain centralized for the header action");
 assert.match(pageSource, /Missing metadata policy: items lacking time\/performance\/processing-fit evidence remain visible and can be grouped with metadata health filters\./, "More filters must explain metadata missing-item visibility policy");
 assert.match(filterMetadataSource, /export function parseCompactNumberInput\(value: string \| null \| undefined\): CompactNumberParseResult/, "Phase 22D-3B must expose a strict compact-number parser result helper from the metadata adapter");
 assert.match(filterMetadataSource, /value: number \| null;[\s\S]*valid: boolean;[\s\S]*error\?: string;[\s\S]*normalizedDisplay\?: string;/, "Compact-number parser must return value, validity, optional error, and normalized display");

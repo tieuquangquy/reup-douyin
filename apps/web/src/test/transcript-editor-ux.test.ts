@@ -10,6 +10,8 @@ const focusSource = readFileSync(resolve(testDir, "../components/transcript-edit
 const railSource = readFileSync(resolve(testDir, "../components/transcript-editor/TranscriptBeatRail.tsx"), "utf8");
 const flagsSource = readFileSync(resolve(testDir, "../components/transcript-editor/TranscriptSegmentFlags.tsx"), "utf8");
 const actionBarSource = readFileSync(resolve(testDir, "../components/transcript-editor/TranscriptActionBar.tsx"), "utf8");
+const timingSource = readFileSync(resolve(testDir, "../components/transcript-editor/TranscriptSegmentTimingEditor.tsx"), "utf8");
+const mediaPreviewSource = readFileSync(resolve(testDir, "../components/transcript-editor/TranscriptMediaPreview.tsx"), "utf8");
 const cssSource = readFileSync(resolve(testDir, "../app/globals.css"), "utf8");
 
 assert.doesNotMatch(headerSource, /<h1>/, "Header must not duplicate Operator shell title with h1");
@@ -33,7 +35,16 @@ assert.doesNotMatch(headerSource, /editor-command__more|<details/, "Toolbar must
 assert.match(headerSource, /translateAgain|regenerateTts/, "Rework actions must use again/regenerate labels");
 assert.match(headerSource, /translateAgainCascadeConfirm|reanalyzeCascadeConfirm/, "Cascade confirms must warn about downstream invalidation");
 assert.match(headerSource, /editor-command__freshness|ttsFreshness/, "Header must surface TTS freshness when narration may be stale");
-assert.match(headerSource, /ttsFreshness\s*!==\s*["']hidden["']|ttsFreshness\s*===\s*["'](current|outdated)["']/, "Freshness chip must gate on resolved freshness, not bare hasJoinedTts");
+assert.match(
+  headerSource,
+  /ttsFreshness\s*===\s*["']outdated["']/,
+  "Freshness chip must show only when TTS is outdated, not the quiet current state"
+);
+assert.doesNotMatch(
+  headerSource,
+  /freshnessTtsCurrent/,
+  "Header must not render the TTS · current success chip beside the pipeline"
+);
 assert.match(headerSource, /transcriptPipelineActionLabelKey/, "Action labels must resolve through pipeline helper");
 assert.match(pageSource, /fingerprintVietnameseDraft|ttsSourceFingerprint|ttsViFp/, "Page must persist VI fingerprint used for TTS freshness");
 assert.match(headerSource, /editor-command__icon/, "Command actions must show icon + text");
@@ -146,9 +157,40 @@ assert.match(focusSource, /source-textarea-primary/, "Focus editor must expose Z
 assert.doesNotMatch(focusSource, /onTranslateLiteral/, "Translate jobs live only in the header bar");
 assert.match(focusSource, /transcript-focus-chrome/, "Focus editor must use quiet chrome shell");
 assert.match(focusSource, /transcript-focus-chrome__title/, "Segment title must be the chrome hero");
-assert.match(focusSource, /transcript-focus-chrome__range/, "Timing range must sit beside the segment title");
+assert.doesNotMatch(
+  focusSource,
+  /transcript-focus-chrome__range/,
+  "Chrome must not duplicate the editable timing range beside the segment title"
+);
+assert.match(
+  focusSource,
+  /TranscriptSegmentTimingEditor/,
+  "Editable timing control owns start/end display (authority for the range)"
+);
 assert.match(focusSource, /transcript-focus-chrome__run/, "Pipeline meta must live in a demoted details block");
 assert.match(focusSource, /runDetails/, "Run details summary must be i18n-labeled");
+assert.match(
+  focusSource,
+  /transcript-dual-pane[\s\S]*transcript-focus-chrome__run/,
+  "Run details must sit below the ZH/VI edit surface (not between title and toolbar)"
+);
+assert.doesNotMatch(
+  focusSource,
+  /transcript-focus-chrome__run[\s\S]{0,400}transcript-focus-chrome__toolbar/,
+  "Run details must not interrupt the title → toolbar chrome"
+);
+assert.match(
+  focusSource,
+  /className="transcript-dual-pane__zh">\s*<span className="transcript-dual-pane__tab">/,
+  "ZH pane label must not claim is-active (VI is the edit hero)"
+);
+assert.match(
+  focusSource,
+  /transcript-dual-pane__vi[\s\S]*className="transcript-dual-pane__tab is-active"/,
+  "VI pane label remains the active edit hero"
+);
+assert.match(focusSource, /segment-ops--toolbar/, "Segment ops must use a compact toolbar group layout");
+assert.match(cssSource, /\.segment-ops__group/, "Secondary segment ops must share a compact button group");
 assert.match(focusSource, /transcript-focus-chrome__toolbar/, "Timing + segment ops must share one toolbar strip");
 assert.match(
   focusSource,
@@ -172,6 +214,35 @@ assert.match(
   "Toolbar Play/Pause hover must keep white label on accent (not bleached white-on-white)"
 );
 assert.match(cssSource, /\.timing-editor--compact/, "CSS must define compact timing editor");
+assert.match(timingSource, /timing-editor__range/, "Timing editor must use an inline range group");
+assert.match(timingSource, /timing-editor__duration/, "Timing editor must keep a duration chip");
+assert.match(timingSource, /timing-editor__sep/, "Range group must separate start/end");
+assert.match(timingSource, /→|timing-editor__sep--arrow/, "NLE range must use an arrow separator (not a plain dash)");
+assert.match(
+  timingSource,
+  /timing-editor__range[\s\S]*timing-editor__duration/,
+  "Duration must live inside the same range chrome (one control, not a detached pill)"
+);
+assert.match(timingSource, /type="text"/, "Timing fields must be text so decimals stay dot-stable (not locale commas)");
+assert.match(timingSource, /formatMs/, "Start/end must display M:SS.cc timecode via formatMs");
+assert.match(timingSource, /parseTimingTimecodeToMs/, "Start/end must parse M:SS.cc timecode back to ms");
+assert.match(
+  timingSource,
+  /aria-label=\{t\("transcriptEditorTiming\.start"\)\}/,
+  "Start field must stay accessible via aria-label (no stacked visible label)"
+);
+assert.match(
+  timingSource,
+  /aria-label=\{t\("transcriptEditorTiming\.end"\)\}/,
+  "End field must stay accessible via aria-label (no stacked visible label)"
+);
+assert.match(cssSource, /\.timing-editor--timecode|\.timing-editor__range--timecode/, "CSS must style NLE timecode chrome");
+assert.match(cssSource, /\.timing-editor__range\s*\{/, "CSS must style the inline timing range group");
+assert.match(
+  cssSource,
+  /\.timing-editor__range\s+\.timing-editor__duration|\.timing-editor__duration\s*\{/,
+  "CSS must style duration inside the compact range control"
+);
 
 assert.match(railSource, /segmentsList/, "Beat rail must use Segments list label");
 assert.match(flagsSource, /partitionSegmentFlags/, "Flags component must use quiet operator partition");
@@ -186,6 +257,31 @@ assert.doesNotMatch(
 assert.match(focusSource, /compare-machine-details/, "Focus editor keeps Machine details disclosure");
 assert.match(focusSource, /compare-machine-details__title/, "Machine details summary must expose title");
 assert.match(focusSource, /compare-machine-details__hint/, "Machine details summary must expose hint");
+assert.doesNotMatch(
+  focusSource,
+  /<details[^>]*\bopen\b/,
+  "Machine details must stay collapsed by default (no open attribute)"
+);
+assert.match(
+  focusSource,
+  /flagsForFocusQuietSummary/,
+  "Focus quiet summary must drop TTS fit/length duplicates when the fit banner owns that signal"
+);
+assert.match(
+  focusSource,
+  /isTtsFitProblem/,
+  "Focus TTS fit banner must show for problem fits only (not fits_well noise)"
+);
+assert.match(
+  cssSource,
+  /\.transcript-dual-pane__vi\s*\{[^}]*border-color:/,
+  "VI pane must carry a stronger border as the edit hero"
+);
+assert.match(
+  cssSource,
+  /\.transcript-tts-fit\.is-warn|\.transcript-tts-fit\.is-danger/,
+  "TTS fit panel must use tone classes for a single status banner"
+);
 assert.match(cssSource, /\.compare-machine-details/, "CSS must style Machine details disclosure");
 assert.match(
   cssSource,
@@ -226,6 +322,53 @@ assert.match(
   cssSource,
   /\.transcript-header--command\s+\.editor-command\s*\{[\s\S]*?margin-left:\s*auto;/,
   "Command toolbar must pin to the far right of the header"
+);
+
+assert.match(mediaPreviewSource, /transcript-bench-media__empty-icon/, "Unavailable video needs a designed visual empty state");
+assert.match(
+  cssSource,
+  /\/\* Transcript Editor V2 — polished production workspace\. \*\//,
+  "Transcript Editor must keep its cohesive production-workspace polish layer"
+);
+assert.match(
+  cssSource,
+  /\.editor-command__pipeline\s*\{[^}]*background:\s*#f4f8f7[^}]*border-radius:\s*999px/s,
+  "Pipeline steps should read as one compact guided control"
+);
+assert.match(
+  cssSource,
+  /\.transcript-header--command \.editor-command\s*\{[^}]*border-radius:\s*12px[^}]*padding:\s*3px/s,
+  "Header actions should sit in one quiet command surface"
+);
+assert.match(
+  cssSource,
+  /\.transcript-bench__side\s*\{[^}]*border-radius:\s*16px[^}]*box-shadow:/s,
+  "Media rail should use polished panel depth"
+);
+assert.match(
+  cssSource,
+  /\.transcript-bench-media__empty-icon\s*\{[^}]*height:\s*2\.8rem[^}]*width:\s*2\.8rem/s,
+  "Media empty-state icon should have a deliberate visual frame"
+);
+assert.match(
+  cssSource,
+  /\.transcript-focus-chrome__toolbar\s*\{[^}]*background:\s*linear-gradient[^}]*border-radius:\s*11px/s,
+  "Timing and segment actions should use refined toolbar chrome"
+);
+assert.match(
+  cssSource,
+  /\.transcript-dual-pane__zh > \.transcript-dual-pane__tab,[\s\S]*?\.transcript-dual-pane__tab-row\s*\{[^}]*min-height:\s*42px[^}]*padding:\s*0 13px/s,
+  "Language panes should have structured editor headers"
+);
+assert.match(
+  cssSource,
+  /\.transcript-dual-pane \.source-textarea-primary,[\s\S]*?\.transcript-dual-pane \.translation-textarea\s*\{[^}]*font-size:\s*0\.875rem[^}]*line-height:\s*1\.7[^}]*min-height:\s*320px/s,
+  "Transcript text should use a readable professional type scale"
+);
+assert.match(
+  cssSource,
+  /\.transcript-focus-secondary\s*\{[^}]*border-radius:\s*10px[^}]*flex-direction:\s*row/s,
+  "Run and machine details should collapse into one compact footer strip"
 );
 
 console.log("transcript-editor ux tests passed");

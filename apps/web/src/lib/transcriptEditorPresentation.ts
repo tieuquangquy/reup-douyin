@@ -40,6 +40,32 @@ export function isSourceQualityFlag(flag: string): boolean {
   return key.includes("low_confidence") || key.includes("likely_mistranscribed");
 }
 
+/** Length/fit flags already covered by the TTS fit banner — do not re-list in quiet summary. */
+export function isTtsFitDuplicateFlag(flag: string): boolean {
+  const key = (flag || "").toLowerCase();
+  if (!key) return false;
+  if (key.includes("too_long") || key.includes("too_short") || key.includes("slightly_long")) return true;
+  if (key.includes("translation_too_long") || key.includes("for_slot")) return true;
+  return false;
+}
+
+function fitBannerOwnsLengthSignal(fitStatus: string | null | undefined): boolean {
+  return fitStatus === "slightly_long" || fitStatus === "too_long" || fitStatus === "too_short";
+}
+
+/**
+ * Quiet summary under the TTS fit banner: drop length/fit duplicates when the banner owns that signal.
+ * Machine details still receives the full flag list.
+ */
+export function flagsForFocusQuietSummary(
+  flags: string[],
+  fitStatus: string | null | undefined
+): string[] {
+  const unique = Array.from(new Set(flags.filter(Boolean)));
+  if (!fitBannerOwnsLengthSignal(fitStatus)) return unique;
+  return unique.filter((flag) => !isTtsFitDuplicateFlag(flag));
+}
+
 export function classifyFlagTone(flag: string): FlagTone {
   const key = (flag || "").toLowerCase();
   if (

@@ -31,20 +31,27 @@ class UnifiedOcrBoxAlignTests(unittest.TestCase):
         self.assertGreaterEqual(int(xs.min()), 70)
         self.assertLessEqual(int(xs.max()), 155)
 
-    def test_vi_left_edge_matches_segment_x(self) -> None:
+    def test_vi_centered_on_segment_box(self) -> None:
         h, w = 200, 300
         frame = np.full((h, w, 3), 200, dtype=np.uint8)
         seg = OverlaySegment(0, 1000, 0.20, 0.40, 0.35, 0.12, "ABCDEF", kind="ui")
         font = Path(r"C:\Windows\Fonts\arial.ttf")
         if not font.is_file():
             font = Path(r"C:\Windows\Fonts\segoeui.ttf")
-        out = draw_vi_overlays(frame, [seg], fontfile=font, align="left")
-        x0, y0, x1, y1 = _norm_box_to_pixels(seg.x, seg.y, seg.width, seg.height, frame_w=w, frame_h=h)
-        # Dark VI on light bg — ink should start near the left of the OCR box.
-        left_band = out[y0:y1, x0 : x0 + 25, 0]
-        mid_band = out[y0:y1, (x0 + x1) // 2 : (x0 + x1) // 2 + 25, 0]
-        self.assertGreater(float((left_band < 80).mean()), 0.01)
-        self.assertGreaterEqual(float((left_band < 80).mean()), float((mid_band < 80).mean()) - 0.01)
+        out = draw_vi_overlays(frame, [seg], fontfile=font)
+        x0, y0, x1, y1 = _norm_box_to_pixels(
+            seg.x, seg.y, seg.width, seg.height, frame_w=w, frame_h=h
+        )
+        ax = (x0 + x1) // 2
+        ay = y1
+        # Center-bottom band has ink; far-left of box should be quieter than center.
+        center_band = out[max(0, ay - 35) : ay, max(0, ax - 20) : ax + 20, 0]
+        left_band = out[max(0, ay - 35) : ay, x0 : x0 + 15, 0]
+        self.assertGreater(float((center_band < 80).mean()), 0.01)
+        self.assertGreaterEqual(
+            float((center_band < 80).mean()),
+            float((left_band < 80).mean()) - 0.01,
+        )
 
     def test_process_frame_does_not_use_ink_refine_drift(self) -> None:
         h, w = 200, 200

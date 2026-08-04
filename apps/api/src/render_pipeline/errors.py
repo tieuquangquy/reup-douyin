@@ -14,6 +14,8 @@ class RenderPipelineErrorCode(StrEnum):
     EXPORT_FAILED = "export_failed"
     OUTPUT_VALIDATION_FAILED = "output_validation_failed"
     PERSISTENCE_FAILED = "persistence_failed"
+    QUALITY_REVIEW_REQUIRED = "quality_review_required"
+    PIPELINE_RECIPE_WORKFLOW_MISMATCH = "pipeline_recipe_workflow_mismatch"
 
 
 class RenderPipelineError(Exception):

@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import type { Candidate } from "../../types/review-board";
 import { reviewBoardDetailsActionVisibility } from "../../lib/reviewBoardQueueState";
 import { AsyncButton } from "../shared/AsyncButton";
@@ -65,7 +66,59 @@ export function ReviewBoardTileActions({
     );
   }
 
-  const showCompanionSplit = showLater || showReject;
+  // Order: approve_only → later → reject — one companion row (split/triple).
+  const companions: ReactNode[] = [];
+  if (showApproveOnly && onApprove) {
+    companions.push(
+      <AsyncButton
+        className="review-board-tile-btn is-secondary"
+        disabled={disabled}
+        key="approve-only"
+        leadingIcon={<WorkItemActionIcon kind="approve" />}
+        onClick={onApprove}
+        pending={pendingAction === "approved"}
+        pendingLabel="Approving…"
+        type="button"
+      >
+        Approve only
+      </AsyncButton>
+    );
+  }
+  if (showLater) {
+    companions.push(
+      <AsyncButton
+        className="review-board-tile-btn is-muted"
+        disabled={disabled}
+        key="later"
+        leadingIcon={<WorkItemActionIcon kind="later" />}
+        onClick={onLater}
+        pending={pendingAction === "in_review"}
+        pendingLabel="Updating…"
+        type="button"
+      >
+        Later
+      </AsyncButton>
+    );
+  }
+  if (showReject) {
+    companions.push(
+      <AsyncButton
+        className="review-board-tile-btn is-danger"
+        disabled={disabled}
+        key="reject"
+        leadingIcon={<WorkItemActionIcon kind="reject" />}
+        onClick={onReject}
+        pending={pendingAction === "rejected"}
+        pendingLabel="Rejecting…"
+        type="button"
+      >
+        Reject
+      </AsyncButton>
+    );
+  }
+
+  const companionRowClass =
+    companions.length === 3 ? "is-triple" : companions.length === 2 ? "is-split" : "is-secondary";
 
   return (
     <div className={barClass} aria-label="Candidate actions">
@@ -97,51 +150,8 @@ export function ReviewBoardTileActions({
         )}
       </div>
 
-      {showApproveOnly && onApprove ? (
-        <div className="review-board-tile-action-row is-secondary">
-          <AsyncButton
-            className="review-board-tile-btn is-secondary"
-            disabled={disabled}
-            leadingIcon={<WorkItemActionIcon kind="approve" />}
-            onClick={onApprove}
-            pending={pendingAction === "approved"}
-            pendingLabel="Approving…"
-            type="button"
-          >
-            Approve only
-          </AsyncButton>
-        </div>
-      ) : null}
-
-      {showCompanionSplit ? (
-        <div className={`review-board-tile-action-row ${showLater && showReject ? "is-split" : "is-secondary"}`}>
-          {showLater ? (
-            <AsyncButton
-              className="review-board-tile-btn is-muted"
-              disabled={disabled}
-              leadingIcon={<WorkItemActionIcon kind="later" />}
-              onClick={onLater}
-              pending={pendingAction === "in_review"}
-              pendingLabel="Updating…"
-              type="button"
-            >
-              Later
-            </AsyncButton>
-          ) : null}
-          {showReject ? (
-            <AsyncButton
-              className="review-board-tile-btn is-danger"
-              disabled={disabled}
-              leadingIcon={<WorkItemActionIcon kind="reject" />}
-              onClick={onReject}
-              pending={pendingAction === "rejected"}
-              pendingLabel="Rejecting…"
-              type="button"
-            >
-              Reject
-            </AsyncButton>
-          ) : null}
-        </div>
+      {companions.length > 0 ? (
+        <div className={`review-board-tile-action-row ${companionRowClass}`}>{companions}</div>
       ) : null}
     </div>
   );

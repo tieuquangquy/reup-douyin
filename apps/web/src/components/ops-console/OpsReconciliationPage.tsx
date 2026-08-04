@@ -159,7 +159,8 @@ export function OpsReconciliationPage() {
       <AsyncContentBoundary
         refreshing={request.refreshing}
         status={boundaryStatus}
-        skeleton={<OpsState title={t("opsReconciliation.loadingTitle")} detail={t("opsReconciliation.loadingDetail")} />}
+        skeletonVariant="table"
+        loadingLabel={t("opsReconciliation.loadingDetail")}
         errorState={<OpsState title={t("opsReconciliation.unavailableTitle")} detail={request.error?.message ?? t("opsReconciliation.unavailableTitle")} retry={() => void load("initial")} />}
       >
       <main className="ops-page ops-recon-page">

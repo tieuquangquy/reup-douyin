@@ -1,3 +1,5 @@
+import type { IntakeDateChip } from "../lib/reviewBoardIntake";
+
 export type ReviewCandidateCanonicalFields = {
   capture_item_id?: string | null;
   capture_session_id?: string | null;
@@ -244,6 +246,10 @@ export type CandidateFilters = {
   search: string;
   sort: "score_desc" | "newest_first" | "views_desc";
   presetName: string;
+  captureSessionId: string;
+  dateChip: IntakeDateChip;
+  dateFrom: string;
+  dateTo: string;
 };
 
 export type BulkActionStatus = "APPROVED" | "REJECTED" | "IN_REVIEW";

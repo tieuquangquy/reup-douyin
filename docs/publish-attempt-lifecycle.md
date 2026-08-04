@@ -20,13 +20,19 @@
 
 ```text
 PublishDraft READY
-  -> gate/account/render validation
+  -> gate/account/render validation in API
   -> PublishAttempt QUEUED
+  -> PUBLISH_CONTENT durable job
+  -> worker executes the pre-created attempt
   -> RUNNING
   -> UPLOADING
   -> PUBLISHING
   -> SUCCEEDED, FAILED, or NEEDS_RECONCILIATION
 ```
+
+The HTTP publish action returns the queued attempt and does not upload media inline.
+Confirmed external posts are materialized separately as `PlatformPublication` rows; see
+`docs/publishing-foundation-v2.md`.
 
 On confirmed success, the publish draft status becomes `PUBLISHED`. On failure without any external reference, the draft becomes `FAILED` and the failed attempt carries the failure details.
 

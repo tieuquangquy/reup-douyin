@@ -56,6 +56,86 @@ class PlatformAccount(BaseModel):
     notes: Mapped[str | None] = mapped_column(Text)
 
     publish_attempts: Mapped[list["PublishAttempt"]] = relationship(back_populates="platform_account")
+    platform_publications: Mapped[list["PlatformPublication"]] = relationship(back_populates="platform_account")
+
+
+class PlatformCredential(BaseModel):
+    """Encrypted provider credential referenced by a platform account.
+
+    The ciphertext is never exposed through the public account schema. Keeping
+    this boundary separate from ``PlatformAccount`` allows a future vault/KMS
+    adapter to replace local database envelopes without changing publish flows.
+    """
+
+    __tablename__ = "platform_credentials"
+    __table_args__ = (
+        UniqueConstraint(
+            "platform_account_id",
+            "provider",
+            "credential_kind",
+            name="uq_platform_credentials_account_provider_kind",
+        ),
+    )
+
+    workspace_id: Mapped[UUID] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    platform_account_id: Mapped[UUID] = mapped_column(ForeignKey("platform_accounts.id"), index=True)
+    provider: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    credential_kind: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    encrypted_value: Mapped[str] = mapped_column(Text, nullable=False)
+    key_version: Mapped[str] = mapped_column(String(40), default="envelope-v1", nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    last_validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    metadata_json: Mapped[dict | None] = mapped_column(JSONB)
+
+
+class PlatformIntegrationConfiguration(BaseModel):
+    """Workspace-scoped provider application configuration.
+
+    Provider secrets stay envelope-encrypted and are never included in public
+    schemas. This boundary can later be backed by KMS without changing OAuth
+    or web contracts.
+    """
+
+    __tablename__ = "platform_integration_configurations"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id",
+            "provider",
+            name="uq_platform_integration_configs_workspace_provider",
+        ),
+    )
+
+    workspace_id: Mapped[UUID] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    provider: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    app_id: Mapped[str] = mapped_column(String(240), nullable=False)
+    encrypted_app_secret: Mapped[str] = mapped_column(Text, nullable=False)
+    oauth_redirect_uri: Mapped[str] = mapped_column(String(1000), nullable=False)
+    graph_api_version: Mapped[str] = mapped_column(String(40), nullable=False)
+    requested_scopes_json: Mapped[list] = mapped_column(JSONB, nullable=False)
+    configured_by_subject: Mapped[str] = mapped_column(String(240), nullable=False)
+    key_version: Mapped[str] = mapped_column(String(40), default="envelope-v1", nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+
+
+class PlatformOAuthSession(BaseModel):
+    """Short-lived durable OAuth state; provider tokens remain encrypted."""
+
+    __tablename__ = "platform_oauth_sessions"
+
+    workspace_id: Mapped[UUID] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    provider: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    created_by_subject: Mapped[str] = mapped_column(String(240), nullable=False, index=True)
+    state_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    status: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    redirect_uri: Mapped[str] = mapped_column(String(1000), nullable=False)
+    requested_scopes_json: Mapped[list | None] = mapped_column(JSONB)
+    granted_scopes_json: Mapped[list | None] = mapped_column(JSONB)
+    encrypted_payload: Mapped[str | None] = mapped_column(Text)
+    error_code: Mapped[str | None] = mapped_column(String(120), index=True)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    metadata_json: Mapped[dict | None] = mapped_column(JSONB)
 
 
 class PublishDraft(BaseModel):
@@ -132,6 +212,7 @@ class PublishDraft(BaseModel):
         back_populates="publish_draft",
         foreign_keys="PublishAttempt.publish_draft_id",
     )
+    platform_publications: Mapped[list["PlatformPublication"]] = relationship(back_populates="publish_draft")
     canonical_publish_attempt: Mapped["PublishAttempt | None"] = relationship(
         foreign_keys=[canonical_publish_attempt_id],
         post_update=True,
@@ -198,6 +279,83 @@ class PublishAttempt(BaseModel):
 
     publish_draft: Mapped[PublishDraft] = relationship(back_populates="publish_attempts", foreign_keys=[publish_draft_id])
     platform_account: Mapped[PlatformAccount] = relationship(back_populates="publish_attempts")
+    platform_publications: Mapped[list["PlatformPublication"]] = relationship(
+        back_populates="publish_attempt"
+    )
+
+
+class PlatformPublication(BaseModel):
+    """One externally observable post, independent from the attempt that created it.
+
+    A draft can accidentally produce more than one real post after retries. Every external
+    post is retained here; ``is_canonical`` identifies the publication selected by the
+    draft lifecycle without erasing duplicate-publication evidence.
+    """
+
+    __tablename__ = "platform_publications"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id",
+            "platform",
+            "platform_account_id",
+            "external_publish_id",
+            name="uq_platform_publications_external_identity",
+        ),
+        UniqueConstraint(
+            "publish_attempt_id",
+            name="uq_platform_publications_publish_attempt",
+        ),
+    )
+
+    workspace_id: Mapped[UUID] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    publish_draft_id: Mapped[UUID | None] = mapped_column(ForeignKey("publish_drafts.id"), index=True)
+    source_video_id: Mapped[UUID | None] = mapped_column(ForeignKey("source_videos.id"), index=True)
+    render_output_id: Mapped[UUID | None] = mapped_column(ForeignKey("render_outputs.id"), index=True)
+    platform: Mapped[PublishTargetPlatform] = mapped_column(
+        Enum(PublishTargetPlatform, name="publish_target_platform"),
+        nullable=False,
+        index=True,
+    )
+    platform_account_id: Mapped[UUID] = mapped_column(ForeignKey("platform_accounts.id"), index=True)
+    publish_attempt_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("publish_attempts.id"),
+        index=True,
+    )
+    external_publish_id: Mapped[str] = mapped_column(String(240), nullable=False, index=True)
+    external_media_id: Mapped[str | None] = mapped_column(String(240), index=True)
+    external_reel_id: Mapped[str | None] = mapped_column(String(240), index=True)
+    external_permalink: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[ExternalPublicationStatus] = mapped_column(
+        Enum(ExternalPublicationStatus, name="external_publication_status"),
+        default=ExternalPublicationStatus.UNKNOWN,
+        nullable=False,
+        index=True,
+    )
+    is_canonical: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    content_fingerprint_sha256: Mapped[str | None] = mapped_column(String(64), index=True)
+    origin: Mapped[str] = mapped_column(
+        String(40), default="CONNECTOR_PUBLISH", nullable=False, index=True
+    )
+    native_product_placement_status: Mapped[str] = mapped_column(
+        String(80), default="NOT_EVALUATED", nullable=False, index=True
+    )
+    affiliate_comment_status: Mapped[str] = mapped_column(
+        String(80), default="NOT_PLANNED", nullable=False, index=True
+    )
+    metadata_json: Mapped[dict | None] = mapped_column(JSONB)
+
+    publish_draft: Mapped[PublishDraft | None] = relationship(back_populates="platform_publications")
+    platform_account: Mapped[PlatformAccount] = relationship(back_populates="platform_publications")
+    publish_attempt: Mapped[PublishAttempt | None] = relationship(back_populates="platform_publications")
+    metric_snapshots: Mapped[list["PublicationMetricSnapshot"]] = relationship(
+        back_populates="platform_publication"
+    )
+    content_classifications: Mapped[list["ContentClassification"]] = relationship(
+        back_populates="platform_publication",
+        cascade="all, delete-orphan",
+    )
 
 
 class PublishRoutingRule(BaseModel):

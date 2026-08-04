@@ -1,4 +1,6 @@
-# OCR / Hard-sub pipeline (Pilot A + media E2E)
+# OCR / Hard-sub pipeline (legacy Pilot A + media E2E)
+
+> The Authority V3.6/sample-based flow below is not used by the closed v58 baseline. See [`phase2-v58-ocr-contract.md`](./phase2-v58-ocr-contract.md).
 
 Final Review **Analyze OCR / clean hard-sub** (`clean_hardsub=True`, default) runs full Phase 1–4 via `media_pipeline.hardsub_e2e`: sample → REST/mock OCR (bottom band) → Caption AI translate → single-pass FFmpeg (mask + VI burn + anti-hash) → `CLEANED_VIDEO`.
 
@@ -34,12 +36,14 @@ Final Review **Analyze OCR / clean hard-sub** (`clean_hardsub=True`, default) ru
 ## Ops / env
 
 - Caption AI: `/ops/caption-ai`, `/ops/caption-prompt`
-- OCR Cloud Run: `OCR_ENDPOINT_URL` (see `deploy/hf-paddle-ocr/`)
+- OCR text backend: `OCR_ENDPOINT_URL` → any service with `POST /predict` (local Docker **or** Cloud Run). Same contract; switch by URL only.
+  - Local $0: `powershell -ExecutionPolicy Bypass -File deploy/hf-paddle-ocr/run_local.ps1` then `OCR_ENDPOINT_URL=http://127.0.0.1:8080/predict`
+  - Cloud optional: `deploy/hf-paddle-ocr/` + `auto_deploy.py` (prefer `min-instances=0` when idle)
 - Dry OCR: `OCR_FILTERING_USE_MOCK=1` or CLI `--mock-ocr`
 - HTTP timeout to Cloud Run: default **300s** (`OCR_HTTP_TIMEOUT_SECONDS`) — cold start can exceed 120s
 - Cold start: client polls `/health` up to **180s** (`OCR_WARMUP_DEADLINE_SECONDS`) before first `/predict`
 - When OCR finds **0 hard-sub boxes**, job stays `COMPLETED` but sets `error_code=OCR_NO_HARDSUB_OUTPUT` + message on the job (Ops Jobs Error column / warn badge). No new `CLEANED_VIDEO` is written; prior plate is restored if any.
-- **Best profile (Authority V3.6 full-duration):** set `OCR_QUALITY_PROFILE=best`. Phase 2 then calls `run_per_frame_position_authority` over **every frame** (not Phase-1 sample fps). Local mid-title + hardsub gap-hold apply; Cloud OCR is sparse + cached.
+- **Best profile (Authority V3.6 full-duration):** set `OCR_QUALITY_PROFILE=best`. Phase 2 then calls `run_per_frame_position_authority` over **every frame** (not Phase-1 sample fps). Local mid-title + hardsub gap-hold apply; text OCR via `OCR_ENDPOINT_URL` is sparse + cached (local Docker or Cloud).
 - **Perf (Phase 2 defaults, legacy/default profile):**
   - `OCR_CROP_BAND=1` — OCR only bottom subtitle band (smaller upload; boxes remapped to full frame)
   - `OCR_HTTP_CONCURRENCY=4` — parallel `/predict` calls (warmup is thread-safe)

@@ -1,0 +1,98 @@
+{
+  "schema_version": "pipeline_recipe_lock_v1",
+  "status": "LOCKED_FOR_CONTROLLED_PILOT_WITH_GAPS",
+  "locked_at": "2026-07-27T03:35:04.893128+00:00",
+  "operator_id": "local_operator",
+  "phase1": {
+    "extractor": "v58_candidate",
+    "step": 1,
+    "pad": 1,
+    "authority": "master_timeline.json",
+    "authority_v3_6_full_duration": false,
+    "scorer": "score_phase1_pass"
+  },
+  "phase2": {
+    "provider": "local",
+    "model_versions": [
+      "ppocrv6-medium-det-8e0f56fb_rec-e5a92bcb_paddleocr-3.8.0.dev11-g2661c7c0e"
+    ],
+    "geometry_authority": "master_timeline.json",
+    "output_artifact": "phase2_ocr_timeline.json",
+    "overwrite_master_timeline": false,
+    "approval_policy": "exact_operator_review",
+    "llm_context_correction_allowed": true,
+    "llm_correction_is_approval_authority": false
+  },
+  "phase3": {
+    "scope": "title_labels_ingredients_units_endcard",
+    "duplicate_transition_policy": "translate_once_cover_all_geometry_refs",
+    "duration_policy": "meaning_preserving_compaction_then_measured_audio_fit",
+    "approval_policy": "operator_locked_translation"
+  },
+  "tts": {
+    "provider": "auto",
+    "voice_id": "vi-VN-HoaiMyNeural",
+    "speaking_rate": 1.0,
+    "timing_policy": "measured_duration_segment_fit",
+    "atempo_policy": "bounded_only_after_text_compaction"
+  },
+  "render": {
+    "renderer": "phase4_adaptive_pts_preserving",
+    "video_encoder_policy": "auto",
+    "hardware_smoke_probe": true,
+    "hardware_fallback_enabled": true,
+    "background_mix_gain": 0.22,
+    "loudness_target_lufs": -14.0,
+    "invisible_perturbation": false,
+    "mirror": false,
+    "duplicate_detection_evasion": false
+  },
+  "operator_gates": [
+    "OCR_APPROVED",
+    "TRANSLATION_APPROVED",
+    "VISUAL_APPROVED",
+    "AUDIO_APPROVED",
+    "FINAL_APPROVED",
+    "METADATA_APPROVED",
+    "SOURCE_RIGHTS_AND_MUSIC_APPROVED"
+  ],
+  "execution": {
+    "resume": true,
+    "idempotent_stage_checks": true,
+    "transient_retry_policy": "pipeline_retry_policy",
+    "external_publish": false
+  },
+  "evidence": {
+    "corpus": {
+      "path": "docs/pipeline-regression-corpus-v2.json",
+      "file_sha256": "09353d20ff93a37010a67af304ce5ca5bfa2fc381ba91aeb3b4b12d4fc36e27c",
+      "corpus_sha256": "6e08d1391adec51772452ef63b705de6e156a883abb340969b5e822737869d2b"
+    },
+    "report": {
+      "path": "apps/api/regression_runs/pipeline_v2_20260727_fade_fix/pipeline_regression_report.json",
+      "file_sha256": "67d4a3c9386473977a5e5c989788ad47dab9e084d271ff3793263a5bed12d6e1",
+      "report_sha256": "3994cff88a82315428bd80ada80ab726c03f21f6af0a89ec271eedfeef2d7be9"
+    },
+    "real_video_gaps": {
+      "orientation": [
+        "portrait"
+      ],
+      "resolution": [
+        "720p_or_lower"
+      ],
+      "motion": [
+        "low",
+        "medium"
+      ],
+      "audio": [
+        "absent"
+      ]
+    }
+  },
+  "claims": {
+    "universal_video_support": false,
+    "controlled_pilot_ready_through_phase2_execution": true,
+    "full_batch_end_to_end_pass": false
+  },
+  "recipe_sha256": "4dd597c32b8acd224dfb33a0ce0446f8f4bc9a4237f2b0d5fb684f20c34fe0f1"
+}

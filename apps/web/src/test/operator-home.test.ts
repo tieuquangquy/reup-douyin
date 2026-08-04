@@ -67,7 +67,7 @@ const pipeline = {
       secondary_count: 1,
       secondary_label: "Sessions 24h",
       status: "needs_attention",
-      href: "/ops/extensions/douyin/capture-inbox",
+      href: "/selection/capture-inbox",
       attention_count: 5,
       metrics: [{ key: "failed", label: "Failed", value: 1, detail: null }],
       description: "",
@@ -138,7 +138,7 @@ const pipeline = {
       title: "Capture failures",
       detail: "1 failed",
       count: 1,
-      href: "/ops/extensions/douyin/capture-inbox",
+      href: "/selection/capture-inbox",
       recommended_action: "Inspect failures"
     },
     {

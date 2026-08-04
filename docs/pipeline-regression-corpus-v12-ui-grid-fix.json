@@ -1,0 +1,94 @@
+{
+  "schema_version": "pipeline_regression_corpus_v1",
+  "policy_version": "pipeline_regression_policy_v1",
+  "status": "FRESH_RECIPE_LOCK_CANDIDATE",
+  "case_count": 5,
+  "fresh_phase1_required": true,
+  "cases": [
+    {
+      "case_id": "local_public_pd_nasa_spectra_vertical",
+      "source_video_external_id": "public_pd_nasa_spectra_vertical",
+      "status": "READY_FOR_BATCH_REGRESSION",
+      "video_path": ".douyin_profiles/regression_gap_staging/public_pd_nasa_spectra_vertical.webm",
+      "phase1_baseline": {"track_count": 43, "hardsub_count": 43},
+      "dimensions": {
+        "orientation": "portrait", "resolution": "1080p_or_higher",
+        "timebase": "CFR", "frame_rate": "30fps_or_lower",
+        "duration_band": "45_to_60s", "audio": "present",
+        "lighting": "mixed", "motion": "high", "text_density": "medium"
+      }
+    },
+    {
+      "case_id": "local_public_pd_nasa_radio_signal_portrait",
+      "source_video_external_id": "public_pd_nasa_radio_signal_portrait",
+      "status": "READY_FOR_BATCH_REGRESSION",
+      "video_path": ".douyin_profiles/regression_gap_staging/public_pd_nasa_radio_signal_portrait.webm",
+      "phase1_baseline": {"track_count": 2, "hardsub_count": 2},
+      "dimensions": {
+        "orientation": "portrait", "resolution": "1080p_or_higher",
+        "timebase": "CFR", "frame_rate": "30fps_or_lower",
+        "duration_band": "under_35s", "audio": "absent",
+        "lighting": "dark", "motion": "low", "text_density": "light"
+      }
+    },
+    {
+      "case_id": "local_public_cc0_flameless_candle",
+      "source_video_external_id": "public_cc0_flameless_candle",
+      "status": "READY_FOR_BATCH_REGRESSION",
+      "video_path": ".douyin_profiles/regression_gap_staging/public_cc0_flameless_candle.webm",
+      "phase1_baseline": {"track_count": 0, "hardsub_count": 0},
+      "dimensions": {
+        "orientation": "landscape", "resolution": "1080p_or_higher",
+        "timebase": "VFR", "frame_rate": "30fps_or_lower",
+        "duration_band": "under_35s", "audio": "present",
+        "lighting": "dark", "motion": "low", "text_density": "light"
+      }
+    },
+    {
+      "case_id": "local_7450099336215579915",
+      "source_video_external_id": "7450099336215579915",
+      "status": "READY_FOR_BATCH_REGRESSION",
+      "video_path": ".douyin_profiles/download_staging/7450099336215579915.mp4",
+      "phase1_baseline": {"track_count": 35, "hardsub_count": 35},
+      "dimensions": {
+        "orientation": "landscape", "resolution": "1080p_or_higher",
+        "timebase": "VFR", "frame_rate": "30fps_or_lower",
+        "duration_band": "under_35s", "audio": "present",
+        "lighting": "mixed", "motion": "high", "text_density": "medium"
+      }
+    },
+    {
+      "case_id": "local_7472735913513078057",
+      "source_video_external_id": "7472735913513078057",
+      "status": "READY_FOR_BATCH_REGRESSION",
+      "video_path": ".douyin_profiles/download_staging/7472735913513078057.mp4",
+      "phase1_baseline": {"track_count": 37, "hardsub_count": 15},
+      "dimensions": {
+        "orientation": "landscape", "resolution": "1080p_or_higher",
+        "timebase": "VFR", "frame_rate": "30fps_or_lower",
+        "duration_band": "under_35s", "audio": "present",
+        "lighting": "mixed", "motion": "high", "text_density": "dense"
+      }
+    }
+  ],
+  "coverage": {
+    "orientation": ["landscape", "portrait"],
+    "resolution": ["1080p_or_higher"],
+    "timebase": ["CFR", "VFR"],
+    "frame_rate": ["30fps_or_lower"],
+    "duration_band": ["45_to_60s", "under_35s"],
+    "lighting": ["dark", "mixed"],
+    "motion": ["high", "low"],
+    "audio": ["absent", "present"],
+    "text_density": ["dense", "light", "medium"]
+  },
+  "real_video_gaps": {
+    "resolution": ["720p_or_lower"],
+    "frame_rate": ["above_30fps"],
+    "duration_band": ["35_to_45s"],
+    "lighting": ["light"],
+    "motion": ["medium"]
+  },
+  "closure_rule": "This targeted five-case run may lock only the tested recipe; it does not claim universal video coverage while real_video_gaps is non-empty.",
+  "corpus_sha256": "4e2af46155085f8a13f8821da8e70611e134ecae4573caa87f0ba28e13c14895"
+}

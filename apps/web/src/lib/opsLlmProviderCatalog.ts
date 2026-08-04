@@ -1,6 +1,7 @@
 /** LLM Ops provider presets for Translation / Caption AI (UI + gate authority). */
 
 export type LlmRuntimeMode = "gemini" | "ollama" | "openai_compatible";
+export type LlmProviderCategory = "cloud" | "local" | "gateway" | "system";
 
 export type LlmProviderOption = {
   id: string;
@@ -132,6 +133,27 @@ export function llmProviderLabel(provider: string): string {
   const id = (provider || "").trim();
   if (!id) return "";
   return llmProviderOption(id)?.label || id;
+}
+
+const LLM_GATEWAY_PROVIDERS = new Set([
+  "litellm",
+  "openai_compatible",
+  "openrouter",
+  "requesty",
+  "vercel_ai_gateway"
+]);
+
+/** Presentation category for the registry identity; the exact provider stays in Runtime. */
+export function llmProviderCategory(provider: string, baseUrl = ""): LlmProviderCategory {
+  const id = (provider || "").trim().toLowerCase();
+  const endpoint = baseUrl.trim().toLowerCase();
+  const isLocalEndpoint = /^(https?:\/\/)?(127\.0\.0\.1|localhost)(:\d+)?(?:\/|$)/.test(endpoint);
+  if (llmRuntimeMode(id) === "unsupported") return "system";
+  if (llmRuntimeMode(id) === "ollama" || id === "lmstudio" || id === "vscode_lm" || isLocalEndpoint) {
+    return "local";
+  }
+  if (LLM_GATEWAY_PROVIDERS.has(id)) return "gateway";
+  return "cloud";
 }
 
 export function isNativeLlmProvider(provider: string): boolean {

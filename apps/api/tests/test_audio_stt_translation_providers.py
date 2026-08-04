@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 import unittest
 from dataclasses import dataclass
+from unittest.mock import patch
 
 from src.audio_pipeline.providers import (
     CaptionFallbackSttProvider,
@@ -15,7 +16,13 @@ from src.audio_pipeline.stt_funasr import (
     parse_funasr_generate_result,
     split_caption_into_timed_units,
 )
-from src.audio_pipeline.translation_llm import DurationConstrainedTranslationProvider, FixedLlmClient
+from src.audio_pipeline.translation_llm import (
+    DurationConstrainedTranslationProvider,
+    FixedLlmClient,
+    GeminiHttpClient,
+    _clean_model_text,
+    _extract_gemini_text,
+)
 from src.audio_pipeline.types import TranslationPreset
 
 
@@ -80,6 +87,39 @@ class FunasrSttProviderTests(unittest.TestCase):
         self.assertAlmostEqual(units[0].end_seconds, 1.2)
         self.assertEqual(units[1].text, "减脂餐很简单")
         self.assertAlmostEqual(units[1].start_seconds, 1.3)
+
+    def test_word_timestamps_split_dialogue_at_measured_pauses(self) -> None:
+        raw = [
+            {
+                "text": "\u542c \u5230 \u4f1a \u5316 \u5986 \u8bf7 \u95ed \u773c",
+                "timestamp": [
+                    [90, 290],
+                    [290, 470],
+                    [470, 650],
+                    [650, 830],
+                    [830, 1050],
+                    [2900, 3100],
+                    [3100, 3300],
+                    [3300, 3500],
+                ],
+            }
+        ]
+
+        units = parse_funasr_generate_result(raw)
+
+        self.assertEqual(len(units), 2)
+        self.assertEqual(units[0].text, "\u542c\u5230\u4f1a\u5316\u5986")
+        self.assertEqual(units[0].start_seconds, 0.09)
+        self.assertEqual(units[0].end_seconds, 1.05)
+        self.assertEqual(units[1].text, "\u8bf7\u95ed\u773c")
+        self.assertEqual(units[1].start_seconds, 2.9)
+        self.assertEqual(units[1].end_seconds, 3.5)
+        self.assertTrue(
+            all("funasr_word_timestamps" in unit.flags for unit in units)
+        )
+
+        fitted = fit_funasr_units_to_duration(units, duration_seconds=6.0)
+        self.assertEqual([(unit.start_seconds, unit.end_seconds) for unit in fitted], [(0.09, 1.05), (2.9, 3.5)])
 
     def test_split_caption_distributes_timing_by_length(self) -> None:
         units = split_caption_into_timed_units("你好。世界！测试", duration_seconds=6.0)
@@ -152,6 +192,71 @@ class FunasrSttProviderTests(unittest.TestCase):
 
 
 class DurationConstrainedTranslationTests(unittest.TestCase):
+    def test_gemini_client_spaces_requests_for_free_tier_rpm(self) -> None:
+        client = GeminiHttpClient(
+            api_key="test",
+            min_request_interval_seconds=13.0,
+        )
+        with (
+            patch(
+                "src.audio_pipeline.translation_llm.time.monotonic",
+                side_effect=[100.0, 100.0, 105.0, 113.0],
+            ),
+            patch("src.audio_pipeline.translation_llm.time.sleep") as sleep,
+        ):
+            client._wait_for_rate_budget()
+            client._wait_for_rate_budget()
+
+        sleep.assert_called_once_with(8.0)
+
+    def test_clean_model_text_removes_gemini_reasoning_wrapper(self) -> None:
+        raw = (
+            "Assembling and Refining (Checking constraints):**\n"
+            "*Draft:* Tán nền thật mỏng rồi dặm đều"
+        )
+        self.assertEqual(
+            _clean_model_text(raw),
+            "Tán nền thật mỏng rồi dặm đều",
+        )
+
+    def test_extract_gemini_text_ignores_thought_parts(self) -> None:
+        payload = {
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [
+                            {"text": "Checking constraints", "thought": True},
+                            {"text": "Tán nền thật mỏng"},
+                        ]
+                    }
+                }
+            ]
+        }
+        self.assertEqual(_extract_gemini_text(payload), "Tán nền thật mỏng")
+
+    def test_high_quality_mode_fails_whole_beat_instead_of_using_mt(self) -> None:
+        @dataclass
+        class BoomClient:
+            provider_name: str = "gemini"
+
+            def complete(self, prompt: str) -> str:
+                del prompt
+                raise RuntimeError("gemini_http_429:quota")
+
+        provider = DurationConstrainedTranslationProvider(
+            primary=BoomClient(),
+            max_rewrite_rounds=0,
+            machine_translate=lambda _src: "Bản dịch MyMemory không được dùng",
+            allow_machine_translate_recovery=False,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "translation_provider_unavailable"):
+            provider.translate(
+                "测试",
+                preset=TranslationPreset.LITERAL_SAFE,
+                duration_budget_seconds=3.0,
+            )
+
     def test_literal_safe_prefers_llm_over_machine_translate(self) -> None:
         client = FixedLlmClient(responses=["Ban dich Gemini sat nghia"])
         provider = DurationConstrainedTranslationProvider(
@@ -190,6 +295,28 @@ class DurationConstrainedTranslationTests(unittest.TestCase):
         self.assertEqual(result.translated_text, "Ban dich MT recovery")
         self.assertIn("machine_translate_recovery", result.quality_flags)
         self.assertEqual(result.metadata.get("provider"), "mymemory")
+
+    def test_expired_llm_key_fails_closed_instead_of_silent_mt(self) -> None:
+        @dataclass
+        class ExpiredClient:
+            provider_name: str = "openai_compatible"
+
+            def complete(self, prompt: str) -> str:
+                del prompt
+                raise RuntimeError("openai_compatible_http_401: API key đã hết hạn")
+
+        provider = DurationConstrainedTranslationProvider(
+            primary=ExpiredClient(),
+            max_rewrite_rounds=0,
+            machine_translate=lambda _src: "Bản dịch MT không được dùng",
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "translation_provider_auth_failed"):
+            provider.translate(
+                "测试",
+                preset=TranslationPreset.LITERAL_SAFE,
+                duration_budget_seconds=3.0,
+            )
 
     def test_rewrite_loop_shortens_oversized_translation(self) -> None:
         client = FixedLlmClient(

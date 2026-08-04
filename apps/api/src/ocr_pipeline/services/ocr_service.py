@@ -91,9 +91,19 @@ class OcrPipelineService:
                 "sample_fps": request.sample_fps,
                 "hard_sub_band_ratio": request.hard_sub_band_ratio,
                 "clean_hardsub": request.clean_hardsub,
+                "use_master_phase1": request.use_master_phase1,
+                "workflow_version": request.workflow_version,
+                "workflow_action": request.workflow_action,
+                "review_decisions": list(request.review_decisions),
+                "operator_id": request.operator_id,
             },
             idempotency_key=None,
         )
+        if request.workflow_version == "QUALITY_LOCALIZATION_V24_1":
+            from src.services.pipeline_recipe_runtime import bind_job_to_current_recipe
+
+            bind_job_to_current_recipe(job)
+            self.db.commit()
         logger.info("ocr_job_created", extra={"job_id": str(job.id), "source_video_id": str(source_video.id)})
         return job
 
@@ -191,6 +201,7 @@ class OcrPipelineService:
                     render_progress=_render_progress,
                     ocr_cache_path=ocr_cache_path,
                     force_refresh=bool(request.force_refresh),
+                    use_master_phase1=request.use_master_phase1,
                 )
             except OcrFilteringError as exc:
                 raise OcrPipelineError(

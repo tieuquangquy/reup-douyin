@@ -1,9 +1,11 @@
-# Dependencies cho HF Spaces PaddleOCR API
+# Dependencies cho local / Cloud Run PaddleOCR API
 # STRICT: dùng opencv-python-headless (không dùng opencv-python đầy đủ UI)
 fastapi
 uvicorn
-paddleocr
-paddlepaddle
+# Upstream GitHub + doc-parser extra (required for PaddleOCR-VL-1.6).
+# Classic PP-OCR remains the automatic fallback when VL init fails.
+paddleocr[doc-parser] @ git+https://github.com/PaddlePaddle/PaddleOCR.git
+paddlepaddle>=3.2.1
 python-multipart
 opencv-python-headless
 numpy

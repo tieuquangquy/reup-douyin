@@ -38,7 +38,7 @@
   - `/ops/assets`
   - `/ops/publish-attempts`
   - `/ops/reconciliation`
-  - `/ops/accounts`
+  - `/publishing/accounts`
   - `/ops/routing-rules`
   - `/ops/risk`
   - `/ops/tools`

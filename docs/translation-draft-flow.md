@@ -8,14 +8,14 @@ The translation draft flow turns current `TranscriptSegment` rows (DialogueBeats
 2. **Operator:** Review **Vietnamese** + timeline (Chinese is read-only reference). Optional advanced endpoint `POST .../transcript-draft/approve-source` remains but is not the primary CTA.
 3. **Phase B — Literal translate:** `BUILD_TRANSLATION_DRAFT` (`literal_safe`) via `POST .../translation-draft/rerun`. Does **not** run FunASR. Requires beats `APPROVED` (satisfied by Phase A auto-approve).
 
-Default Phase B CTA is `literal_safe` (faithful meaning). **Gemini (AI Studio `GEMINI_API_KEY`) is primary** unless Ops **Translation AI** overrides; MyMemory is recovery only when the LLM is down or VI still has Chinese. UI also offers **Translate natural** (`natural_viral`) for punchier spoken lines after literal quality is acceptable.
+Default Phase B CTA is `literal_safe` (faithful meaning). **Gemini (AI Studio `GEMINI_API_KEY`) is primary** unless Ops **Translation AI** overrides. The production high-quality lane does not fall back to MyMemory: provider failures fail/retry the durable job, preventing mixed-provider drafts. UI also offers **Translate natural** (`natural_viral`) for punchier spoken lines after literal quality is acceptable.
 
 ### Operator-owned Translation AI (LLM connection)
 
 **Preferred:** Ops Console → **Translation settings** (`/ops/translation-ai`) → tab **Translation AI** → enable DB override → Save.  
 Stored in DB at `workspaces.settings_json.translation_ai` (per workspace). Supports `gemini`, `openai_compatible` (third-party Chat Completions), `ollama`, and `auto`. API key is never returned in full (masked). Worker rebuilds the translation provider on each Translate job.
 
-**Authority:** enabled workspace DB override → `.env` (`GEMINI_*` / `OLLAMA_*` / `AUDIO_TRANSLATION_PROVIDER`) → placeholder.
+**Authority:** enabled workspace DB override → `.env` (`GEMINI_*` / `OLLAMA_*` / `AUDIO_TRANSLATION_PROVIDER`) → placeholder. Gemini free-tier execution is sequential and uses `GEMINI_TRANSLATION_MIN_REQUEST_INTERVAL_SECONDS=13` by default; a 429 receives a minimum 60-second durable retry delay.
 
 Phase 1 note: if the login JWT `workspace_id` is not a real `workspaces` row, settings Save falls back to `ensure_default_workspace` (same local workspace jobs/videos use) so Translate picks up the saved connection/prompt.
 
@@ -24,7 +24,7 @@ API: `GET/PUT /ops/translation-ai`, `POST /ops/translation-ai/test`, `POST /ops/
 ### Operator-owned translation prompt
 
 **Preferred:** Ops Console → **Translation settings** → tab **Translation prompt** (`/ops/translation-prompt`) → Save.  
-Stored in DB at `workspaces.settings_json.translation_user_prompt` (per workspace). The worker loads it on each Translate and appends only the Chinese beat text. No code edit; restart not required after Save.
+Stored in DB at `workspaces.settings_json.translation_user_prompt` (per workspace). The worker loads it on each Translate and appends a mandatory runtime contract, the real Chinese beat, the slot duration, and a spoken-unit ceiling. Placeholder source text inside a saved prompt is explicitly ignored. No code edit or restart is required after Save.
 
 **Fallback (if DB empty):**
 
@@ -62,6 +62,18 @@ Important fields:
 
 `duration_budget_ms` comes from the source transcript timing. It gives step 9 a clear budget for TTS/subtitle fitting.
 
+The versioned `TRANSLATION_DRAFT_JSON` also exports each row's `status` and safe `metadata`. This is where duration-rewrite candidates and their validation evidence remain reviewable without overwriting the approved/current text history.
+
+## Duration-aware controlled rewrite
+
+Translation first produces the complete Vietnamese meaning. It then evaluates the line against the slot using Vietnamese spoken units, punctuation pause budget, and a provider-neutral default rate. This estimate is an early review signal only; synthesized audio remains the final authority.
+
+Only an oversized line enters controlled rewrite, for at most two attempts in the production provider factory. Every candidate records its text and SHA-256, speech-budget result, missing protected tokens, a deterministic semantic-retention screening score, and whether it is safe to present for operator review. Numbers, URLs, acronyms and common units are protected against accidental deletion. A safe candidate is selected as a review candidate and receives `needs_operator_review`; it is never silently approved.
+
+If no safe candidate exists, the original translation is retained with `duration_adaptation_required` and `duration_rewrite_no_safe_candidate`. Underfilled lines are also retained rather than padded with invented speech. Candidate history is stored under `metadata.duration_adaptation` with schema `duration_adaptation_v1`.
+
+The semantic-retention score is a deterministic screening heuristic, not a semantic equivalence proof. Operator review remains mandatory for a selected rewrite candidate and for low-retention warnings.
+
 ## Review Hints
 
 Current quality flags:
@@ -74,7 +86,9 @@ Current quality flags:
 - `translation_fallback_used` (primary LLM failed; secondary used)
 - `needs_operator_review` (only when risk flags above apply — not on every clean beat)
 
-Dirty VI recovery order after Gemini/LLM draft: **MyMemory zh→vi** (`machine_translate_applied`) → chat-LLM repair → micro-chunk LLM (`cjk_chunk_retranslate_applied`). If Gemini is fully unavailable, MyMemory is used as `machine_translate_recovery`. If a beat still fails the CJK gate, that beat stays empty; clean beats still persist (`translated_literal_partial`). Job `translation_count` = filled VI only.
+Dirty VI recovery in the production high-quality lane uses chat-LLM repair followed by micro-chunk LLM (`cjk_chunk_retranslate_applied`). MyMemory recovery remains available only to explicit legacy/manual provider instances; the default factory disables it. If a beat still fails the CJK gate, that beat stays empty; clean beats still persist (`translated_literal_partial`). Job `translation_count` = filled VI only.
+
+Additional duration-review flags include `duration_rewrite_applied`, `duration_rewrite_no_safe_candidate`, `duration_rewrite_protected_token_mismatch`, `duration_rewrite_semantic_review_required`, and `duration_underfilled_review`.
 
 ## Versioning
 
@@ -84,7 +98,7 @@ Each audio analysis rerun creates a new current set:
 - New translations point to the new current transcript rows.
 - JSON draft artifact is written as `TRANSLATION_DRAFT_JSON`.
 
-Re-running **Translate literal** on the same transcript version **upserts** rows keyed by `(transcript_segment_id, language_code, version)` — it does not INSERT a second row (avoids `uq_translation_segments_transcript_language_version`).
+Translation history is immutable across jobs. A new Translate job inserts `max(version) + 1` for each `(transcript_segment_id, language_code)` and leaves prior rows non-current. Only an idempotent retry carrying the same `created_by_job_id` may update that job's own row. This satisfies `uq_translation_segments_transcript_language_version` while preventing a new run from overwriting a previously approved translation.
 
 ## Step 9 Contract
 
@@ -93,7 +107,10 @@ TTS/subtitle generation should read:
 1. Current `TranslationSegment` rows ordered by `segment_index`.
 2. `duration_budget_ms` as the slot budget.
 3. `quality_flags_json` to decide whether a segment needs review before synthesis.
-4. `TranscriptSegment` timing for subtitle alignment.
+4. `metadata.speech_budget` and `metadata.duration_adaptation` as review evidence, never as approval authority.
+5. `TranscriptSegment` timing for subtitle alignment.
+
+Before TTS, risky or unapproved rows park the Reup Queue at `translation_review`. The frontend approval endpoint hash-binds the reviewed Vietnamese text and timing; only then may the recipe-owned OmniVoice TTS job resume. `timing_fit_blocked` is terminal and is never retried as a transient provider error.
 
 ## Phase 1 Limits
 

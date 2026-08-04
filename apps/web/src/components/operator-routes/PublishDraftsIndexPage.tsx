@@ -68,7 +68,7 @@ export function PublishDraftsIndexPage() {
   if (!queue && !request.error) {
     return (
       <OperatorStudioShell actions={refreshAction} description={t("publishDraftsIndex.pageDesc")} title={t("publishDraftsIndex.pageTitle")}>
-        <AsyncContentBoundary skeletonVariant="list" status="loading"><span /></AsyncContentBoundary>
+        <AsyncContentBoundary skeletonVariant="table" loadingLabel={t("publishDraftsIndex.loadingDetail")} status="loading"><span /></AsyncContentBoundary>
       </OperatorStudioShell>
     );
   }
@@ -76,7 +76,7 @@ export function PublishDraftsIndexPage() {
   if (request.error && !queue) {
     return (
       <OperatorStudioShell actions={refreshAction} description={t("publishDraftsIndex.pageDesc")} title={t("publishDraftsIndex.pageTitle")}>
-        <AsyncContentBoundary errorState={<OpsState title={t("publishDraftsIndex.couldNotLoad")} detail={request.error.message} retry={() => void load()} />} skeletonVariant="list" status="error"><span /></AsyncContentBoundary>
+        <AsyncContentBoundary errorState={<OpsState title={t("publishDraftsIndex.couldNotLoad")} detail={request.error.message} retry={() => void load()} />} skeletonVariant="table" status="error"><span /></AsyncContentBoundary>
       </OperatorStudioShell>
     );
   }
@@ -91,7 +91,7 @@ export function PublishDraftsIndexPage() {
 
   return (
     <OperatorStudioShell actions={refreshAction} description={t("publishDraftsIndex.pageDesc")} title={t("publishDraftsIndex.pageTitle")}>
-      <AsyncContentBoundary refreshing={request.refreshing} skeletonVariant="list" status="success">
+      <AsyncContentBoundary refreshing={request.refreshing} skeletonVariant="table" status="success">
       <main className="ops-page ops-drafts-page">
 
         <div className="ops-drafts-freshness">

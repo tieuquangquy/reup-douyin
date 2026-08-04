@@ -34,7 +34,7 @@ This document captures the final state of the UI unification work for the `reup-
 | `/ops/assets` | Media asset state | Available |
 | `/ops/publish-attempts` | Publish attempt history | Available |
 | `/ops/reconciliation` | Publish reconciliation queue | Available |
-| `/ops/accounts` | Platform account list | Available |
+| `/publishing/accounts` | Platform account list | Available |
 | `/ops/publish-control` | Draft-to-account assignment and rebalancing | Available |
 | `/ops/routing-rules` | Routing rule viewer | Available |
 | `/ops/risk` | Risk flag and decision management | Available |

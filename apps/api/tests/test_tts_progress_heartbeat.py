@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import unittest
+import wave
+from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
@@ -16,8 +18,14 @@ class _FakeProvider:
     provider_name = "fake"
 
     def synthesize(self, request: TtsProviderInput) -> TtsProviderOutput:
+        output = BytesIO()
+        with wave.open(output, "wb") as handle:
+            handle.setnchannels(1)
+            handle.setsampwidth(2)
+            handle.setframerate(24_000)
+            handle.writeframes(b"\x00\x00" * 4_800)
         return TtsProviderOutput(
-            audio_bytes=b"RIFF....",
+            audio_bytes=output.getvalue(),
             duration_seconds=0.2,
             mime_type="audio/wav",
             file_extension="wav",

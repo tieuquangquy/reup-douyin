@@ -33,9 +33,83 @@ assert.match(componentSource, /copyInstallCommand/, "Must support copy install c
 assert.match(componentSource, /installTtsAiPackage/, "Must one-click install via API");
 assert.match(componentSource, /onInstall/, "Must expose Install action");
 assert.match(componentSource, /customProviderSlug/, "Must support custom Local/SDK provider name");
+assert.match(componentSource, /!editingProfileId && nextKind === "local"/, "New Local drafts must not auto-select Edge");
+assert.match(componentSource, /providerChoice:\s*""/, "New Local drafts must preserve an explicit unselected provider state");
+assert.match(componentSource, /localDraftNeedsProvider/, "New Local drafts must expose a provider gate");
+assert.match(componentSource, /ops-tts-provider-gate/, "Provider gate must explain why dependent sections are hidden");
+assert.match(componentSource, /isLocal && !localDraftNeedsProvider/, "Install must wait for a selected Local provider");
+assert.match(
+  componentSource,
+  /\(isLocal \|\| isCloud \|\| isHttp\) && !localDraftNeedsProvider/,
+  "Voice and Preview must wait for a selected Local provider"
+);
+assert.match(enSource, /"providerRequiredTitle"/, "English copy must explain the new-provider gate");
+assert.match(viSource, /"providerRequiredTitle"/, "Vietnamese copy must explain the new-provider gate");
 assert.match(componentSource, /resolveTtsReadyState/, "Must map Install+Test to ready chip");
 assert.match(componentSource, /data-ready-state/, "Must expose ready state on chip");
 assert.match(componentSource, /result\.catalog/, "Must apply Test catalog to Voice select");
+assert.match(
+  componentSource,
+  /resolveTtsCatalogForProvider/,
+  "Opening a saved setup must resolve persisted or curated provider catalog"
+);
+assert.match(componentSource, /onRefreshCatalog/, "Editor must expose an explicit catalog refresh action");
+assert.match(componentSource, /CatalogRefreshPhase/, "Catalog refresh must have explicit lifecycle phases");
+assert.match(componentSource, /setCatalogRefreshPhase\("preparing"\)/, "Catalog refresh must render pre-loading state");
+assert.match(componentSource, /setCatalogRefreshPhase\("loading"\)/, "Catalog refresh must render API loading state");
+assert.match(componentSource, /data-phase=\{catalogRefreshPhase\}/, "Refresh control must expose its current phase");
+assert.match(componentSource, /aria-busy=\{catalogRefreshBusy\}/, "Refresh control must announce busy state");
+assert.match(enSource, /"catalogPreparing"/, "English copy must define catalog pre-loading state");
+assert.match(viSource, /"catalogLoading"/, "Vietnamese copy must define catalog loading state");
+assert.match(cssSource, /\.ops-tts-catalog-refresh\.is-preparing/, "Pre-loading must have distinct visual feedback");
+assert.match(cssSource, /\.ops-tts-catalog-refresh\.is-loading/, "Loading must animate the refresh icon");
+assert.match(
+  componentSource,
+  /ops-tts-section__head--with-action[\s\S]*?onRefreshCatalog\(\)[\s\S]*?<svg/,
+  "Voice catalog refresh must sit in the section header and include an icon"
+);
+assert.match(
+  componentSource,
+  /\{catalog \? \([\s\S]*?ops-tts-status ops-tts-status--compact/,
+  "Catalog metadata row must render only when metadata exists"
+);
+assert.match(cssSource, /\.ops-tts-section__head--with-action/, "Voice header action must have responsive layout styles");
+assert.match(componentSource, /fetchTtsAiEngines/, "OmniVoice editor must load the host-aware engine catalog");
+assert.match(componentSource, /installTtsAiEngine/, "OmniVoice editor must support registry-owned dependency installs");
+assert.match(componentSource, /onInstallEngine/, "OmniVoice engine rows must expose their install action");
+assert.match(componentSource, /fetchTtsAiEngineInstallStatus/, "Engine installs must reattach and poll durable status");
+assert.match(componentSource, /engineInstallJob/, "Engine cards must retain active install state");
+assert.match(componentSource, /<progress max=\{100\}/, "Engine cards must render one-click install progress");
+assert.match(componentSource, /disabled=\{!engine\.selectable\}/, "Engines without a synthesize adapter must remain unselectable");
+assert.match(componentSource, /engineExpandedId/, "Manual and external engines must expose progressive setup guidance");
+assert.match(componentSource, /engineSetupGuide/, "Manual engines must render an explicit setup-guide action");
+assert.match(componentSource, /engineDependencyLabelKey/, "Every compact engine row must retain dependency status text");
+assert.match(apiSource, /\/ops\/tts-ai\/engines/, "API client must expose the OmniVoice engine catalog endpoint");
+assert.match(enSource, /"engineCatalogTitle"/, "en.json must define the OmniVoice engine catalog title");
+assert.match(viSource, /"engineCatalogTitle"/, "vi.json must define the OmniVoice engine catalog title");
+assert.match(enSource, /"engineInstall": "Install engine"/, "English action must describe the full engine install");
+assert.match(viSource, /"engineInstall": "Cài engine"/, "Vietnamese action must describe the full engine install");
+assert.match(componentSource, /engineCatalogCategory/, "Engine catalog must derive one clear state per engine");
+assert.match(componentSource, /engineGroups/, "Engine catalog must group models by operational state");
+assert.match(componentSource, /engineGroupTab/, "Engine categories must retain the selected tab");
+assert.match(componentSource, /role="tablist"/, "Engine categories must use an accessible tab list");
+assert.match(componentSource, /role="tabpanel"/, "The selected engine category must render a tab panel");
+assert.match(componentSource, /aria-selected=\{engineGroupTab === group\.id\}/, "Engine tabs must expose selection state");
+assert.match(componentSource, /ops-tts-engine-catalog__meta/, "Engine totals must stay in the compact catalog header");
+assert.match(componentSource, /ops-tts-engine-card__row/, "Each engine must use a compact single-row card");
+assert.match(componentSource, /ops-tts-engine-card__controls/, "Only actionable controls should occupy card space");
+assert.match(componentSource, /ops-tts-engine-card__identity-top/, "Compact cards must align title and size cleanly");
+assert.match(componentSource, /ops-tts-engine-card__details-toggle[\s\S]*?<svg/, "Details must use a quiet icon control");
+assert.match(componentSource, /EngineCatalogActionIcon/, "Engine actions must use dedicated visual icons");
+assert.match(componentSource, /ops-tts-engine-card__action is-icon/, "Install and setup actions must be icon-only");
+assert.match(componentSource, /aria-label=\{installActionLabel\}/, "Icon-only install action must remain accessible");
+assert.match(componentSource, /title=\{guideActionLabel\}/, "Icon-only setup action must expose a tooltip");
+assert.doesNotMatch(componentSource, /engineFilters|engineSearch/, "Compact catalog must not add filter or search chrome");
+assert.match(cssSource, /\.ops-tts-engine-card__identity/, "Compact cards must style their condensed identity block");
+assert.match(cssSource, /\.ops-tts-engine-tabs/, "Engine category tabs must use compact segmented styling");
+assert.match(cssSource, /\.ops-tts-engine-card:hover/, "Engine cards must have restrained interactive polish");
+assert.match(cssSource, /\.ops-tts-engine-card__progress/, "Engine install progress must have a compact card treatment");
+assert.match(cssSource, /repeat\(3, minmax\(0, 1fr\)\)/, "Wide engine catalog must use a compact three-column layout");
 assert.match(componentSource, /voiceFromCatalog/, "Must explain catalog-backed voices");
 assert.match(componentSource, /previewTtsAiSpeech/, "Must support speech preview");
 assert.match(componentSource, /fetchTtsAiPreviewStatus/, "Must poll async TTS preview status");
@@ -159,6 +233,23 @@ assert.match(cssSource, /\.ops-tts-provider-name\b/, "CSS must style Provider fi
 assert.doesNotMatch(cssSource, /\.ops-tts-studio\b|\.ops-tts-bento\b/, "Studio/bento mosaic CSS must be removed");
 assert.match(componentSource, /sectionPreview/, "Must expose Preview speech section");
 assert.match(componentSource, /ops-tts-preview-bar/, "Preview controls must sit in one bar");
+assert.match(componentSource, /previewValidationMessage/, "Preview must validate provider configuration before API calls");
+assert.match(componentSource, /previewCloudUnavailable/, "Unsupported Cloud preview must use friendly guidance");
+assert.match(componentSource, /showPreviewFailure/, "Preview failures must use panel-local feedback");
+assert.match(componentSource, /ops-tts-preview-feedback/, "Preview panel must render its own error banner");
+assert.match(cssSource, /\.ops-tts-preview-feedback/, "Preview feedback must have dedicated styling");
+assert.match(enSource, /"previewBlockedTitle"/, "English copy must define the Preview validation banner");
+assert.match(viSource, /"previewCloudUnavailable"/, "Vietnamese copy must explain unavailable Cloud preview");
+{
+  const previewStart = componentSource.indexOf("async function onPreview(");
+  const previewEnd = componentSource.indexOf("async function onCancelPreview(", previewStart);
+  const previewChunk = componentSource.slice(previewStart, previewEnd > previewStart ? previewEnd : undefined);
+  assert.doesNotMatch(
+    previewChunk,
+    /setError\((?:status\.detail|started\.detail|message)\)/,
+    "Preview must not dump raw provider errors into the page-top inline error"
+  );
+}
 assert.match(componentSource, /createTtsAiProfile/, "Must create TTS setup via API on Save");
 assert.match(
   componentSource,
@@ -221,9 +312,9 @@ assert.match(componentSource, /renameTtsAiProfile/, "Must rename TTS setup via A
 assert.match(componentSource, /deleteTtsAiProfile/, "Must delete TTS setup via API");
 assert.match(componentSource, /setTtsAiProfileEnabled/, "Must toggle enabled on overview");
 assert.match(componentSource, /saveTtsAiProfile/, "Must save editor via profile PUT");
-assert.match(componentSource, /api_key_masked/, "Table must show masked API key per setup");
-assert.match(componentSource, /ops-tts-setup-table__api-key/, "API key column must use a dedicated visible cell");
-assert.doesNotMatch(componentSource, /profile\.api_key_set \? t\("opsTtsAi\.profileKeySet"\)/, "Table must not only show Set/Unset for API key");
+assert.match(componentSource, /api_key_masked/, "Profile editing must preserve masked API key metadata");
+assert.match(componentSource, /ops-ai-voice-runtime-cell/, "Voice runtime must keep credential state visually grouped");
+assert.match(componentSource, /showsTtsApiKey\(profile\.provider\)/, "Credential state must only render for providers that require an API key");
 assert.match(apiSource, /api_key_masked/, "Profile summary type must include api_key_masked");
 assert.match(componentSource, /viewMode === \"list\"/, "Must default to list overview");
 assert.match(componentSource, /ops-tts-list-toolbar/, "Must expose list toolbar for saved setups");
@@ -240,6 +331,20 @@ assert.match(apiSource, /createTtsAiProfile/, "API helper must export createTtsA
 assert.match(apiSource, /activateTtsAiProfile/, "API helper must export activateTtsAiProfile");
 assert.match(apiSource, /saveTtsAiProfile/, "API helper must export saveTtsAiProfile");
 assert.match(componentSource, /ops-tts-setup-table/, "List must use table layout");
+assert.match(componentSource, /ops-ai-control-center is-tts/, "TTS list must use the AI Setup Control Center surface");
+assert.match(componentSource, /ops-ai-registry-leading/, "TTS registry must use a voice-specific identity header");
+assert.match(componentSource, /ops-ai-registry-table is-tts/, "TTS setups must use the condensed voice registry table");
+assert.match(componentSource, /voiceRuntimeCol[\s\S]*speechRuntimeCol[\s\S]*statusControlCol/, "TTS registry must group voice, runtime and control data into single-line columns");
+assert.match(componentSource, /ops-ai-voice-runtime-cell[\s\S]*profileKeySet[\s\S]*profileKeyUnset/, "Grouped voice runtime must preserve visible API key state");
+assert.match(componentSource, /showsTtsApiKey\(profile\.provider\)/, "Voice runtime must only show key state for providers that require credentials");
+assert.match(componentSource, /hasFallback \? `FB:[\s\S]*profile\.fallback_voice_id/, "Fallback voice must not render without a configured fallback provider");
+assert.doesNotMatch(componentSource, /hasFallbackColumn/, "Fallback must fold into voice configuration instead of creating a sparse column");
+assert.match(componentSource, /ops-ai-inline-config[\s\S]*ops-ai-inline-status/, "TTS rows must use compact single-line data groups");
+assert.doesNotMatch(componentSource, /OpsAiProviderMark/, "Setup names must not have decorative leading icons");
+assert.match(componentSource, /ops-ai-row-actions/, "Row actions must be wrapped without changing table-cell display");
+assert.match(cssSource, /\.ops-ai-registry-table \.ops-ai-row-actions\s*\{[^}]*display:\s*inline-flex/s, "Action wrapper must own flex alignment");
+assert.doesNotMatch(cssSource, /\.ops-ai-registry-table \.ops-tts-setup-table__actions\s*\{[^}]*display:\s*flex/s, "Table action cell must retain table-cell layout");
+assert.match(cssSource, /\.ops-ai-control-center \.ops-ai-registry-table td\s*\{[^}]*height:\s*56px[^}]*white-space:\s*nowrap/s, "AI registry rows must stay on one compact line");
 assert.match(componentSource, /<thead>/, "Table must have column headers");
 assert.doesNotMatch(componentSource, /ops-tts-setup-switch__label/, "Active switch must not show On/Off text");
 assert.match(componentSource, /ops-tts-setup-switch/, "Table must keep the Active toggle switch");
@@ -318,7 +423,7 @@ assert.match(componentSource, /aria-label=\{t\("opsTtsAi\.profileDelete"\)\}/, "
 assert.match(cssSource, /tbody tr\.is-active/, "CSS must highlight active TTS setup row");
 assert.match(cssSource, /ops-tts-setup-table__icon-btn--danger/, "CSS must style delete icon as danger");
 assert.doesNotMatch(componentSource, /profileSetActive/, "Separate Set active button must be removed");
-assert.match(componentSource, /profileActiveCol/, "Active column must label the On/Off switch");
+assert.match(componentSource, /statusControlCol/, "Combined status column must label the On/Off switch");
 assert.match(componentSource, /activateTtsAiProfile/, "On/Off On must call activate API");
 assert.match(componentSource, /sampleRate/, "Must show sample rate meta from catalog");
 assert.match(componentSource, /EDGE_FALLBACK_VOICE_OPTIONS/, "Fallback edge voices must be selectable");
@@ -482,6 +587,7 @@ assert.match(enSource, /"testErrorHint"/, "TTS i18n must include test error hint
     rateLimited: "Rate limited",
     failed: "Connection check failed",
     checkKey: "Check the API key and try again.",
+    checkForbidden: "The provider rejected this request. Check Base URL, key permissions, or a gateway/firewall block.",
     checkEndpoint: "Check Base URL and provider, then try again."
   });
   assert.equal(apiFail.httpStatus, 500);

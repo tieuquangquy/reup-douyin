@@ -12,6 +12,46 @@ from src.tts_pipeline.types import TtsRequest, VoiceConfig
 
 
 class TtsVoiceAuthorityTests(unittest.TestCase):
+    def test_bound_recipe_overrides_changed_ops_voice_and_provider(self) -> None:
+        service = TtsPipelineService(db=MagicMock())
+        workspace_tts = SimpleNamespace(
+            enabled=True,
+            provider="edge",
+            model_id="",
+            voice_id="vi-VN-HoaiMyNeural",
+            speaking_rate=1.2,
+            language_code="vi",
+        )
+        request = TtsRequest(
+            source_video_id=uuid4(),
+            runtime_authority={
+                "provider": "omnivoice",
+                "model_id": "k2-fsa/OmniVoice",
+                "voice_id": "instruct:vi_female_north",
+                "language_code": "vi",
+                "speaking_rate": 1.0,
+                "runtime_config_sha256": "a" * 64,
+            },
+        )
+        with patch(
+            "src.tts_pipeline.services.tts_service.WorkspaceSettingsService"
+        ) as service_cls:
+            service_cls.return_value.get_tts_ai.return_value = workspace_tts
+            with patch("src.tts_pipeline.services.tts_service.get_settings") as settings:
+                settings.return_value = SimpleNamespace(
+                    audio_tts_voice_id="vi-VN-HoaiMyNeural",
+                    audio_tts_speaking_rate=1.0,
+                )
+                effective = service._workspace_tts_config(
+                    uuid4(), request.runtime_authority
+                )
+                resolved = service._voice_config_for_request(request, uuid4())
+
+        self.assertEqual(effective.provider, "omnivoice")
+        self.assertEqual(effective.model_id, "k2-fsa/OmniVoice")
+        self.assertEqual(resolved.voice_id, "instruct:vi_female_north")
+        self.assertEqual(resolved.speaking_rate, 1.0)
+
     def test_workspace_enabled_overrides_client_edge_default(self) -> None:
         service = TtsPipelineService(db=MagicMock())
         workspace_tts = SimpleNamespace(

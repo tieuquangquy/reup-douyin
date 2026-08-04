@@ -113,6 +113,22 @@ class ExportHandoffServiceTests(unittest.TestCase):
         self.assertEqual(fake_db.commits, 1)
         self.assertGreaterEqual(fake_db.flushes, 1)
 
+    def test_create_export_package_persists_manifest_extensions_atomically(self) -> None:
+        ready = queue_item()
+        fake_db = FakeExportHandoffDb([ready])
+        recipe_ref = {"recipe_sha256": "a" * 64}
+
+        package, result = ExportHandoffService(fake_db).create_export_package(
+            item_ids=[ready.id],
+            package_manifest_extension={"recipe_lock": recipe_ref},
+            item_manifest_extension={"recipe_lock": recipe_ref},
+        )
+
+        self.assertEqual(result.succeeded_count, 1)
+        self.assertEqual(package.manifest_json["recipe_lock"], recipe_ref)
+        self.assertEqual(package.items[0].manifest_json["recipe_lock"], recipe_ref)
+        self.assertEqual(fake_db.commits, 1)
+
     def test_create_publish_handoff_marks_packaged_items_for_handoff_without_external_publish(self) -> None:
         workspace_id = uuid4()
         ready = queue_item(workspace_id=workspace_id)

@@ -26,13 +26,18 @@ class ReleaseOrphanedLocksTests(unittest.TestCase):
         )
         job = SimpleNamespace(
             id=job_id,
+            job_type=JobType.COLLECT_PUBLICATION_METRICS,
             status=JobStatus.RUNNING,
             locked_by="local-worker-1",
             locked_at=datetime.now(UTC),
             scheduled_at=None,
             steps=[step],
+            attempts=1,
+            max_attempts=3,
+            retryable=True,
             error_code=None,
             error_message=None,
+            metadata_json={},
         )
         db = MagicMock()
         db.scalars.return_value.all.return_value = [job]
@@ -66,6 +71,47 @@ class ReleaseOrphanedLocksTests(unittest.TestCase):
         self.assertEqual(step.status, JobStepStatus.FAILED)
         self.assertEqual(step.error_code, "WORKER_ORPHANED")
         db.commit.assert_called()
+
+    def test_release_orphaned_locks_stops_when_metric_retry_budget_is_exhausted(self) -> None:
+        job_id = uuid4()
+        step = SimpleNamespace(
+            step_key="collect_and_persist_snapshot",
+            status=JobStepStatus.RUNNING,
+            progress_percent=50,
+            error_code=None,
+            error_message=None,
+            job_id=job_id,
+        )
+        job = SimpleNamespace(
+            id=job_id,
+            job_type=JobType.COLLECT_PUBLICATION_METRICS,
+            status=JobStatus.RUNNING,
+            locked_by="local-worker-1",
+            locked_at=datetime.now(UTC),
+            scheduled_at=None,
+            steps=[step],
+            attempts=5,
+            max_attempts=5,
+            retryable=True,
+            error_code=None,
+            error_message=None,
+            metadata_json={},
+        )
+        db = MagicMock()
+        db.scalars.return_value.all.return_value = [job]
+        runner = JobRunner(db)
+        runner.service = MagicMock()
+        runner.service.refresh_progress.side_effect = lambda j: j
+        runner.service.transition_job.side_effect = lambda j, status, **_kwargs: setattr(j, "status", status)
+        runner.service.transition_step.side_effect = lambda s, status, **_kwargs: setattr(s, "status", status)
+
+        count = runner.release_orphaned_locks("local-worker-1")
+
+        self.assertEqual(count, 1)
+        self.assertEqual(job.status, JobStatus.FAILED)
+        self.assertEqual(step.status, JobStepStatus.FAILED)
+        self.assertFalse(job.metadata_json["metrics_will_auto_retry"])
+        self.assertIsNone(job.scheduled_at)
 
 
 class UnhandledStepExceptionTests(unittest.TestCase):

@@ -1,5 +1,14 @@
 import assert from "node:assert/strict";
-import { activeRiskFlags, gateMessage, highestRiskSeverity, riskBadgeClass } from "../lib/riskState";
+import {
+  activeRiskFlags,
+  gateMessage,
+  highestRiskSeverity,
+  humanizeWarningCode,
+  isActiveRiskFlag,
+  looksLikeWarningCode,
+  resolveRiskWarningLabel,
+  riskBadgeClass
+} from "../lib/riskState";
 import type { RiskFlag, RiskGateSummary } from "../types/risk";
 
 const flags: RiskFlag[] = [
@@ -12,6 +21,21 @@ assert.equal(activeRiskFlags(flags).length, 2);
 assert.equal(highestRiskSeverity(flags), "CRITICAL");
 assert.equal(riskBadgeClass("CRITICAL"), "danger");
 assert.equal(riskBadgeClass("HIGH"), "warn");
+assert.equal(isActiveRiskFlag("OPEN"), true);
+assert.equal(isActiveRiskFlag("RESOLVED"), false);
+assert.equal(looksLikeWarningCode("subtitle_lines_wrapped_for_burn"), true);
+assert.equal(looksLikeWarningCode("Subtitle timing mismatch"), false);
+assert.equal(humanizeWarningCode("subtitle_lines_wrapped_for_burn"), "Subtitle lines wrapped for burn");
+assert.equal(
+  resolveRiskWarningLabel("subtitle_lines_wrapped_for_burn", (key) =>
+    key === "riskWarnings.subtitle_lines_wrapped_for_burn" ? "Lines wrapped for burn-in" : key
+  ),
+  "Lines wrapped for burn-in"
+);
+assert.equal(
+  resolveRiskWarningLabel("unknown_snake_code", (key) => key),
+  "Unknown snake code"
+);
 
 const gate: RiskGateSummary = {
   can_continue: false,

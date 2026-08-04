@@ -36,6 +36,7 @@ class ReupQueueEnqueueResponseTests(unittest.TestCase):
             started_at=None,
             completed_at=None,
             cancelled_at=None,
+            operator_dismissed_at=None,
             job_id=None,
             render_output_id=None,
             publish_draft_id=None,

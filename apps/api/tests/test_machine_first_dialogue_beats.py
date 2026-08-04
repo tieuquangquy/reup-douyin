@@ -15,6 +15,7 @@ from src.audio_pipeline.caption_asr_consensus import (
     drop_punctuation_only_units,
     should_auto_approve_source,
 )
+from src.audio_pipeline.demucs_runner import DemucsStemPaths
 from src.audio_pipeline.providers import DemucsSourceSeparationProvider
 from src.audio_pipeline.services.audio_analysis_service import AudioAnalysisService
 from src.audio_pipeline.types import (
@@ -120,6 +121,32 @@ class DemucsExecutionTests(unittest.TestCase):
         self.assertEqual(result.transcription_storage_key, "video/raw.mp4")
         self.assertIn("demucs_unavailable", result.difficulty_flags)
         self.assertNotIn("demucs_not_executed", result.difficulty_flags)
+
+    def test_demucs_provider_persists_both_stems(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            storage = LocalStorageBackend(root)
+            input_key = "workspace/demo/video/raw.mp4"
+            storage.write_bytes(input_key, b"source")
+
+            def fake_runner(*, input_path: Path, output_dir: Path, model_name: str):
+                del input_path, model_name
+                vocals = output_dir / "vocals.wav"
+                background = output_dir / "no_vocals.wav"
+                vocals.write_bytes(b"VOCALS")
+                background.write_bytes(b"BACKGROUND")
+                return DemucsStemPaths(vocals=vocals, background=background)
+
+            provider = DemucsSourceSeparationProvider(
+                storage=storage,
+                runner=fake_runner,
+                demucs_importable=True,
+            )
+            result = provider.separate(input_key)
+
+            self.assertFalse(result.fallback_used)
+            self.assertTrue(storage.exists(result.metadata["vocal_storage_key"]))
+            self.assertTrue(storage.exists(result.metadata["background_storage_key"]))
 
 
 class MachineFirstAutoApproveTests(unittest.TestCase):

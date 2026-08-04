@@ -16,6 +16,8 @@ export type PublishHandoffStatus =
 
 export type ReupQueueBatchAction =
   | "START_PROCESSING"
+  | "START_AUTO_PIPELINE"
+  | "SET_AUTOMATION"
   | "HOLD"
   | "RESUME"
   | "RETRY"
@@ -51,6 +53,7 @@ export type ReupQueueBatchActionRequest = {
   item_ids: string[];
   note?: string | null;
   target_platform?: PublishTargetPlatform | null;
+  pipeline_mode?: string | null;
 };
 
 export type ExportPackageCreateRequest = {

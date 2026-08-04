@@ -39,6 +39,14 @@ assert.match(sharedSource, /editingProfileId/, "Shared page must track editingPr
 assert.match(sharedSource, /ops-tts-list-toolbar/, "Shared page list mode must reuse TTS list toolbar CSS chrome");
 assert.match(sharedSource, /ops-tts-list-header/, "Tabs + Active toolbar must share one list header row");
 assert.match(sharedSource, /ops-tts-setup-table/, "Shared page must reuse TTS setup table CSS");
+assert.match(sharedSource, /ops-ai-control-center is-\$\{variant\}/, "Translation and Caption lists must use the shared AI Setup Control Center surface");
+assert.match(sharedSource, /ops-ai-registry-table is-llm/, "LLM setups must use the condensed semantic registry table");
+assert.match(sharedSource, /runtimeCol[\s\S]*connectionCol/, "LLM registry must group provider/model and key/base URL into scannable columns");
+assert.match(sharedSource, /ops-ai-setup-identity[\s\S]*ops-ai-inline-config/, "LLM setup identity and configuration must stay on one visual line");
+assert.doesNotMatch(sharedSource, /OpsAiProviderMark/, "LLM setup names must not have decorative leading icons");
+assert.match(sharedSource, /ops-ai-row-actions/, "LLM row actions must be wrapped without changing table-cell display");
+assert.match(sharedSource, /ops-ai-inline-config[\s\S]*ops-ai-inline-connection[\s\S]*ops-ai-inline-status/, "LLM runtime, connection and active state must use single-line groups");
+assert.doesNotMatch(sharedSource, /hasFallbackColumn/, "Fallback must fold into configuration instead of creating a sparse column");
 assert.match(sharedSource, /isOn \? \"is-active\"/, "On row (active+enabled) must get is-active class");
 assert.match(
   sharedSource,
@@ -132,7 +140,8 @@ assert.doesNotMatch(
   /clearApiKey|clear_api_key/,
   "LLM setups must not expose Clear stored API key — keys stay in workspace DB"
 );
-assert.match(sharedSource, /profile\.api_key \|\| profile\.api_key_masked/, "Table must prefer plaintext api_key");
+assert.match(sharedSource, /ops-ai-inline-connection/, "Table must show compact credential status instead of rendering key material");
+assert.doesNotMatch(sharedSource, /profile\.api_key \|\| profile\.api_key_masked/, "Compact table must not render plaintext or masked key material");
 assert.match(sharedSource, /apiKeyInput:\s*\(data\.api_key/, "Edit form must prefill saved api_key");
 assert.match(apiSource, /api_key\?:/, "Caption AI types must include optional api_key");
 assert.doesNotMatch(

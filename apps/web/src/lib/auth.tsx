@@ -174,6 +174,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return <AuthBootScreen message={t("auth.redirecting")} />;
   }
 
+  const loginBounce = token && surface ? authenticatedLoginBounceTarget(pathname, surface) : null;
+  if (loginBounce) {
+    return <AuthBootScreen message={t("auth.redirecting")} />;
+  }
+
   if (token && surface && !isPublicPath(pathname) && surfaceForPath(pathname) !== surface) {
     return <AuthBootScreen message={t("auth.redirecting")} />;
   }

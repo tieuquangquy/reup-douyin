@@ -65,6 +65,10 @@ assert.match(sharedSource, /OpsConsoleShell/, "Shared component must wrap itself
 assert.doesNotMatch(sharedSource, /testConnection|onTest\(|actionTest/, "Prompt setups must not expose a Test button");
 assert.doesNotMatch(sharedSource, /Setup renamed|profileRenamed/, "Do not show a rename toast on rename");
 assert.match(sharedSource, /ops-ai-page is-compact/, "Prompt page must keep compact AI settings density");
+assert.match(sharedSource, /ops-ai-control-center ops-prompt-registry/, "Prompt list must use the focused AI control-center surface");
+assert.match(sharedSource, /ops-prompt-preview-line[\s\S]*ops-prompt-char-count/, "Prompt preview must pair readable copy with a real character count");
+assert.match(sharedSource, /ops-prompt-row-status[\s\S]*ops-ai-row-actions/, "Prompt status and row actions must use compact aligned groups");
+assert.match(cssSource, /\.ops-prompt-preview-line\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\) auto/s, "Prompt preview must remain a single responsive line");
 
 assert.match(apiSource, /\/ops\/translation-prompt/, "API helper must hit translation-prompt endpoints");
 assert.match(apiSource, /createTranslationPromptProfile/, "API helper must expose profile create");
@@ -76,11 +80,13 @@ for (const key of [
   "setupNamePlaceholder",
   "profileNew",
   "profileActive",
+  "profileInactiveBadge",
   "profileActiveHint",
   "profileSetupsCount",
   "profileNameCol",
   "profileActiveCol",
   "profileActionsCol",
+  "profileRename",
   "profileEmpty",
   "profileDeleteConfirm",
   "profileLastError",
@@ -90,6 +96,7 @@ for (const key of [
   "actionBack",
   "actionSave",
   "previewCol",
+  "charactersShort",
   "loadingDetail"
 ]) {
   const enBlock = enSource.split('"opsTranslationPrompt"')[1] || "";

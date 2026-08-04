@@ -10,6 +10,13 @@ if TYPE_CHECKING:
     from src.models.media import RenderOutput
     from src.models.publish import PublishDraft
 
+# Pipeline status notes that are not operator risk findings.
+_INFORMATIONAL_RENDER_WARNINGS = frozenset(
+    {
+        "using_cleaned_video",
+    }
+)
+
 
 def scan_source_video(source_video: SourceVideo) -> list[RiskFinding]:
     metadata = source_video.metadata_json or {}
@@ -26,9 +33,14 @@ def scan_source_video(source_video: SourceVideo) -> list[RiskFinding]:
 
 
 def scan_render_output(render: RenderOutput) -> list[RiskFinding]:
-    warnings = _warnings(render.warning_summary_json) + _warnings((render.metadata_json or {}).get("manifest") if render.metadata_json else None)
+    warnings = _dedupe_warnings(
+        _warnings(render.warning_summary_json)
+        + _warnings((render.metadata_json or {}).get("manifest") if render.metadata_json else None)
+    )
     findings: list[RiskFinding] = []
     for warning in warnings:
+        if warning in _INFORMATIONAL_RENDER_WARNINGS:
+            continue
         severity = RiskSeverity.HIGH if "mismatch" in warning.lower() or "failed" in warning.lower() else RiskSeverity.MEDIUM
         findings.append(_finding(RiskFlagType.MANUAL_REVIEW_REQUIRED, severity, "Render warning needs review", "Render pipeline produced a warning that should be checked in final review.", warning, "render_output_warnings", {"warning": warning}))
     if render.subtitle_burned is False:
@@ -61,3 +73,15 @@ def _warnings(value: object) -> list[str]:
     if not isinstance(warnings, list):
         return []
     return [item for item in warnings if isinstance(item, str) and item]
+
+
+def _dedupe_warnings(warnings: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for warning in warnings:
+        key = warning.strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(key)
+    return out

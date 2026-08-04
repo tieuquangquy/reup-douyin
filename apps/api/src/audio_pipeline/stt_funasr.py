@@ -19,6 +19,8 @@ _SENTENCE_SPLIT_RE = re.compile(r"(?<=[。！？.!?\n；;])\s*")
 _CLAUSE_SPLIT_RE = re.compile(r"(?<=[，、,])\s*")
 # Soft cap so untimed FunASR blobs become speakable/translatable DialogueBeats.
 MAX_UNTIMED_BEAT_CHARS = 48
+WORD_TIMESTAMP_GAP_MS = 700.0
+WORD_TIMESTAMP_MAX_BEAT_MS = 8_000.0
 
 # First-time ModelScope paraformer download can take several minutes on slow links.
 DEFAULT_FUNASR_TIMEOUT_SECONDS = 900.0
@@ -104,6 +106,84 @@ def split_caption_into_timed_units(
     return units
 
 
+def _timestamped_item_units(item: dict[str, Any]) -> list[TranscriptionUnit]:
+    """Recover dialogue beats from FunASR's word-level ``timestamp`` array.
+
+    Paraformer may omit ``sentence_info`` while still returning an exact
+    timestamp for every emitted token. Treating that payload as untimed maps a
+    whole video onto one TTS slot, so narration plays at the start and the rest
+    becomes silence. Split only at measured pauses (or a bounded beat length)
+    and preserve the original token evidence for review.
+    """
+
+    raw_timestamps = item.get("timestamp")
+    if not isinstance(raw_timestamps, list) or not raw_timestamps:
+        return []
+    timestamps: list[tuple[float, float]] = []
+    for raw in raw_timestamps:
+        if not isinstance(raw, (list, tuple)) or len(raw) < 2:
+            return []
+        try:
+            start_ms = float(raw[0])
+            end_ms = float(raw[1])
+        except (TypeError, ValueError):
+            return []
+        if start_ms < 0 or end_ms <= start_ms:
+            return []
+        if timestamps and start_ms < timestamps[-1][0]:
+            return []
+        timestamps.append((start_ms, end_ms))
+
+    text = str(item.get("text") or "").strip()
+    tokens = [token for token in text.split() if token]
+    if len(tokens) != len(timestamps):
+        compact = re.sub(r"\s+", "", text)
+        tokens = list(compact) if len(compact) == len(timestamps) else []
+    if len(tokens) != len(timestamps):
+        return []
+
+    groups: list[tuple[int, int]] = []
+    group_start = 0
+    for index in range(1, len(tokens)):
+        pause_ms = timestamps[index][0] - timestamps[index - 1][1]
+        span_ms = timestamps[index - 1][1] - timestamps[group_start][0]
+        punctuation_boundary = bool(re.search(r"[。！？.!?；;]$", tokens[index - 1]))
+        if (
+            pause_ms >= WORD_TIMESTAMP_GAP_MS
+            or span_ms >= WORD_TIMESTAMP_MAX_BEAT_MS
+            or punctuation_boundary
+        ):
+            groups.append((group_start, index))
+            group_start = index
+    groups.append((group_start, len(tokens)))
+
+    compact_cjk_tokens = all(
+        len(token) == 1 and bool(re.search(r"[\u3400-\u4dbf\u4e00-\u9fff]", token))
+        for token in tokens
+    )
+    units: list[TranscriptionUnit] = []
+    for start_index, end_index in groups:
+        beat_tokens = tokens[start_index:end_index]
+        beat_text = "".join(beat_tokens) if compact_cjk_tokens else " ".join(beat_tokens)
+        units.append(
+            TranscriptionUnit(
+                text=beat_text,
+                start_seconds=round(timestamps[start_index][0] / 1000.0, 3),
+                end_seconds=round(timestamps[end_index - 1][1] / 1000.0, 3),
+                confidence=float(item.get("confidence") or 0.8),
+                flags=["funasr", "funasr_word_timestamps"],
+                raw_payload={
+                    "provider": "funasr",
+                    "word_timestamp_range": [start_index, end_index - 1],
+                    "timestamps": [
+                        list(value) for value in timestamps[start_index:end_index]
+                    ],
+                },
+            )
+        )
+    return units
+
+
 def parse_funasr_generate_result(raw: Any) -> list[TranscriptionUnit]:
     """Normalize FunASR `generate()` payloads into TranscriptionUnit rows."""
     if raw is None:
@@ -143,6 +223,10 @@ def parse_funasr_generate_result(raw: Any) -> list[TranscriptionUnit]:
             continue
         text = str(item.get("text") or "").strip()
         if not text:
+            continue
+        timestamped_units = _timestamped_item_units(item)
+        if timestamped_units:
+            units.extend(timestamped_units)
             continue
         units.append(
             TranscriptionUnit(

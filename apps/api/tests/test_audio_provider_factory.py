@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import unittest
+import shutil
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -15,12 +18,30 @@ from src.audio_pipeline.translation_llm import (
     DurationConstrainedTranslationProvider,
     OpenAiCompatibleHttpClient,
 )
+from src.storage.local import LocalStorageBackend, to_windows_long_path
 
 
 class AudioProviderFactoryTests(unittest.TestCase):
     def test_default_stt_is_funasr_wrapper(self) -> None:
         provider = build_default_stt_provider(settings=SimpleNamespace(local_storage_root="./data/storage"))
         self.assertIsInstance(provider, FunasrSttProvider)
+
+    def test_default_stt_resolves_windows_long_storage_path(self) -> None:
+        with TemporaryDirectory() as tmp:
+            try:
+                key = "/".join(["segment_" + "x" * 72] * 4) + "/vocals.wav"
+                storage = LocalStorageBackend(tmp)
+                storage.write_bytes(key, b"RIFF" + b"audio" * 20)
+                provider = build_default_stt_provider(
+                    settings=SimpleNamespace(local_storage_root=tmp)
+                )
+
+                resolved = provider.resolve_audio_path(key)
+
+                self.assertIsNotNone(resolved)
+                self.assertTrue(to_windows_long_path(Path(str(resolved))).exists())
+            finally:
+                shutil.rmtree(to_windows_long_path(Path(tmp)), ignore_errors=True)
 
     def test_default_translation_uses_llm_when_gemini_key_present(self) -> None:
         settings = SimpleNamespace(
@@ -32,6 +53,8 @@ class AudioProviderFactoryTests(unittest.TestCase):
         provider = build_default_translation_provider(settings=settings)
         self.assertIsInstance(provider, DurationConstrainedTranslationProvider)
         self.assertEqual(provider.primary.provider_name, "gemini")
+        self.assertEqual(provider.primary.min_request_interval_seconds, 13.0)
+        self.assertFalse(provider.allow_machine_translate_recovery)
 
     def test_default_translation_placeholder_when_no_llm_configured(self) -> None:
         settings = SimpleNamespace(

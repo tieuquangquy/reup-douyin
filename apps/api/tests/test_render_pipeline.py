@@ -2,16 +2,70 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 from uuid import uuid4
 
+from src.enums import MediaAssetStatus, MediaAssetType
 from src.render_pipeline.runners.ffmpeg_runner import build_subtitles_vf
 from src.render_pipeline.runners.mock import CopyMockRenderRunner
 from src.render_pipeline.services.output_validator import validate_render_output
 from src.render_pipeline.services.render_manifest_builder import build_render_manifest
+from src.render_pipeline.services.render_service import RenderService
 from src.render_pipeline.types import ExportInput, RenderProfile, ResolvedRenderInput, VideoProbe
 
 
 class RenderPipelineTests(unittest.TestCase):
+    def test_adaptive_rerender_reuses_same_storage_key_asset(self) -> None:
+        workspace_id = uuid4()
+        source = SimpleNamespace(id=uuid4(), workspace_id=workspace_id)
+        job_id = uuid4()
+        key = "quality/run/phase4_adaptive_final.mp4"
+        existing = SimpleNamespace(
+            id=uuid4(),
+            workspace_id=workspace_id,
+            source_video_id=source.id,
+            asset_type=MediaAssetType.FINAL_RENDER_VIDEO,
+            status=MediaAssetStatus.AVAILABLE,
+            version=1,
+            is_current=False,
+            storage_key=key,
+            logical_key=key,
+            relative_path=key,
+            manifest_group="quality_adaptive_final",
+            created_by_job_id=uuid4(),
+            mime_type="video/mp4",
+            size_bytes=1,
+            checksum_sha256="0" * 64,
+            metadata_json={},
+            error_message="old",
+        )
+        db = MagicMock()
+        db.scalar.return_value = existing
+        storage = MagicMock()
+        storage.metadata.return_value = SimpleNamespace(
+            exists=True,
+            size_bytes=123,
+            checksum_sha256="a" * 64,
+            absolute_path="C:/storage/final.mp4",
+        )
+        service = RenderService(db, storage=storage, runner=MagicMock())
+
+        rebound = service._register_existing_file_asset(
+            source,
+            key,
+            MediaAssetType.FINAL_RENDER_VIDEO,
+            mime_type="video/mp4",
+            manifest_group="quality_adaptive_final",
+            job_id=job_id,
+        )
+
+        self.assertIs(rebound, existing)
+        self.assertFalse(db.add.called)
+        self.assertTrue(existing.is_current)
+        self.assertEqual(existing.created_by_job_id, job_id)
+        self.assertEqual(existing.size_bytes, 123)
+        self.assertIsNone(existing.error_message)
+
     def test_subtitles_vf_escapes_windows_drive_colon(self) -> None:
         vf = build_subtitles_vf(r"C:\Users\PC\Desktop\reup_douyin\data\storage\workspace\@Agu\metadata\subs.srt")
         self.assertTrue(vf.startswith("subtitles="))

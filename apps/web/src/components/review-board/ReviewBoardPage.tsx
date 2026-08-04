@@ -3,7 +3,10 @@
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState, useTransition, type KeyboardEvent } from "react";
 import { useT } from "../../lib/i18n";
-import { applyCandidatePreset, bulkUpdateCandidateStatus, deleteCandidate, enqueueReupCandidates, fetchCandidateDetail, fetchCandidates } from "../../lib/api";
+import { applyCandidatePreset, bulkUpdateCandidateStatus, deleteCandidate, enqueueReupCandidates, fetchCandidateDetail, fetchCandidates, fetchCaptureInboxSessions } from "../../lib/api";
+import { promotedCaptureSessions } from "../../lib/reviewBoardIntake";
+import { IntakeFilterRow } from "../shared/IntakeFilterRow";
+import type { CaptureSession } from "../../types/capture-inbox";
 import { TopbarRefreshButton } from "../app-shell/TopbarRefreshButton";
 import { getDouyinMetadataCompletenessForItem } from "../../lib/captureInboxFilterMetadata";
 import { buildCapturedItemFromReviewCandidate } from "../../lib/operatorReupScore";
@@ -35,6 +38,7 @@ import { WorkItemActionIcon } from "../shared/WorkItemActionIcon";
 import { WorkItemDetailsDrawer } from "../shared/WorkItemDetailsDrawer";
 import { WorkMediaTileOverlay } from "../shared/WorkMediaTileOverlay";
 import { WorkBulkActionBar, WorkGalleryEmptyState, WorkGalleryHeader, WorkStudioDeck } from "../shared/WorkStudioChrome";
+import { TileMediaThumbnail } from "../shared/TileMediaThumbnail";
 import { useOffsetLoadMoreOnScroll } from "../shared/useOffsetLoadMoreOnScroll";
 import { useReviewCandidateTileScoreBadge } from "../../lib/useCaptureItemReupScore";
 import { hasMoreOffsetItems, mergeOffsetItemsById } from "../../lib/offsetListPagination";
@@ -100,6 +104,7 @@ export function ReviewBoardPage() {
   const [scoreRangeOpen, setScoreRangeOpen] = useState(false);
   const [showQueuedInApproved, setShowQueuedInApproved] = useState(false);
   const [pendingStatus, setPendingStatus] = useState<ReviewFilterKey | null>(null);
+  const [intakeSessions, setIntakeSessions] = useState<CaptureSession[]>([]);
   const [isStatusPending, startStatusTransition] = useTransition();
 
   function candidateActionKey(candidateId: string, action: string) {
@@ -208,6 +213,29 @@ export function ReviewBoardPage() {
     }, 300);
     return () => window.clearTimeout(handle);
   }, [appliedFilters.search, filters.search]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void fetchCaptureInboxSessions({ limit: 50 })
+      .then((response) => {
+        if (!cancelled) setIntakeSessions(promotedCaptureSessions(response.sessions));
+      })
+      .catch(() => {
+        // The intake picker is an accelerator; the board still works without it.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    const captureSessionId = searchParams.get("capture_session")?.trim();
+    if (!captureSessionId) return;
+    // Landing straight from a Capture Inbox promotion: show the whole batch, not just the
+    // Shortlisted tab, so nothing the operator just pushed is hidden behind a status tab.
+    setFilters((current) => ({ ...current, captureSessionId, status: "" }));
+    setAppliedFilters((current) => ({ ...current, captureSessionId, status: "" }));
+  }, [searchParams]);
 
   useEffect(() => {
     const candidateId = searchParams.get("candidate")?.trim();
@@ -560,9 +588,30 @@ export function ReviewBoardPage() {
     }
   }
 
+  // Batches and day chips are discrete picks like the status tabs, so they take effect on
+  // the spot instead of waiting for "Apply filters" — which read as a dead control.
+  function applyIntakeChange(partial: Partial<CandidateFilters>) {
+    setFilters((current) => ({ ...current, ...partial }));
+    setAppliedFilters((current) => ({ ...current, ...partial }));
+  }
+
+  function clearIntakeFilters() {
+    applyIntakeChange({ captureSessionId: "", dateChip: "", dateFrom: "", dateTo: "" });
+    if (!searchParams.get("capture_session")) return;
+    const params = new URLSearchParams(searchParams.toString());
+    params.delete("capture_session");
+    const query = params.toString();
+    router.replace(query ? `${pathname}?${query}` : pathname, { scroll: false });
+  }
+
   function resetFilters() {
     setFilters(DEFAULT_FILTERS);
     setAppliedFilters(DEFAULT_FILTERS);
+    if (!searchParams.get("capture_session")) return;
+    const params = new URLSearchParams(searchParams.toString());
+    params.delete("capture_session");
+    const query = params.toString();
+    router.replace(query ? `${pathname}?${query}` : pathname, { scroll: false });
   }
 
   function selectReviewStatus(status: ReviewFilterKey) {
@@ -577,6 +626,12 @@ export function ReviewBoardPage() {
     <TopbarRefreshButton busy={refreshing} disabled={loading} onClick={() => void loadData("refresh")} />
   );
 
+  // Status tabs use a transition; intake filters flip `loading` while prior tiles remain.
+  // Both must surface the same gallery busy state or a slow filter looks broken.
+  const intakeBusy = loading && candidates.length > 0 && !refreshing;
+  const galleryBusy = isStatusPending || intakeBusy;
+  const galleryBusyLabel = isStatusPending ? pendingStatusLabel : "filtered";
+
   return (
     <OperatorStudioShell actions={primaryActions} description="Triage shortlisted clips in a Capture Inbox-style studio and approve reup picks." title={t("reviewBoardPage.pageTitle")}>
       <OpsConsolePage>
@@ -585,13 +640,17 @@ export function ReviewBoardPage() {
           activeFilter={pendingStatus ?? effectiveStatus}
           approvedQueueCount={bulkApprovedQueueIds.length}
           filters={filters}
+          intakeBusy={intakeBusy}
+          intakeSessions={intakeSessions}
           mutating={mutating}
           onApply={applyFilters}
           onApprove={() => void bulkApproveSelected()}
           onApproveAndSend={() => void bulkApproveAndSendToReupQueue()}
           onChange={setFilters}
           onClear={() => setSelectedIds(new Set())}
+          onClearIntake={clearIntakeFilters}
           onFilter={selectReviewStatus}
+          onIntakeChange={applyIntakeChange}
           onLater={() => void bulkLaterSelected()}
           onReject={() => setBulkDialog("reject")}
           onRemove={() => setBulkDialog("remove")}
@@ -604,12 +663,12 @@ export function ReviewBoardPage() {
           summary={summary}
         />
         <div className="capture-inbox-review-workspace review-board-studio-workspace" data-review-board-ui-version={UI_VERSION}>
-          <main className="capture-inbox-review-main" aria-busy={loading || refreshing} aria-label="Review Board candidate gallery" data-review-board-studio={UI_VERSION}>
+          <main className="capture-inbox-review-main" aria-busy={loading || refreshing || galleryBusy} aria-label="Review Board candidate gallery" data-review-board-studio={UI_VERSION}>
             <AsyncContentBoundary
               emptyState={(
                 <WorkGalleryEmptyState
                   action={(
-                    <a className="review-board-empty-capture-link" href="/ops/extensions/douyin/capture-inbox">
+                    <a className="review-board-empty-capture-link" href="/selection/capture-inbox">
                       <WorkItemActionIcon className="review-board-empty-capture-link__icon" kind="open" />
                       <span>Open Capture Inbox</span>
                     </a>
@@ -664,7 +723,7 @@ export function ReviewBoardPage() {
               </div>
             ) : null}
 
-            {!loading && !isStatusPending && displayVisible.length === 0 && candidates.length > 0 ? (
+            {!loading && !galleryBusy && displayVisible.length === 0 && candidates.length > 0 ? (
               <WorkGalleryEmptyState
                 action={filters.status === "APPROVED" && queuedInViewCount > 0 ? (
                   <button onClick={() => setShowQueuedInApproved(true)} type="button">Show {queuedInViewCount} in queue</button>
@@ -676,11 +735,11 @@ export function ReviewBoardPage() {
               />
             ) : null}
 
-            {displayVisible.length > 0 || isStatusPending ? (
+            {displayVisible.length > 0 || galleryBusy ? (
               <section
-                aria-busy={isStatusPending}
+                aria-busy={galleryBusy}
                 aria-label="Candidate tile gallery"
-                className={`operator-panel capture-inbox-media-gallery review-board-candidate-gallery${isStatusPending ? " is-preloading" : ""}`}
+                className={`operator-panel capture-inbox-media-gallery review-board-candidate-gallery${galleryBusy ? " is-preloading" : ""}`}
               >
                 <WorkGalleryHeader
                   actions={(
@@ -692,7 +751,7 @@ export function ReviewBoardPage() {
                       ) : null}
                       <button
                         className="review-board-deck-btn review-board-gallery-select-visible"
-                        disabled={mutating || isStatusPending}
+                        disabled={mutating || galleryBusy}
                         onClick={() => setSelectedIds(selectAllOnPage(selectableVisible))}
                         type="button"
                       >
@@ -701,11 +760,11 @@ export function ReviewBoardPage() {
                       </button>
                     </div>
                   )}
-                  meta={isStatusPending ? `Preparing ${pendingStatusLabel} candidates…` : `${displayVisible.length.toLocaleString()} shown · ${totalCount.toLocaleString()} total`}
+                  meta={galleryBusy ? `Preparing ${galleryBusyLabel} candidates…` : `${displayVisible.length.toLocaleString()} shown · ${totalCount.toLocaleString()} total`}
                   title="Candidate tiles"
                 />
-                {isStatusPending ? (
-                  <ReviewGalleryPreloading statusLabel={pendingStatusLabel} />
+                {galleryBusy ? (
+                  <ReviewGalleryPreloading statusLabel={galleryBusyLabel} />
                 ) : (
                   <>
                     <div className="capture-inbox-media-tile-grid">
@@ -738,7 +797,7 @@ export function ReviewBoardPage() {
                   <OffsetLoadMoreFooter
                     ref={loadMoreRef}
                     autoLoad
-                    disabled={mutating || isStatusPending}
+                    disabled={mutating || galleryBusy}
                     loadedCount={candidates.length}
                     loadingMore={loadingMore}
                     noun={footerCandidateNoun}
@@ -810,13 +869,17 @@ function ReviewStudioCommandDeck({
   activeFilter,
   approvedQueueCount,
   filters,
+  intakeBusy,
+  intakeSessions,
   mutating,
   onApply,
   onApprove,
   onApproveAndSend,
   onChange,
   onClear,
+  onClearIntake,
   onFilter,
+  onIntakeChange,
   onLater,
   onReject,
   onRemove,
@@ -831,13 +894,17 @@ function ReviewStudioCommandDeck({
   activeFilter: ReviewFilterKey;
   approvedQueueCount: number;
   filters: CandidateFilters;
+  intakeBusy: boolean;
+  intakeSessions: CaptureSession[];
   mutating: boolean;
   onApply: () => void;
   onApprove: () => void;
   onApproveAndSend: () => void;
   onChange: (filters: CandidateFilters) => void;
   onClear: () => void;
+  onClearIntake: () => void;
   onFilter: (filter: ReviewFilterKey) => void;
+  onIntakeChange: (partial: Partial<CandidateFilters>) => void;
   onLater: () => void;
   onReject: () => void;
   onRemove: () => void;
@@ -929,6 +996,7 @@ function ReviewStudioCommandDeck({
             </button>
           </div>
         </div>
+        <IntakeFilterRow busy={intakeBusy} onChange={onIntakeChange} onClear={onClearIntake} sessions={intakeSessions} state={filters} />
         {scoreRangeOpen ? (
           <div className="review-board-score-range">
             <span className="review-board-score-range__title">Score range</span>
@@ -1113,10 +1181,13 @@ function CandidateMediaTile({
   const inReupQueue = isCandidateInReupQueue(candidate);
   const perfStats = reviewTilePerfStats(metadata);
   return (
-    <article className={`capture-inbox-media-tile capture-inbox-compact-card review-board-media-tile ${selected ? "is-bulk-selected" : ""} ${focused ? "is-inspector-focused" : ""} ${inReupQueue ? "is-in-reup-queue" : ""}`}>
+    <article
+      className={`capture-inbox-media-tile capture-inbox-compact-card review-board-media-tile ${selected ? "is-bulk-selected" : ""} ${focused ? "is-inspector-focused" : ""} ${inReupQueue ? "is-in-reup-queue" : ""}`}
+      data-tone={reviewBoardStatusTone(candidate.status)}
+    >
       <div className="capture-inbox-media-frame">
         <button className="capture-inbox-media-thumbnail" onClick={onDetails} type="button">
-          {thumbnailUrl ? <img alt={`Thumbnail for ${title}`} src={thumbnailUrl} /> : <span className="capture-inbox-thumbnail-placeholder"><strong>No thumbnail</strong></span>}
+          <TileMediaThumbnail alt={`Thumbnail for ${title}`} src={thumbnailUrl} />
         </button>
         <WorkMediaTileOverlay
           onToggleSelect={onToggleSelect}
@@ -1255,11 +1326,9 @@ function ReviewRightInspector({
         {candidate && metadata ? (
           <>
             <section className="review-board-inspector-summary-card" aria-label="Candidate summary">
-              {metadata.thumbnailUrl ? (
-                <div className="review-board-inspector-media">
-                  <img alt={`Thumbnail for ${candidateTitle(candidate)}`} src={metadata.thumbnailUrl} />
-                </div>
-              ) : null}
+              <div className="review-board-inspector-media">
+                <TileMediaThumbnail alt={`Thumbnail for ${candidateTitle(candidate)}`} src={metadata.thumbnailUrl} />
+              </div>
               <div className="review-board-inspector-summary">
                 <div className="review-board-inspector-summary-topline">
                 <span className={`capture-inbox-reup-score-badge is-${scoreBadge?.level ?? "needs_metadata"} ${scoreBadge?.score == null ? "missing" : "ready"}`}>

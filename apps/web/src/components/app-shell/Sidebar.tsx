@@ -35,7 +35,7 @@ export function Sidebar({ surface, sections }: { surface: NavSurface; sections: 
   }, [pathname]);
 
   return (
-    <aside className="app-sidebar" ref={sidebarRef}>
+    <aside className={`app-sidebar is-${surface}`} ref={sidebarRef}>
       <a className="app-brand" href={surface === "operator" ? "/" : "/ops"}>
         <span className="app-brand__mark">
           <img alt="" height={28} src="/brand/logo-loop-r.svg" width={28} />
@@ -50,6 +50,13 @@ export function Sidebar({ surface, sections }: { surface: NavSurface; sections: 
           <NavSection activePath={pathname} currentSourceVideoId={currentSourceVideoId} key={section.title} section={section} />
         ))}
       </nav>
+      <footer className="app-sidebar__footer">
+        <span aria-hidden="true" className="app-sidebar__status-dot" />
+        <span>
+          <strong>{t("common.localWorkspace")}</strong>
+          <small>{surface === "operator" ? t("nav.operatorStudio") : t("nav.opsConsole")}</small>
+        </span>
+      </footer>
     </aside>
   );
 }

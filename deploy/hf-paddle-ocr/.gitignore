@@ -1,0 +1,4 @@
+﻿models/**/*.safetensors
+models/**/.cache/
+_svc_export.yaml
+_patch_svc_yaml.py

@@ -172,6 +172,43 @@ class TtsAiCatalog(BaseModel):
     capabilities: TtsAiFieldCapabilities | None = None
 
 
+class TtsAiEngineOption(BaseModel):
+    id: str
+    label: str
+    adapter_status: str = "planned"
+    dependency_status: str = "missing"
+    selectable: bool = False
+    installable: bool = False
+    install_mode: str = "manual"
+    install_command: str | None = None
+    install_hint: str = ""
+    platforms: list[str] = Field(default_factory=list)
+    gpu_compat: list[str] = Field(default_factory=list)
+    estimated_size_gb: float | None = None
+
+
+class TtsAiEngineCatalogResponse(BaseModel):
+    provider: str = "omnivoice"
+    engines: list[TtsAiEngineOption] = Field(default_factory=list)
+
+
+class TtsAiEngineInstallRequest(BaseModel):
+    profile_id: str | None = None
+    force_reinstall: bool = False
+
+
+class TtsAiEngineInstallJobResponse(BaseModel):
+    engine_id: str
+    status: str = "running"
+    step: str = "queued"
+    progress: int = 0
+    detail: str = ""
+    log_tail: str = ""
+    error: str = ""
+    started_at: float | None = None
+    finished_at: float | None = None
+
+
 class TtsAiLastInstall(BaseModel):
     at: str = ""
     ok: bool = False
@@ -384,6 +421,12 @@ class BacklogSummary(BaseModel):
     queued: int = 0
     retryable: int = 0
     running: int = 0
+    oldest_queued_at: datetime | None = None
+    running_with_lock: int = 0
+    running_without_lock: int = 0
+    active_worker_count: int = 0
+    stale_running: int = 0
+    stale_running_job_ids: list[str] = Field(default_factory=list)
 
 
 class FailureCategory(BaseModel):
@@ -425,6 +468,7 @@ class OperationalMetricsResponse(BaseModel):
     job_counts_by_type_status: dict[str, dict[str, int]] = Field(default_factory=dict)
     job_failure_rate_percent_by_type: dict[str, float] = Field(default_factory=dict)
     queue_backlog: BacklogSummary = Field(default_factory=BacklogSummary)
+    oldest_job_at_by_status: dict[str, datetime] = Field(default_factory=dict)
     retryable_jobs: int = 0
     total_retry_attempts: int = 0
     step_duration_by_job_type: dict[str, dict[str, float | int]] = Field(default_factory=dict)
@@ -435,4 +479,3 @@ class OperationalMetricsResponse(BaseModel):
     publish_draft_counts_by_status: dict[str, int] = Field(default_factory=dict)
     open_risk_counts_by_severity: dict[str, int] = Field(default_factory=dict)
     douyin_fetch_health: FetchHealthSummary = Field(default_factory=FetchHealthSummary)
-

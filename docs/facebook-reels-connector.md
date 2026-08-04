@@ -35,6 +35,22 @@ The phase 1 connector follows Meta's Reels Publishing collection:
 
 The connector stores only safe response summaries. It must never persist or log the full page access token.
 
+Before a publish is admitted, the API applies Page-level safety guardrails:
+
+- OAuth must verify `pages_manage_posts` and the Page `CREATE_CONTENT` task;
+- only one active attempt may exist for a Page;
+- unresolved external outcomes block another attempt;
+- conservative warm-up, interval, daily-attempt and failure budgets are
+  enforced per Page;
+- rate-limit errors create a cooldown, while token/permission/restriction
+  errors put the Page on hold until it is reconnected;
+- Graph credentials are sent in the HTTPS `Authorization` header, not URL
+  query parameters.
+
+These controls reduce avoidable API pressure and duplicate publishes. They do
+not guarantee immunity from Meta enforcement; operators remain responsible for
+rights, policy, Page quality and approved content.
+
 Sources used while implementing this connector:
 
 - Meta Postman collection, Reels Publishing overview

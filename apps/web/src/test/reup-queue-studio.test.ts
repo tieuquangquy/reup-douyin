@@ -44,6 +44,7 @@ import {
   queueStageTone,
   queueTileNextStepHint,
   queueTileFailureAlert,
+  queueTileFailureStrip,
   queueTileTranscriptCta,
   isAnalyzeAudioFailed,
   isMissingSourceAssetAnalyzeFailure,
@@ -55,14 +56,17 @@ import {
   worklistPrimaryActionLabel,
   worklistStageLabel,
   worklistStageTone,
+  hasActivePipelineJob,
+  isDialogueUncertain,
+  dialogueUncertainHint,
   markMediaReadyNotice,
   linkedJobActivityLabel,
   shouldShowWorklistOpenJobLink,
   worklistTranscriptHref,
   worklistNoDialogueHint,
   isNoDialogueAnalyzeResult,
-  transcriptStageDisabledTitle,
-  buildQueueInspectorEngagementStats
+  buildQueueInspectorEngagementStats,
+  pipelineRecipeChipLabel
 } from "../lib/reupQueueStudioState";
 import type { ReupQueueItem } from "../types/reup-queue";
 
@@ -82,7 +86,34 @@ assert.equal(summary.download, 3);
 assert.equal(summary.attention, 1);
 
 assert.equal(queueStageLabel(ready), "Needs start");
-assert.equal(primaryQueueAction(ready), "START_PROCESSING");
+assert.equal(primaryQueueAction(ready), "START_AUTO_PIPELINE");
+assert.equal(primaryQueueActionLabel(ready), "Start auto");
+{
+  const bound = makeItem("v24-bound", "WAITING_FOR_MEDIA");
+  bound.metadata_json = {
+    pipeline_mode: "auto_to_render",
+    pipeline_step: "download",
+    pipeline_recipe_lock: {
+      release_label: "V24",
+      recipe_sha256: "a".repeat(64)
+    }
+  };
+  assert.equal(pipelineRecipeChipLabel(bound), "V24 locked · aaaaaaaa");
+}
+{
+  const autoReady = makeItem("auto-final", "WAITING_FOR_METADATA");
+  autoReady.metadata_json = {
+    pipeline_mode: "auto_to_tts",
+    pipeline_step: "ready_final",
+    pipeline_hold: false
+  };
+  assert.equal(primaryQueueActionLabel(autoReady), "Open Final Review");
+  assert.ok(buildInspectorWorkflowLinks(autoReady).some((link) => /final-review/.test(link.href)));
+}
+{
+  const eligibility = buildSelectionEligibility([ready]);
+  assert.ok(eligibility.startAuto >= 1, "Ready items must count toward Start auto bulk");
+}
 {
   const downloading = makeItem("dl1", "WAITING_FOR_MEDIA");
   downloading.job_id = "job-dl";
@@ -190,6 +221,24 @@ assert.equal(primaryQueueAction(ready), "START_PROCESSING");
     true,
     "Idle download-wait tiles must expose Open details when primary is inspect"
   );
+  idleDownload.available_actions = [
+    { action: "RESUME", label: "Resume", description: "Resume", requires_note: false }
+  ];
+  assert.equal(primaryQueueAction(idleDownload), "RESUME", "Idle download with RESUME must surface worklist CTA");
+  assert.equal(primaryQueueActionLabel(idleDownload), "Restart download");
+  assert.equal(shouldShowQueueTileDetailsButton(idleDownload), false);
+}
+{
+  const idleCancelled = makeItem("w-idle-cancel", "WAITING_FOR_MEDIA");
+  idleCancelled.job_id = "job-cancelled";
+  idleCancelled.job_status = "CANCELLED";
+  idleCancelled.available_actions = [
+    { action: "RESUME", label: "Resume", description: "Resume", requires_note: false },
+    { action: "CANCEL", label: "Cancel", description: "Cancel", requires_note: false }
+  ];
+  assert.equal(primaryQueueAction(idleCancelled), "RESUME");
+  assert.equal(worklistPrimaryActionLabel(idleCancelled), "Restart download");
+  assert.equal(shouldShowQueueTileDetailsButton(idleCancelled), false);
 }
 {
   const downloadingHint = makeItem("dl-hint", "WAITING_FOR_MEDIA");
@@ -312,6 +361,11 @@ assert.equal(primaryQueueAction(ready), "START_PROCESSING");
     message: "Raw video missing",
     detail: "Click Download to check the file. If missing: Retry from start → Start processing → Mark media ready."
   });
+  assert.deepEqual(
+    queueTileFailureStrip(missingAsset),
+    queueTileFailureAlert(missingAsset),
+    "Raw-video-missing reason must show on the thumbnail strip (distinct from Analyze failed chip)"
+  );
   assert.equal(
     buildPipelineStages(missingAsset).find((stage) => stage.key === "transcript")?.state,
     "failed",
@@ -334,6 +388,11 @@ assert.equal(primaryQueueAction(ready), "START_PROCESSING");
   assert.equal(queueStageLabel(analyzeFailed), "Analyze failed");
   assert.equal(queueTileNextStepHint(analyzeFailed), null, "Analyze-failed gallery uses compact alert, not long hint");
   assert.equal(queueTileFailureAlert(analyzeFailed)?.message, "Analyze failed");
+  assert.equal(
+    queueTileFailureStrip(analyzeFailed),
+    null,
+    "When failure message matches stage chip, skip redundant thumbnail strip"
+  );
   assert.match(queueTileFailureAlert(analyzeFailed)?.detail ?? "", /Speech gate|Details|Retry analyze/i);
   assert.equal(primaryQueueAction(analyzeFailed), "MARK_MEDIA_READY");
   assert.equal(primaryQueueActionLabel(analyzeFailed), "Retry analyze");
@@ -348,10 +407,89 @@ assert.equal(primaryQueueAction(ready), "START_PROCESSING");
   );
 }
 {
+  // VAD measured speech but ASR produced nothing: never claim "No dialogue".
+  const uncertain = makeItem("dlg-uncertain", "FAILED_NEEDS_ATTENTION");
+  uncertain.job_type = "ANALYZE_AUDIO";
+  uncertain.job_status = "COMPLETED";
+  uncertain.dialogue_phase = "dialogue_uncertain";
+  uncertain.has_speech = true;
+  uncertain.transcript_count = 0;
+  uncertain.last_error_code = "DIALOGUE_DETECTION_UNCERTAIN";
+  assert.equal(isDialogueUncertain(uncertain), true);
+  assert.equal(isNoDialogueAnalyzeResult(uncertain), false, "Uncertain must not be reported as no dialogue");
+  assert.equal(worklistStageLabel(uncertain), "Check dialogue");
+  assert.equal(worklistStageTone(uncertain), "warn");
+  assert.match(dialogueUncertainHint(uncertain) ?? "", /speech/i);
+
+  const stillWaiting = makeItem("dlg-uncertain-wait", "WAITING_FOR_METADATA");
+  stillWaiting.job_type = "ANALYZE_AUDIO";
+  stillWaiting.job_status = "COMPLETED";
+  stillWaiting.dialogue_phase = "dialogue_uncertain";
+  stillWaiting.has_speech = true;
+  stillWaiting.transcript_count = 0;
+  assert.equal(worklistStageLabel(stillWaiting), "Check dialogue");
+  assert.equal(worklistTranscriptHref(stillWaiting), null, "Empty transcript must not be opened as ready");
+}
+{
+  // Auto pipeline continues past analyze: worklist must show the step that is running.
+  const translating = makeItem("auto-translate", "WAITING_FOR_METADATA");
+  translating.job_id = "6c8f0d18-1f0d-4b0e-9c5b-0f9d4a0d4a11";
+  translating.job_type = "BUILD_TRANSLATION_DRAFT";
+  translating.job_status = "RUNNING";
+  translating.transcript_count = 4;
+  translating.has_speech = true;
+  translating.dialogue_phase = "source_auto_approved";
+  translating.metadata_json = { pipeline_mode: "auto_to_tts", pipeline_step: "translate" };
+  assert.equal(worklistStageLabel(translating), "Translating");
+  assert.equal(worklistStageTone(translating), "active");
+  assert.equal(hasActivePipelineJob(translating), true);
+
+  const voicing = makeItem("auto-tts", "WAITING_FOR_METADATA");
+  voicing.job_id = "0b0c4e6a-2c6a-4d8e-9a2b-6b1a2c3d4e5f";
+  voicing.job_type = "SYNTHESIZE_TTS";
+  voicing.job_status = "QUEUED";
+  voicing.transcript_count = 4;
+  voicing.has_speech = true;
+  voicing.dialogue_phase = "translated_draft";
+  voicing.metadata_json = { pipeline_mode: "auto_to_tts", pipeline_step: "tts" };
+  assert.equal(worklistStageLabel(voicing), "Voicing");
+  assert.equal(worklistStageTone(voicing), "active");
+  assert.equal(hasActivePipelineJob(voicing), true);
+
+  const ocr = makeItem("auto-ocr", "WAITING_FOR_METADATA");
+  ocr.job_id = "80d59827-4b8a-4f35-b0f8-63c42ddac5f6";
+  ocr.job_type = "ANALYZE_OCR";
+  ocr.job_status = "RUNNING";
+  ocr.job_progress_percent = 67;
+  ocr.metadata_json = { pipeline_mode: "auto_to_render", pipeline_step: "ocr" };
+  assert.equal(worklistStageLabel(ocr), "Scanning OCR");
+  assert.equal(worklistStageTone(ocr), "active");
+  assert.equal(hasActivePipelineJob(ocr), true, "Active OCR must keep the queue polling");
+  assert.match(queueTileNextStepHint(ocr) ?? "", /Scanning OCR.*67%/i);
+
+  const rendering = makeItem("auto-render", "WAITING_FOR_METADATA");
+  rendering.job_id = "923325ba-7a01-40da-a06b-9d53bfdc1dd4";
+  rendering.job_type = "RENDER_FINAL";
+  rendering.job_status = "QUEUED";
+  rendering.metadata_json = { pipeline_mode: "auto_to_render", pipeline_step: "render" };
+  assert.equal(worklistStageLabel(rendering), "Rendering");
+  assert.equal(hasActivePipelineJob(rendering), true, "Queued render must keep the queue polling");
+
+  const doneTranslating = makeItem("auto-done", "WAITING_FOR_METADATA");
+  doneTranslating.job_type = "BUILD_TRANSLATION_DRAFT";
+  doneTranslating.job_status = "COMPLETED";
+  doneTranslating.transcript_count = 4;
+  doneTranslating.has_speech = true;
+  doneTranslating.dialogue_phase = "translated_draft";
+  assert.equal(worklistStageLabel(doneTranslating), "Transcript ready");
+  assert.equal(hasActivePipelineJob(doneTranslating), false);
+}
+{
   const analyzing = makeItem("a1", "WAITING_FOR_METADATA");
   analyzing.job_id = "110050de-71f2-483a-a67e-1bbd88393985";
   analyzing.job_type = "ANALYZE_AUDIO";
   analyzing.job_status = "RUNNING";
+  assert.equal(hasActivePipelineJob(analyzing), true, "Active analyze must keep the queue polling");
   assert.equal(worklistStageLabel(analyzing), "Analyzing");
   assert.equal(linkedJobActivityLabel(analyzing), "Analyzing");
   assert.equal(formatJobChipLabel(analyzing), "Analyzing");
@@ -615,6 +753,17 @@ assert.equal(resolveInitialReupQueueFilter(buildReupQueueSummary([makeItem("h1",
 const pipeline = buildPipelineStages(ready);
 assert.equal(pipeline.find((stage) => stage.key === "download")?.state, "pending");
 
+{
+  const needsStartWithMedia = makeItem("ns-media", "READY_FOR_PROCESSING");
+  needsStartWithMedia.media_ready_at = "2026-07-14T00:00:00Z";
+  assert.equal(queueStageLabel(needsStartWithMedia), "Needs start");
+  assert.equal(
+    buildPipelineStages(needsStartWithMedia).find((stage) => stage.key === "download")?.state,
+    "pending",
+    "Needs-start tiles must keep Download pending even when media_ready_at is already set"
+  );
+}
+
 const eligibility = buildSelectionEligibility([ready, doneItem]);
 assert.equal(eligibility.start, 1);
 assert.match(bulkSelectionGuidance(2, { ...eligibility, actionable: 1 }) ?? "", /can run a bulk action/);
@@ -786,6 +935,7 @@ function makeItem(id: string, status: ReupQueueItem["status"]): ReupQueueItem {
     last_action_note: null,
     available_actions: status === "READY_FOR_PROCESSING"
       ? [
+          { action: "START_AUTO_PIPELINE", label: "Start auto pipeline", description: "Auto", requires_note: false },
           { action: "START_PROCESSING", label: "Start processing", description: "Start", requires_note: false },
           { action: "CANCEL", label: "Cancel", description: "Cancel", requires_note: true }
         ]

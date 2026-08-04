@@ -256,6 +256,11 @@ class BiphasicTranscriptContractTests(unittest.TestCase):
         with (
             patch.object(service, "_load_source_video", return_value=source_video),
             patch.object(service, "get_transcript_segments", return_value=beats),
+            patch.object(
+                service,
+                "_translation_builder_for_workspace",
+                return_value=service.translation_builder,
+            ),
             patch.object(service.translation_builder, "build", return_value=drafts),
             patch.object(service, "_mark_previous_translations_non_current"),
             patch.object(

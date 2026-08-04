@@ -1,7 +1,10 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState, useCallback, useTransition } from "react";
-import { fetchReupQueueItems, purgeClearableReupQueueItems, revealSourceVideoLocalAsset, runReupQueueAction, runReupQueueBatchAction } from "../../lib/api";
+import { fetchReupQueueIntakeSessions, fetchReupQueueItems, purgeClearableReupQueueItems, revealSourceVideoLocalAsset, runReupQueueAction, runReupQueueBatchAction } from "../../lib/api";
+import { EMPTY_INTAKE_FILTERS, type IntakeFilterState } from "../../lib/reviewBoardIntake";
+import type { CaptureSession } from "../../types/capture-inbox";
+import { IntakeFilterRow } from "../shared/IntakeFilterRow";
 import { TopbarRefreshButton } from "../app-shell/TopbarRefreshButton";
 import {
   actionLabel,
@@ -23,13 +26,16 @@ import {
   buildQueueTileSecondaryLinks,
   pipelineStageInteraction,
   buildQuickPathHeroStats,
+  automationModeOptions,
+  canChangeAutomation,
+  currentAutomationMode,
   capStartProcessingBatchIds,
-  downloadJobErrorLine,
   downloadJobProgressPercent,
   formatJobChipLabel,
   groupInspectorLifecycleActions,
   filterInspectorCompanionActions,
   hasActiveDownloadJob,
+  hasActivePipelineJob,
   hasAnyBatchEligibility,
   itemTitle,
   metadataString,
@@ -45,13 +51,16 @@ import {
   queueStageTone,
   queueTileDurationLabel,
   queueTileFailureAlert,
+  queueTileFailureStrip,
   queueTilePostedLabel,
   queueTileThumbnailUrl,
   queueTileTranscriptCta,
   worklistStageLabel,
   worklistStageTone,
   worklistTranscriptHref,
-  worklistNoDialogueHint,
+  worklistFinalReviewHref,
+  pipelineStepChipLabel,
+  pipelineRecipeChipLabel,
   queueTileNextStepHint,
   shouldShowQueueTileDetailsButton,
   REUP_QUEUE_ATTENTION_FILTERS,
@@ -70,11 +79,24 @@ import {
   terminalQueueDismissAction,
   toggleReupQueueSelection,
   visibleReupQueueItems,
+  type ReupPipelineMode,
   type ReupQueueOperatorFilter,
   type ReupQueueSortMode
 } from "../../lib/reupQueueStudioState";
 import { useQueueTileScoreBadge } from "../../lib/useCaptureItemReupScore";
 import { hasMoreOffsetItems, resolveOffsetPageMerge } from "../../lib/offsetListPagination";
+import {
+  applyMarqueeSelection,
+  autoScrollVelocity,
+  dragDistance,
+  intersectingSelectionIds,
+  normalizeSelectionRect,
+  selectSelectionRange,
+  type MarqueeSelectionMode,
+  type SelectionPoint,
+  type SelectionRect,
+  type SelectionRectEntry
+} from "../../lib/reupQueueDragSelection";
 import {
   REUP_QUEUE_VIEW_MODE_LABELS,
   readReupQueueViewMode,
@@ -102,6 +124,17 @@ const DEFAULT_HANDOFF_PLATFORM = "FACEBOOK_REELS";
 const REVIEW_BOARD_HREF = "/selection/review-board";
 const ACTIVE_DOWNLOAD_POLL_MS = 8_000;
 const REUP_QUEUE_LOAD_BATCH_SIZE = 50;
+const WORKLIST_MARQUEE_DRAG_THRESHOLD_PX = 6;
+
+type WorklistDragSession = {
+  anchorDocument: SelectionPoint;
+  currentClient: SelectionPoint;
+  mode: MarqueeSelectionMode;
+  pointerId: number;
+  selectionEntries: SelectionRectEntry[];
+  selectionAtDragStart: Set<string>;
+  started: boolean;
+};
 
 export function ReupQueuePage() {
   const asyncActions = useAsyncAction();
@@ -113,8 +146,13 @@ export function ReupQueuePage() {
   const [pendingFilter, setPendingFilter] = useState<ReupQueueOperatorFilter | null>(null);
   const [isFilterPending, startFilterTransition] = useTransition();
   const [searchQuery, setSearchQuery] = useState("");
+  const [intake, setIntake] = useState<IntakeFilterState>(EMPTY_INTAKE_FILTERS);
+  const [intakeSessions, setIntakeSessions] = useState<CaptureSession[]>([]);
   const [sortMode, setSortMode] = useState<ReupQueueSortMode>("active-first");
   const [viewMode, setViewMode] = useState<ReupQueueViewMode>(() => readReupQueueViewMode());
+  const [collapsedWorklistStages, setCollapsedWorklistStages] = useState<Set<string>>(() => new Set());
+  const [worklistMarquee, setWorklistMarquee] = useState<SelectionRect | null>(null);
+  const [worklistDragging, setWorklistDragging] = useState(false);
   const [activeItemId, setActiveItemId] = useState<string | null>(null);
   const [queueInspectorOpen, setQueueInspectorOpen] = useState(false);
   const [selectedItemIds, setSelectedItemIds] = useState<Set<string>>(new Set());
@@ -129,12 +167,24 @@ export function ReupQueuePage() {
   const loadedCountRef = useRef(0);
   const loadMoreInFlightRef = useRef(false);
   const loadMoreRef = useRef<HTMLDivElement | null>(null);
+  const worklistSurfaceRef = useRef<HTMLDivElement | null>(null);
+  const worklistDragSessionRef = useRef<WorklistDragSession | null>(null);
+  const worklistAutoScrollFrameRef = useRef<number | null>(null);
+  const worklistSelectionFrameRef = useRef<number | null>(null);
+  const worklistSelectionAnchorRef = useRef<string | null>(null);
+  const worklistSuppressClickRef = useRef(false);
+  const selectedItemIdsRef = useRef(selectedItemIds);
+  selectedItemIdsRef.current = selectedItemIds;
   const itemsRef = useRef(items);
   const totalCountRef = useRef(totalCount);
   itemsRef.current = items;
   totalCountRef.current = totalCount;
   const operatorFilterRef = useRef(operatorFilter);
   operatorFilterRef.current = operatorFilter;
+  // Scroll paging and the background poll both fire from stale closures, so they read
+  // the intake filter from a ref instead of capturing it.
+  const intakeRef = useRef(intake);
+  intakeRef.current = intake;
   const queueHasMore = hasMoreOffsetItems(items.length, totalCount);
   const queuePagerDisabled = mutatingAction !== null || batchWorkingAction !== null;
 
@@ -145,6 +195,171 @@ export function ReupQueuePage() {
   function queueItemPending(itemId: string) {
     return [...asyncActions.pendingKeys].some((key) => key.startsWith(`queue-item:${itemId}:`));
   }
+
+  function toggleWorklistStage(stageLabel: string) {
+    setCollapsedWorklistStages((current) => {
+      const next = new Set(current);
+      if (next.has(stageLabel)) next.delete(stageLabel);
+      else next.add(stageLabel);
+      return next;
+    });
+  }
+
+  const updateWorklistMarqueeSelection = useCallback((session: WorklistDragSession) => {
+    const currentDocument = clientPointToDocument(session.currentClient);
+    const selectionRect = normalizeSelectionRect(session.anchorDocument, currentDocument);
+    const intersectingIds = intersectingSelectionIds(selectionRect, session.selectionEntries);
+
+    setSelectedItemIds(applyMarqueeSelection(session.selectionAtDragStart, intersectingIds, session.mode));
+    setWorklistMarquee({
+      bottom: selectionRect.bottom - window.scrollY,
+      left: selectionRect.left - window.scrollX,
+      right: selectionRect.right - window.scrollX,
+      top: selectionRect.top - window.scrollY
+    });
+  }, []);
+
+  const stopWorklistAutoScroll = useCallback(() => {
+    if (worklistAutoScrollFrameRef.current == null) return;
+    window.cancelAnimationFrame(worklistAutoScrollFrameRef.current);
+    worklistAutoScrollFrameRef.current = null;
+  }, []);
+
+  const stopWorklistSelectionFrame = useCallback(() => {
+    if (worklistSelectionFrameRef.current == null) return;
+    window.cancelAnimationFrame(worklistSelectionFrameRef.current);
+    worklistSelectionFrameRef.current = null;
+  }, []);
+
+  const scheduleWorklistMarqueeUpdate = useCallback(() => {
+    if (worklistSelectionFrameRef.current != null) return;
+    worklistSelectionFrameRef.current = window.requestAnimationFrame(() => {
+      worklistSelectionFrameRef.current = null;
+      const session = worklistDragSessionRef.current;
+      if (session?.started) updateWorklistMarqueeSelection(session);
+    });
+  }, [updateWorklistMarqueeSelection]);
+
+  const ensureWorklistAutoScroll = useCallback(() => {
+    if (worklistAutoScrollFrameRef.current != null) return;
+
+    const tick = () => {
+      const session = worklistDragSessionRef.current;
+      if (!session?.started) {
+        worklistAutoScrollFrameRef.current = null;
+        return;
+      }
+      const velocity = autoScrollVelocity(session.currentClient.y, window.innerHeight);
+      if (velocity === 0) {
+        worklistAutoScrollFrameRef.current = null;
+        return;
+      }
+      window.scrollBy({ behavior: "auto", left: 0, top: velocity });
+      scheduleWorklistMarqueeUpdate();
+      worklistAutoScrollFrameRef.current = window.requestAnimationFrame(tick);
+    };
+
+    worklistAutoScrollFrameRef.current = window.requestAnimationFrame(tick);
+  }, [scheduleWorklistMarqueeUpdate]);
+
+  useEffect(() => {
+    function handlePagePointerDown(event: globalThis.PointerEvent) {
+      if (viewMode !== "worklist" || !worklistSurfaceRef.current) return;
+      if (event.button !== 0 || event.pointerType !== "mouse" || pageDragTargetBlocksMarquee(event.target)) return;
+
+      const currentClient = { x: event.clientX, y: event.clientY };
+      worklistDragSessionRef.current = {
+        anchorDocument: clientPointToDocument(currentClient),
+        currentClient,
+        mode: event.ctrlKey || event.metaKey ? "toggle" : "replace",
+        pointerId: event.pointerId,
+        selectionEntries: readWorklistSelectionEntries(worklistSurfaceRef.current),
+        selectionAtDragStart: new Set(selectedItemIdsRef.current),
+        started: false
+      };
+    }
+
+    function handlePagePointerMove(event: globalThis.PointerEvent) {
+      const session = worklistDragSessionRef.current;
+      if (!session || session.pointerId !== event.pointerId) return;
+
+      session.currentClient = { x: event.clientX, y: event.clientY };
+      const currentDocument = clientPointToDocument(session.currentClient);
+      if (!session.started) {
+        if (dragDistance(session.anchorDocument, currentDocument) < WORKLIST_MARQUEE_DRAG_THRESHOLD_PX) return;
+        session.started = true;
+        try {
+          document.documentElement.setPointerCapture(event.pointerId);
+        } catch {
+          // Document-level listeners still keep the gesture active inside the viewport.
+        }
+        setWorklistDragging(true);
+        document.body.classList.add("is-reup-queue-marquee-selecting");
+        window.getSelection()?.removeAllRanges();
+      }
+
+      event.preventDefault();
+      scheduleWorklistMarqueeUpdate();
+      const velocity = autoScrollVelocity(session.currentClient.y, window.innerHeight);
+      if (velocity === 0) stopWorklistAutoScroll();
+      else ensureWorklistAutoScroll();
+    }
+
+    function handlePagePointerEnd(event: globalThis.PointerEvent) {
+      const session = worklistDragSessionRef.current;
+      if (!session || session.pointerId !== event.pointerId) return;
+
+      if (session.started) {
+        event.preventDefault();
+        stopWorklistSelectionFrame();
+        updateWorklistMarqueeSelection(session);
+        worklistSuppressClickRef.current = true;
+        window.setTimeout(() => {
+          worklistSuppressClickRef.current = false;
+        }, 0);
+      }
+      try {
+        if (document.documentElement.hasPointerCapture(event.pointerId)) document.documentElement.releasePointerCapture(event.pointerId);
+      } catch {
+        // Pointer capture may already be gone after a native cancellation.
+      }
+      worklistDragSessionRef.current = null;
+      stopWorklistAutoScroll();
+      document.body.classList.remove("is-reup-queue-marquee-selecting");
+      setWorklistDragging(false);
+      setWorklistMarquee(null);
+    }
+
+    function handlePageClickCapture(event: globalThis.MouseEvent) {
+      if (!worklistSuppressClickRef.current) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      worklistSuppressClickRef.current = false;
+    }
+
+    function handlePageDragStart(event: globalThis.DragEvent) {
+      if (worklistDragSessionRef.current) event.preventDefault();
+    }
+
+    document.addEventListener("pointerdown", handlePagePointerDown, true);
+    document.addEventListener("pointermove", handlePagePointerMove, true);
+    document.addEventListener("pointerup", handlePagePointerEnd, true);
+    document.addEventListener("pointercancel", handlePagePointerEnd, true);
+    document.addEventListener("click", handlePageClickCapture, true);
+    document.addEventListener("dragstart", handlePageDragStart, true);
+    return () => {
+      document.removeEventListener("pointerdown", handlePagePointerDown, true);
+      document.removeEventListener("pointermove", handlePagePointerMove, true);
+      document.removeEventListener("pointerup", handlePagePointerEnd, true);
+      document.removeEventListener("pointercancel", handlePagePointerEnd, true);
+      document.removeEventListener("click", handlePageClickCapture, true);
+      document.removeEventListener("dragstart", handlePageDragStart, true);
+      worklistDragSessionRef.current = null;
+      stopWorklistAutoScroll();
+      stopWorklistSelectionFrame();
+      document.body.classList.remove("is-reup-queue-marquee-selecting");
+    };
+  }, [ensureWorklistAutoScroll, scheduleWorklistMarqueeUpdate, stopWorklistAutoScroll, stopWorklistSelectionFrame, updateWorklistMarqueeSelection, viewMode]);
 
   const loadMoreQueue = useCallback(async () => {
     const currentItems = itemsRef.current;
@@ -160,6 +375,7 @@ export function ReupQueuePage() {
         offset: currentItems.length,
         statuses,
         sort: sortMode,
+        ...intakeRef.current,
       });
       setStatusCounts(payload.status_counts ?? {});
       const { merged, totalCount: nextTotalCount } = resolveOffsetPageMerge(
@@ -196,7 +412,7 @@ export function ReupQueuePage() {
     try {
       const statuses = statusesForReupQueueFilter(filter);
       const windowLimit = Math.max(REUP_QUEUE_LOAD_BATCH_SIZE, preserveUi ? loadedCountRef.current || REUP_QUEUE_LOAD_BATCH_SIZE : REUP_QUEUE_LOAD_BATCH_SIZE);
-      const payload = await fetchReupQueueItems({ limit: windowLimit, offset: 0, statuses, sort });
+      const payload = await fetchReupQueueItems({ limit: windowLimit, offset: 0, statuses, sort, ...intakeRef.current });
       setStatusCounts(payload.status_counts ?? {});
       const nextSummary = buildReupQueueSummaryFromStatusCounts(payload.status_counts);
       if (!initialFilterApplied.current) {
@@ -243,6 +459,15 @@ export function ReupQueuePage() {
     loadedCountRef.current = 0;
   }
 
+  function applyIntakeChange(partial: Partial<IntakeFilterState>) {
+    setIntake((current) => ({ ...current, ...partial }));
+    loadedCountRef.current = 0;
+  }
+
+  function clearIntakeFilters() {
+    applyIntakeChange(EMPTY_INTAKE_FILTERS);
+  }
+
   function handleViewModeChange(nextMode: ReupQueueViewMode) {
     if (nextMode === viewMode) return;
     setViewMode(nextMode);
@@ -251,17 +476,37 @@ export function ReupQueuePage() {
 
   useEffect(() => {
     void loadQueue(false, operatorFilter, sortMode);
-  }, [operatorFilter, sortMode]);
-
-  const hasActiveDownloads = useMemo(() => items.some((item) => hasActiveDownloadJob(item)), [items]);
+  }, [operatorFilter, sortMode, intake]);
 
   useEffect(() => {
-    if (!hasActiveDownloads) return;
+    let cancelled = false;
+    void fetchReupQueueIntakeSessions({ limit: 50 })
+      .then((response) => {
+        // The API already drops empty promotes and remaps the count to queue membership.
+        if (!cancelled) setIntakeSessions(response.sessions);
+      })
+      .catch(() => {
+        // The picker is an optional refinement; the queue still works without it.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Auto pipeline keeps working after download (analyze → translate → TTS), so the
+  // queue must keep refreshing for those steps too, not only while media downloads.
+  const hasActiveWork = useMemo(
+    () => items.some((item) => hasActiveDownloadJob(item) || hasActivePipelineJob(item)),
+    [items]
+  );
+
+  useEffect(() => {
+    if (!hasActiveWork) return;
     const timer = window.setInterval(() => {
       void loadQueue(true, operatorFilterRef.current, sortMode);
     }, ACTIVE_DOWNLOAD_POLL_MS);
     return () => window.clearInterval(timer);
-  }, [hasActiveDownloads, sortMode]);
+  }, [hasActiveWork, sortMode]);
 
   useEffect(() => {
     if (!queueInspectorOpen) return;
@@ -277,6 +522,11 @@ export function ReupQueuePage() {
     () => visibleReupQueueItems(items, operatorFilter, searchQuery, sortMode),
     [items, operatorFilter, searchQuery, sortMode]
   );
+  const worklistGroups = useMemo(() => groupReupQueueWorklistItems(visibleItems), [visibleItems]);
+  const worklistSelectableIds = useMemo(
+    () => worklistGroups.flatMap((group) => group.items.filter(hasAnyBatchEligibility).map((item) => item.id)),
+    [worklistGroups]
+  );
   const bulkSelectedIds = useMemo(() => selectedVisibleReupQueueIds(visibleItems, selectedItemIds), [selectedItemIds, visibleItems]);
   const selectedItems = useMemo(() => items.filter((item) => selectedItemIds.has(item.id)), [items, selectedItemIds]);
   const activeItem = useMemo(() => {
@@ -290,7 +540,38 @@ export function ReupQueuePage() {
     setActiveItemId(null);
   }, [activeItem, activeItemId]);
 
-  async function applyQueueAction(item: ReupQueueItem, action: ReupQueueAction) {
+  useEffect(() => {
+    if (!worklistDragging) return;
+    function handleScroll() {
+      const session = worklistDragSessionRef.current;
+      if (session?.started) scheduleWorklistMarqueeUpdate();
+    }
+    window.addEventListener("scroll", handleScroll, true);
+    return () => window.removeEventListener("scroll", handleScroll, true);
+  }, [scheduleWorklistMarqueeUpdate, worklistDragging]);
+
+  useEffect(() => () => {
+    stopWorklistAutoScroll();
+    stopWorklistSelectionFrame();
+  }, [stopWorklistAutoScroll, stopWorklistSelectionFrame]);
+
+  function handleWorklistRowSelection(itemId: string, modifiers: { additive: boolean; range: boolean }) {
+    const anchorId = worklistSelectionAnchorRef.current;
+    if (modifiers.range && anchorId) {
+      setSelectedItemIds((current) => selectSelectionRange(current, worklistSelectableIds, anchorId, itemId, modifiers.additive));
+    } else if (modifiers.additive) {
+      setSelectedItemIds((current) => toggleReupQueueSelection(current, itemId));
+    } else {
+      setSelectedItemIds(new Set([itemId]));
+    }
+    worklistSelectionAnchorRef.current = itemId;
+  }
+
+  async function applyQueueAction(
+    item: ReupQueueItem,
+    action: ReupQueueAction,
+    options?: { pipelineMode?: ReupPipelineMode }
+  ) {
     if (action === "CANCEL" && !window.confirm(bulkCancelConfirmMessage(1, operatorFilter))) {
       return;
     }
@@ -307,7 +588,13 @@ export function ReupQueuePage() {
         note: defaultActionNote(action),
         blocked_reason: action === "MARK_BLOCKED" || action === "CANCEL" ? defaultActionNote(action) : null,
         media_prep_notes: action === "MARK_MEDIA_READY" ? "Operator confirmed media; enqueue audio analysis." : null,
-        media_prep_status: action === "MARK_MEDIA_READY" ? "WAITING_FOR_METADATA" : null
+        media_prep_status: action === "MARK_MEDIA_READY" ? "WAITING_FOR_METADATA" : null,
+        pipeline_mode:
+          action === "SET_AUTOMATION"
+            ? (options?.pipelineMode ?? "auto_to_render")
+            : action === "START_AUTO_PIPELINE"
+              ? (options?.pipelineMode ?? "auto_to_render")
+              : null
       });
       setItems((current) => current.map((existing) => (existing.id === result.item.id ? result.item : existing)));
       if (queueInspectorOpen) {
@@ -333,7 +620,8 @@ export function ReupQueuePage() {
   async function applyBatchAction(
     action: ReupQueueBatchAction,
     itemIds = bulkSelectedIds,
-    pendingKey = `bulk:${action}`
+    pendingKey = `bulk:${action}`,
+    options?: { pipelineMode?: string | null }
   ) {
     if (itemIds.length === 0) {
       notify({ message: "Select at least one queue item before running a batch action.", tone: "info" });
@@ -350,6 +638,8 @@ export function ReupQueuePage() {
     }
     let requestIds = itemIds;
     let preflightCapNotice: string | null = null;
+    // Auto keeps every selected clip: the lane parks what it cannot start yet and admits
+    // it later. Only the manual start still shares one download session worth capping.
     if (action === "START_PROCESSING") {
       const capped = capStartProcessingBatchIds(itemIds);
       requestIds = capped.acceptedIds;
@@ -371,7 +661,11 @@ export function ReupQueuePage() {
         action,
         item_ids: requestIds,
         note: defaultBatchActionNote(action),
-        target_platform: action === "CREATE_PUBLISH_HANDOFF" ? DEFAULT_HANDOFF_PLATFORM : null
+        target_platform: action === "CREATE_PUBLISH_HANDOFF" ? DEFAULT_HANDOFF_PLATFORM : null,
+        pipeline_mode:
+          action === "SET_AUTOMATION" || action === "START_AUTO_PIPELINE"
+            ? (options?.pipelineMode ?? "auto_to_render")
+            : null
       });
       setBatchResult(result);
       const summary = batchSummary(action, result);
@@ -420,6 +714,11 @@ export function ReupQueuePage() {
   async function runTilePrimaryAction(item: ReupQueueItem) {
     const action = primaryQueueAction(item);
     if (action === "inspect" || action === null) {
+      const finalHref = worklistFinalReviewHref(item);
+      if (finalHref) {
+        window.location.href = finalHref;
+        return;
+      }
       openItemDetails(item.id);
       return;
     }
@@ -451,8 +750,13 @@ export function ReupQueuePage() {
   const dismissableVisibleItems = useMemo(() => dismissableReupQueueItems(visibleItems), [visibleItems]);
   const purgeableVisibleItems = useMemo(() => clearablePurgeReupQueueItems(visibleItems), [visibleItems]);
   const bulkHint = useMemo(() => bulkSelectionGuidance(bulkSelectedIds.length, selectionEligibility), [bulkSelectedIds.length, selectionEligibility]);
-  const filterPreloading = isFilterPending || pendingFilter !== null;
-  const pendingFilterLabel = REUP_QUEUE_STATUS_FILTERS.find((entry) => entry.key === (pendingFilter ?? operatorFilter))?.label ?? "queue";
+  // Status tabs use a transition; intake filters flip `loading` while prior tiles remain.
+  const intakeBusy = loading && items.length > 0 && !refreshing;
+  const filterPreloading = isFilterPending || pendingFilter !== null || intakeBusy;
+  const pendingFilterLabel =
+    intakeBusy && !isFilterPending && pendingFilter === null
+      ? "filtered"
+      : (REUP_QUEUE_STATUS_FILTERS.find((entry) => entry.key === (pendingFilter ?? operatorFilter))?.label ?? "queue");
 
   return (
     <OperatorStudioShell
@@ -465,11 +769,40 @@ export function ReupQueuePage() {
         <ReupQueueQuickPathBar
           activeFilter={operatorFilter}
           onFilter={handleOperatorFilterChange}
-          onStartReady={() => void applyBatchAction("START_PROCESSING", items.filter((item) => item.status === "READY_FOR_PROCESSING").map((item) => item.id))}
+          onStartAutoReady={() =>
+            void applyBatchAction(
+              "START_AUTO_PIPELINE",
+              items.filter((item) => item.status === "READY_FOR_PROCESSING").map((item) => item.id),
+              "bulk:START_AUTO_PIPELINE_RENDER",
+              { pipelineMode: "auto_to_render" }
+            )
+          }
+          onStartAutoTtsOnlyReady={() =>
+            void applyBatchAction(
+              "START_AUTO_PIPELINE",
+              items.filter((item) => item.status === "READY_FOR_PROCESSING").map((item) => item.id),
+              "bulk:START_AUTO_PIPELINE",
+              { pipelineMode: "auto_to_tts" }
+            )
+          }
+          onStartReady={() =>
+            void applyBatchAction(
+              "START_PROCESSING",
+              items.filter((item) => item.status === "READY_FOR_PROCESSING").map((item) => item.id)
+            )
+          }
           summary={summary}
-          working={batchWorkingAction === "START_PROCESSING"}
+          working={
+            batchWorkingAction === "START_PROCESSING" || batchWorkingAction === "START_AUTO_PIPELINE"
+          }
+          workingAuto={batchWorkingAction === "START_AUTO_PIPELINE"}
         />
         <ReupQueueStudioFilters
+          intake={intake}
+          intakeBusy={filterPreloading}
+          intakeSessions={intakeSessions}
+          onClearIntake={clearIntakeFilters}
+          onIntakeChange={applyIntakeChange}
           onSearch={setSearchQuery}
           onSort={handleSortModeChange}
           searchQuery={searchQuery}
@@ -485,7 +818,7 @@ export function ReupQueuePage() {
               eligibility={selectionEligibility}
               guidance={bulkHint}
               mutating={batchWorkingAction !== null || mutatingAction !== null}
-              onBatchAction={(action) => void applyBatchAction(action)}
+              onBatchAction={(action, options) => void applyBatchAction(action, bulkSelectedIds, `bulk:${action}`, options)}
               onCancelVisible={() => void applyBatchAction("CANCEL", cancellableVisibleItems.map((item) => item.id))}
               onClear={() => setSelectedItemIds(new Set())}
               onDismissVisible={() => void applyBatchAction("DISMISS", dismissableVisibleItems.map((item) => item.id))}
@@ -562,21 +895,68 @@ export function ReupQueuePage() {
                 {filterPreloading ? (
                   <ReupQueueGalleryPreloading statusLabel={pendingFilterLabel} viewMode={viewMode} />
                 ) : viewMode === "worklist" ? (
-                  <div className="reup-queue-worklist work-studio-worklist is-rail is-dense is-soft" role="list">
-                    {visibleItems.map((item) => (
-                      <ReupQueueWorklistRow
-                        focused={activeItemId === item.id}
-                        item={item}
-                        key={item.id}
-                        mutating={batchWorkingAction !== null}
-                        onDetails={() => openItemDetails(item.id)}
-                        onDismiss={() => void applyQueueAction(item, "DISMISS")}
-                        onPrimary={() => void runTilePrimaryAction(item)}
-                        onToggleSelect={() => setSelectedItemIds((current) => toggleReupQueueSelection(current, item.id))}
-                        pending={queueItemPending(item.id)}
-                        selected={selectedItemIds.has(item.id)}
+                  <div
+                    className={`reup-queue-worklist work-studio-worklist is-rail is-dense is-stage-stack${worklistDragging ? " is-marquee-selecting" : ""}`}
+                    ref={worklistSurfaceRef}
+                  >
+                    {worklistGroups.map((group) => {
+                      const collapsed = collapsedWorklistStages.has(group.label);
+                      const panelId = worklistStagePanelId(group.label);
+                      return (
+                        <section className={`reup-queue-stage-group${collapsed ? " is-collapsed" : ""}`} data-tone={group.tone} key={group.label}>
+                          <button
+                            aria-controls={panelId}
+                            aria-expanded={!collapsed}
+                            className="reup-queue-stage-heading"
+                            onClick={() => toggleWorklistStage(group.label)}
+                            title={`${collapsed ? "Show" : "Hide"} ${group.label} queue items`}
+                            type="button"
+                          >
+                            <span aria-hidden="true" className="reup-queue-stage-marker" />
+                            <span className="reup-queue-stage-copy">
+                              <span className="reup-queue-stage-title">{group.label}</span>
+                              <span>{worklistStageGroupHint(group.label, group.tone)}</span>
+                            </span>
+                            <span className="reup-queue-stage-count" title={`${group.items.length} visible queue item${group.items.length === 1 ? "" : "s"}`}>
+                              {group.items.length}
+                            </span>
+                            <span className="reup-queue-stage-context">{collapsed ? "Show items" : "Hide items"}</span>
+                            <svg aria-hidden="true" className="reup-queue-stage-chevron" viewBox="0 0 20 20">
+                              <path d="m5.5 7.5 4.5 4.5 4.5-4.5" />
+                            </svg>
+                          </button>
+                          <div aria-label={`${group.label} queue items`} className="reup-queue-stage-items" hidden={collapsed} id={panelId} role="list">
+                            {group.items.map((item) => (
+                              <ReupQueueWorklistRow
+                                focused={activeItemId === item.id}
+                                item={item}
+                                key={item.id}
+                                mutating={batchWorkingAction !== null}
+                                onDetails={() => openItemDetails(item.id)}
+                                onDismiss={() => void applyQueueAction(item, "DISMISS")}
+                                onPrimary={() => void runTilePrimaryAction(item)}
+                                onSelectionClick={(modifiers) => handleWorklistRowSelection(item.id, modifiers)}
+                                onToggleSelect={(range) => handleWorklistRowSelection(item.id, { additive: !range, range })}
+                                pending={queueItemPending(item.id)}
+                                selected={selectedItemIds.has(item.id)}
+                              />
+                            ))}
+                          </div>
+                        </section>
+                      );
+                    })}
+                    {worklistMarquee ? (
+                      <div
+                        aria-hidden="true"
+                        className="reup-queue-selection-marquee"
+                        style={{
+                          height: Math.max(0, worklistMarquee.bottom - worklistMarquee.top),
+                          left: worklistMarquee.left,
+                          top: worklistMarquee.top,
+                          width: Math.max(0, worklistMarquee.right - worklistMarquee.left)
+                        }}
                       />
-                    ))}
+                    ) : null}
                   </div>
                 ) : (
                 <div className="capture-inbox-media-tile-grid">
@@ -632,15 +1012,21 @@ export function ReupQueuePage() {
 function ReupQueueQuickPathBar({
   activeFilter,
   onFilter,
+  onStartAutoReady,
+  onStartAutoTtsOnlyReady,
   onStartReady,
   summary,
-  working
+  working,
+  workingAuto
 }: {
   activeFilter: ReupQueueOperatorFilter;
   onFilter: (filter: ReupQueueOperatorFilter) => void;
+  onStartAutoReady: () => void;
+  onStartAutoTtsOnlyReady: () => void;
   onStartReady: () => void;
   summary: ReturnType<typeof buildReupQueueSummary>;
   working: boolean;
+  workingAuto: boolean;
 }) {
   const needsStartCount = summary.needs_start;
   const startBatchCount = Math.min(needsStartCount, REUP_QUEUE_START_PROCESSING_BATCH_LIMIT);
@@ -679,16 +1065,55 @@ function ReupQueueQuickPathBar({
             disabled={working || needsStartCount === 0}
             leadingIcon={(
               <span aria-hidden="true" className="capture-inbox-hero-action-rail__icon">
-                <WorkItemActionIcon className="capture-inbox-hero-action-rail__glyph" kind="process" />
+                <WorkItemActionIcon className="capture-inbox-hero-action-rail__glyph" kind="auto-render" />
+              </span>
+            )}
+            onClick={onStartAutoReady}
+            pending={workingAuto}
+            pendingLabel="Starting auto…"
+            title={
+              needsStartCount === 0
+                ? "No clips are ready to start right now"
+                : startCapped
+                  ? `Safe batch limit ${REUP_QUEUE_START_PROCESSING_BATCH_LIMIT} — auto Download→Render`
+                  : "Auto Download → ASR → Translate → TTS → OCR → Render, then just review the finished video"
+            }
+            type="button"
+          >
+            {startCapped
+              ? `Start auto (${startBatchCount}/${needsStartCount})`
+              : `Start auto (${needsStartCount})`}
+          </AsyncButton>
+          <AsyncButton
+            className="capture-inbox-hero-action-rail__item reup-queue-hero-cta"
+            disabled={working || needsStartCount === 0}
+            leadingIcon={(
+              <span aria-hidden="true" className="capture-inbox-hero-action-rail__icon">
+                <WorkItemActionIcon className="capture-inbox-hero-action-rail__glyph" kind="auto-run" />
+              </span>
+            )}
+            onClick={onStartAutoTtsOnlyReady}
+            pending={false}
+            title="Stop after TTS so you can edit transcript or voice before OCR + Render"
+            type="button"
+          >
+            Auto→TTS
+          </AsyncButton>
+          <AsyncButton
+            className="capture-inbox-hero-action-rail__item reup-queue-hero-cta"
+            disabled={working || needsStartCount === 0}
+            leadingIcon={(
+              <span aria-hidden="true" className="capture-inbox-hero-action-rail__icon">
+                <WorkItemActionIcon className="capture-inbox-hero-action-rail__glyph" kind="step" />
               </span>
             )}
             onClick={onStartReady}
-            pending={working}
+            pending={working && !workingAuto}
             pendingLabel="Starting…"
-            title={needsStartCount === 0 ? "No clips are ready to start right now" : startCapped ? `Safe batch limit ${REUP_QUEUE_START_PROCESSING_BATCH_LIMIT}` : undefined}
+            title={needsStartCount === 0 ? "No clips are ready to start right now" : "Manual Start processing (download only)"}
             type="button"
           >
-            {startCapped ? `Start ready (${startBatchCount}/${needsStartCount})` : `Start all ready (${needsStartCount})`}
+            {startCapped ? `Start manual (${startBatchCount})` : "Start manual"}
           </AsyncButton>
           <a className="capture-inbox-hero-action-rail__item" href={REVIEW_BOARD_HREF}>
             <span aria-hidden="true" className="capture-inbox-hero-action-rail__icon">
@@ -748,11 +1173,21 @@ function ReupQueueStatusStatBars({ ratio, status }: { ratio: number; status: Reu
 }
 
 function ReupQueueStudioFilters({
+  intake,
+  intakeBusy,
+  intakeSessions,
+  onClearIntake,
+  onIntakeChange,
   onSearch,
   onSort,
   searchQuery,
   sortMode
 }: {
+  intake: IntakeFilterState;
+  intakeBusy: boolean;
+  intakeSessions: CaptureSession[];
+  onClearIntake: () => void;
+  onIntakeChange: (partial: Partial<IntakeFilterState>) => void;
   onSearch: (query: string) => void;
   onSort: (sortMode: ReupQueueSortMode) => void;
   searchQuery: string;
@@ -795,6 +1230,14 @@ function ReupQueueStudioFilters({
           </select>
         </label>
       </div>
+      <IntakeFilterRow
+        addedLabel="Queued"
+        busy={intakeBusy}
+        onChange={onIntakeChange}
+        onClear={onClearIntake}
+        sessions={intakeSessions}
+        state={intake}
+      />
     </section>
   );
 }
@@ -852,7 +1295,7 @@ function ReupQueueBatchActionBar({
   eligibility: ReturnType<typeof buildSelectionEligibility>;
   guidance: string | null;
   mutating: boolean;
-  onBatchAction: (action: ReupQueueBatchAction) => void;
+  onBatchAction: (action: ReupQueueBatchAction, options?: { pipelineMode?: ReupPipelineMode }) => void;
   onCancelVisible: () => void;
   onClear: () => void;
   onDismissVisible: () => void;
@@ -873,19 +1316,42 @@ function ReupQueueBatchActionBar({
   const showCancelVisible = !hasSelection && supportsBulkCancelVisibleScope(operatorFilter) && cancellableVisibleCount > 0;
   const showDismissVisible = !hasSelection && supportsBulkDismissVisibleScope(operatorFilter) && dismissableVisibleCount > 0;
   const showPurgeVisible = !hasSelection && supportsBulkPurgeVisibleScope(operatorFilter) && purgeableVisibleCount > 0;
-  const primaryActionOptions: Array<{ action: ReupQueueBatchAction; label: string; count: number }> = [
-    { action: "START_PROCESSING", label: "Start", count: eligibility.start },
-    { action: "CREATE_EXPORT_PACKAGE", label: "Export", count: eligibility.export },
-    { action: "CREATE_PUBLISH_HANDOFF", label: "Handoff", count: eligibility.handoff }
+  const primaryActionOptions: BulkActionOption[] = [
+    {
+      key: "START_AUTO_PIPELINE",
+      action: "START_AUTO_PIPELINE",
+      label: "Start auto",
+      count: eligibility.startAuto,
+      pipelineMode: "auto_to_render"
+    },
+    { key: "START_PROCESSING", action: "START_PROCESSING", label: "Start manual", count: eligibility.start },
+    { key: "CREATE_EXPORT_PACKAGE", action: "CREATE_EXPORT_PACKAGE", label: "Export", count: eligibility.export },
+    { key: "CREATE_PUBLISH_HANDOFF", action: "CREATE_PUBLISH_HANDOFF", label: "Handoff", count: eligibility.handoff }
   ];
   const primaryActions = primaryActionOptions.filter((entry) => entry.count > 0);
-  const secondaryActionOptions: Array<{ action: ReupQueueBatchAction; label: string; count: number }> = [
-    { action: "HOLD", label: "Pause", count: eligibility.hold },
-    { action: "RESUME", label: "Resume", count: eligibility.resume },
-    { action: "RETRY", label: "Retry", count: eligibility.retry },
-    { action: "MARK_MEDIA_READY", label: "Media ready", count: eligibility.markMediaReady },
-    { action: "CANCEL", label: "Cancel", count: eligibility.cancel },
-    { action: "DISMISS", label: "Clear", count: eligibility.dismiss }
+  const secondaryActionOptions: BulkActionOption[] = [
+    { key: "HOLD", action: "HOLD", label: "Pause", count: eligibility.hold },
+    { key: "RESUME", action: "RESUME", label: "Resume", count: eligibility.resume },
+    {
+      key: "SET_AUTOMATION:auto_to_render",
+      action: "SET_AUTOMATION",
+      label: "Hand to full auto",
+      count: eligibility.setAutomation,
+      icon: "auto-render",
+      pipelineMode: "auto_to_render"
+    },
+    {
+      key: "SET_AUTOMATION:manual",
+      action: "SET_AUTOMATION",
+      label: "Take over manually",
+      count: eligibility.setAutomation,
+      icon: "step",
+      pipelineMode: "manual"
+    },
+    { key: "RETRY", action: "RETRY", label: "Retry", count: eligibility.retry },
+    { key: "MARK_MEDIA_READY", action: "MARK_MEDIA_READY", label: "Media ready", count: eligibility.markMediaReady },
+    { key: "CANCEL", action: "CANCEL", label: "Cancel", count: eligibility.cancel },
+    { key: "DISMISS", action: "DISMISS", label: "Clear", count: eligibility.dismiss }
   ];
   const secondaryActions = secondaryActionOptions.filter((entry) => entry.count > 0);
   const decisionActions = hasSelection && primaryTotal + secondaryTotal > 0 ? [...primaryActions, ...secondaryActions] : [];
@@ -959,9 +1425,14 @@ function ReupQueueBatchActionBar({
             <AsyncButton
               className={`review-board-deck-btn reup-queue-bulk-btn ${bulkActionButtonTone(entry.action)}`}
               disabled={disabled || entry.count === 0 || (workingAction !== null && workingAction !== entry.action)}
-              key={entry.action}
-              leadingIcon={<WorkItemActionIcon className="review-board-bulk-action__icon" kind={bulkActionIconKind(entry.action)} />}
-              onClick={() => onBatchAction(entry.action)}
+              key={entry.key}
+              leadingIcon={(
+                <WorkItemActionIcon
+                  className="review-board-bulk-action__icon"
+                  kind={entry.icon ?? bulkActionIconKind(entry.action)}
+                />
+              )}
+              onClick={() => onBatchAction(entry.action, entry.pipelineMode ? { pipelineMode: entry.pipelineMode } : undefined)}
               pending={workingAction === entry.action}
               pendingLabel={`${entry.label}…`}
               type="button"
@@ -976,8 +1447,17 @@ function ReupQueueBatchActionBar({
   );
 }
 
+type BulkActionOption = {
+  key: string;
+  action: ReupQueueBatchAction;
+  label: string;
+  count: number;
+  icon?: WorkItemActionIconKind;
+  pipelineMode?: ReupPipelineMode;
+};
+
 function bulkActionIconKind(action: ReupQueueBatchAction): WorkItemActionIconKind {
-  if (action === "START_PROCESSING" || action === "RESUME") return "process";
+  if (action === "START_PROCESSING" || action === "START_AUTO_PIPELINE" || action === "RESUME") return "process";
   if (action === "CREATE_EXPORT_PACKAGE" || action === "CREATE_PUBLISH_HANDOFF") return "send";
   if (action === "HOLD") return "pause";
   if (action === "RETRY") return "retry";
@@ -988,12 +1468,91 @@ function bulkActionIconKind(action: ReupQueueBatchAction): WorkItemActionIconKin
 }
 
 function bulkActionButtonTone(action: ReupQueueBatchAction): string {
-  if (action === "START_PROCESSING" || action === "RESUME") return "is-queue-primary";
+  if (action === "START_AUTO_PIPELINE" || action === "START_PROCESSING" || action === "RESUME") return "is-queue-primary";
   if (action === "CREATE_EXPORT_PACKAGE" || action === "CREATE_PUBLISH_HANDOFF") return "is-queue-info";
   if (action === "MARK_MEDIA_READY") return "is-queue-success";
   if (action === "HOLD" || action === "RETRY") return "is-queue-warning";
   if (action === "CANCEL" || action === "PURGE") return "is-queue-danger";
   return "is-queue-neutral";
+}
+
+type ReupQueueWorklistGroup = {
+  items: ReupQueueItem[];
+  label: string;
+  tone: ReturnType<typeof worklistStageTone>;
+};
+
+const WORKLIST_STAGE_TONE_PRIORITY: Record<ReupQueueWorklistGroup["tone"], number> = {
+  danger: 5,
+  active: 4,
+  warn: 3,
+  good: 2,
+  muted: 1
+};
+
+function groupReupQueueWorklistItems(items: ReupQueueItem[]): ReupQueueWorklistGroup[] {
+  const groups = new Map<string, ReupQueueWorklistGroup>();
+
+  for (const item of items) {
+    const label = worklistStageLabel(item);
+    const tone = worklistStageTone(item);
+    const current = groups.get(label);
+    if (!current) {
+      groups.set(label, { items: [item], label, tone });
+      continue;
+    }
+
+    current.items.push(item);
+    if (WORKLIST_STAGE_TONE_PRIORITY[tone] > WORKLIST_STAGE_TONE_PRIORITY[current.tone]) {
+      current.tone = tone;
+    }
+  }
+
+  return [...groups.values()];
+}
+
+function worklistStageGroupHint(label: string, tone: ReupQueueWorklistGroup["tone"]): string {
+  if (label === "No dialogue") return "Skip dubbing and continue";
+  if (label === "Transcript ready") return "Ready for review";
+  if (tone === "danger") return "Recovery needed";
+  if (tone === "active") return "In progress";
+  if (tone === "warn") return "Operator check";
+  if (tone === "good") return "Ready for action";
+  return "Paused or finished";
+}
+
+function worklistStagePanelId(label: string): string {
+  const slug = label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  return `reup-queue-stage-${slug || "items"}`;
+}
+
+function clientPointToDocument(point: SelectionPoint): SelectionPoint {
+  return { x: point.x + window.scrollX, y: point.y + window.scrollY };
+}
+
+function pageDragTargetBlocksMarquee(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) return false;
+  return Boolean(target.closest("input:not([type='checkbox']):not([type='radio']), textarea, select, [contenteditable='true']"));
+}
+
+function readWorklistSelectionEntries(surface: HTMLDivElement): SelectionRectEntry[] {
+  return Array.from(surface.querySelectorAll<HTMLElement>('[data-queue-item-id][data-selectable="true"]')).map((element) => {
+    const bounds = element.getBoundingClientRect();
+    return {
+      id: element.dataset.queueItemId ?? "",
+      rect: {
+        bottom: bounds.bottom + window.scrollY,
+        left: bounds.left + window.scrollX,
+        right: bounds.right + window.scrollX,
+        top: bounds.top + window.scrollY
+      }
+    };
+  }).filter((entry) => entry.id.length > 0);
+}
+
+function worklistTargetIsInteractive(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) return false;
+  return Boolean(target.closest("button, a, input, label, select, textarea, [role='button']"));
 }
 
 function ReupQueueWorklistRow({
@@ -1003,6 +1562,7 @@ function ReupQueueWorklistRow({
   onDetails,
   onDismiss,
   onPrimary,
+  onSelectionClick,
   onToggleSelect,
   pending,
   selected
@@ -1013,7 +1573,8 @@ function ReupQueueWorklistRow({
   onDetails: () => void;
   onDismiss: () => void;
   onPrimary: () => void;
-  onToggleSelect: () => void;
+  onSelectionClick: (modifiers: { additive: boolean; range: boolean }) => void;
+  onToggleSelect: (range: boolean) => void;
   pending: boolean;
   selected: boolean;
 }) {
@@ -1029,17 +1590,28 @@ function ReupQueueWorklistRow({
   const primaryTone = buttonTone === "recover" ? "is-recover" : buttonTone === "forward" ? "is-primary" : "is-quiet";
   const primaryIconKind = worklistPrimaryIconKind(item);
   const transcriptHref = worklistTranscriptHref(item);
-  const noDialogueHint = worklistNoDialogueHint(item);
 
   return (
     <article
       className={`reup-queue-worklist-row work-studio-worklist-row ${selected ? "is-bulk-selected" : ""} ${focused ? "is-inspector-focused" : ""} ${!selectable ? "is-terminal-queue-tile" : ""}`}
+      data-queue-item-id={item.id}
+      data-selectable={selectable ? "true" : "false"}
+      data-tone={stageTone}
+      onClick={(event) => {
+        if (!selectable || worklistTargetIsInteractive(event.target)) return;
+        onSelectionClick({ additive: event.ctrlKey || event.metaKey, range: event.shiftKey });
+      }}
       role="listitem"
     >
       <div className="reup-queue-worklist-select">
         {selectable ? (
           <label className={`reup-queue-worklist-check ${selected ? "is-selected" : ""}`} title={selected ? "Deselect for bulk actions" : "Select for bulk actions"}>
-            <input aria-label={selected ? "Deselect queue item" : "Select queue item"} checked={selected} onChange={onToggleSelect} type="checkbox" />
+            <input
+              aria-label={selected ? "Deselect queue item" : "Select queue item"}
+              checked={selected}
+              onChange={(event) => onToggleSelect(Boolean((event.nativeEvent as globalThis.MouseEvent).shiftKey))}
+              type="checkbox"
+            />
           </label>
         ) : (
           <span className="reup-queue-worklist-select-spacer" aria-hidden="true" />
@@ -1053,21 +1625,14 @@ function ReupQueueWorklistRow({
           <span className="reup-queue-worklist-title-text">{itemTitle(item)}</span>
         </button>
       </div>
-      <div className={`reup-queue-worklist-status-col ${downloadProgress != null ? "has-progress" : ""}`}>
-        {downloadProgress != null ? <WorklistProgressRing percent={downloadProgress} tone={stageTone} /> : null}
-        <span
-          className={`reup-queue-worklist-status is-${stageTone}`}
-          title={
-            noDialogueHint
-              ?? (item.job_id
-                ? `${(item.job_type ?? "JOB").toUpperCase()} · ${item.job_status ?? "unknown"} · ${item.job_id.slice(0, 8)}`
-                : undefined)
-          }
+      {downloadProgress != null ? (
+        <div
+          className="reup-queue-worklist-status-col has-progress"
+          title={item.job_id ? `${(item.job_type ?? "JOB").toUpperCase()} · ${item.job_status ?? "unknown"} · ${item.job_id.slice(0, 8)}` : undefined}
         >
-          {downloadProgress == null ? <span aria-hidden="true" className="reup-queue-worklist-status-dot" /> : null}
-          {worklistStageLabel(item)}
-        </span>
-      </div>
+          <WorklistProgressRing percent={downloadProgress} tone={stageTone} />
+        </div>
+      ) : null}
       <div className="reup-queue-worklist-actions">
         {transcriptHref ? (
           <a className="reup-queue-worklist-action is-primary is-with-icon" href={transcriptHref}>
@@ -1159,7 +1724,6 @@ function ReupQueueMediaTile({
   const selectable = hasAnyBatchEligibility(item);
   const pipelineStages = buildPipelineStages(item);
   const downloadProgress = downloadJobProgressPercent(item);
-  const downloadError = downloadJobErrorLine(item);
   const dismissAction = terminalQueueDismissAction(item);
   const secondaryLinks = buildQueueTileSecondaryLinks(item);
   const primaryAction = primaryQueueAction(item);
@@ -1168,6 +1732,7 @@ function ReupQueueMediaTile({
   const primaryButtonClass = queueTilePrimaryButtonClassName(item);
   const transcriptCta = queueTileTranscriptCta(item);
   const failureAlert = queueTileFailureAlert(item);
+  const failureStrip = queueTileFailureStrip(item);
   const nextStepHint = failureAlert ? null : queueTileNextStepHint(item);
   const showOpenDetails = shouldShowQueueTileDetailsButton(item);
   const scoreBadge = useQueueTileScoreBadge(item);
@@ -1189,7 +1754,10 @@ function ReupQueueMediaTile({
   }
 
   return (
-    <article className={`capture-inbox-media-tile capture-inbox-compact-card reup-queue-media-tile ${selected ? "is-bulk-selected" : ""} ${focused ? "is-inspector-focused" : ""} ${!selectable ? "is-terminal-queue-tile" : ""}`}>
+    <article
+      className={`capture-inbox-media-tile capture-inbox-compact-card reup-queue-media-tile ${selected ? "is-bulk-selected" : ""} ${focused ? "is-inspector-focused" : ""} ${!selectable ? "is-terminal-queue-tile" : ""}`}
+      data-tone={stageTone}
+    >
       <div className="capture-inbox-media-frame">
         <button className="capture-inbox-media-thumbnail" onClick={onDetails} type="button">
           {thumbnailUrl ? (
@@ -1206,9 +1774,28 @@ function ReupQueueMediaTile({
           selectTitle={selected ? "Deselect for bulk actions" : "Select for bulk actions"}
           selectable={selectable}
           selected={selected}
-          statusChips={[{ label: queueStageLabel(item), tone: stageTone }]}
+          statusChips={[
+            { label: queueStageLabel(item), tone: stageTone },
+            ...(pipelineStepChipLabel(item)
+              ? [{ label: pipelineStepChipLabel(item)!, tone: "ready" as const }]
+              : []),
+            ...(pipelineRecipeChipLabel(item)
+              ? [{ label: pipelineRecipeChipLabel(item)!, tone: "ready" as const }]
+              : [])
+          ]}
         />
-        {downloadProgress != null ? (
+        {failureStrip ? (
+          <p className="reup-queue-tile-failure-strip" title={failureStrip.detail}>
+            <span aria-hidden="true" className="reup-queue-tile-failure-strip__icon">
+              <svg viewBox="0 0 16 16">
+                <circle cx="8" cy="8" r="6.25" fill="none" stroke="currentColor" strokeWidth="1.4" />
+                <path d="M8 4.75v4.1" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="1.5" />
+                <circle cx="8" cy="11.15" r="0.85" fill="currentColor" />
+              </svg>
+            </span>
+            <span className="reup-queue-tile-failure-strip__text">{failureStrip.message}</span>
+          </p>
+        ) : downloadProgress != null ? (
           <div
             aria-label={`Download progress ${downloadProgress} percent`}
             aria-valuemax={100}
@@ -1231,22 +1818,6 @@ function ReupQueueMediaTile({
         >
           {itemTitle(item)}
         </button>
-        {failureAlert ? (
-          <p className="reup-queue-tile-failure-alert" title={failureAlert.detail}>
-            <span aria-hidden="true" className="reup-queue-tile-failure-alert__icon">
-              <svg viewBox="0 0 16 16">
-                <circle cx="8" cy="8" r="6.25" fill="none" stroke="currentColor" strokeWidth="1.4" />
-                <path d="M8 4.75v4.1" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="1.5" />
-                <circle cx="8" cy="11.15" r="0.85" fill="currentColor" />
-              </svg>
-            </span>
-            <span className="reup-queue-tile-failure-alert__text">{failureAlert.message}</span>
-          </p>
-        ) : downloadError ? (
-          <p className="reup-queue-tile-job-error" title={downloadError}>
-            {downloadError}
-          </p>
-        ) : null}
         <p className="capture-inbox-tile-meta-line" aria-label="Duration and posted">
           <span className="capture-inbox-tile-meta-stat" title={`Duration: ${queueTileDurationLabel(item)}`}>
             <span aria-hidden="true" className="capture-inbox-tile-perf-stat-icon">
@@ -1647,7 +2218,7 @@ function ReupQueueInspectorActions({
 }: {
   item: ReupQueueItem;
   mutatingAction: ReupQueueAction | null;
-  onApplyAction: (item: ReupQueueItem, action: ReupQueueAction) => void;
+  onApplyAction: (item: ReupQueueItem, action: ReupQueueAction, options?: { pipelineMode?: ReupPipelineMode }) => void;
   onBatchAction: (action: ReupQueueBatchAction) => void;
 }) {
   const disabled = mutatingAction !== null;
@@ -1708,8 +2279,32 @@ function ReupQueueInspectorActions({
     onApplyAction(item, primaryAction);
   }
 
+  const automationMode = currentAutomationMode(item);
+
   return (
     <div className="reup-queue-inspector-footer-actions" aria-label="Queue item actions">
+      {canChangeAutomation(item) ? (
+        <div className="reup-queue-automation-picker" aria-label="Automation level" role="group">
+          <p className="reup-queue-automation-picker__label">Automation</p>
+          <div className="reup-queue-automation-picker__options">
+            {automationModeOptions().map((option) => (
+              <button
+                aria-pressed={option.mode === automationMode}
+                className={`review-board-tile-btn is-muted reup-queue-automation-picker__option${
+                  option.mode === automationMode ? " is-active" : ""
+                }`}
+                disabled={disabled || option.mode === automationMode}
+                key={option.mode}
+                onClick={() => onApplyAction(item, "SET_AUTOMATION", { pipelineMode: option.mode })}
+                title={option.description}
+                type="button"
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
       {!hasPrimary && !hasSecondary && !hasWorkflow ? (
         <p className="reup-queue-inspector-empty">No lifecycle actions are currently available.</p>
       ) : (
@@ -1937,6 +2532,7 @@ function defaultActionNote(action: ReupQueueAction): string | null {
   if (action === "HOLD") return "Operator paused download progress from Reup Queue.";
   if (action === "CANCEL") return "Operator cancelled downstream queue work.";
   if (action === "MARK_MEDIA_READY") return "Operator confirmed media; start audio analysis.";
+  if (action === "START_AUTO_PIPELINE") return "Operator started auto pipeline (download through TTS).";
   return null;
 }
 
@@ -1944,6 +2540,7 @@ function defaultBatchActionNote(action: ReupQueueBatchAction): string | null {
   if (action === "HOLD") return "Operator batch-paused download progress from Reup Queue.";
   if (action === "CANCEL") return "Operator batch-cancelled downstream queue work.";
   if (action === "MARK_MEDIA_READY") return "Operator batch-confirmed media; start audio analysis.";
+  if (action === "START_AUTO_PIPELINE") return "Operator batch-started auto pipeline (download through TTS).";
   if (action === "CREATE_EXPORT_PACKAGE") return "Operator created an Export Package from selected Reup Queue items.";
   if (action === "CREATE_PUBLISH_HANDOFF") return "Operator created a Publish Handoff payload from selected Reup Queue items.";
   if (action === "DISMISS") return "Operator cleared queue items from the active Reup Queue view.";
@@ -1954,5 +2551,9 @@ function defaultBatchActionNote(action: ReupQueueBatchAction): string | null {
 function batchSummary(action: ReupQueueBatchAction, result: BatchOperationResponse): string {
   const packageText = result.export_package_id ? ` Export Package: ${result.export_package_id}.` : "";
   const handoffText = result.publish_handoff_id ? ` Publish Handoff: ${result.publish_handoff_id}.` : "";
-  return `${actionLabel(action)} completed: ${result.succeeded_count} succeeded, ${result.skipped_count} skipped, ${result.failed_count} failed.${packageText}${handoffText}`;
+  const parkedCount = action === "START_AUTO_PIPELINE"
+    ? result.results.filter((entry) => entry.message?.toLowerCase().includes("waiting for a free lane slot")).length
+    : 0;
+  const parkedText = parkedCount > 0 ? ` ${parkedCount} queued for an auto lane slot.` : "";
+  return `${actionLabel(action)} completed: ${result.succeeded_count} succeeded, ${result.skipped_count} skipped, ${result.failed_count} failed.${parkedText}${packageText}${handoffText}`;
 }

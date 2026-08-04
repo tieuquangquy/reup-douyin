@@ -4,6 +4,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from src.render_pipeline.audio_loudness import loudness_filter_args
 from src.render_pipeline.errors import RenderPipelineError, RenderPipelineErrorCode
 from src.render_pipeline.types import ExportInput, ExportResult
 
@@ -65,6 +66,9 @@ class FfmpegRenderRunner:
             "1:a:0",
             "-vf",
             subtitle_filter,
+            # The narration is re-encoded here, so this is the one place where a loudness
+            # filter reaches every delivered clip.
+            *loudness_filter_args(),
             "-c:v",
             export_input.profile.video_codec,
             "-c:a",

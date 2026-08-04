@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 
 from src.media_pipeline.frame_sampling.local_text_detector import (
     LocalTextDetector,
+    resolve_dbnet_execution_providers,
     TextBox,
     box_iou,
+    expand_text_boxes,
     has_new_text_boxes,
+    merge_collinear_text_boxes,
     postprocess_prob_map,
     preprocess_bgr_for_dbnet,
 )
@@ -30,16 +33,16 @@ class PreprocessPostprocessTests(unittest.TestCase):
         self.assertEqual(pad_h % 32, 0)
         self.assertEqual(pad_w % 32, 0)
 
-    def test_preprocess_long_edge_is_320(self) -> None:
-        """chineseocr_lite dbnet.onnx expects ~320 long-edge (not 640)."""
+    def test_preprocess_long_edge_is_640(self) -> None:
+        """Higher long-edge improves recall on 1080p Douyin frames."""
         from src.media_pipeline.frame_sampling.local_text_detector import _DET_LONG_EDGE
 
-        self.assertEqual(_DET_LONG_EDGE, 320)
+        self.assertEqual(_DET_LONG_EDGE, 640)
         frame = np.full((480, 640, 3), 120, dtype=np.uint8)
         tensor, scale, _ = preprocess_bgr_for_dbnet(frame)
-        # Long side of network canvas before pad is 320; after pad still ≤ 320+31.
-        self.assertLessEqual(max(int(tensor.shape[2]), int(tensor.shape[3])), 320)
-        self.assertAlmostEqual(scale, 320 / 640, places=5)
+        # Long side of network canvas before pad is 640; after pad ≤ 640+31.
+        self.assertLessEqual(max(int(tensor.shape[2]), int(tensor.shape[3])), 640 + 31)
+        self.assertAlmostEqual(scale, 640 / 640, places=5)
 
     def test_postprocess_finds_blob_as_box(self) -> None:
         prob = np.zeros((160, 160), dtype=np.float32)
@@ -49,6 +52,38 @@ class PreprocessPostprocessTests(unittest.TestCase):
         b = boxes[0]
         self.assertGreater(b.width, 0.05)
         self.assertGreater(b.height, 0.02)
+
+
+class ExpandMergeTextBoxTests(unittest.TestCase):
+    def test_expand_grows_box_and_clamps(self) -> None:
+        box = TextBox(x=0.10, y=0.80, width=0.20, height=0.04)
+        expanded = expand_text_boxes([box], pad_w_frac=0.08, pad_h_frac=0.20)
+        self.assertEqual(len(expanded), 1)
+        e = expanded[0]
+        self.assertLess(e.x, box.x)
+        self.assertLess(e.y, box.y)
+        self.assertGreater(e.width, box.width)
+        self.assertGreater(e.height, box.height)
+        self.assertGreaterEqual(e.x, 0.0)
+        self.assertGreaterEqual(e.y, 0.0)
+        self.assertLessEqual(e.x + e.width, 1.0 + 1e-6)
+        self.assertLessEqual(e.y + e.height, 1.0 + 1e-6)
+
+    def test_merge_collinear_fragments_into_one_line(self) -> None:
+        # Truncated caption + trailing fragment on same baseline (f720-like).
+        left = TextBox(x=0.04, y=0.86, width=0.27, height=0.033)
+        right = TextBox(x=0.32, y=0.87, width=0.08, height=0.030)
+        merged = merge_collinear_text_boxes([left, right])
+        self.assertEqual(len(merged), 1)
+        m = merged[0]
+        self.assertLessEqual(m.x, left.x + 1e-6)
+        self.assertGreaterEqual(m.x + m.width, right.x + right.width - 1e-6)
+
+    def test_merge_does_not_join_different_rows(self) -> None:
+        top = TextBox(x=0.70, y=0.25, width=0.08, height=0.03)
+        bottom = TextBox(x=0.04, y=0.86, width=0.30, height=0.03)
+        merged = merge_collinear_text_boxes([top, bottom])
+        self.assertEqual(len(merged), 2)
 
 
 class IoUGateTests(unittest.TestCase):
@@ -75,6 +110,24 @@ class IoUGateTests(unittest.TestCase):
 
 
 class LocalTextDetectorLoadTests(unittest.TestCase):
+    def test_execution_provider_defaults_to_cpu_for_locked_baseline(self) -> None:
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertEqual(
+                resolve_dbnet_execution_providers(
+                    ["DmlExecutionProvider", "CPUExecutionProvider"]
+                ),
+                ["CPUExecutionProvider"],
+            )
+
+    def test_execution_provider_uses_explicit_directml_with_cpu_fallback(self) -> None:
+        with patch.dict("os.environ", {"DBNET_ONNX_PROVIDER": "directml"}):
+            self.assertEqual(
+                resolve_dbnet_execution_providers(
+                    ["DmlExecutionProvider", "CPUExecutionProvider"]
+                ),
+                ["DmlExecutionProvider", "CPUExecutionProvider"],
+            )
+
     def test_detect_uses_session_run(self) -> None:
         frame = np.full((240, 320, 3), 90, dtype=np.uint8)
         fake_out = np.zeros((1, 1, 160, 160), dtype=np.float32)

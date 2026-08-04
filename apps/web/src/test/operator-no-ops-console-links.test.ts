@@ -21,6 +21,8 @@ const OPERATOR_SOURCES = [
   "components/operator-home/FreshnessStrip.tsx",
   "components/operator-routes/PipelineDashboardPage.tsx",
   "components/operator-routes/PublishDraftsIndexPage.tsx",
+  "components/operator-routes/PublicationLibraryPage.tsx",
+  "components/ops-console/OpsAccountsPage.tsx",
   "components/operator-routes/OperatorPublishDraftPage.tsx",
   "components/publish-draft/PublishDraftHeader.tsx",
   "components/transcript-editor/TranscriptEditorHeader.tsx",
@@ -30,7 +32,7 @@ const OPERATOR_SOURCES = [
 ] as const;
 
 const FORBIDDEN_HREF =
-  /(?:href|href=)\s*[:=]?\s*["'`](\/ops\/(?:jobs|health|risk|reconciliation|publish-health|publish-attempts|publish-control|accounts|assets|tools|users|routing-rules|translation|caption|tts|optimization)[^"'`]*)["'`]/g;
+  /(?:href|href=)\s*[:=]?\s*["'`](\/ops\/(?:jobs|health|risk|reconciliation|publish-health|publish-attempts|publish-control|assets|tools|users|routing-rules|translation|caption|tts|optimization)[^"'`]*)["'`]/g;
 
 assert.equal(isOpsConsoleHref("/ops/jobs"), true);
 assert.equal(isOpsConsoleHref("/ops/pipeline"), false);

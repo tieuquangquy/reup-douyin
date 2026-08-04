@@ -1,0 +1,89 @@
+{
+  "schema_version": "pipeline_gap_discovery_v1",
+  "status": "NO_MATCHING_REAL_SOURCES",
+  "source_policy": {
+    "trusted_path_markers": [
+      "download_staging",
+      "raw",
+      "regression_gap_staging"
+    ],
+    "derived_path_markers_rejected": [
+      "export",
+      "export_packages",
+      "final",
+      "output",
+      "outputs",
+      "render",
+      "renders"
+    ],
+    "dedupe": "sha256_original_bytes",
+    "source_transformations": false,
+    "synthetic_gap_evidence_allowed": false
+  },
+  "target_gaps": {
+    "orientation": [
+      "portrait"
+    ],
+    "motion": [
+      "low",
+      "medium"
+    ],
+    "audio": [
+      "absent"
+    ]
+  },
+  "max_duration_seconds": 60.0,
+  "inventory": {
+    "input_file_count": 108,
+    "unique_source_count": 104,
+    "duplicate_file_count": 4,
+    "hash_failure_count": 0,
+    "probe_failure_count": 2,
+    "too_long_or_invalid_duration_count": 12,
+    "derived_or_untrusted_excluded_count": 118,
+    "dimension_counts": {
+      "orientation": {
+        "landscape": 90
+      },
+      "motion": {
+        "high": 90
+      },
+      "audio": {
+        "present": 90
+      }
+    }
+  },
+  "candidate_count": 0,
+  "candidates": [],
+  "matched_gaps": {
+    "orientation": [],
+    "motion": [],
+    "audio": []
+  },
+  "remaining_gaps": {
+    "orientation": [
+      "portrait"
+    ],
+    "motion": [
+      "low",
+      "medium"
+    ],
+    "audio": [
+      "absent"
+    ]
+  },
+  "failures": {
+    "hash": [],
+    "probe": [
+      {
+        "path": "apps/api/data/storage/demo/demo-video-publish-ready/raw/source.mp4",
+        "error": "RegressionCorpusError"
+      },
+      {
+        "path": "apps/worker/data/storage/workspace_00f25893-c1c2-4f13-abdd-79e809ae5fc9/douyin/profile_MS4wLjABAAAA965SRwbGiCEbl3dTh5msla4MEbBO4vSBM6NAqphjDYwO71azBeEC-MuFpz-av3Oh/niche_default/video_7502793329186262326/raw/v1_7502793329186262326.mp4",
+        "error": "RegressionCorpusError"
+      }
+    ]
+  },
+  "discovery_sha256": "290a25dcc2be8ffbaadcd21d49bc3b0a08d35f05b38bd69c08b2c7e6db7f9736"
+}

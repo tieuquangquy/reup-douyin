@@ -1,122 +1,76 @@
 # Reup Pipeline Dashboard User Guide
 
-## What This Dashboard Is
+## Purpose
 
-The Reup Pipeline Dashboard is the top-level operator command view for the full workflow:
+`/ops/pipeline` is the read-only operator command view for the full workflow:
 
-Capture -> Review -> Reup Queue -> Export Package -> Publish Handoff -> Publish progress.
+Capture -> Review -> Reup Queue -> Download -> Audio -> Translate -> TTS -> OCR -> Render -> Output Review -> Draft -> Export Package -> Publish Handoff.
 
-It helps operators answer:
+Use it to identify the largest current workload, blocked stages, manual checkpoints, and the next stage-owned surface to open.
 
-- What is happening across the pipeline now?
-- Where is work blocked?
-- Where is the biggest backlog?
-- What needs attention next?
-- How much content has progressed from capture toward publish?
+## Main sections
 
-## Route
+### Control strip
 
-Open the dashboard at:
+The single-line control strip shows generation time, overall status, and four point-in-time metrics without Home-style KPI cards:
 
-- `/ops/pipeline`
+- Active backlog: waiting, running, manual-review, or failed records across the stage map.
+- Attention workload: affected records represented by critical and warning categories.
+- Running: durable records currently running.
+- Ready downstream: QA-passed outputs, ready Export Packages, and ready Publish Handoffs.
 
-## Main Sections
+Lifetime Published is intentionally not compared with these snapshot metrics.
 
-### Header
+### Pipeline Operations Board
 
-Shows overall pipeline status, generated time, and a short operator-focused summary.
+The dominant view is a 13-row operational matrix grouped into Intake, Production, and Delivery. Every row exposes exact stage-owned bucket counts:
 
-### Pipeline summary strip
+- Waiting
+- Running
+- Manual review
+- Failed
+- Ready
 
-Shows high-level counts such as captures in the last 24 hours, active backlog, attention items, export-ready content, handoff-ready content, and publish progress.
+Cell background intensity highlights high workload relative to the same bucket column. It is not a completion percentage or conversion funnel.
 
-### Stage cards
+On desktop, the Operations Board occupies roughly 70% of the workspace and a sticky Stage Focus Rail occupies the remaining 30%. Select a stage name to update that rail with its description, bucket totals, recommended action, exceptions, and owning-surface link. On narrower screens the rail moves below the board.
 
-Each card represents one canonical stage:
+### Output QA
 
-1. Capture
-2. Review
-3. Reup Queue
-4. Export Package
-5. Publish Handoff
-6. Publish progress
+Output QA does not occupy a permanent dashboard card. Select Output Review in the Operations Board to show the canonical distribution inside Stage Inspector:
 
-Each stage card includes:
+- Passed
+- Warning
+- Failed
+- Ungraded
 
-- Current stage health.
-- Primary backlog or throughput count.
-- Secondary progress count.
-- Short next action recommendation.
-- Link to the canonical workflow surface.
+### Exception Queue
 
-### Stage visualization
+This compact table ranks critical and warning categories by severity and affected count. Each row links to the stage-owned surface where the operator can act.
 
-The visualization shows progress from left to right across the canonical workflow. It is a summary only; operators should use the canonical stage pages for detailed work.
+### Event Tape
 
-### Attention / blockers
+The Event Tape is a compact lifecycle timeline from capture, Reup Queue, production jobs, render outputs, export, handoff, and draft records.
 
-This panel lists items that may require operator action, such as:
+## Status labels
 
-- Capture failures.
-- Capture items ready but not promoted.
-- Review backlog.
-- Approved candidates not yet queued.
-- Reup Queue blocked or failed items.
-- Queue items waiting for media or metadata.
-- Export packages ready for handoff.
-- Handoffs ready for operator acceptance.
-- Publish attempts that failed or need reconciliation.
+- Healthy: ready work exists without a blocker.
+- In progress: work is running.
+- Needs attention: waiting or manual-review work exists.
+- Blocked: failed records require action.
+- Quiet: no current workload exists.
 
-### Recent activity
+## Recommended operator flow
 
-Shows recent high-level lifecycle events across stages. This helps operators confirm that content is moving through the pipeline.
+1. Check overall status and Attention workload in the control strip.
+2. Scan the Failed and Manual review columns in the Operations Board.
+3. Select the affected stage and read Stage Inspector.
+4. Open the stage-owned surface from Inspector or Exception Queue.
+5. Resolve the issue, return to `/ops/pipeline`, and refresh the snapshot.
 
-### Quick actions
+## Safety and limitations
 
-Quick links take operators to the canonical surfaces:
-
-- Capture Inbox
-- Review Board
-- Reup Queue
-- Export Packages
-- Publish Handoffs
-- Publish Drafts
-- Publish Health
-- Publish Attempts
-- Reconciliation
-
-## Status Labels
-
-The dashboard uses operator-facing status labels:
-
-- Healthy: no obvious blocker.
-- In progress: active work is moving.
-- Needs attention: backlog or warning exists.
-- Blocked: failures or blockers require action.
-- Quiet: no active backlog or recent movement.
-
-These labels summarize pipeline health. They do not replace the underlying canonical statuses used by each stage.
-
-## Recommended Operator Flow
-
-1. Start at `/ops/pipeline`.
-2. Check the overall status and summary strip.
-3. Review the attention panel first.
-4. Open the canonical stage link for the highest-severity blocker.
-5. Complete actions in the stage-specific surface.
-6. Return to `/ops/pipeline` to confirm the pipeline moved forward.
-
-## Safety Notes
-
-- The dashboard is read-only.
-- It does not run crawlers, video processing, rendering, or publish actions.
-- It does not expose raw secrets, tokens, cookies, credentials, or private local paths.
-- Publishing remains controlled by the dedicated publish surfaces and existing guardrails.
-
-## Empty State
-
-If there is no data, the dashboard should show a quiet pipeline and guide the operator to start with Capture Inbox.
-
-## Error State
-
-If the dashboard cannot load, operators should retry the page and then check whether the API service is running. The dashboard should not hide canonical stage pages; operators can still open those pages directly if needed.
+- The dashboard never starts jobs or publishes content.
+- It does not expose secrets, credentials, raw payloads, or private local paths.
+- Trend, throughput, cycle-time, funnel, and backlog-history charts are not shown until a persisted historical authority exists.
+- If the dashboard cannot load, retry and check the API service; stage-owned pages remain available directly.

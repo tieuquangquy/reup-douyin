@@ -72,29 +72,32 @@ class CoverPolishTests(unittest.TestCase):
         out = apply_blur_cover(frame, mask)
         self.assertLess(float(out[8:28, 10:50, 0].mean()), 120.0)
 
-    def test_dark_vi_on_light_background(self) -> None:
-        h, w = 100, 200
+    def test_vi_stroke_visible_on_light_background(self) -> None:
+        h, w = 200, 300
         frame = np.full((h, w, 3), 240, dtype=np.uint8)
-        seg = OverlaySegment(0, 1000, 0.10, 0.30, 0.50, 0.30, "Com", kind="ui")
+        seg = OverlaySegment(0, 1000, 0.20, 0.50, 0.40, 0.12, "Com", kind="ui")
         font = Path(r"C:\Windows\Fonts\arial.ttf")
         if not font.is_file():
             font = Path(r"C:\Windows\Fonts\segoeui.ttf")
-        out = draw_vi_overlays(frame, [seg], fontfile=font, align="left")
-        # Dark ink (not white-on-white) should appear in the label band.
-        band = out[35:65, 25:120, 0]
-        self.assertGreater(float((band < 80).mean()), 0.01)
+        out = draw_vi_overlays(frame, [seg], fontfile=font)
+        ax = int((seg.x + seg.width / 2) * w)
+        ay = int((seg.y + seg.height) * h)
+        # Black stroke around white fill must leave dark pixels near anchor.
+        band = out[max(0, ay - 40) : min(h, ay + 2), max(0, ax - 40) : min(w, ax + 40), 0]
+        self.assertGreater(float((band < 80).mean()), 0.005)
 
     def test_process_frame_hides_chinese_better_than_ghost_blur(self) -> None:
         h, w = 160, 200
         frame = np.full((h, w, 3), 250, dtype=np.uint8)
-        frame[70:95, 40:140] = (10, 10, 10)
-        seg = OverlaySegment(0, 1000, 0.20, 0.42, 0.50, 0.16, "Tom", kind="ui")
+        frame[70:84, 40:140] = (10, 10, 10)
+        # Plausible UI label size-class (~50%×9%), not a mid-frame food slab.
+        seg = OverlaySegment(0, 1000, 0.20, 0.44, 0.50, 0.09, "Tom", kind="ui")
         font = Path(r"C:\Windows\Fonts\arial.ttf")
         if not font.is_file():
             font = Path(r"C:\Windows\Fonts\segoeui.ttf")
         out = process_frame_bgr(frame, [seg], fontfile=font)
         # Cover must lift the near-black Chinese slab (VI ink may still be dark).
-        self.assertGreater(float(out[70:95, 40:140, 0].mean()), 100.0)
+        self.assertGreater(float(out[70:84, 40:140, 0].mean()), 100.0)
 
 
 if __name__ == "__main__":

@@ -115,7 +115,7 @@ Extension has a separate local state machine for whole-profile harvesting in `ap
 2. Operator reload unpacked extension từ `apps/extension-douyin-capture/dist`.
 3. Trên Douyin, popup extension capture current page/profile hoặc whole profile harvest.
 4. Backend Douyin extension routes nhận capture payload/session/items.
-5. Web capture inbox ở `/ops/extensions/douyin/capture-inbox` review và chuyển item về review/reup queue.
+5. Web capture inbox ở `/selection/capture-inbox` review và chuyển item về review/reup queue.
 
 ### Flow E: Extension Scan Profile hiện tại
 
@@ -375,9 +375,9 @@ Operator side:
 Ops side:
 
 - `/ops`, `/ops/health`, `/ops/jobs`, `/ops/pipeline`, `/ops/assets`.
-- `/ops/accounts`, `/ops/routing-rules`, `/ops/publish-control`, `/ops/publish-health`, `/ops/publish-attempts`, `/ops/reconciliation`.
+- `/publishing/accounts`, `/ops/routing-rules`, `/ops/publish-control`, `/ops/publish-health`, `/ops/publish-attempts`, `/ops/reconciliation`.
 - `/ops/risk`, `/ops/optimization`, `/ops/tools`.
-- `/ops/extensions/douyin`, `/ops/extensions/douyin/capture-inbox`.
+- `/ops/extensions/douyin` (legacy redirect), `/selection/capture-inbox` (Capture Inbox; legacy `/ops/extensions/douyin/capture-inbox` redirects).
 
 ### UI status
 
@@ -490,7 +490,7 @@ python src/main.py
 ### P1 - quan trọng
 
 1. Tạo/update phase log chính thức cho `22C-9Z-3` trong `docs/metadata-phase22C-*` vì hiện docs mới nhất chỉ có Z-NOGIT/Z1-ish; handoff này ghi nhận Z3 nhưng phase doc riêng cần kiểm tra thêm.
-2. Kiểm tra end-to-end capture inbox: extension capture -> backend `capture_sessions`/`captured_items` -> web `/ops/extensions/douyin/capture-inbox` -> promote sang candidate/reup queue; chạy liên quan `test_douyin_extension_capture_service.py`, `test_capture_inbox*` nếu có deps.
+2. Kiểm tra end-to-end capture inbox: extension capture -> backend `capture_sessions`/`captured_items` -> web `/selection/capture-inbox` -> promote sang candidate/reup queue; chạy liên quan `test_douyin_extension_capture_service.py`, `test_capture_inbox*` nếu có deps.
 3. Xác nhận browser-connect/intake thật: connected account -> browser-primary `/intake` discovery -> observability fields `primary_execution_path=browser_profile`/fallback reason -> persisted crawl/source video.
 4. Xác nhận backend/web smoke trên DB local mới sau migrations và seed.
 5. Rà soát các màn hình ops/operator có data thật hay skeleton/mock để đánh dấu rõ trong docs/UI.

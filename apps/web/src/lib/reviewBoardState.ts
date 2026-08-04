@@ -8,7 +8,11 @@ export const DEFAULT_FILTERS: CandidateFilters = {
   sourceProfileId: "",
   search: "",
   sort: "score_desc",
-  presetName: ""
+  presetName: "",
+  captureSessionId: "",
+  dateChip: "",
+  dateFrom: "",
+  dateTo: ""
 };
 
 export function toggleSelection(selection: Set<string>, candidateId: string): Set<string> {

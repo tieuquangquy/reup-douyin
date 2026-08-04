@@ -2644,7 +2644,7 @@ export function getBackendFlushFlowViewModel(
     capture_inbox_cta: oneItemFlush.status === "succeeded"
       ? "1 video saved to Capture Inbox."
       : batchFlush.status === "completed"
-        ? "Open /extensions/douyin/capture-inbox to review collected videos."
+        ? "Open /selection/capture-inbox to review collected videos."
         : null
   };
 }

@@ -206,11 +206,20 @@ export function TranscriptMediaPreview({
           <video ref={videoRef} src={playbackUrl} controls preload="metadata" />
         ) : (
           <div className="transcript-bench-media__empty">
-            {loadState === "loading"
-              ? t("transcriptEditorBench.previewLoading")
-              : loadState === "error"
-                ? t("transcriptEditorBench.previewFailed")
-                : t("transcriptEditorBench.noPreview")}
+            <span className="transcript-bench-media__empty-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24">
+                <rect x="3.5" y="5" width="13" height="14" rx="2.5" fill="none" stroke="currentColor" strokeWidth="1.5" />
+                <path d="m16.5 9 4-2v10l-4-2V9Z" fill="none" stroke="currentColor" strokeLinejoin="round" strokeWidth="1.5" />
+                <path d="m8.8 9.2 4.3 2.8-4.3 2.8V9.2Z" fill="currentColor" />
+              </svg>
+            </span>
+            <span>
+              {loadState === "loading"
+                ? t("transcriptEditorBench.previewLoading")
+                : loadState === "error"
+                  ? t("transcriptEditorBench.previewFailed")
+                  : t("transcriptEditorBench.noPreview")}
+            </span>
           </div>
         )}
       </div>

@@ -1,0 +1,214 @@
+{
+  "schema_version": "pipeline_public_regression_sources_v1",
+  "status": "PUBLIC_SOURCES_STAGED_FOR_LOCAL_REGRESSION",
+  "acquired_on": "2026-07-27",
+  "scope": {
+    "allowed_use": "LOCAL_REGRESSION_ONLY",
+    "corpus_admission": "REQUIRES_PHASE1_PHASE2_AND_OPERATOR_REVIEW",
+    "external_reup_or_publish_authorized": false,
+    "source_transformations": false,
+    "integrity": "ORIGINAL_BYTES_UNCHANGED"
+  },
+  "source_count": 14,
+  "sources": [
+    {
+      "filename": "public_cc0_flameless_candle.webm",
+      "source_path": ".douyin_profiles/regression_gap_staging/public_cc0_flameless_candle.webm",
+      "source_page_url": "https://commons.wikimedia.org/wiki/File:Flameless_candle_1.webm",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/9/92/Flameless_candle_1.webm",
+      "license": "CC0-1.0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "attribution_required": false,
+      "sha256": "a1d02d0ffbcbe4973586d0a2a11efdef544ba0cd678b7640daa8eaaa6a284f3a",
+      "size_bytes": 1891323,
+      "probe": {"duration_seconds": 8.683, "width": 1920, "height": 1080, "has_audio": true},
+      "discovery_dimensions": {"orientation": "landscape", "motion": "low", "audio": "present"}
+    },
+    {
+      "filename": "public_cc0_monument.webm",
+      "source_path": ".douyin_profiles/regression_gap_staging/public_cc0_monument.webm",
+      "source_page_url": "https://commons.wikimedia.org/wiki/File:Portrait_Monument_Video_01.webmhd.webm",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/c/c3/Portrait_Monument_Video_01.webmhd.webm",
+      "license": "CC0-1.0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "attribution_required": false,
+      "sha256": "6068276d37ad608f0019ebfbfceb14266681f50f4a029bf33c3fe36d0a0a90f8",
+      "size_bytes": 5386161,
+      "probe": {"duration_seconds": 23.256, "width": 1280, "height": 720, "has_audio": false},
+      "discovery_dimensions": {"orientation": "landscape", "motion": "high", "audio": "absent"}
+    },
+    {
+      "filename": "public_ccbysa_blocked_pendulum.webm",
+      "source_path": ".douyin_profiles/regression_gap_staging/public_ccbysa_blocked_pendulum.webm",
+      "source_page_url": "https://commons.wikimedia.org/wiki/File:Blocked-pendulum-slow-motion.webm",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/b/b7/Blocked-pendulum-slow-motion.webm",
+      "license": "CC-BY-SA-4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+      "attribution_required": true,
+      "sha256": "b51517e260e620b306a91f8b2dbd1cc8c2fa8d74250cc05e5210cfe7f8f4315a",
+      "size_bytes": 1759473,
+      "probe": {"duration_seconds": 20.0, "width": 1280, "height": 720, "has_audio": false},
+      "discovery_dimensions": {"orientation": "landscape", "motion": "low", "audio": "absent"}
+    },
+    {
+      "filename": "public_ccbysa_cell_division.ogv",
+      "source_path": ".douyin_profiles/regression_gap_staging/public_ccbysa_cell_division.ogv",
+      "source_page_url": "https://commons.wikimedia.org/wiki/File:Digital_holographic_microscopy_video_showing_cell_division_of_unlabeled_JIMT-1_breast_cancer_cells..ogv",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/0/0f/Digital_holographic_microscopy_video_showing_cell_division_of_unlabeled_JIMT-1_breast_cancer_cells..ogv",
+      "license": "CC-BY-SA-3.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/3.0/",
+      "attribution_required": true,
+      "sha256": "3642f92bd71ca2cbc03f48b4e9230746ef18a877e1f95dd2c31ff880e1711b36",
+      "size_bytes": 1004635,
+      "probe": {"duration_seconds": 39.778, "width": 320, "height": 208, "has_audio": false},
+      "discovery_dimensions": {"orientation": "landscape", "motion": "medium", "audio": "absent"}
+    },
+    {
+      "filename": "public_ccbysa_organelle_motion.webm",
+      "source_path": ".douyin_profiles/regression_gap_staging/public_ccbysa_organelle_motion.webm",
+      "source_page_url": "https://commons.wikimedia.org/wiki/File:Movement_of_organelles_in_Tradescantia_stamen_hair_cells.webm",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/9/95/Movement_of_organelles_in_Tradescantia_stamen_hair_cells.webm",
+      "license": "CC-BY-SA-4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+      "attribution_required": true,
+      "sha256": "2b3e41f7cdc3310f553a84cce9ba5da5ef6e1d30c4b5c7e41553c410d4c1d4e3",
+      "size_bytes": 25360057,
+      "probe": {"duration_seconds": 20.834, "width": 1920, "height": 1080, "has_audio": false},
+      "discovery_dimensions": {"orientation": "landscape", "motion": "medium", "audio": "absent"}
+    },
+    {
+      "filename": "public_ccbysa_rem_dog.webm",
+      "source_path": ".douyin_profiles/regression_gap_staging/public_ccbysa_rem_dog.webm",
+      "source_page_url": "https://commons.wikimedia.org/wiki/File:REM_-_Rapid_eye_movement_sleep_of_a_dog.webm",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/7/73/REM_-_Rapid_eye_movement_sleep_of_a_dog.webm",
+      "license": "CC-BY-SA-3.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/3.0/",
+      "attribution_required": true,
+      "sha256": "6c998730298d6321ad915cbad76129f19b226c761c1237cae6018efafedb3be1",
+      "size_bytes": 34743847,
+      "probe": {"duration_seconds": 27.519, "width": 1280, "height": 720, "has_audio": true},
+      "discovery_dimensions": {"orientation": "landscape", "motion": "high", "audio": "present"}
+    },
+    {
+      "filename": "public_ccbysa_snail_portrait.webm",
+      "source_path": ".douyin_profiles/regression_gap_staging/public_ccbysa_snail_portrait.webm",
+      "source_page_url": "https://commons.wikimedia.org/wiki/File:Snail_moving_down_a_window.webm",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/d/df/Snail_moving_down_a_window.webm",
+      "license": "CC-BY-SA-4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+      "attribution_required": true,
+      "sha256": "7444523959b035a1aae67a2f071f2ec435b3921163417f7e06de6a60a80a25f1",
+      "size_bytes": 4570588,
+      "probe": {"duration_seconds": 10.933, "width": 1080, "height": 1920, "has_audio": false},
+      "discovery_dimensions": {"orientation": "portrait", "motion": "high", "audio": "absent"}
+    },
+    {
+      "filename": "public_pd_nasa_arctic_vertical_noaudio.webm",
+      "source_path": ".douyin_profiles/regression_gap_staging/public_pd_nasa_arctic_vertical_noaudio.webm",
+      "source_page_url": "https://commons.wikimedia.org/wiki/File:Arctic_Sea_Ice_Maximum_2026_(SVS5629_-_sea_ice_2026_max_vert_1920p60).webm",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/6/6e/Arctic_Sea_Ice_Maximum_2026_%28SVS5629_-_sea_ice_2026_max_vert_1920p60%29.webm",
+      "license": "PUBLIC-DOMAIN-NASA",
+      "license_url": "https://www.nasa.gov/nasa-brand-center/images-and-media/",
+      "attribution_required": false,
+      "sha256": "fc1c97cb97392b3b243690526d12aaa73357716219d7dcf705ef7407f9789666",
+      "size_bytes": 15407523,
+      "probe": {"duration_seconds": 53.834, "width": 1080, "height": 1920, "has_audio": false},
+      "discovery_dimensions": {"orientation": "portrait", "motion": "high", "audio": "absent"}
+    },
+    {
+      "filename": "public_pd_nasa_m31_noaudio.mov",
+      "source_path": ".douyin_profiles/regression_gap_staging/public_pd_nasa_m31_noaudio.mov",
+      "source_page_url": "https://commons.wikimedia.org/wiki/File:M31-_NASA%27s_Chandra_Reveals_Origin_of_Key_Cosmic_Explosions_(2010-type1a).webm",
+      "download_url": "https://chandra.si.edu/photo/2010/type1a/type1a_merge_sm_web.mov",
+      "license": "PUBLIC-DOMAIN-NASA",
+      "license_url": "https://www.nasa.gov/nasa-brand-center/images-and-media/",
+      "attribution_required": false,
+      "sha256": "6c40410e2cd614e44c42697c538f89b7cbb15f1a6c3b019f36099b9655913efd",
+      "size_bytes": 1514378,
+      "probe": {"duration_seconds": 20.02, "width": 360, "height": 240, "has_audio": false},
+      "discovery_dimensions": {"orientation": "landscape", "motion": "high", "audio": "absent"}
+    },
+    {
+      "filename": "public_pd_nasa_ngc3393_noaudio.mov",
+      "source_path": ".douyin_profiles/regression_gap_staging/public_pd_nasa_ngc3393_noaudio.mov",
+      "source_page_url": "https://commons.wikimedia.org/wiki/File:NGC_3393-_NASA%27s_Chandra_Finds_Nearest_Pair_of_Supermassive_Black_Holes_(2011-n3393).webm",
+      "download_url": "https://chandra.si.edu/photo/2011/n3393/n3393_mog_sm_web.mov",
+      "license": "PUBLIC-DOMAIN-NASA",
+      "license_url": "https://www.nasa.gov/nasa-brand-center/images-and-media/",
+      "attribution_required": false,
+      "sha256": "7b937ac80394ec3c6bfa35d3c97c4c1e030895d27a5a15a09a2804af33f1bd90",
+      "size_bytes": 479671,
+      "probe": {"duration_seconds": 20.02, "width": 360, "height": 240, "has_audio": false},
+      "discovery_dimensions": {"orientation": "landscape", "motion": "high", "audio": "absent"}
+    },
+    {
+      "filename": "public_pd_nasa_spectra_vertical.webm",
+      "source_path": ".douyin_profiles/regression_gap_staging/public_pd_nasa_spectra_vertical.webm",
+      "source_page_url": "https://commons.wikimedia.org/wiki/File:Astrophysics_Explainer_Vertical_Video_(SVS14801_-_Types_of_Spectra_-_Vertical_CAPTIONS).webm",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/f/fa/Astrophysics_Explainer_Vertical_Video_%28SVS14801_-_Types_of_Spectra_-_Vertical_CAPTIONS%29.webm",
+      "license": "PUBLIC-DOMAIN-NASA",
+      "license_url": "https://www.nasa.gov/nasa-brand-center/images-and-media/",
+      "attribution_required": false,
+      "sha256": "6a9e9b0c6fc7ee9ba36c1428e121ccbe8a9fbc0edcac2d0c91cd57db567d7478",
+      "size_bytes": 28212430,
+      "probe": {"duration_seconds": 59.421, "width": 1080, "height": 1920, "has_audio": true},
+      "discovery_dimensions": {"orientation": "portrait", "motion": "high", "audio": "present"}
+    },
+    {
+      "filename": "public_pd_nasa_radio_signal_portrait.webm",
+      "source_path": ".douyin_profiles/regression_gap_staging/public_pd_nasa_radio_signal_portrait.webm",
+      "source_page_url": "https://commons.wikimedia.org/wiki/File:Radio_Signal_Reflection_%26_Refraction_on_a_Simple_Ionosphere_Model_(SVS5240_-_portrait_polar_propagation_parallel_1920p30).webm",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/a/a6/Radio_Signal_Reflection_%26_Refraction_on_a_Simple_Ionosphere_Model_%28SVS5240_-_portrait_polar_propagation_parallel_1920p30%29.webm",
+      "license": "PUBLIC-DOMAIN-NASA",
+      "license_url": "https://www.nasa.gov/nasa-brand-center/images-and-media/",
+      "attribution_required": false,
+      "sha256": "1ea24391b1db1b2ecd1122d97ca7a34aa9e1bc5904f8ef155182bf807e9ddff6",
+      "size_bytes": 119964,
+      "probe": {"duration_seconds": 4.966, "width": 1080, "height": 1920, "has_audio": false},
+      "discovery_dimensions": {"orientation": "portrait", "motion": "low", "audio": "absent"}
+    },
+    {
+      "filename": "public_pd_noaa_power_outage_harvey_portrait.webm",
+      "source_path": ".douyin_profiles/regression_gap_staging/public_pd_noaa_power_outage_harvey_portrait.webm",
+      "source_page_url": "https://commons.wikimedia.org/wiki/File:Power_Outages_in_Texas_After_Hurricane_Harvey_(CIRA_2017-08-30_-_nolabels_portrait).webm",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/c/cf/Power_Outages_in_Texas_After_Hurricane_Harvey_%28CIRA_2017-08-30_-_nolabels_portrait%29.webm",
+      "license": "PUBLIC-DOMAIN-NOAA",
+      "license_url": "https://www.noaa.gov/disclaimer",
+      "attribution_required": false,
+      "sha256": "a8613fac4779b3e9a04fd808679914ebc0e04c762d67c79996ce31e7927dc8bf",
+      "size_bytes": 1687612,
+      "probe": {"duration_seconds": 5.005, "width": 1080, "height": 1920, "has_audio": false},
+      "discovery_dimensions": {"orientation": "portrait", "motion": "low", "audio": "absent"}
+    },
+    {
+      "filename": "public_pd_noaa_power_outage_michael_portrait.webm",
+      "source_path": ".douyin_profiles/regression_gap_staging/public_pd_noaa_power_outage_michael_portrait.webm",
+      "source_page_url": "https://commons.wikimedia.org/wiki/File:Power_Outages_from_Hurricane_Michael_(CIRA_2018-10-12_-_nolabels_portrait).webm",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/1/13/Power_Outages_from_Hurricane_Michael_%28CIRA_2018-10-12_-_nolabels_portrait%29.webm",
+      "license": "PUBLIC-DOMAIN-NOAA",
+      "license_url": "https://www.noaa.gov/disclaimer",
+      "attribution_required": false,
+      "sha256": "44763a762d3b8feb66328ea846b50125d33ccc518b3b1495a65848e383a245f2",
+      "size_bytes": 1469497,
+      "probe": {"duration_seconds": 5.005, "width": 1080, "height": 1920, "has_audio": false},
+      "discovery_dimensions": {"orientation": "portrait", "motion": "low", "audio": "absent"}
+    }
+  ],
+  "requested_profile_coverage": {
+    "portrait_medium_present": [],
+    "portrait_low_absent": [
+      "public_pd_nasa_radio_signal_portrait.webm",
+      "public_pd_noaa_power_outage_harvey_portrait.webm",
+      "public_pd_noaa_power_outage_michael_portrait.webm"
+    ],
+    "landscape_medium_absent": [
+      "public_ccbysa_cell_division.ogv",
+      "public_ccbysa_organelle_motion.webm"
+    ],
+    "low_motion_independent_control": [
+      "public_cc0_flameless_candle.webm",
+      "public_ccbysa_blocked_pendulum.webm"
+    ]
+  },
+  "manifest_sha256": "06bc2182aa480f6e687727adaf8bc91c417cf9828c22bde8ac144c7dae7e2cbf"
+}

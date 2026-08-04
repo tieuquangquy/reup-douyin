@@ -127,6 +127,147 @@ export type PlatformAccountListResponse = {
   accounts: PlatformAccount[];
 };
 
+export type FacebookAccountSetupCheck = {
+  code: string;
+  passed: boolean;
+  blocking: boolean;
+  message: string;
+};
+
+export type FacebookAccountSetupCheckResponse = {
+  platform_account_id: string;
+  ready_for_publication_setup: boolean;
+  network_used: boolean;
+  token_value_exposed: boolean;
+  checks: FacebookAccountSetupCheck[];
+  blocker_codes: string[];
+};
+
+export type FacebookPublishSafetyState = "READY" | "WARM_UP" | "CADENCE_WAIT" | "COOLDOWN" | "HOLD" | "RECONNECT_REQUIRED" | "BLOCKED";
+
+export type FacebookPublishSafetyStatus = {
+  platform_account_id: string;
+  state: FacebookPublishSafetyState;
+  eligible_for_publish: boolean;
+  credential_source: string | null;
+  managed_credential: boolean;
+  hold_reason: string | null;
+  cooldown_until: string | null;
+  connected_at: string | null;
+  capability_verified_at: string | null;
+  capability_expires_at: string | null;
+  warmup_until: string | null;
+  next_publish_at: string | null;
+  verified_publish_scopes: string[];
+  page_tasks: string[];
+  attempts_24h: number;
+  failures_24h: number;
+  active_attempts: number;
+  unresolved_attempts: number;
+  effective_min_interval_minutes: number;
+  effective_max_attempts_24h: number;
+  warmup_stage: "PILOT" | "OBSERVE" | "STANDARD";
+  confirmed_connector_publishes: number;
+  next_stage_min_successes: number | null;
+  next_stage_earliest_at: string | null;
+  blocker_codes: string[];
+  blockers: string[];
+  warnings: string[];
+};
+
+export type FacebookOAuthConfiguration = {
+  configured: boolean;
+  missing_configuration: string[];
+  graph_api_version: string;
+  redirect_uri: string;
+  requested_scopes: string[];
+  encrypted_credential_store_ready: boolean;
+  raw_token_entry_required: boolean;
+  source: "DATABASE" | "ENVIRONMENT" | "NONE";
+  app_id: string | null;
+  app_secret_configured: boolean;
+  editable: boolean;
+  updated_at: string | null;
+};
+
+export type FacebookOAuthConfigurationUpdate = {
+  app_id: string;
+  app_secret: string | null;
+  redirect_uri: string;
+  graph_api_version: string;
+  requested_scopes: string[];
+};
+
+export type FacebookOAuthStartResponse = {
+  connection_id: string;
+  authorization_url: string;
+  expires_at: string;
+  token_value_exposed: boolean;
+};
+
+export type FacebookOAuthPage = {
+  page_id: string;
+  display_name: string;
+  tasks: string[];
+  picture_url: string | null;
+};
+
+export type FacebookOAuthSession = {
+  connection_id: string;
+  status: "AUTHORIZATION_PENDING" | "PAGE_SELECTION_REQUIRED" | "COMPLETED" | "FAILED" | "EXPIRED";
+  pages: FacebookOAuthPage[];
+  granted_scopes: string[];
+  expires_at: string;
+  error_code: string | null;
+  error_message: string | null;
+  token_value_exposed: boolean;
+};
+
+export type FacebookOAuthConnectPageResponse = {
+  account: PlatformAccount;
+  setup_check: FacebookAccountSetupCheckResponse;
+  created: boolean;
+  token_value_exposed: boolean;
+};
+
+export type PlatformPublication = {
+  id: string;
+  workspace_id: string;
+  publish_draft_id: string | null;
+  source_video_id: string | null;
+  render_output_id: string | null;
+  platform: PublishTargetPlatform;
+  platform_account_id: string;
+  publish_attempt_id: string | null;
+  external_publish_id: string;
+  external_media_id: string | null;
+  external_reel_id: string | null;
+  external_permalink: string | null;
+  status: ExternalPublicationStatus;
+  is_canonical: boolean;
+  published_at: string | null;
+  last_synced_at: string | null;
+  content_fingerprint_sha256: string | null;
+  origin: "CONNECTOR_PUBLISH" | "MANUAL_IMPORT" | "FACEBOOK_DISCOVERY";
+  native_product_placement_status: string;
+  affiliate_comment_status: string;
+  metadata_json: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type FacebookInsightsPreflightResponse = {
+  ready_for_live_job: boolean;
+  network_used: boolean;
+  platform_publication_id: string;
+  platform_account_id: string;
+  media_reference_source: string;
+  graph_api_version: string;
+  token_resolution_deferred_to_worker: boolean;
+  checks: FacebookAccountSetupCheck[];
+  blocker_codes: string[];
+};
+
 export type PublishAttempt = {
   id: string;
   workspace_id: string;

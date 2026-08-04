@@ -42,9 +42,17 @@ except ImportError:  # Allows `python src/main.py` from apps/worker during local
     from runtime import LocalPollingWorker
 
 
+def resolve_worker_id() -> str:
+    """Stable id for this process; crash recovery requeues jobs by ``locked_by``."""
+    configured = (os.getenv("WORKER_ID") or "").strip()
+    if configured:
+        return configured
+    return f"local-worker-{os.getpid()}"
+
+
 def main() -> None:
     logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
-    worker_id = os.getenv("WORKER_ID", "local-worker-1")
+    worker_id = resolve_worker_id()
     poll_interval = float(os.getenv("WORKER_POLL_INTERVAL_SECONDS", "5"))
     redis_url = os.getenv("REDIS_URL")
     redis_queue_name = os.getenv("WORKER_REDIS_QUEUE_NAME", "reup-douyin:jobs")

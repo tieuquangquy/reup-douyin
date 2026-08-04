@@ -4,25 +4,77 @@ import type { ReactNode } from "react";
 
 export type AsyncContentStatus = "loading" | "error" | "empty" | "success";
 
+export type AsyncSkeletonVariant = "gallery" | "list" | "detail" | "form" | "table" | "dashboard";
+
 type AsyncSkeletonProps = {
-  variant: "gallery" | "list" | "detail" | "form";
+  variant: AsyncSkeletonVariant;
   count?: number;
   label?: string;
 };
 
-export function AsyncSkeleton({ variant, count, label = "Loading content…" }: AsyncSkeletonProps) {
-  const itemCount = count ?? (variant === "gallery" ? 6 : variant === "list" ? 5 : 1);
+function SkeletonStatus({ label }: { label: string }) {
   return (
-    <div aria-label={label} className={`async-skeleton is-${variant}`} role="status">
-      <span className="sr-only">{label}</span>
-      {Array.from({ length: itemCount }, (_, index) => (
-        <div aria-hidden="true" className="async-skeleton__item" key={index}>
-          {variant === "gallery" || variant === "detail" ? <span className="async-skeleton__block is-media" /> : null}
-          <span className="async-skeleton__block is-line is-wide" />
-          <span className="async-skeleton__block is-line" />
-          {variant === "form" ? <span className="async-skeleton__block is-field" /> : null}
+    <div className="async-skeleton__status">
+      <span aria-hidden="true" className="async-skeleton__spinner" />
+      <span className="async-skeleton__label">{label}</span>
+    </div>
+  );
+}
+
+export function AsyncSkeleton({ variant, count, label = "Loading content…" }: AsyncSkeletonProps) {
+  if (variant === "dashboard") {
+    return (
+      <div aria-busy="true" className="async-skeleton is-dashboard" role="status">
+        <SkeletonStatus label={label} />
+        <div aria-hidden="true" className="async-skeleton__dashboard">
+          <div className="async-skeleton__kpi-row">
+            {Array.from({ length: 4 }, (_, index) => (
+              <div className="async-skeleton__kpi" key={index}>
+                <span className="async-skeleton__block is-line is-wide" />
+                <span className="async-skeleton__block is-line" />
+              </div>
+            ))}
+          </div>
+          <div className="async-skeleton__panels">
+            {Array.from({ length: 2 }, (_, index) => (
+              <div className="async-skeleton__item" key={index}>
+                <span className="async-skeleton__block is-line is-wide" />
+                <span className="async-skeleton__block is-line" />
+                <span className="async-skeleton__block is-line" />
+                <span className="async-skeleton__block is-field" />
+              </div>
+            ))}
+          </div>
         </div>
-      ))}
+      </div>
+    );
+  }
+
+  const itemCount = count ?? (variant === "gallery" ? 6 : variant === "list" || variant === "table" ? 5 : 1);
+  return (
+    <div aria-busy="true" className={`async-skeleton is-${variant}`} role="status">
+      <SkeletonStatus label={label} />
+      <div aria-hidden="true" className="async-skeleton__grid">
+        {Array.from({ length: itemCount }, (_, index) => (
+          <div className={`async-skeleton__item${variant === "table" ? " is-table-row" : ""}`} key={index}>
+            {variant === "table" ? (
+              <>
+                <span className="async-skeleton__block is-line is-cell" />
+                <span className="async-skeleton__block is-line is-cell is-wide" />
+                <span className="async-skeleton__block is-line is-cell" />
+                <span className="async-skeleton__block is-line is-cell is-narrow" />
+              </>
+            ) : (
+              <>
+                {variant === "gallery" || variant === "detail" ? <span className="async-skeleton__block is-media" /> : null}
+                <span className="async-skeleton__block is-line is-wide" />
+                <span className="async-skeleton__block is-line" />
+                {variant === "form" ? <span className="async-skeleton__block is-field" /> : null}
+              </>
+            )}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

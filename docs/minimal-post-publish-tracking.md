@@ -27,17 +27,18 @@ Phase 1 tracks only the fields needed to know whether a post went live and where
 - last publish sync time
 - publication summary JSON
 
-## Not Tracked In Phase 1
+## Added After The Minimal Phase 1 Contract
 
-- views
-- likes
-- comments
-- shares
-- follower growth
+`Publication Metrics V1` now stores cumulative snapshots for views, likes, comments,
+shares, saves and selected platform-specific reach/watch fields. It also derives deltas,
+view velocity and engagement rates. See `docs/publication-metrics-v1.md`.
+
+Still not tracked here:
+
+- affiliate clicks, orders, commission or revenue attribution
 - comment moderation
 - inbox state
-
-Those belong to a later analytics/engagement phase.
+- audience/follower history outside publication-attributed follower gain
 
 ## Use In UI
 
@@ -47,4 +48,3 @@ The publish draft page can display:
 - canonical external link;
 - warning if operator attention is needed;
 - recent attempts with refresh action.
-

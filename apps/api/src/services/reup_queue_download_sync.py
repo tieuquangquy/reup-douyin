@@ -97,7 +97,41 @@ def is_download_ready_for_confirm(item: ReupQueueItem) -> bool:
 
 
 def next_action_for_item(item: ReupQueueItem) -> str:
+    from src.services.reup_pipeline_meta import (
+        PIPELINE_STEP_ANALYZE_AUDIO,
+        PIPELINE_STEP_DOWNLOAD,
+        PIPELINE_STEP_NEEDS_ATTENTION,
+        PIPELINE_STEP_OCR,
+        PIPELINE_STEP_READY_FINAL,
+        PIPELINE_STEP_RENDER,
+        PIPELINE_STEP_TRANSLATE,
+        PIPELINE_STEP_TTS,
+        get_pipeline_step,
+        is_auto_pipeline,
+        is_pipeline_held,
+    )
     from src.services.reup_queue_service import next_action_for_status
+
+    if is_auto_pipeline(item):
+        if is_pipeline_held(item):
+            return "Auto pipeline paused. Resume to continue, or open Transcript / Final Review to edit."
+        step = get_pipeline_step(item)
+        if step == PIPELINE_STEP_DOWNLOAD:
+            return "Auto pipeline: downloading source media…"
+        if step == PIPELINE_STEP_ANALYZE_AUDIO:
+            return "Auto pipeline: analyzing audio / transcript…"
+        if step == PIPELINE_STEP_TRANSLATE:
+            return "Auto pipeline: translating to Vietnamese…"
+        if step == PIPELINE_STEP_TTS:
+            return "Auto pipeline: generating TTS…"
+        if step == PIPELINE_STEP_OCR:
+            return "Auto pipeline: analyzing OCR / cleaning hard-sub…"
+        if step == PIPELINE_STEP_RENDER:
+            return "Auto pipeline: rendering final video…"
+        if step == PIPELINE_STEP_READY_FINAL:
+            return "Auto pipeline ready for Final Review — open Final to OCR/Render/Compare."
+        if step == PIPELINE_STEP_NEEDS_ATTENTION:
+            return "Auto pipeline needs attention. Inspect the error, then retry or resume."
 
     if item.status == ReupQueueStatus.WAITING_FOR_MEDIA and is_download_ready_for_confirm(item):
         return "Source media downloaded. Confirm with Mark media ready, then continue to export."

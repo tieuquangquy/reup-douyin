@@ -267,18 +267,12 @@ export function TranscriptEditorHeader({
               );
             })}
           </ol>
-          {guide.ttsFreshness !== "hidden" ? (
+          {guide.ttsFreshness === "outdated" ? (
             <span
-              className={`editor-command__freshness${guide.ttsFreshness === "outdated" ? " is-outdated" : " is-current"}`}
-              title={
-                guide.ttsFreshness === "outdated"
-                  ? t("transcriptEditorHeader.freshnessTtsOutdated")
-                  : t("transcriptEditorHeader.freshnessTtsCurrent")
-              }
+              className="editor-command__freshness is-outdated"
+              title={t("transcriptEditorHeader.freshnessTtsOutdated")}
             >
-              {guide.ttsFreshness === "outdated"
-                ? t("transcriptEditorHeader.freshnessTtsOutdated")
-                : t("transcriptEditorHeader.freshnessTtsCurrent")}
+              {t("transcriptEditorHeader.freshnessTtsOutdated")}
             </span>
           ) : null}
         </div>

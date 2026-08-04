@@ -1,5 +1,5 @@
 /**
- * Ops Jobs Monitor — Process Monitor mockup: KPI icons, filter selects, dense table, retry.
+ * Ops Jobs — truthful control-room flow, workload charts, six-column worklist and durable step trace.
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -13,144 +13,107 @@ const page = readFileSync(resolve(webSrc, "components/ops-console/OpsJobsPage.ts
 const css = readFileSync(resolve(webSrc, "app/globals.css"), "utf8");
 const api = readFileSync(resolve(webSrc, "lib/api.ts"), "utf8");
 
-assert.match(page, /ops-jobs-monitor is-compact/, "Jobs Monitor must opt into compact density");
-assert.match(page, /ops-jobs-kpis/, "Jobs page must render KPI band");
-assert.match(page, /ops-jobs-kpi__icon/, "KPI tiles must include mockup icons");
-assert.match(page, /ops-jobs-kpi__label/, "KPI cards must show top-left label");
-assert.match(page, /ops-jobs-kpi__value/, "KPI cards must show large primary value");
-assert.match(page, /ops-jobs-kpi__glyph/, "KPI cards must show top-right icon box");
-assert.match(page, /ops-jobs-kpi__trend/, "KPI cards must show trend pill");
-assert.match(page, /ops-jobs-kpi__hint/, "KPI cards must show comparison hint text");
-assert.match(page, /kind=\"backlog\"|kind=\"retries\"/, "KPI band must include backlog and retries cards");
-assert.doesNotMatch(page, /ops-jobs-controls__pill/, "Backlog/retries must leave control-bar pill");
-assert.match(page, /ops-jobs-kpi is-hotel|is-hotel/, "KPI cards must use hotel mockup aesthetic");
-assert.match(page, /ops-jobs-controls/, "Jobs page must render control bar");
-assert.match(page, /ops-jobs-controls__status/, "Control bar must include status select");
-assert.match(page, /ops-jobs-controls__type/, "Control bar must include job type select");
-assert.match(page, /ops-jobs-controls__view-all/, "Control bar must include View All clear action");
-assert.match(page, /jobTypeFilter/, "Jobs page must keep job type filter state");
-assert.match(page, /statusFilter/, "Jobs page must keep status filter state");
-assert.match(page, /searchParams\.get\(["']status["']\)|get\(["']status["']\)/, "Jobs page must read status deep-link from URL");
-assert.match(page, /searchQuery/, "Jobs page must keep search state");
-assert.match(page, /ops-jobs-sheet/, "Jobs table must sit in a Users-style sheet card");
-assert.match(page, /ops-jobs-sheet__bar|ops-jobs-sheet__meta/, "Sheet must show count meta like Users");
-assert.match(page, /ops-jobs-table is-sheet/, "Jobs table must use Users sheet aesthetic");
-assert.match(page, /ops-jobs-table/, "Jobs must render in a dense data table");
-assert.match(page, /opsJobs\.videoSource/, "Table must include Video Source column");
-assert.match(page, /opsJobs\.progress/, "Table must include Progress column");
-assert.match(page, /opsJobs\.startedAt|opsJobs\.start/, "Table must include Start datetime column");
-assert.match(page, /opsJobs\.finishedAt|opsJobs\.end/, "Table must include End datetime column");
-assert.match(page, /opsJobs\.duration|opsJobs\.processingTime/, "Table must include processing duration column");
-assert.doesNotMatch(page, /opsJobs\.updated/, "Table must replace Updated column with End");
-assert.match(page, /ops-jobs-table__id/, "Job ID must be its own bold column");
-assert.match(page, /ops-jobs-table__type/, "Job type must render as category pill");
-assert.match(page, /ops-jobs-table__progress/, "Progress must render with bar/percent");
-assert.match(page, /progress_percent/, "Progress must read job.progress_percent");
-assert.doesNotMatch(
-  page,
-  /ops-jobs-table__done|doneShort/,
-  "Completed jobs must show a 100% progress bar, not a Done pill"
-);
-assert.match(
-  page,
-  /status === "COMPLETED"[\s\S]*?\b100\b/,
-  "Completed status must force displayed progress to 100%"
-);
-assert.match(
-  page,
-  /status === "CANCELLED"[\s\S]*?\b0\b/,
-  "Cancelled status must force displayed progress to 0%"
-);
-assert.match(page, /job\.started_at/, "Start column must read job.started_at");
-assert.match(page, /job\.finished_at/, "End column must read job.finished_at");
-assert.match(page, /formatJobDuration|jobDuration/, "Duration must be derived from finished_at − started_at");
-assert.match(page, /ops-jobs-table__copy/, "Job id must offer a copy control");
-assert.doesNotMatch(page, /ops-jobs-table__view/, "Row actions must remove View");
-assert.match(page, /ops-jobs-table__retry/, "Row actions must include Retry");
-assert.match(page, /ops-jobs-table__icon|ActionIcon|aria-hidden=\"true\"/, "Retry/Delete must render icon glyphs");
-assert.match(page, /retryJob/, "Jobs page must call retryJob");
-assert.match(page, /formatStatusLabel/, "Status pills must use soft title-case labels");
-assert.match(
-  page,
-  /ops-jobs-table__status/,
-  "Status column must use redesigned status chips"
-);
-assert.match(
-  page,
-  /ops-jobs-table__status-dot/,
-  "Status chips must include a status color dot"
-);
-assert.doesNotMatch(
-  page,
-  /ops-jobs-table__badge tone-\$\{tone\}/,
-  "Status column must not keep the old generic tone badge markup"
-);
-assert.match(
-  page,
-  /function formatTableDateTime[\s\S]*?padStart\(2,\s*"0"\)[\s\S]*?\$\{dd\}\/\$\{mm\}\/\$\{yy\} \$\{hh\}:\$\{min\}/,
-  "Start/End datetime must use compact dd/MM/yy HH:mm"
-);
-assert.doesNotMatch(
-  page,
-  /function formatTableDateTime[\s\S]*?toLocaleString/,
-  "Start/End must not use verbose locale month strings like 'thg'"
-);
-assert.match(page, /jobTypePillTone|typeTone/, "Job type pills must map to colored variants");
-assert.doesNotMatch(page, /ops-jobs-table is-booking/, "Jobs table must leave hotel-booking chrome");
-assert.match(page, /failureCategories\.length > 0/, "Failure categories must only render when present");
-assert.doesNotMatch(page, /ops-jobs-desk|ops-jobs-chip\b/, "Jobs page must leave desk/chip chrome");
-assert.doesNotMatch(page, /ops-jobs-stream|ops-jobs-row\b/, "Jobs page must leave card-stream chrome");
-assert.doesNotMatch(page, /OpsMetricCard/, "Jobs page must not use OpsMetricCard tiles");
-assert.doesNotMatch(page, /health-overview-grid/, "Jobs page must leave health overview grid");
-assert.match(page, /deleteJob/, "Jobs page must keep delete behavior");
-assert.match(page, /OffsetLoadMoreFooter/, "Jobs page must keep load-more pagination");
-assert.match(page, /variant=\"inline\"/, "Jobs footer must use inline aesthetic pager");
-assert.match(page, /ops-jobs-monitor__footer/, "Jobs page must style the monitor footer");
-assert.match(page, /ops-job-row-\$\{/, "Jobs page must keep job_id focus row ids");
+assert.match(page, /ops-jobs-monitor is-compact/, "Jobs must keep the compact Ops shell density");
+assert.match(page, /function JobStateFlow/, "Jobs must use a state-flow control room");
+assert.match(page, /ops-jobs-v2-command/, "State flow must have a dedicated command surface");
+assert.match(page, /ops-jobs-v2-flow__main/, "State flow must show the main execution path");
+assert.match(page, /ops-jobs-v2-flow__exceptions/, "State flow must separate exceptions from the main path");
+assert.match(page, /ops-jobs-v2-flow__gauge/, "State flow must visualize the real completion share");
+assert.match(page, /counts\.COMPLETED \/ total/, "Completion gauge must derive its percentage from real counts");
+assert.match(page, /totalJobs[\s\S]*activeNow/, "State flow must give zero values useful volume context");
+assert.match(page, /function JobFlowIcon/, "State flow must use semantic SVG icons");
+assert.match(page, /<i><JobFlowIcon kind=\{item\.icon\} \/><\/i>/, "Main execution states must render icons");
+assert.match(page, /<JobFlowIcon kind="workers" \/>[\s\S]*<JobFlowIcon kind="oldest" \/>/, "Metadata rail must render icons");
+assert.doesNotMatch(page, /<p><JobFlowIcon|flow__gauge[\s\S]{0,300}<JobFlowIcon/, "Icons must stay out of summary and completion gauge");
+assert.match(page, /clearSummary[\s\S]*activeSummary[\s\S]*exceptionSummary/, "State flow must narrate the current operational state");
+assert.match(page, /generatedAt[\s\S]*formatMetricTime/, "State flow must expose metrics freshness");
+assert.match(page, /WAITING_FOR_REVIEW/, "State flow must retain the manual review checkpoint");
+assert.match(page, /active_worker_count/, "Control room must surface active worker authority");
+assert.match(page, /running_with_lock/, "Control room must surface claimed running work");
+assert.match(page, /running_without_lock/, "Control room must surface unclaimed running work");
+assert.match(page, /oldest_queued_at/, "Control room must surface oldest queue wait");
+
+assert.match(page, /stale_running_job_ids/, "Stale row filtering must use backend-provided job ids");
+assert.match(page, /stale_running \?\? staleRunning\.length/, "Stale headline must use backend canonical count");
+assert.doesNotMatch(page, /STALE_RUNNING_MINUTES|60 \* 60 \* 1000|running > 60/, "Frontend must not invent a stale threshold");
+assert.doesNotMatch(page, /<KpiTile|ops-jobs-kpis/, "Jobs must not render the legacy KPI-card grid");
+assert.doesNotMatch(page, /trend=|ops-jobs-kpi__trend/, "Jobs must not render decorative trends without history");
+
+assert.match(page, /function JobWorkloadChart/, "Jobs must visualize workload by job type");
+assert.match(page, /job_counts_by_type_status/, "Workload chart must use backend status counts");
+assert.match(page, /statusOrder[\s\S]*?QUEUED[\s\S]*?RUNNING[\s\S]*?COMPLETED/, "Workload stack must keep truthful statuses");
+assert.match(page, /function JobExceptionPareto/, "Jobs must visualize common errors as a Pareto chart");
+assert.match(page, /common_failure_categories/, "Exception chart must use recorded backend error categories");
+assert.doesNotMatch(page, /ops-jobs-failures/, "Text-heavy legacy failure banner must be removed from page markup");
+
+assert.match(page, /ops-jobs-controls/, "Jobs must keep the filter control bar");
+assert.match(page, /ops-jobs-controls__status/, "Control bar must keep status filtering");
+assert.match(page, /ops-jobs-controls__type/, "Control bar must keep job type filtering");
+assert.match(page, /ops-jobs-controls__view-all/, "Control bar must keep a clear action");
+assert.match(page, /searchParams\.get\(["']status["']\)/, "Jobs must read status deep links");
+assert.match(page, /queryForApi|query:/, "Search must be submitted to the jobs API");
+
+assert.match(page, /ops-jobs-sheet/, "Worklist must remain in a sheet surface");
+assert.match(page, /ops-jobs-table is-sheet/, "Worklist must remain a semantic table");
+const tableHead = page.match(/<thead>[\s\S]*?<\/thead>/)?.[0] ?? "";
+assert.equal((tableHead.match(/<th>/g) ?? []).length, 6, "Worklist must use six grouped columns");
+for (const key of ["jobAndSource", "work", "execution", "health", "timing", "actions"]) {
+  assert.match(tableHead, new RegExp(`opsJobs\\.${key}`), `Worklist must include ${key}`);
+}
+assert.match(page, /ops-jobs-table__source-line/, "Job identity must keep source context");
+assert.match(page, /ops-jobs-table__type/, "Work column must keep type pills");
+assert.match(page, /current_step_key/, "Work column must surface the current durable step");
+assert.match(page, /ops-jobs-table__progress/, "Execution column must visualize progress");
+assert.match(page, /attempts[\s\S]*max_attempts/, "Execution column must show attempt budget");
+assert.match(page, /completed_steps[\s\S]*total_steps/, "Execution column must show durable step completion");
+assert.match(page, /error_code/, "Health column must surface the last error code");
+assert.match(page, /locked_at|heartbeat/, "Health column must surface worker heartbeat evidence");
+assert.match(page, /ops-jobs-table__timing/, "Timing column must group start, end and elapsed duration");
+assert.match(page, /formatJobDuration|formatJobElapsed/, "Timing must derive truthful duration from timestamps");
+
+assert.match(page, /expandedJobId/, "Rows must keep explicit expansion state");
+assert.match(page, /function JobStepTrace/, "Expanded rows must render durable step traces");
+assert.match(page, /ops-jobs-v2-trace-row/, "Step trace must render inline with its job");
+assert.match(page, /colSpan=\{6\}/, "Step trace must span the six-column worklist");
+assert.match(page, /job\.steps/, "Step trace must use persisted job steps");
+
+assert.match(page, /status === "COMPLETED"[\s\S]*?100/, "Completed jobs must force displayed progress to 100%");
+assert.match(page, /status === "CANCELLED"[\s\S]*?0/, "Cancelled jobs must force displayed progress to 0%");
+assert.match(page, /ops-jobs-table__copy/, "Job id must keep a copy control");
+assert.match(page, /retryJob/, "Jobs must keep retry behavior");
+assert.match(page, /resumeJob/, "Jobs must keep resume behavior");
+assert.match(page, /cancelJob/, "Jobs must keep cancel behavior");
+assert.match(page, /deleteJob/, "Jobs must keep delete behavior");
+assert.match(page, /JobActionIcon/, "Row actions must retain icon controls");
+assert.match(page, /formatStatusLabel/, "Status pills must retain readable labels");
+assert.match(page, /ops-jobs-table__status-dot/, "Status pills must retain semantic color dots");
+assert.match(page, /function OpsJobsPagination/, "Jobs must use a dedicated numbered Pagination Dock");
+assert.match(page, /function paginationItems/, "Pagination Dock must build a bounded page-number window");
+assert.match(page, /offset:\s*\(currentPage - 1\) \* pageSize/, "Jobs API offset must follow the selected page");
+assert.match(page, /params\.set\("page"[\s\S]*params\.set\("per_page"/, "Page and page size must sync to the URL");
+assert.match(page, /ops-jobs-pagination__size/, "Page size must use segmented controls");
+assert.match(page, /ops-jobs-pagination__numbers/, "Desktop pagination must expose direct page buttons");
+assert.match(page, /ops-jobs-pagination__compact/, "Mobile pagination must expose compact page context");
+assert.doesNotMatch(page, /OffsetLoadMoreFooter|variant="inline"|loadMore/, "Jobs must remove accumulated Load more pagination");
+assert.match(page, /ops-job-row-\$\{/, "Jobs must keep focusable row ids");
+
+assert.match(css, /\.ops-jobs-v2-command/, "CSS must define the control-room surface");
+assert.match(css, /\.ops-jobs-v2-flow__gauge/, "CSS must define the completion gauge");
+assert.match(css, /\.ops-jobs-v2-icon/, "CSS must define semantic flow icons");
+assert.match(css, /\.ops-jobs-v2-command__status/, "CSS must define freshness and state treatment");
+assert.match(css, /\.ops-jobs-v2-workload/, "CSS must define the workload chart");
+assert.match(css, /\.ops-jobs-v2-pareto/, "CSS must define the exception Pareto");
+assert.match(css, /\.ops-jobs-v2-trace/, "CSS must define inline step traces");
+assert.match(css, /--ops-jobs-axis:\s*0\.6875rem/, "Desktop chart labels must be at least 11px");
+assert.match(css, /--ops-jobs-axis:\s*0\.75rem/, "Mobile chart labels must increase to 12px");
+assert.match(css, /ops-jobs-status-pulse|@keyframes\s+ops-jobs-status-pulse/, "Running status must retain a live pulse");
+assert.match(css, /\.ops-jobs-table\.is-sheet th:nth-child\(6\)/, "Six-column worklist must have explicit sizing");
+assert.match(css, /\.ops-jobs-pagination\s*\{/, "CSS must define the Pagination Dock");
+assert.match(css, /\.ops-jobs-pagination__numbers/, "CSS must define numbered navigation");
+assert.match(css, /\.ops-jobs-pagination__size/, "CSS must define segmented page-size controls");
+assert.match(css, /\.ops-jobs-pagination__compact/, "CSS must define mobile compact pagination");
 
 assert.match(api, /export async function retryJob/, "api.ts must export retryJob");
 assert.match(api, /\/jobs\/\$\{jobId\}\/retry/, "retryJob must POST /jobs/{id}/retry");
-
-const footer = readFileSync(resolve(webSrc, "components/shared/OffsetLoadMoreFooter.tsx"), "utf8");
-assert.match(footer, /variant\?:/, "OffsetLoadMoreFooter must accept a variant prop");
-assert.match(footer, /offset-load-more is-inline|is-inline/, "Inline variant must render offset-load-more is-inline");
-assert.match(footer, /offset-load-more__bar|loadedPercent/, "Inline variant must expose loaded percent progress");
-
-assert.match(css, /\.ops-jobs-monitor\.is-compact/, "CSS must define compact Monitor density");
-assert.match(
-  css,
-  /\.ops-jobs-monitor\s*\{[^}]*padding:\s*[^;]*var\(--app-content-inset-x\)/,
-  "Jobs monitor must use horizontal page inset token",
-);
-assert.match(
-  css,
-  /\.ops-jobs-monitor\.is-compact\s*\{[^}]*padding:\s*[^;]*var\(--app-content-inset-x\)/,
-  "Compact Jobs monitor must keep horizontal inset token like Health",
-);
-assert.match(css, /\.ops-jobs-kpi__icon/, "CSS must define KPI icons");
-assert.match(css, /\.ops-jobs-kpi\.is-hotel|\.ops-jobs-kpi__label/, "CSS must define hotel KPI layout");
-assert.match(css, /\.ops-jobs-kpi__value/, "CSS must define large KPI value");
-assert.match(css, /\.ops-jobs-kpi__trend/, "CSS must define KPI trend pill");
-assert.match(css, /\.ops-jobs-kpi\.is-active/, "CSS must define active mint KPI card");
-assert.match(css, /\.ops-jobs-controls__status/, "CSS must define status select");
-assert.match(css, /\.ops-jobs-sheet/, "CSS must define Jobs sheet card");
-assert.match(css, /\.ops-jobs-table\.is-sheet/, "CSS must define sheet-table aesthetic");
-assert.match(css, /\.ops-jobs-table__status/, "CSS must define redesigned status chips");
-assert.match(css, /\.ops-jobs-table__status-dot/, "CSS must define status chip dots");
-assert.match(css, /ops-jobs-status-pulse|@keyframes\s+ops-jobs-status-pulse/, "Running status must have a live pulse");
-assert.match(
-  css,
-  /\.ops-jobs-table\.is-sheet\s+\.ops-jobs-table__status\s*\{[^}]*font-size:\s*0\.66rem[^}]*text-transform:\s*lowercase/,
-  "Status chip text must be lowercase and one size smaller"
-);
-assert.match(css, /\.ops-jobs-table__type/, "CSS must define type category pills");
-assert.match(css, /\.ops-jobs-table__id/, "CSS must define bold job id column");
-assert.match(css, /\.ops-jobs-table__progress/, "CSS must define progress cell");
-assert.match(css, /\.ops-jobs-table\.is-sheet th[\s\S]*?text-transform:\s*uppercase/, "Sheet headers must use uppercase like Users");
-assert.doesNotMatch(css, /\.ops-jobs-table\.is-booking/, "CSS must leave booking-table aesthetic");
-assert.match(css, /\.offset-load-more\.is-inline/, "CSS must define inline pager footer");
-assert.match(css, /\.ops-jobs-monitor__footer/, "CSS must define Jobs monitor footer");
-assert.doesNotMatch(css, /\.ops-jobs-desk\b/, "CSS must leave Jobs desk shell");
-assert.doesNotMatch(css, /\.ops-jobs-stream\b/, "CSS must leave card-stream layout");
 
 console.log("ops-jobs-monitor tests passed");

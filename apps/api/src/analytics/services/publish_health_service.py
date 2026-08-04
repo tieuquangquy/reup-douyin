@@ -28,8 +28,14 @@ from src.schemas.analytics import (
 
 
 class PublishHealthService:
-    def __init__(self, db: Session):
+    def __init__(self, db: Session, *, workspace_id: UUID | None = None):
         self.db = db
+        self.workspace_id = workspace_id
+
+    def _scoped(self, stmt, model):
+        if self.workspace_id is None:
+            return stmt
+        return stmt.where(model.workspace_id == self.workspace_id)
 
     def dashboard_snapshot(self, *, window: str = "last_7_days", start: datetime | None = None, end: datetime | None = None) -> PublishHealthDashboardResponse:
         window_start, window_end = resolve_time_window(window, start, end)
@@ -96,16 +102,19 @@ class PublishHealthService:
         )
 
     def _attempts_in_window(self, start: datetime, end: datetime) -> list[PublishAttempt]:
+        stmt = self._scoped(
+            select(PublishAttempt).where(PublishAttempt.created_at >= start, PublishAttempt.created_at <= end),
+            PublishAttempt,
+        )
         return list(
             self.db.scalars(
-                select(PublishAttempt)
-                .where(PublishAttempt.created_at >= start, PublishAttempt.created_at <= end)
-                .order_by(PublishAttempt.created_at.desc(), PublishAttempt.attempt_number.desc())
+                stmt.order_by(PublishAttempt.created_at.desc(), PublishAttempt.attempt_number.desc())
             )
         )
 
     def _all_publish_drafts(self) -> list[PublishDraft]:
-        return list(self.db.scalars(select(PublishDraft).order_by(PublishDraft.updated_at.desc())))
+        stmt = self._scoped(select(PublishDraft), PublishDraft)
+        return list(self.db.scalars(stmt.order_by(PublishDraft.updated_at.desc())))
 
     def _overview(self, attempts: list[PublishAttempt], drafts: list[PublishDraft]) -> PublishHealthOverview:
         succeeded = len([item for item in attempts if item.status in {PublishAttemptStatus.SUCCEEDED, PublishAttemptStatus.RECONCILED} and item.external_status == ExternalPublicationStatus.PUBLISHED])
@@ -138,7 +147,8 @@ class PublishHealthService:
         ]
 
     def _account_health(self, attempts: list[PublishAttempt]) -> list[AccountHealthSummary]:
-        accounts = {account.id: account for account in self.db.scalars(select(PlatformAccount))}
+        account_stmt = self._scoped(select(PlatformAccount), PlatformAccount)
+        accounts = {account.id: account for account in self.db.scalars(account_stmt)}
         grouped: dict[UUID, list[PublishAttempt]] = defaultdict(list)
         for attempt in attempts:
             grouped[attempt.platform_account_id].append(attempt)
@@ -172,10 +182,10 @@ class PublishHealthService:
         return [FailureCategorySummary(error_code=key, label=key.replace("_", " "), count=count) for key, count in counts.most_common(10)]
 
     def _publication_outcomes(self, drafts: list[PublishDraft], feedback_by_draft: dict[UUID, OperatorFeedback]) -> list[PublicationOutcomeItem]:
-        source_videos = {item.id: item for item in self.db.scalars(select(SourceVideo))}
-        profiles = {item.id: item for item in self.db.scalars(select(SourceProfile))}
-        candidates = {item.source_video_id: item for item in self.db.scalars(select(VideoCandidate))}
-        attempts = {item.id: item for item in self.db.scalars(select(PublishAttempt))}
+        source_videos = {item.id: item for item in self.db.scalars(self._scoped(select(SourceVideo), SourceVideo))}
+        profiles = {item.id: item for item in self.db.scalars(self._scoped(select(SourceProfile), SourceProfile))}
+        candidates = {item.source_video_id: item for item in self.db.scalars(self._scoped(select(VideoCandidate), VideoCandidate))}
+        attempts = {item.id: item for item in self.db.scalars(self._scoped(select(PublishAttempt), PublishAttempt))}
         items: list[PublicationOutcomeItem] = []
         for draft in drafts:
             source_video = source_videos.get(draft.source_video_id)
@@ -210,7 +220,8 @@ class PublishHealthService:
 
     def _latest_feedback_by_draft(self) -> dict[UUID, OperatorFeedback]:
         result: dict[UUID, OperatorFeedback] = {}
-        for feedback in self.db.scalars(select(OperatorFeedback).order_by(OperatorFeedback.feedback_at.desc())):
+        stmt = self._scoped(select(OperatorFeedback), OperatorFeedback).order_by(OperatorFeedback.feedback_at.desc())
+        for feedback in self.db.scalars(stmt):
             if feedback.publish_draft_id and feedback.publish_draft_id not in result:
                 result[feedback.publish_draft_id] = feedback
         return result
@@ -244,13 +255,12 @@ class PublishHealthService:
 
     def _risk_blocked_count(self) -> int:
         blocking = {RiskSeverity.HIGH, RiskSeverity.CRITICAL, RiskSeverity.BLOCKING}
-        rows = self.db.scalars(
-            select(RiskFlag).where(
+        stmt = select(RiskFlag).where(
                 RiskFlag.target_type == RiskTargetType.PUBLISH_DRAFT,
                 RiskFlag.status == RiskFlagStatus.OPEN,
                 RiskFlag.severity.in_(blocking),
             )
-        )
+        rows = self.db.scalars(self._scoped(stmt, RiskFlag))
         return len({item.target_id for item in rows if item.target_id is not None})
 
     def _failure_group(self, error_code: str | None) -> str:

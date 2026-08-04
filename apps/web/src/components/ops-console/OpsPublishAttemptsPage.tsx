@@ -138,7 +138,7 @@ export function OpsPublishAttemptsPage() {
   if (!loadedAt && !request.error) {
     return (
       <OpsConsoleShell actions={refreshAction} description={t("opsPublishAttempts.description")} title={t("opsPublishAttempts.title")}>
-        <AsyncContentBoundary skeletonVariant="list" status="loading"><span /></AsyncContentBoundary>
+        <AsyncContentBoundary skeletonVariant="table" loadingLabel={t("opsPublishAttempts.loadingDetail")} status="loading"><span /></AsyncContentBoundary>
       </OpsConsoleShell>
     );
   }
@@ -146,14 +146,14 @@ export function OpsPublishAttemptsPage() {
   if (request.error && !loadedAt) {
     return (
       <OpsConsoleShell actions={refreshAction} description={t("opsPublishAttempts.description")} title={t("opsPublishAttempts.title")}>
-        <AsyncContentBoundary errorState={<OpsState title={t("opsPublishAttempts.unavailableTitle")} detail={request.error.message} retry={() => void load()} />} skeletonVariant="list" status="error"><span /></AsyncContentBoundary>
+        <AsyncContentBoundary errorState={<OpsState title={t("opsPublishAttempts.unavailableTitle")} detail={request.error.message} retry={() => void load()} />} skeletonVariant="table" status="error"><span /></AsyncContentBoundary>
       </OpsConsoleShell>
     );
   }
 
   return (
     <OpsConsoleShell actions={refreshAction} description={t("opsPublishAttempts.description")} title={t("opsPublishAttempts.title")}>
-      <AsyncContentBoundary refreshing={request.refreshing} skeletonVariant="list" status="success">
+      <AsyncContentBoundary refreshing={request.refreshing} skeletonVariant="table" status="success">
       <main className="ops-page ops-attempts-page">
 
         <p className="ops-attempts-freshness">

@@ -19,6 +19,9 @@ export type WorkItemActionIconKind =
   | "transcript"
   | "retry"
   | "process"
+  | "auto-run"
+  | "auto-render"
+  | "step"
   | "home"
   | "select-visible"
   | "clear-selection";
@@ -189,6 +192,42 @@ export function WorkItemActionIcon({ kind, className = "review-board-tile-btn__i
     return (
       <svg aria-hidden="true" className={className} viewBox="0 0 24 24">
         <path d="M8.2 5.8a1.2 1.2 0 0 1 1.8-.9l9.2 5.5a1.2 1.2 0 0 1 0 2.1l-9.2 5.5a1.2 1.2 0 0 1-1.8-1V5.8Z" fill="currentColor" />
+      </svg>
+    );
+  }
+
+  // Auto run → chained play, keeps going by itself through several stages
+  if (kind === "auto-run") {
+    return (
+      <svg aria-hidden="true" className={className} viewBox="0 0 24 24">
+        <path d="M3.4 6.6a1.1 1.1 0 0 1 1.7-.9l6.4 4.4a1.1 1.1 0 0 1 0 1.8l-6.4 4.4a1.1 1.1 0 0 1-1.7-.9V6.6Z" fill="currentColor" />
+        <path d="M12.2 6.6a1.1 1.1 0 0 1 1.7-.9l6.4 4.4a1.1 1.1 0 0 1 0 1.8l-6.4 4.4a1.1 1.1 0 0 1-1.7-.9V6.6Z" fill="currentColor" />
+      </svg>
+    );
+  }
+
+  // Auto through render → film frame, the burned-in output stage
+  if (kind === "auto-render") {
+    return (
+      <svg aria-hidden="true" className={className} viewBox="0 0 24 24">
+        <path
+          d="M4.6 5.4h9.6a1.8 1.8 0 0 1 1.8 1.8v9.6a1.8 1.8 0 0 1-1.8 1.8H4.6a1.8 1.8 0 0 1-1.8-1.8V7.2a1.8 1.8 0 0 1 1.8-1.8Zm1 2.1v1.8h1.8V7.5H5.6Zm0 3.6v1.8h1.8v-1.8H5.6Zm0 3.6v1.8h1.8v-1.8H5.6Zm6 -7.2v1.8h1.8V7.5h-1.8Zm0 3.6v1.8h1.8v-1.8h-1.8Zm0 3.6v1.8h1.8v-1.8h-1.8Z"
+          fill="currentColor"
+        />
+        <path
+          d="M18.4 8.3a1 1 0 0 1 1.6-.8l2.6 3.7a1 1 0 0 1 0 1.1l-2.6 3.7a1 1 0 0 1-1.6-.8V8.3Z"
+          fill="currentColor"
+        />
+      </svg>
+    );
+  }
+
+  // Step → play up to the next stop, one stage only, operator drives the rest
+  if (kind === "step") {
+    return (
+      <svg aria-hidden="true" className={className} viewBox="0 0 24 24">
+        <path d="M5.4 6.4a1.1 1.1 0 0 1 1.7-.9l7.5 5.1a1.1 1.1 0 0 1 0 1.8l-7.5 5.1a1.1 1.1 0 0 1-1.7-.9V6.4Z" fill="currentColor" />
+        <path d="M17.2 5.5a1.3 1.3 0 0 1 1.3 1.3v10.4a1.3 1.3 0 0 1-2.6 0V6.8a1.3 1.3 0 0 1 1.3-1.3Z" fill="currentColor" />
       </svg>
     );
   }

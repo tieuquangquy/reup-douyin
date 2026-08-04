@@ -300,7 +300,10 @@ async def post_ocr_predict(
 
     Retried by tenacity on network errors / timeouts / HTTP 429|502|503|504.
     """
-    timeout = aiohttp.ClientTimeout(total=ASYNC_OCR_TIMEOUT_SECONDS)
+    timeout_s = float(
+        os.environ.get("OCR_HTTP_TIMEOUT_SECONDS") or ASYNC_OCR_TIMEOUT_SECONDS
+    )
+    timeout = aiohttp.ClientTimeout(total=timeout_s)
     form = aiohttp.FormData()
     form.add_field(
         "file",
@@ -352,9 +355,12 @@ async def _detect_one(
                 str(exc),
             ) from exc
         except asyncio.TimeoutError as exc:
+            timeout_s = float(
+                os.environ.get("OCR_HTTP_TIMEOUT_SECONDS") or ASYNC_OCR_TIMEOUT_SECONDS
+            )
             raise OcrFilteringError(
                 OcrFilteringErrorCode.OCR_PROVIDER_FAILED,
-                f"OCR HTTP request timed out after {ASYNC_OCR_TIMEOUT_SECONDS}s",
+                f"OCR HTTP request timed out after {timeout_s}s",
             ) from exc
         except aiohttp.ClientError as exc:
             raise OcrFilteringError(

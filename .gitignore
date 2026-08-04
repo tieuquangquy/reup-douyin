@@ -30,6 +30,9 @@ apps/**/release/
 # Local ONNX models (auto-downloaded; do not commit weights)
 apps/api/models/*.onnx
 
+# Caption AI translation memory (local cache; do not commit)
+apps/api/.cache/
+
 # Local data / runtime
 data/
 storage/
@@ -38,6 +41,7 @@ tmp/
 .tmp/
 .douyin_profiles/
 .dev/
+.runtime/
 apps/**/data/
 apps/**/tmp/
 apps/**/.tmp/

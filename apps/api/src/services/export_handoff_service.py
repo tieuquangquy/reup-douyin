@@ -54,6 +54,8 @@ class BatchOperationResult:
 
 LIFECYCLE_BATCH_ACTIONS: dict[ReupQueueBatchAction, ReupQueueAction] = {
     ReupQueueBatchAction.START_PROCESSING: ReupQueueAction.START_PROCESSING,
+    ReupQueueBatchAction.START_AUTO_PIPELINE: ReupQueueAction.START_AUTO_PIPELINE,
+    ReupQueueBatchAction.SET_AUTOMATION: ReupQueueAction.SET_AUTOMATION,
     ReupQueueBatchAction.HOLD: ReupQueueAction.HOLD,
     ReupQueueBatchAction.RESUME: ReupQueueAction.RESUME,
     ReupQueueBatchAction.RETRY: ReupQueueAction.RETRY,
@@ -117,6 +119,8 @@ class ExportHandoffService:
         item_ids: list[UUID],
         label: str | None = None,
         operator_note: str | None = None,
+        package_manifest_extension: dict | None = None,
+        item_manifest_extension: dict | None = None,
     ) -> tuple[ExportPackage, BatchOperationResult]:
         if not item_ids:
             raise ExportHandoffError("NO_QUEUE_ITEMS", "At least one Reup Queue item is required.")
@@ -129,7 +133,13 @@ class ExportHandoffService:
             label=label,
             operator_note=operator_note,
             item_count=0,
-            manifest_json={"source": "reup_queue", "requested_item_ids": [str(item_id) for item_id in item_ids]},
+            manifest_json=self._extend_manifest(
+                {
+                    "source": "reup_queue",
+                    "requested_item_ids": [str(item_id) for item_id in item_ids],
+                },
+                package_manifest_extension,
+            ),
             diagnostics_json={"created_by": "operator", "checks": []},
         )
         self.db.add(package)
@@ -158,7 +168,9 @@ class ExportHandoffService:
                 render_output_id=item.render_output_id,
                 publish_draft_id=item.publish_draft_id,
                 item_status="INCLUDED",
-                manifest_json=self._item_manifest(item),
+                manifest_json=self._extend_manifest(
+                    self._item_manifest(item), item_manifest_extension
+                ),
                 diagnostics_json=diagnostics,
             )
             self.db.add(package_item)
@@ -185,7 +197,10 @@ class ExportHandoffService:
             package.status = ExportPackageStatus.READY_FOR_HANDOFF
             package.ready_at = now
             package.item_count = len(included)
-            package.manifest_json = self._package_manifest(package, included)
+            package.manifest_json = self._extend_manifest(
+                self._package_manifest(package, included),
+                package_manifest_extension,
+            )
             package.diagnostics_json = {**(package.diagnostics_json or {}), "item_count": len(included), "ready_for_handoff": True}
 
         self.db.commit()
@@ -238,6 +253,7 @@ class ExportHandoffService:
         item_ids: list[UUID],
         note: str | None = None,
         target_platform: PublishTargetPlatform | None = None,
+        pipeline_mode: str | None = None,
     ) -> BatchOperationResult:
         if action == ReupQueueBatchAction.CREATE_EXPORT_PACKAGE:
             _package, result = self.create_export_package(item_ids=item_ids, label="Batch Export Package", operator_note=note)
@@ -297,6 +313,8 @@ class ExportHandoffService:
         accepted_ids = item_ids
         overflow_ids: list[UUID] = []
         batch_limit: int | None = None
+        # Auto has its own admission control: overflow clips are parked and start themselves
+        # when a slot frees. Only the manual start still needs the download-session cap.
         if action == ReupQueueBatchAction.START_PROCESSING:
             batch_limit = get_settings().reup_queue_start_processing_batch_limit
             accepted_ids, overflow_ids = apply_start_processing_batch_cap(item_ids, limit=batch_limit)
@@ -314,11 +332,30 @@ class ExportHandoffService:
                     media_prep_status=(
                         ReupQueueMediaPrepStatus.WAITING_FOR_METADATA if queue_action == ReupQueueAction.MARK_MEDIA_READY else None
                     ),
+                    pipeline_mode=pipeline_mode
+                    if queue_action
+                    in {ReupQueueAction.START_AUTO_PIPELINE, ReupQueueAction.SET_AUTOMATION}
+                    else None,
                 )
             except ReupQueueError as exc:
                 results.append(BatchItemResult(item_id=item_id, result="skipped", reason_code=exc.code, message=exc.message))
                 continue
-            results.append(BatchItemResult(item_id=item_id, result="succeeded", status=updated.status, message="Batch action applied."))
+            parked = bool(
+                isinstance(getattr(updated, "metadata_json", None), dict)
+                and (updated.metadata_json or {}).get("pipeline_awaiting_slot") is True
+            )
+            results.append(
+                BatchItemResult(
+                    item_id=item_id,
+                    result="succeeded",
+                    status=updated.status,
+                    message=(
+                        "Auto pipeline accepted; waiting for a free lane slot."
+                        if parked
+                        else "Batch action applied."
+                    ),
+                )
+            )
         if overflow_ids and batch_limit is not None:
             overflow_message = (
                 f"Batch capped at {batch_limit} items for safe download processing. "
@@ -380,6 +417,16 @@ class ExportHandoffService:
             "item_count": len(items),
             "items": [item.manifest_json for item in items],
         }
+
+    def _extend_manifest(self, base: dict, extension: dict | None) -> dict:
+        extra = dict(extension or {})
+        conflicts = sorted(set(base).intersection(extra))
+        if conflicts:
+            raise ExportHandoffError(
+                "MANIFEST_EXTENSION_CONFLICT",
+                f"Manifest extension conflicts with reserved keys: {', '.join(conflicts)}.",
+            )
+        return {**base, **extra}
 
     def _handoff_payload(self, package: ExportPackage, target_platform: PublishTargetPlatform) -> dict:
         return {

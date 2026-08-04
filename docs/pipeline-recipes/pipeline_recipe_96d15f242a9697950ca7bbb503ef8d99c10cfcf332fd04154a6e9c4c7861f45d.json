@@ -1,0 +1,106 @@
+{
+  "schema_version": "pipeline_recipe_lock_v2",
+  "status": "LOCKED_FOR_CONTROLLED_PILOT_WITH_GAPS",
+  "locked_at": "2026-07-27T04:52:06.810697+00:00",
+  "operator_id": "local_operator",
+  "phase1": {
+    "extractor": "v58_candidate",
+    "step": 1,
+    "pad": 1,
+    "authority": "master_timeline.json",
+    "authority_v3_6_full_duration": false,
+    "scorer": "score_phase1_pass",
+    "final_coverage_fade_tail_max_frames": 5,
+    "post_refinement_sparse_compact_guard": {
+      "policy_version": "post_refinement_sparse_compact_text_consensus_v1",
+      "max_width_frac": 0.08,
+      "max_height_frac": 0.065,
+      "visual_normalized_height": 64,
+      "texture_max_laplacian_variance": 150.0,
+      "texture_max_edge_density": 0.1,
+      "texture_min_saturation": 120.0,
+      "recognizer_failure_policy": "fail_soft_to_operator_review"
+    }
+  },
+  "phase2": {
+    "provider": "local",
+    "model_versions": [
+      "ppocrv6-medium-det-8e0f56fb_rec-e5a92bcb_paddleocr-3.8.0.dev11-g2661c7c0e"
+    ],
+    "geometry_authority": "master_timeline.json",
+    "output_artifact": "phase2_ocr_timeline.json",
+    "overwrite_master_timeline": false,
+    "approval_policy": "exact_operator_review",
+    "llm_context_correction_allowed": true,
+    "llm_correction_is_approval_authority": false
+  },
+  "phase3": {
+    "scope": "title_labels_ingredients_units_endcard",
+    "duplicate_transition_policy": "translate_once_cover_all_geometry_refs",
+    "duration_policy": "meaning_preserving_compaction_then_measured_audio_fit",
+    "approval_policy": "operator_locked_translation"
+  },
+  "tts": {
+    "provider": "auto",
+    "voice_id": "vi-VN-HoaiMyNeural",
+    "speaking_rate": 1.0,
+    "timing_policy": "measured_duration_segment_fit",
+    "atempo_policy": "bounded_only_after_text_compaction"
+  },
+  "render": {
+    "renderer": "phase4_adaptive_pts_preserving",
+    "video_encoder_policy": "auto",
+    "hardware_smoke_probe": true,
+    "hardware_fallback_enabled": true,
+    "background_mix_gain": 0.22,
+    "loudness_target_lufs": -14.0,
+    "invisible_perturbation": false,
+    "mirror": false,
+    "duplicate_detection_evasion": false
+  },
+  "operator_gates": [
+    "OCR_APPROVED",
+    "TRANSLATION_APPROVED",
+    "VISUAL_APPROVED",
+    "AUDIO_APPROVED",
+    "FINAL_APPROVED",
+    "METADATA_APPROVED",
+    "SOURCE_RIGHTS_AND_MUSIC_APPROVED"
+  ],
+  "execution": {
+    "resume": true,
+    "idempotent_stage_checks": true,
+    "transient_retry_policy": "pipeline_retry_policy",
+    "external_publish": false
+  },
+  "evidence": {
+    "corpus": {
+      "path": "docs/pipeline-regression-corpus-v4.json",
+      "file_sha256": "50411addb09dba352db8a219bbc3100e66e4c0a797de662e361ffd42dd0e0346",
+      "corpus_sha256": "12a1a4ceb68365e8f3206239b96b181f478c3b381f158a83daae7d8193bdda09"
+    },
+    "report": {
+      "path": "apps/api/regression_runs/pipeline_v4_20260727_720p_guard/pipeline_regression_report.json",
+      "file_sha256": "f908e89bc24c94b7412cdd05b816b33bbee3487f7a47cc9f0c3628a8a0f9bbbc",
+      "report_sha256": "c4a726c383d79f732f3268b2a832a4c903bc9da1e279de0a14d051de72248498"
+    },
+    "real_video_gaps": {
+      "orientation": [
+        "portrait"
+      ],
+      "motion": [
+        "low",
+        "medium"
+      ],
+      "audio": [
+        "absent"
+      ]
+    }
+  },
+  "claims": {
+    "universal_video_support": false,
+    "controlled_pilot_ready_through_phase2_execution": true,
+    "full_batch_end_to_end_pass": false
+  },
+  "recipe_sha256": "96d15f242a9697950ca7bbb503ef8d99c10cfcf332fd04154a6e9c4c7861f45d"
+}

@@ -1,0 +1,307 @@
+{
+  "schema_version": "pipeline_regression_corpus_v1",
+  "policy_version": "pipeline_regression_policy_v1",
+  "status": "CORPUS_READY_WITH_GAPS",
+  "case_count": 6,
+  "cases": [
+    {
+      "case_id": "local_7450099336215579915",
+      "source_video_external_id": "7450099336215579915",
+      "status": "READY_FOR_BATCH_REGRESSION",
+      "video_path": ".douyin_profiles/download_staging/7450099336215579915.mp4",
+      "phase1_artifact_root": "apps/api/phase1_v58_closure_candidate_7450099336215579915",
+      "probe": {
+        "duration_seconds": 27.133,
+        "size_bytes": 9388159,
+        "width": 1920,
+        "height": 1080,
+        "r_frame_rate": "30/1",
+        "avg_frame_rate": "10410/407",
+        "has_audio": true
+      },
+      "visual_sample": {
+        "sample_count": 7,
+        "mean_brightness": 124.959,
+        "brightness_range": 128.506,
+        "mean_contrast": 68.734,
+        "mean_motion": 83.659,
+        "lighting": "mixed",
+        "motion": "high"
+      },
+      "phase1_baseline": {
+        "track_count": 36,
+        "hardsub_count": 36
+      },
+      "dimensions": {
+        "orientation": "landscape",
+        "resolution": "1080p_or_higher",
+        "timebase": "VFR",
+        "frame_rate": "30fps_or_lower",
+        "duration_band": "under_35s",
+        "audio": "present",
+        "lighting": "mixed",
+        "motion": "high",
+        "text_density": "medium"
+      }
+    },
+    {
+      "case_id": "local_7472735913513078057",
+      "source_video_external_id": "7472735913513078057",
+      "status": "READY_FOR_BATCH_REGRESSION",
+      "video_path": ".douyin_profiles/download_staging/7472735913513078057.mp4",
+      "phase1_artifact_root": "apps/api/tmp_phase1_random5_final_reconcile_v58/7472735913513078057",
+      "probe": {
+        "duration_seconds": 29.467,
+        "size_bytes": 9828615,
+        "width": 1920,
+        "height": 1080,
+        "r_frame_rate": "30/1",
+        "avg_frame_rate": "5595/221",
+        "has_audio": true
+      },
+      "visual_sample": {
+        "sample_count": 7,
+        "mean_brightness": 91.378,
+        "brightness_range": 144.068,
+        "mean_contrast": 53.027,
+        "mean_motion": 68.026,
+        "lighting": "mixed",
+        "motion": "high"
+      },
+      "phase1_baseline": {
+        "track_count": 34,
+        "hardsub_count": 34
+      },
+      "dimensions": {
+        "orientation": "landscape",
+        "resolution": "1080p_or_higher",
+        "timebase": "VFR",
+        "frame_rate": "30fps_or_lower",
+        "duration_band": "under_35s",
+        "audio": "present",
+        "lighting": "mixed",
+        "motion": "high",
+        "text_density": "medium"
+      }
+    },
+    {
+      "case_id": "local_7604099786644380635",
+      "source_video_external_id": "7604099786644380635",
+      "status": "READY_FOR_BATCH_REGRESSION",
+      "video_path": ".douyin_profiles/download_staging/7604099786644380635.mp4",
+      "phase1_artifact_root": "apps/api/tmp_phase1_random5_final_reconcile_v58/7604099786644380635",
+      "probe": {
+        "duration_seconds": 34.833,
+        "size_bytes": 10054270,
+        "width": 1920,
+        "height": 1080,
+        "r_frame_rate": "30/1",
+        "avg_frame_rate": "30/1",
+        "has_audio": true
+      },
+      "visual_sample": {
+        "sample_count": 7,
+        "mean_brightness": 122.148,
+        "brightness_range": 101.974,
+        "mean_contrast": 57.227,
+        "mean_motion": 75.969,
+        "lighting": "mixed",
+        "motion": "high"
+      },
+      "phase1_baseline": {
+        "track_count": 35,
+        "hardsub_count": 35
+      },
+      "dimensions": {
+        "orientation": "landscape",
+        "resolution": "1080p_or_higher",
+        "timebase": "CFR",
+        "frame_rate": "30fps_or_lower",
+        "duration_band": "under_35s",
+        "audio": "present",
+        "lighting": "mixed",
+        "motion": "high",
+        "text_density": "medium"
+      }
+    },
+    {
+      "case_id": "local_7543241784286465306",
+      "source_video_external_id": "7543241784286465306",
+      "status": "READY_FOR_BATCH_REGRESSION",
+      "video_path": ".douyin_profiles/download_staging/7543241784286465306.mp4",
+      "phase1_artifact_root": "apps/api/tmp_phase1_random5_final_reconcile_v58_edge_fix/7543241784286465306",
+      "probe": {
+        "duration_seconds": 43.567,
+        "size_bytes": 25825343,
+        "width": 1920,
+        "height": 1080,
+        "r_frame_rate": "30/1",
+        "avg_frame_rate": "30/1",
+        "has_audio": true
+      },
+      "visual_sample": {
+        "sample_count": 7,
+        "mean_brightness": 107.398,
+        "brightness_range": 175.154,
+        "mean_contrast": 60.159,
+        "mean_motion": 77.668,
+        "lighting": "mixed",
+        "motion": "high"
+      },
+      "phase1_baseline": {
+        "track_count": 50,
+        "hardsub_count": 50
+      },
+      "dimensions": {
+        "orientation": "landscape",
+        "resolution": "1080p_or_higher",
+        "timebase": "CFR",
+        "frame_rate": "30fps_or_lower",
+        "duration_band": "35_to_45s",
+        "audio": "present",
+        "lighting": "mixed",
+        "motion": "high",
+        "text_density": "dense"
+      }
+    },
+    {
+      "case_id": "local_7632302211641623154",
+      "source_video_external_id": "7632302211641623154",
+      "status": "READY_FOR_BATCH_REGRESSION",
+      "video_path": ".douyin_profiles/download_staging/7632302211641623154.mp4",
+      "phase1_artifact_root": "apps/api/tmp_phase1_random5_final_reconcile_v58/7632302211641623154",
+      "probe": {
+        "duration_seconds": 51.067,
+        "size_bytes": 20933260,
+        "width": 1920,
+        "height": 1080,
+        "r_frame_rate": "30/1",
+        "avg_frame_rate": "30/1",
+        "has_audio": true
+      },
+      "visual_sample": {
+        "sample_count": 7,
+        "mean_brightness": 111.894,
+        "brightness_range": 150.438,
+        "mean_contrast": 62.258,
+        "mean_motion": 78.354,
+        "lighting": "mixed",
+        "motion": "high"
+      },
+      "phase1_baseline": {
+        "track_count": 49,
+        "hardsub_count": 49
+      },
+      "dimensions": {
+        "orientation": "landscape",
+        "resolution": "1080p_or_higher",
+        "timebase": "CFR",
+        "frame_rate": "30fps_or_lower",
+        "duration_band": "45_to_60s",
+        "audio": "present",
+        "lighting": "mixed",
+        "motion": "high",
+        "text_density": "dense"
+      }
+    },
+    {
+      "case_id": "local_7436740505855151399",
+      "source_video_external_id": "7436740505855151399",
+      "status": "READY_FOR_BATCH_REGRESSION",
+      "video_path": ".douyin_profiles/download_staging/7436740505855151399.mp4",
+      "phase1_artifact_root": null,
+      "probe": {
+        "duration_seconds": 30.881,
+        "size_bytes": 15766198,
+        "width": 1920,
+        "height": 1080,
+        "r_frame_rate": "60/1",
+        "avg_frame_rate": "47520/1849",
+        "has_audio": true
+      },
+      "visual_sample": {
+        "sample_count": 7,
+        "mean_brightness": 88.901,
+        "brightness_range": 89.613,
+        "mean_contrast": 49.22,
+        "mean_motion": 56.531,
+        "lighting": "mixed",
+        "motion": "high"
+      },
+      "phase1_baseline": {
+        "track_count": null,
+        "hardsub_count": null
+      },
+      "dimensions": {
+        "orientation": "landscape",
+        "resolution": "1080p_or_higher",
+        "timebase": "VFR",
+        "frame_rate": "above_30fps",
+        "duration_band": "under_35s",
+        "audio": "present",
+        "lighting": "mixed",
+        "motion": "high",
+        "text_density": "unknown"
+      }
+    }
+  ],
+  "coverage": {
+    "orientation": [
+      "landscape"
+    ],
+    "resolution": [
+      "1080p_or_higher"
+    ],
+    "timebase": [
+      "CFR",
+      "VFR"
+    ],
+    "frame_rate": [
+      "30fps_or_lower",
+      "above_30fps"
+    ],
+    "duration_band": [
+      "35_to_45s",
+      "45_to_60s",
+      "under_35s"
+    ],
+    "lighting": [
+      "mixed"
+    ],
+    "motion": [
+      "high"
+    ],
+    "audio": [
+      "present"
+    ],
+    "text_density": [
+      "dense",
+      "medium",
+      "unknown"
+    ]
+  },
+  "real_video_gaps": {
+    "orientation": [
+      "portrait"
+    ],
+    "resolution": [
+      "720p_or_lower"
+    ],
+    "lighting": [
+      "dark",
+      "light"
+    ],
+    "motion": [
+      "low",
+      "medium"
+    ],
+    "audio": [
+      "absent"
+    ],
+    "text_density": [
+      "light"
+    ]
+  },
+  "closure_rule": "Do not claim universal closure while real_video_gaps is non-empty.",
+  "corpus_sha256": "f84b9cb49179d72a287fad1ec4e326e4484f37ee14c79c5e2900d79262e501d4"
+}

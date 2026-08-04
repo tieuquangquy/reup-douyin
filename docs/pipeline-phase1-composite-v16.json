@@ -1,0 +1,23 @@
+{
+  "schema_version": "pipeline_phase1_composite_v1",
+  "status": "PASS",
+  "created_at": "2026-07-27T21:24:00+07:00",
+  "scorer": "scripts.score_phase1_pass current UI-grid peer guard",
+  "case_count": 10,
+  "pass_count": 10,
+  "fail_count": 0,
+  "cases": [
+    {"case_id": "local_7450099336215579915", "artifact_root": "apps/api/regression_runs/pipeline_v14_grid_peer_guard_20260727/local_7450099336215579915", "tracks": 42, "hardsubs": 15, "uncertain": 0, "overmerged_ui_grid_tracks": 0, "pass": true},
+    {"case_id": "local_7472735913513078057", "artifact_root": "apps/api/regression_runs/pipeline_v14_grid_peer_guard_20260727/local_7472735913513078057", "tracks": 37, "hardsubs": 15, "uncertain": 0, "overmerged_ui_grid_tracks": 0, "pass": true},
+    {"case_id": "local_7604099786644380635", "artifact_root": "apps/api/regression_runs/pipeline_v16_legacy_ui_grid_refresh_20260727/local_7604099786644380635", "tracks": 37, "hardsubs": 16, "uncertain": 0, "overmerged_ui_grid_tracks": 0, "pass": true},
+    {"case_id": "local_7543241784286465306", "artifact_root": "apps/api/regression_runs/pipeline_v16_legacy_ui_grid_refresh_20260727/local_7543241784286465306", "tracks": 53, "hardsubs": 20, "uncertain": 0, "overmerged_ui_grid_tracks": 0, "pass": true},
+    {"case_id": "local_7632302211641623154", "artifact_root": "apps/api/regression_runs/pipeline_v16_legacy_ui_grid_refresh_20260727/local_7632302211641623154", "tracks": 51, "hardsubs": 20, "uncertain": 0, "overmerged_ui_grid_tracks": 0, "pass": true},
+    {"case_id": "local_7436740505855151399", "artifact_root": "apps/api/regression_runs/pipeline_v2_20260727_fade_fix/local_7436740505855151399", "tracks": 16, "hardsubs": 6, "uncertain": 0, "overmerged_ui_grid_tracks": 0, "pass": true},
+    {"case_id": "local_7435998258977099019", "artifact_root": "apps/api/regression_runs/pipeline_v2_20260727_fade_fix/local_7435998258977099019", "tracks": 33, "hardsubs": 19, "uncertain": 0, "overmerged_ui_grid_tracks": 0, "pass": true},
+    {"case_id": "local_7442677656685939980", "artifact_root": "apps/api/regression_runs/pipeline_v2_20260727_fade_fix/local_7442677656685939980", "tracks": 24, "hardsubs": 15, "uncertain": 0, "overmerged_ui_grid_tracks": 0, "pass": true},
+    {"case_id": "local_7429689966633979175", "artifact_root": "apps/api/regression_runs/pipeline_v3_20260727_post_refinement_guard_v2/local_7429689966633979175", "tracks": 16, "hardsubs": 14, "uncertain": 0, "overmerged_ui_grid_tracks": 0, "pass": true},
+    {"case_id": "local_7473848630424702271", "artifact_root": "apps/api/regression_runs/pipeline_v3_20260727_post_refinement_guard_v2/local_7473848630424702271", "tracks": 46, "hardsubs": 13, "uncertain": 0, "overmerged_ui_grid_tracks": 0, "pass": true}
+  ],
+  "historical_note": "Immutable pre-UI-grid v4 artifacts remain unchanged; five correctly fail the current scorer because they retain merged nutrition cells.",
+  "composite_sha256": "07f9f72625d250f62633898df333134b58033189c3c9d397741ad4504b1084c2"
+}

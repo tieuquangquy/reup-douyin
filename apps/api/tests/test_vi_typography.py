@@ -1,4 +1,4 @@
-"""VI burn: size near OCR box height, left at OCR x (not cover pad), keep diacritics."""
+"""VI burn: fixed global font size, center-bottom anchor, stroke, diacritics."""
 
 from __future__ import annotations
 
@@ -8,10 +8,10 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-from src.media_pipeline.translator.service import USER_INSTRUCTION
+from src.media_pipeline.translator.translate_llm import USER_BATCH_INSTRUCTION
 from src.media_pipeline.video_renderer.inpaint_render import (
-    _TIGHT_PAD_X,
     draw_vi_overlays,
+    global_vi_font_size_px,
 )
 from src.media_pipeline.video_renderer.overlays import OverlaySegment
 
@@ -24,66 +24,64 @@ def _segoe_or_arial() -> Path:
 
 
 class ViTypographyTests(unittest.TestCase):
-    def test_font_height_matches_ocr_box_scale(self) -> None:
-        """VI ink height must track the scanned label box (not half-size)."""
-        h, w = 200, 300
+    def test_font_uses_global_size_not_box_fit(self) -> None:
+        h, w = 500, 400
         frame = np.full((h, w, 3), 240, dtype=np.uint8)
-        # Short VI so width shrink does not dominate; height 40px.
-        seg = OverlaySegment(0, 1000, 0.20, 0.40, 0.55, 0.20, "Cơm", kind="ui")
+        seg = OverlaySegment(0, 1000, 0.20, 0.70, 0.55, 0.04, "Cơm", kind="ui")
         font = _segoe_or_arial()
-        ocr_h = int(seg.height * h)
-        out = draw_vi_overlays(frame, [seg], fontfile=font, align="left")
-        x0 = int(seg.x * w)
-        y0 = int(seg.y * h)
-        x1 = int((seg.x + seg.width) * w)
-        y1 = int((seg.y + seg.height) * h)
-        roi = out[y0:y1, x0:x1, 0]
-        ink = roi < 80
+        out = draw_vi_overlays(frame, [seg], fontfile=font)
+        expected = global_vi_font_size_px(h)
+        pil_font = ImageFont.truetype(str(font), size=expected)
+        bbox = ImageDraw.Draw(Image.new("RGB", (8, 8))).textbbox(
+            (0, 0), "Cơm", font=pil_font, stroke_width=2
+        )
+        th = bbox[3] - bbox[1]
+        ax = int((seg.x + seg.width / 2) * w)
+        ay = int((seg.y + seg.height) * h)
+        y0 = max(0, ay - th - 6)
+        y1 = min(h, ay + 4)
+        x0 = max(0, ax - 80)
+        x1 = min(w, ax + 80)
+        ink = out[y0:y1, x0:x1, 0] < 80
         self.assertTrue(np.any(ink))
         ys = np.where(np.any(ink, axis=1))[0]
         ink_h = int(ys.max() - ys.min() + 1)
-        ratio = ink_h / float(ocr_h)
-        self.assertGreaterEqual(ratio, 0.70)
-        self.assertLessEqual(ratio, 1.05)
+        self.assertGreaterEqual(ink_h, int(expected * 0.50))
 
-    def test_vi_left_edge_at_ocr_x_not_cover_pad(self) -> None:
+    def test_vi_centered_on_box_not_left_pad(self) -> None:
         h, w = 200, 300
         frame = np.full((h, w, 3), 240, dtype=np.uint8)
         seg = OverlaySegment(0, 1000, 0.30, 0.40, 0.40, 0.12, "Cơm", kind="ui")
         font = _segoe_or_arial()
-        out = draw_vi_overlays(frame, [seg], fontfile=font, align="left")
-        x0 = int(seg.x * w)
-        y0 = int(seg.y * h)
-        y1 = int((seg.y + seg.height) * h)
-        # Pad would start ~_TIGHT_PAD_X*w left of OCR; ink must not live there.
-        pad_px = int(_TIGHT_PAD_X * w) + 2
-        left_of_ocr = out[y0:y1, max(0, x0 - pad_px) : x0, 0]
-        in_ocr_left = out[y0:y1, x0 : x0 + 20, 0]
-        self.assertLess(float((left_of_ocr < 80).mean()), 0.01)
-        self.assertGreater(float((in_ocr_left < 80).mean()), 0.01)
+        out = draw_vi_overlays(frame, [seg], fontfile=font)
+        ax = int((seg.x + seg.width / 2) * w)
+        ay = int((seg.y + seg.height) * h)
+        # Ink should appear near center-bottom, not only at left OCR edge.
+        band = out[max(0, ay - 40) : min(h, ay + 2), max(0, ax - 30) : min(w, ax + 30), 0]
+        self.assertGreater(float((band < 80).mean()), 0.01)
 
     def test_diacritics_string_is_burned(self) -> None:
-        h, w = 120, 240
+        h, w = 200, 320
         frame = np.full((h, w, 3), 250, dtype=np.uint8)
         text = "Bữa trưa"
-        seg = OverlaySegment(0, 1000, 0.10, 0.30, 0.55, 0.25, text, kind="ui")
+        seg = OverlaySegment(0, 1000, 0.20, 0.50, 0.40, 0.12, text, kind="ui")
         font = _segoe_or_arial()
-        out = draw_vi_overlays(frame, [seg], fontfile=font, align="left")
-        x0 = int(seg.x * w)
-        y0 = int(seg.y * h)
-        x1 = int((seg.x + seg.width) * w)
-        y1 = int((seg.y + seg.height) * h)
-        self.assertGreater(float((out[y0:y1, x0:x1, 0] < 80).mean()), 0.005)
-        # Font must be able to measure the diacritic string (not tofu-only).
+        out = draw_vi_overlays(frame, [seg], fontfile=font)
+        ax = int((seg.x + seg.width / 2) * w)
+        ay = int((seg.y + seg.height) * h)
+        roi = out[max(0, ay - 50) : min(h, ay + 4), max(0, ax - 80) : min(w, ax + 80), 0]
+        self.assertGreater(float((roi < 80).mean()), 0.005)
         pil_font = ImageFont.truetype(str(font), size=18)
         bbox = ImageDraw.Draw(Image.new("RGB", (8, 8))).textbbox((0, 0), text, font=pil_font)
         self.assertGreater(bbox[2] - bbox[0], 20)
 
     def test_user_instruction_requires_diacritics(self) -> None:
-        lower = USER_INSTRUCTION.lower()
+        lower = USER_BATCH_INSTRUCTION.lower()
         self.assertTrue(
-            "có dấu" in USER_INSTRUCTION or "co dau" in lower or "dấu" in USER_INSTRUCTION,
-            msg="USER_INSTRUCTION must require Vietnamese with diacritics",
+            "có dấu" in USER_BATCH_INSTRUCTION
+            or "co dau" in lower
+            or "dấu" in USER_BATCH_INSTRUCTION,
+            msg="USER_BATCH_INSTRUCTION must require Vietnamese with diacritics",
         )
 
 

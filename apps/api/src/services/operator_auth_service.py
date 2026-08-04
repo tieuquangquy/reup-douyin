@@ -534,6 +534,15 @@ class OperatorAuthService:
         next_role = _normalize_role(role) if role is not None else membership.role
         next_active = membership.is_active if is_active is None else bool(is_active)
 
+        changing_own_ops_access = operator_id == actor_membership.operator_id and (
+            not next_active or next_role not in _ADMIN_ROLES
+        )
+        if changing_own_ops_access:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot remove your own Ops Console access",
+            )
+
         if membership.role == "owner" and actor_membership.role != "owner":
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only owners can manage owners")
         if next_role == "owner" and actor_membership.role != "owner":

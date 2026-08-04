@@ -87,7 +87,7 @@ def create_risk_decision(request: RiskDecisionRequest, service: RiskService = De
             note=request.note,
             decided_by=request.decided_by,
         )
-        flags = service.list_flags(target_type=request.target_type, target_id=request.target_id)
+        flags = service.list_current_flags(target_type=request.target_type, target_id=request.target_id)
         gate = service.gate_summary(request.target_type, request.target_id)
         return RiskSummaryResponse(
             target_type=request.target_type,
@@ -103,7 +103,7 @@ def create_risk_decision(request: RiskDecisionRequest, service: RiskService = De
 @router.get("/targets/{target_type}/{target_id}/risk-summary", response_model=RiskSummaryResponse)
 def get_target_risk_summary(target_type: RiskTargetType, target_id: UUID, service: RiskService = Depends(get_risk_service)) -> RiskSummaryResponse:
     try:
-        flags = service.list_flags(target_type=target_type, target_id=target_id)
+        flags = service.list_current_flags(target_type=target_type, target_id=target_id)
         gate = service.gate_summary(target_type, target_id)
         latest_decision = service.latest_decision(target_type, target_id)
         return RiskSummaryResponse(

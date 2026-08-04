@@ -5,19 +5,23 @@ import logging
 from uuid import UUID
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from src.core.settings import get_settings
-from src.enums import ExternalPublicationStatus, PublishAttemptStatus, PublishReconciliationStatus
+from src.enums import ExternalPublicationStatus, JobType, PublishAttemptStatus, PublishDraftStatus, PublishReconciliationStatus
 from src.models.media import RenderOutput
 from src.models.publish import PlatformAccount, PublishAttempt, PublishDraft
 from src.publish.connectors.base import PublishConnector, PublishConnectorError
 from src.publish.connectors.facebook_reels import FacebookReelsConnector
+from src.publish.services.facebook_publish_safety_service import FacebookPublishSafetyService
 from src.publish.services.platform_account_service import PlatformAccountService
+from src.publish.services.platform_publication_service import PlatformPublicationService
 from src.publish.services.publish_gate_service import PublishGateService
 from src.publish.services.publish_lifecycle_service import PublishLifecycleService
-from src.publish.types import PublishMediaInput, PublishRequest
+from src.publish.types import PublishGateResult, PublishMediaInput, PublishRequest
 from src.schemas.publish import PublishDraftPublishRequest
+from src.services.job_factory import build_job
 from src.storage.local import LocalStorageBackend
 
 logger = logging.getLogger(__name__)
@@ -42,29 +46,119 @@ class PublishAttemptService:
         self.connector = connector or FacebookReelsConnector()
         self.storage = LocalStorageBackend(get_settings().local_storage_root)
         self.lifecycle = PublishLifecycleService(db)
+        self.publications = PlatformPublicationService(db)
+
+    def enqueue_publish(self, draft_id: UUID, request: PublishDraftPublishRequest) -> PublishAttempt:
+        """Persist an attempt and durable job without making an external request inline."""
+
+        draft, render, account, gate = self._validate_publish_request(draft_id, request)
+        self._assert_no_active_attempt(draft.id)
+        try:
+            attempt = self._create_attempt(draft, account, request)
+            self._initialize_attempt_summary(attempt, draft, render, account, request, gate.warnings)
+            job = build_job(
+                workspace_id=draft.workspace_id,
+                job_type=JobType.PUBLISH_CONTENT,
+                payload_json={
+                    "publish_attempt_id": str(attempt.id),
+                    "publish_draft_id": str(draft.id),
+                    "platform_account_id": str(account.id),
+                    "publish_mode": request.publish_mode,
+                },
+                source_video_id=draft.source_video_id,
+                render_output_id=render.id,
+                reference_type="publish_attempt",
+                reference_id=attempt.id,
+                idempotency_key=f"publish-attempt:{attempt.id}",
+                max_attempts=1,
+            )
+            self.db.add(job)
+            self.db.flush()
+            attempt.created_by_job_id = job.id
+            self._sync_draft(draft)
+            self.db.commit()
+        except IntegrityError as exc:
+            self.db.rollback()
+            raise PublishAttemptError("duplicate_active_attempt") from exc
+        self.db.refresh(attempt)
+        logger.info(
+            "publish_attempt_queued",
+            extra={
+                "publish_attempt_id": str(attempt.id),
+                "publish_draft_id": str(draft.id),
+                "job_id": str(attempt.created_by_job_id),
+            },
+        )
+        return attempt
 
     def publish_now(self, draft_id: UUID, request: PublishDraftPublishRequest) -> PublishAttempt:
-        draft = self._get_draft(draft_id)
+        """Legacy synchronous entry point kept for controlled tests and migration tooling."""
+
+        draft, render, account, gate = self._validate_publish_request(draft_id, request)
+        self._assert_no_active_attempt(draft.id)
+        attempt = self._create_attempt(draft, account, request)
+        self._initialize_attempt_summary(attempt, draft, render, account, request, gate.warnings)
+        self.db.commit()
+        return self._execute_prepared_attempt(attempt, draft, render, account, gate.warnings)
+
+    def execute_attempt(self, attempt_id: UUID) -> PublishAttempt:
+        """Execute exactly one pre-created attempt from a worker job.
+
+        A non-queued attempt is never uploaded again. This fail-closed rule prevents a
+        worker restart from duplicating an external post after an ambiguous transport loss.
+        """
+
+        attempt = self.get_attempt(attempt_id)
+        draft = self._get_draft(attempt.publish_draft_id)
+        if attempt.status != PublishAttemptStatus.QUEUED:
+            if attempt.status in ACTIVE_ATTEMPT_STATUSES:
+                self.lifecycle.apply_uncertain_failure(
+                    attempt,
+                    error_code="publish_attempt_resume_requires_operator_check",
+                    error_message=(
+                        "Worker resumed after the publish attempt crossed an external boundary; "
+                        "the attempt will not be uploaded again automatically."
+                    ),
+                )
+            self._sync_draft(draft)
+            self.db.commit()
+            self.db.refresh(attempt)
+            return attempt
+
         render = self._resolve_render(draft)
-        account = self.db.get(PlatformAccount, request.platform_account_id)
-        gate = PublishGateService(self.db).evaluate(draft, render, account)
-        if not gate.allowed:
-            raise PublishAttemptError("gate_blocked: " + "; ".join(gate.reasons))
+        account = self.db.get(PlatformAccount, attempt.platform_account_id)
+        gate = PublishGateService(self.db).evaluate(
+            draft,
+            render,
+            account,
+            allowed_draft_statuses=frozenset(
+                {PublishDraftStatus.READY, PublishDraftStatus.PUBLISHING}
+            ),
+            current_attempt_id=attempt.id,
+        )
         if account is None:
             raise PublishAttemptError("invalid_platform_account")
-        self._assert_no_active_attempt(draft.id)
+        if not gate.allowed:
+            self.lifecycle.apply_uncertain_failure(
+                attempt,
+                error_code="gate_blocked",
+                error_message="; ".join(gate.reasons),
+            )
+            self._sync_draft(draft)
+            self.db.commit()
+            self.db.refresh(attempt)
+            return attempt
+        return self._execute_prepared_attempt(attempt, draft, render, account, gate.warnings)
 
-        attempt = self._create_attempt(draft, account, request)
+    def _execute_prepared_attempt(
+        self,
+        attempt: PublishAttempt,
+        draft: PublishDraft,
+        render: RenderOutput,
+        account: PlatformAccount,
+        gate_warnings: list[str],
+    ) -> PublishAttempt:
         media_input = self._build_media_input(draft, render)
-        attempt.request_summary_json = {
-            "draft_id": str(draft.id),
-            "render_output_id": str(render.id),
-            "platform_account_id": str(account.id),
-            "platform": draft.target_platform,
-            "video_path": str(media_input.video_path),
-            "mode": request.publish_mode,
-        }
-        attempt.warning_summary_json = {"warnings": gate.warnings}
         attempt.status = PublishAttemptStatus.RUNNING
         attempt.started_at = datetime.now(UTC)
         self._sync_draft(draft)
@@ -91,24 +185,52 @@ class PublishAttemptService:
             attempt.reconciliation_required = result.reconciliation_required
             attempt.reconciliation_status = result.reconciliation_status
             attempt.response_summary_json = result.response_summary
-            attempt.warning_summary_json = {"warnings": [*gate.warnings, *result.warnings]}
+            attempt.warning_summary_json = {"warnings": [*gate_warnings, *result.warnings]}
             if result.status == PublishAttemptStatus.SUCCEEDED and result.external_status == ExternalPublicationStatus.PUBLISHED:
                 self.lifecycle.apply_success(attempt)
             else:
                 attempt.status = result.status
                 attempt.finished_at = datetime.now(UTC)
+            # Persist the platform response before publication materialization. If the
+            # authority upsert fails, a resumed worker sees this terminal/external state
+            # and will sync/reconcile instead of uploading the video again.
+            self.db.commit()
             self._sync_draft(draft)
             logger.info("publish_attempt_succeeded", extra={"publish_attempt_id": str(attempt.id), "draft_id": str(draft.id)})
         except PublishConnectorError as exc:
             attempt.response_summary_json = exc.response_summary
             self._apply_external_identifiers_from_response(attempt, exc.response_summary)
             self.lifecycle.apply_uncertain_failure(attempt, error_code=exc.code, error_message=str(exc))
+            FacebookPublishSafetyService(self.db).apply_connector_failure(
+                account,
+                error_code=exc.code,
+            )
+            self.db.commit()
             self._sync_draft(draft)
-            logger.info("publish_attempt_failed", extra={"publish_attempt_id": str(attempt.id), "error_code": exc.code})
+            logger.info(
+                "publish_attempt_failed",
+                extra={
+                    "publish_attempt_id": str(attempt.id),
+                    "platform_account_id": str(account.id),
+                    "error_code": exc.code,
+                },
+            )
         except ValueError as exc:
             self.lifecycle.apply_uncertain_failure(attempt, error_code="invalid_platform_account", error_message=str(exc))
+            FacebookPublishSafetyService(self.db).apply_connector_failure(
+                account,
+                error_code="facebook_token_unavailable",
+            )
+            self.db.commit()
             self._sync_draft(draft)
-            logger.info("publish_attempt_failed", extra={"publish_attempt_id": str(attempt.id), "error_code": "invalid_platform_account"})
+            logger.info(
+                "publish_attempt_failed",
+                extra={
+                    "publish_attempt_id": str(attempt.id),
+                    "platform_account_id": str(account.id),
+                    "error_code": "invalid_platform_account",
+                },
+            )
         self.db.commit()
         self.db.refresh(attempt)
         return attempt
@@ -118,7 +240,13 @@ class PublishAttemptService:
         if not (attempt.external_publish_id or attempt.external_media_id or attempt.external_reel_id):
             raise PublishAttemptError("missing_external_publish_reference")
 
-        account_config = PlatformAccountService(self.db).resolve_config(attempt.platform_account_id)
+        account = self.db.get(PlatformAccount, attempt.platform_account_id)
+        if account is None:
+            raise PublishAttemptError("invalid_platform_account")
+        account_config = PlatformAccountService(self.db).resolve_config(
+            attempt.platform_account_id,
+            require_active=False,
+        )
         attempt.status = PublishAttemptStatus.RECONCILING
         attempt.reconciliation_status = PublishReconciliationStatus.IN_PROGRESS
         attempt.reconciliation_required = True
@@ -151,7 +279,18 @@ class PublishAttemptService:
             attempt.error_message = str(exc)
             attempt.last_status_checked_at = datetime.now(UTC)
             attempt.last_status_sync_result_json = {"error_code": exc.code, "error_message": str(exc), "response_summary": exc.response_summary}
-            logger.info("publish_attempt_status_refresh_failed", extra={"publish_attempt_id": str(attempt.id), "error_code": exc.code})
+            FacebookPublishSafetyService(self.db).apply_connector_failure(
+                account,
+                error_code=exc.code,
+            )
+            logger.info(
+                "publish_attempt_status_refresh_failed",
+                extra={
+                    "publish_attempt_id": str(attempt.id),
+                    "platform_account_id": str(account.id),
+                    "error_code": exc.code,
+                },
+            )
         draft = self._get_draft(attempt.publish_draft_id)
         self._sync_draft(draft)
         self.db.commit()
@@ -193,6 +332,13 @@ class PublishAttemptService:
 
     def get_draft_for_status(self, draft_id: UUID) -> PublishDraft:
         return self._get_draft(draft_id)
+
+    def sync_draft_state(self, draft_id: UUID) -> PublishDraft:
+        draft = self._get_draft(draft_id)
+        self._sync_draft(draft)
+        self.db.commit()
+        self.db.refresh(draft)
+        return draft
 
     def attempts_for_draft(self, draft_id: UUID) -> list[PublishAttempt]:
         return list(
@@ -249,6 +395,40 @@ class PublishAttemptService:
 
     def _sync_draft(self, draft: PublishDraft) -> None:
         self.lifecycle.sync_attempt_to_draft(draft, self.attempts_for_draft(draft.id))
+        self.publications.sync_for_draft(draft.id)
+
+    def _validate_publish_request(
+        self,
+        draft_id: UUID,
+        request: PublishDraftPublishRequest,
+    ) -> tuple[PublishDraft, RenderOutput, PlatformAccount, PublishGateResult]:
+        draft = self._get_draft(draft_id)
+        render = self._resolve_render(draft)
+        account = self.db.get(PlatformAccount, request.platform_account_id)
+        gate = PublishGateService(self.db).evaluate(draft, render, account)
+        if not gate.allowed:
+            raise PublishAttemptError("gate_blocked: " + "; ".join(gate.reasons))
+        if account is None:
+            raise PublishAttemptError("invalid_platform_account")
+        return draft, render, account, gate
+
+    @staticmethod
+    def _initialize_attempt_summary(
+        attempt: PublishAttempt,
+        draft: PublishDraft,
+        render: RenderOutput,
+        account: PlatformAccount,
+        request: PublishDraftPublishRequest,
+        gate_warnings: list[str],
+    ) -> None:
+        attempt.request_summary_json = {
+            "draft_id": str(draft.id),
+            "render_output_id": str(render.id),
+            "platform_account_id": str(account.id),
+            "platform": draft.target_platform,
+            "mode": request.publish_mode,
+        }
+        attempt.warning_summary_json = {"warnings": gate_warnings}
 
     def _apply_external_identifiers_from_response(self, attempt: PublishAttempt, response_summary: dict | None) -> None:
         if not response_summary:

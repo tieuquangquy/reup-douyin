@@ -38,7 +38,8 @@ assert.match(pageSource, /queueTilePrimaryButtonClassName/, "Tile CTAs must use 
 assert.match(globalCssSource, /is-no-arrow/, "Recover/retry primary buttons must not show forward arrow");
 assert.match(pageSource, /hasActiveDownloadJob/, "Reup Queue must auto-refresh while downloads are active");
 assert.match(pageSource, /reup-queue-download-progress/, "Reup Queue tiles must show download progress bar");
-assert.match(pageSource, /downloadJobErrorLine/, "Reup Queue tiles must surface download job errors");
+assert.match(studioSource, /downloadJobErrorLine/, "Download job errors must feed the shared failure alert/strip helpers");
+assert.match(pageSource, /queueTileFailureStrip|reup-queue-tile-failure-strip/, "Download/analyze failure reasons must surface on the thumbnail strip");
 assert.match(pageSource, /reup-queue-download-progress-label/, "Download progress bar must show percent label");
 assert.match(studioSource, /Avoid duplicate orange chips/, "In-flight download must not duplicate a second job chip");
 assert.doesNotMatch(studioSource, /Downloading \$\{/, "Percent must live on the progress bar, not a second chip");
@@ -129,6 +130,16 @@ assert.match(
   "Bulk-selected Queue tiles must expose is-bulk-selected for the shared green selection ring"
 );
 assert.match(
+  pageSource.slice(pageSource.indexOf("function ReupQueueMediaTile")),
+  /data-tone=\{stageTone\}/,
+  "Queue gallery tiles must expose data-tone for status-tint hover"
+);
+assert.match(
+  pageSource.slice(pageSource.indexOf("function ReupQueueWorklistRow")),
+  /data-tone=\{stageTone\}/,
+  "Queue worklist rows must expose data-tone for status-tint hover"
+);
+assert.match(
   globalCssSource,
   /\.capture-inbox-media-tile\.is-bulk-selected(?:,[\s\S]*?\.review-board-media-tile\.is-bulk-selected)?\s*\{[^}]*border-color: var\(--accent\);[^}]*box-shadow: 0 0 0 2px color-mix\(in srgb, var\(--accent\) 38%, transparent\), var\(--shadow\);/,
   "Bulk-selected Queue gallery tiles must inherit the Capture/Review green outer ring"
@@ -154,7 +165,7 @@ assert.match(pageSource, /operator-panel capture-inbox-media-gallery reup-queue-
 assert.match(pageSource, /Select visible/, "Queue gallery header must expose visible-scope selection");
 assert.doesNotMatch(pageSource, />Selected scope</, "Queue bulk bar must not repeat the selected scope summary");
 assert.doesNotMatch(pageSource, />Run on selected</, "Queue bulk bar must not repeat the selected action scope");
-assert.match(pageSource, /if \(!selectedCount\) return null;/, "Queue bulk actions must only render after an item is selected");
+assert.match(pageSource, /if \(!selectedCount\) return null;/, "Queue bulk dock must only render after an item is selected");
 assert.match(pageSource, /toolbar=\{\(/, "Queue bulk selection controls must live in the compact toolbar");
 assert.match(pageSource, /bulkActionIconKind\(entry\.action\)/, "Queue bulk action buttons must use verb-specific icons");
 assert.match(pageSource, /bulkActionButtonTone\(entry\.action\)/, "Queue bulk buttons must use semantic filled colors");
@@ -244,7 +255,14 @@ assert.match(studioSource, /label: "Render"/, "Reup Queue must expose Render pip
 assert.match(studioSource, /label: "Export"/, "Reup Queue must expose Export pipeline filter");
 assert.doesNotMatch(studioSource, /label: "Needs start"/, "Needs start must not remain a pipeline chip label");
 assert.doesNotMatch(studioSource, /label: "In production"/, "In production must not remain a pipeline chip label");
-assert.match(pageSource, /\{ action: "START_PROCESSING", label: "Start"/, "Reup Queue must expose start processing action");
+assert.match(pageSource, /START_AUTO_PIPELINE/, "Reup Queue must expose Start auto pipeline");
+assert.match(pageSource, /Start auto/, "Reup Queue hero must label Start auto");
+assert.match(pageSource, /Auto→Render|auto_to_render/, "Reup Queue must expose opt-in auto through render");
+assert.match(
+  pageSource,
+  /action: "START_PROCESSING", label: "Start/,
+  "Reup Queue must expose start processing action"
+);
 assert.match(pageSource, /CREATE_EXPORT_PACKAGE/, "Reup Queue must expose export batch action");
 assert.match(pageSource, /CREATE_PUBLISH_HANDOFF/, "Reup Queue must expose handoff batch action");
 assert.match(pageSource, /title="Production details"/, "Reup Queue must keep a clear production details title");
@@ -382,12 +400,17 @@ assert.doesNotMatch(
 );
 assert.match(studioSource, /export function queueTileTranscriptCta/, "Gallery tiles must expose an Open Transcript CTA helper");
 assert.match(studioSource, /export function queueTileFailureAlert/, "Gallery tiles must expose a compact failure alert for analyze/download errors");
+assert.match(studioSource, /export function queueTileFailureStrip/, "Gallery tiles must decide when failure reason belongs on the thumbnail strip");
 assert.match(studioSource, /export function queueTileNextStepHint/, "Gallery tiles must expose a visible next-step hint when Transcript is blocked");
 assert.match(pageSource, /queueTileTranscriptCta/, "Gallery tile must render Open Transcript from shared CTA helper");
-assert.match(pageSource, /queueTileFailureAlert/, "Gallery tile must render compact failure alert instead of stacked error+hint");
-assert.match(pageSource, /reup-queue-tile-failure-alert/, "Gallery failure alert must use a dedicated compact class");
-assert.match(pageSource, /reup-queue-tile-failure-alert__icon/, "Gallery failure alert must show a leading status icon");
-assert.match(pageSource, /reup-queue-tile-failure-alert__text/, "Gallery failure alert message must use regular-weight text span");
+assert.match(pageSource, /queueTileFailureStrip/, "Gallery tile must render failure reason on the thumbnail strip");
+assert.match(pageSource, /reup-queue-tile-failure-strip/, "Failure reason must use a bottom-of-thumbnail strip class");
+assert.match(pageSource, /capture-inbox-media-frame[\s\S]*reup-queue-tile-failure-strip/, "Failure strip must render inside the media frame");
+assert.doesNotMatch(
+  pageSource,
+  /capture-inbox-tile-main[\s\S]*reup-queue-tile-failure-alert/,
+  "Failure reason must not remain as a body banner under the title"
+);
 assert.match(pageSource, /queueTileNextStepHint/, "Gallery tile must show next-step hint when analyze is not ready");
 assert.match(pageSource, /Open Transcript/, "Gallery tile must label the Transcript CTA for operators");
 assert.match(pageSource, /reup-queue-tile-stage-hint/, "Gallery tile must surface a visible stage hint under the stepper");

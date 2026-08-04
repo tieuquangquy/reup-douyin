@@ -3,9 +3,12 @@ import {
   buildSavePayload,
   buildTranscriptEditorState,
   formatMs,
+  formatTimingSeconds,
   formatTranslationAuthorityChip,
   hasUnsavedChanges,
   mergeAdjacentSegments,
+  parseTimingSecondsToMs,
+  parseTimingTimecodeToMs,
   resetSegment,
   resolveTranslationAuthority,
   selectSegment,
@@ -89,6 +92,17 @@ assert.equal(merged.segments[0].sourceText, "你好 第二句");
 assert.equal(merged.segments[0].isDirty, true);
 
 assert.equal(formatMs(7210), "0:07.21");
+assert.equal(formatTimingSeconds(38000), "38.00");
+assert.equal(formatTimingSeconds(38000, 1), "38.0");
+assert.equal(parseTimingSecondsToMs("38.00"), 38000);
+assert.equal(parseTimingSecondsToMs("38,5"), 38500);
+assert.equal(parseTimingSecondsToMs("abc"), null);
+assert.equal(parseTimingSecondsToMs("-1"), null);
+assert.equal(parseTimingTimecodeToMs("0:38.00"), 38000);
+assert.equal(parseTimingTimecodeToMs("1:02.50"), 62500);
+assert.equal(parseTimingTimecodeToMs("0:07,21"), 7210);
+assert.equal(parseTimingTimecodeToMs("38.00"), 38000, "Bare seconds still accepted while editing");
+assert.equal(parseTimingTimecodeToMs("bad"), null);
 
 console.log("transcript-editor state tests passed");
 

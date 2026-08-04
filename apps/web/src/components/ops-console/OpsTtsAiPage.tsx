@@ -6,11 +6,14 @@ import {
   createTtsAiProfile,
   deleteTtsAiProfile,
   fetchTtsAi,
+  fetchTtsAiEngines,
+  fetchTtsAiEngineInstallStatus,
   fetchTtsAiInstallStatus,
   fetchTtsAiPreviewStatus,
   cancelTtsAiPreview,
   fetchTtsAiProfile,
   installTtsAiPackage,
+  installTtsAiEngine,
   previewTtsAiSpeech,
   renameTtsAiProfile,
   reorderTtsAiProfiles,
@@ -18,6 +21,8 @@ import {
   setTtsAiProfileEnabled,
   testTtsAi,
   type TtsAiCatalog,
+  type TtsAiEngineInstallJobResponse,
+  type TtsAiEngineOption,
   type TtsAiInstallResponse,
   type TtsAiProfileSummary,
   type TtsAiResponse,
@@ -28,6 +33,7 @@ import { useAsyncAction } from "../../lib/useAsyncAction";
 import { isSetupTableInteractiveDragTarget, moveItemIndex, profileIdsOf } from "../../lib/opsProfileReorder";
 import {
   formatProviderError,
+  providerTestErrorHint,
   type ConnectionTestResult
 } from "../../lib/opsTranslationAiFormat";
 import { formatTtsProbeSuccess } from "../../lib/opsTtsTestFormat";
@@ -41,13 +47,12 @@ import {
   deriveTtsInstallFromRepoUrl,
   defaultProviderForKind,
   getLocalInstallRecipe,
-  getOmnivoiceCuratedCatalogCapabilities,
   getTtsFieldCapabilities,
   isCustomLocalProvider,
+  isOmnivoiceProvider,
   isPresetLocalProvider,
   looksLikeEdgeVoiceId,
-  OMNIVOICE_CURATED_MODELS,
-  OMNIVOICE_CURATED_VOICES,
+  resolveTtsCatalogForProvider,
   resolveProviderSlugFromInstall,
   resolveTtsProviderKind,
   showsTtsApiKey,
@@ -168,6 +173,143 @@ function providerSelectValue(form: FormState): string {
 
 function kindRequiresNamedProvider(kind: TtsProviderKind): boolean {
   return kind === "local" || kind === "cloud" || kind === "http";
+}
+
+function engineDependencyLabelKey(status: string): string {
+  if (status === "ready") return "opsTtsAi.engineStatusReady";
+  if (status === "installed") return "opsTtsAi.engineStatusInstalled";
+  if (status === "missing") return "opsTtsAi.engineStatusMissing";
+  if (status === "external") return "opsTtsAi.engineStatusExternal";
+  if (status === "incompatible") return "opsTtsAi.engineStatusIncompatible";
+  return "opsTtsAi.engineStatusManual";
+}
+
+function engineInstallStepLabelKey(step: string): string {
+  if (step === "preflight") return "opsTtsAi.engineStepPreflight";
+  if (step === "clone_repo") return "opsTtsAi.engineStepCloneRepo";
+  if (step === "create_venv") return "opsTtsAi.engineStepCreateVenv";
+  if (step === "install_dependency") return "opsTtsAi.engineStepDependencies";
+  if (step === "download_weights") return "opsTtsAi.engineStepWeights";
+  if (step === "probe") return "opsTtsAi.engineStepProbe";
+  if (step === "complete") return "opsTtsAi.engineStepComplete";
+  return "opsTtsAi.engineStepQueued";
+}
+
+type EngineCatalogCategory = "ready" | "installable" | "installed" | "setup" | "unavailable";
+type CatalogRefreshPhase = "idle" | "preparing" | "loading";
+
+function engineCatalogCategory(engine: TtsAiEngineOption): EngineCatalogCategory {
+  if (engine.selectable) return "ready";
+  if (engine.installable) return "installable";
+  if (engine.dependency_status === "installed") return "installed";
+  if (
+    engine.dependency_status !== "incompatible" &&
+    (engine.install_mode === "manual" || engine.install_mode === "external")
+  ) {
+    return "setup";
+  }
+  return "unavailable";
+}
+
+type EngineCatalogActionIconKind = "install" | "loading" | "server" | "guide" | "collapse";
+
+function EngineCatalogActionIcon({ kind }: { kind: EngineCatalogActionIconKind }) {
+  if (kind === "loading") {
+    return (
+      <svg className="is-spinning" viewBox="0 0 20 20" aria-hidden="true">
+        <circle
+          cx="10"
+          cy="10"
+          r="6"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.7"
+          opacity="0.3"
+        />
+        <path
+          d="M10 4a6 6 0 0 1 5.7 4.1"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.7"
+          strokeLinecap="round"
+        />
+      </svg>
+    );
+  }
+  if (kind === "server") {
+    return (
+      <svg viewBox="0 0 20 20" aria-hidden="true">
+        <rect
+          x="4"
+          y="3.7"
+          width="12"
+          height="5"
+          rx="1.4"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.5"
+        />
+        <rect
+          x="4"
+          y="11.3"
+          width="12"
+          height="5"
+          rx="1.4"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.5"
+        />
+        <circle cx="7" cy="6.2" r="0.8" fill="currentColor" />
+        <circle cx="7" cy="13.8" r="0.8" fill="currentColor" />
+      </svg>
+    );
+  }
+  if (kind === "guide") {
+    return (
+      <svg viewBox="0 0 20 20" aria-hidden="true">
+        <path
+          d="M4 4.5c2.1-.6 4-.2 6 1.2v10c-2-1.4-3.9-1.8-6-1.2v-10Z"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeLinejoin="round"
+        />
+        <path
+          d="M16 4.5c-2.1-.6-4-.2-6 1.2v10c2-1.4 3.9-1.8 6-1.2v-10Z"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeLinejoin="round"
+        />
+      </svg>
+    );
+  }
+  if (kind === "collapse") {
+    return (
+      <svg viewBox="0 0 20 20" aria-hidden="true">
+        <path
+          d="m5.5 12.2 4.5-4.4 4.5 4.4"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.7"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+    );
+  }
+  return (
+    <svg viewBox="0 0 20 20" aria-hidden="true">
+      <path
+        d="M10 3.5v8M6.8 8.5 10 11.7l3.2-3.2M4 14v1.8h12V14"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
 }
 
 function blankForm(): FormState {
@@ -434,6 +576,14 @@ export function OpsTtsAiPage() {
   const [error, setError] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<ConnectionTestResult | null>(null);
   const [catalog, setCatalog] = useState<TtsAiCatalog | null>(null);
+  const [catalogRefreshPhase, setCatalogRefreshPhase] = useState<CatalogRefreshPhase>("idle");
+  const [engineCatalog, setEngineCatalog] = useState<TtsAiEngineOption[]>([]);
+  const [engineCatalogLoading, setEngineCatalogLoading] = useState(false);
+  const [engineCatalogError, setEngineCatalogError] = useState<string | null>(null);
+  const [engineInstallingId, setEngineInstallingId] = useState<string | null>(null);
+  const [engineExpandedId, setEngineExpandedId] = useState<string | null>(null);
+  const [engineGroupTab, setEngineGroupTab] = useState<EngineCatalogCategory>("installable");
+  const [engineInstallJob, setEngineInstallJob] = useState<TtsAiEngineInstallJobResponse | null>(null);
   const [runtime, setRuntime] = useState<TtsAiRuntime | null>(null);
   const [liveImportOk, setLiveImportOk] = useState<boolean | null>(null);
   const [installResult, setInstallResult] = useState<{
@@ -446,6 +596,7 @@ export function OpsTtsAiPage() {
   const [previewText, setPreviewText] = useState("Xin chào, đây là bản xem trước giọng đọc tiếng Việt.");
   const [previewing, setPreviewing] = useState(false);
   const [previewAudioUrl, setPreviewAudioUrl] = useState<string | null>(null);
+  const [previewFeedback, setPreviewFeedback] = useState<string | null>(null);
   const [previewMeta, setPreviewMeta] = useState<{ provider: string; duration: number; detail: string } | null>(
     null
   );
@@ -463,6 +614,7 @@ export function OpsTtsAiPage() {
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const installPollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const installPollCancelledRef = useRef(false);
+  const catalogPreloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const previewPollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const previewPollCancelledRef = useRef(false);
 
@@ -480,7 +632,7 @@ export function OpsTtsAiPage() {
     if (nextCatalog.styles?.length > 0 && !nextCatalog.styles.includes(patch.style)) {
       patch.style = nextCatalog.styles[0] || patch.style;
     }
-    if (nextCatalog.models?.length > 0 && !patch.modelId.trim()) {
+    if (nextCatalog.models?.length > 0 && !nextCatalog.models.includes(patch.modelId)) {
       patch.modelId = nextCatalog.models[0] || patch.modelId;
     }
     return patch;
@@ -491,12 +643,25 @@ export function OpsTtsAiPage() {
     setActiveProfileId(data.active_profile_id || "");
   }
 
+  async function loadOmnivoiceEngines() {
+    setEngineCatalogLoading(true);
+    setEngineCatalogError(null);
+    try {
+      const response = await fetchTtsAiEngines();
+      setEngineCatalog(response.engines || []);
+    } catch (err) {
+      setEngineCatalogError(err instanceof Error ? err.message : t("opsTtsAi.engineCatalogError"));
+    } finally {
+      setEngineCatalogLoading(false);
+    }
+  }
+
   function applyResponse(data: TtsAiResponse) {
     let next = toForm(data);
     setRuntime(data.runtime || null);
     setLiveImportOk(data.live_import_ok ?? null);
     applyListResponse(data);
-    const hydrated = catalogFromRuntime(data.runtime || null);
+    const hydrated = resolveTtsCatalogForProvider(next.provider, catalogFromRuntime(data.runtime || null));
     if (hydrated) {
       next = applyCatalog(hydrated, next);
     } else {
@@ -505,6 +670,7 @@ export function OpsTtsAiPage() {
     // Banners are session action feedback only — durable status stays on runtime chips.
     setTestResult(null);
     setInstallResult(null);
+    setPreviewFeedback(null);
     setForm(next);
     setKind(resolveTtsProviderKind(next.provider));
     setMeta({
@@ -554,6 +720,19 @@ export function OpsTtsAiPage() {
   }, [t]);
 
   useEffect(() => {
+    if (!form || !isOmnivoiceProvider(effectiveProvider(form))) {
+      installPollCancelledRef.current = true;
+      setEngineCatalog([]);
+      setEngineCatalogError(null);
+      setEngineInstallJob(null);
+      return;
+    }
+    installPollCancelledRef.current = false;
+    void loadOmnivoiceEngines();
+    void reattachEngineInstallJob();
+  }, [form?.provider, form?.providerChoice, form?.customProviderSlug]);
+
+  useEffect(() => {
     if (!copied) return;
     const timer = window.setTimeout(() => setCopied(false), 2000);
     return () => window.clearTimeout(timer);
@@ -571,6 +750,10 @@ export function OpsTtsAiPage() {
       if (installPollTimerRef.current) {
         clearTimeout(installPollTimerRef.current);
         installPollTimerRef.current = null;
+      }
+      if (catalogPreloadTimerRef.current) {
+        clearTimeout(catalogPreloadTimerRef.current);
+        catalogPreloadTimerRef.current = null;
       }
       previewPollCancelledRef.current = true;
       if (previewPollTimerRef.current) {
@@ -598,6 +781,15 @@ export function OpsTtsAiPage() {
   function buildPayload() {
     if (!form) return null;
     const provider = effectiveProvider(form);
+    if (kindRequiresNamedProvider(kind) && !nameProviderForTest(form)) {
+      setError(null);
+      setTestResult({
+        ok: false,
+        provider: "",
+        detail: t("opsTtsAi.testNeedProvider")
+      });
+      return null;
+    }
     if (form.providerChoice === "custom" && !/^[a-z][a-z0-9_\-]{0,62}$/.test(provider)) {
       setError(null);
       setTestResult({
@@ -701,6 +893,7 @@ export function OpsTtsAiPage() {
     setLiveImportOk(null);
     setTestResult(null);
     setInstallResult(null);
+    setPreviewFeedback(null);
     setMeta({ apiKeySet: false, apiKeyMasked: "", source: "env" });
     setViewMode("editor");
   }
@@ -846,13 +1039,18 @@ export function OpsTtsAiPage() {
     try {
       const result = await testTtsAi({ ...payload, profile_id: editingProfileId || undefined });
       setTestResult({ ok: result.ok, provider: result.provider, detail: result.detail });
-      notify({
-        id: "tts-settings-test",
-        message: result.ok ? t("opsTtsAi.testOk") : t("opsTtsAi.testFail"),
-        tone: result.ok ? "success" : "warning"
-      });
+      if (result.ok) {
+        notify({
+          id: "tts-settings-test",
+          message: t("opsTtsAi.testOk"),
+          tone: "success"
+        });
+      }
       if (result.runtime) setRuntime(result.runtime);
-      const nextCatalog = result.catalog && result.ok ? result.catalog : null;
+      const nextCatalog = resolveTtsCatalogForProvider(
+        result.provider || effectiveProvider(form),
+        result.catalog && result.ok ? result.catalog : null
+      );
       if (form) {
         setForm(applyCatalog(nextCatalog, form));
       } else {
@@ -871,6 +1069,7 @@ export function OpsTtsAiPage() {
 
   function onKindChange(nextKind: TtsProviderKind) {
     if (!form) return;
+    if (nextKind === kind) return;
     const list = TTS_PROVIDERS_BY_KIND[nextKind];
     const currentChoice = form.providerChoice === "custom" ? "custom" : form.provider;
     const staysInKind =
@@ -880,6 +1079,16 @@ export function OpsTtsAiPage() {
     setTestResult(null);
     setCatalog(null);
     setInstallResult(null);
+    setPreviewFeedback(null);
+    if (!editingProfileId && nextKind === "local") {
+      setForm({
+        ...form,
+        provider: "",
+        providerChoice: "",
+        customProviderSlug: ""
+      });
+      return;
+    }
     if (staysInKind) return;
     applyProvider(defaultProviderForKind(nextKind), form);
   }
@@ -911,6 +1120,7 @@ export function OpsTtsAiPage() {
     setTestResult(null);
     setCatalog(null);
     setInstallResult(null);
+    setPreviewFeedback(null);
   }
 
   function onProviderSelect(next: string) {
@@ -926,6 +1136,7 @@ export function OpsTtsAiPage() {
       setTestResult(null);
       setCatalog(null);
       setInstallResult(null);
+      setPreviewFeedback(null);
       return;
     }
     applyProvider(next, form);
@@ -943,6 +1154,7 @@ export function OpsTtsAiPage() {
     setTestResult(null);
     setCatalog(null);
     setInstallResult(null);
+    setPreviewFeedback(null);
   }
 
   async function copyInstallCommand() {
@@ -971,8 +1183,9 @@ export function OpsTtsAiPage() {
       packageName: derived.packageName
     };
     if (slug) {
-      next.providerChoice = "custom";
-      next.customProviderSlug = slug;
+      const isPreset = isPresetLocalProvider(slug);
+      next.providerChoice = isPreset ? slug : "custom";
+      next.customProviderSlug = isPreset ? "" : slug;
       next.provider = slug;
       setKind("local");
     }
@@ -1022,8 +1235,9 @@ export function OpsTtsAiPage() {
       const slug = resolveProviderSlugFromInstall(packageName, workingForm.repoUrl);
       const recipe = getLocalInstallRecipe(slug || packageName);
       if (slug) {
-        nextForm.providerChoice = "custom";
-        nextForm.customProviderSlug = slug;
+        const isPreset = isPresetLocalProvider(slug);
+        nextForm.providerChoice = isPreset ? slug : "custom";
+        nextForm.customProviderSlug = isPreset ? "" : slug;
         nextForm.provider = slug;
         setKind("local");
       }
@@ -1038,37 +1252,41 @@ export function OpsTtsAiPage() {
         nextForm.voiceId = "";
       }
       const apiCatalog = result.catalog;
-      const apiCatalogRich = Boolean(
-        apiCatalog &&
-          (apiCatalog.voices?.length ?? 0) >= 5 &&
-          (apiCatalog.models?.length ?? 0) >= 5
-      );
-      const nextCatalog = apiCatalogRich
-        ? apiCatalog
-        : slug === "omnivoice" || packageName.toLowerCase().includes("omnivoice")
-          ? ({
-              source: "curated",
-              voices: OMNIVOICE_CURATED_VOICES.map((v) => ({ id: v.id, label: v.label })),
-              styles: [],
-              models: [...OMNIVOICE_CURATED_MODELS],
-              default_voice_id: "auto",
-              warning: "",
-              capabilities: getOmnivoiceCuratedCatalogCapabilities()
-            } satisfies TtsAiCatalog)
-          : apiCatalog && (apiCatalog.voices?.length || apiCatalog.models?.length)
-            ? apiCatalog
-            : slug
-              ? ({
-                  source: "curated",
-                  voices: [],
-                  styles: [],
-                  models: recipe?.defaultModel ? [recipe.defaultModel] : [],
-                  default_voice_id: "",
-                  warning: "",
-                  capabilities: getTtsFieldCapabilities(slug || "custom")
-                } satisfies TtsAiCatalog)
-              : null;
-      setForm(applyCatalog(nextCatalog ?? null, nextForm));
+      const apiCatalogHasChoices = Boolean(apiCatalog?.voices?.length || apiCatalog?.models?.length);
+      const isOmnivoice = slug === "omnivoice" || packageName.toLowerCase().includes("omnivoice");
+      const nextCatalog =
+        apiCatalogHasChoices || isOmnivoice
+          ? apiCatalog ?? null
+          : slug
+            ? ({
+                source: "curated",
+                voices: [],
+                styles: [],
+                models: recipe?.defaultModel ? [recipe.defaultModel] : [],
+                default_voice_id: "",
+                warning: "",
+                capabilities: getTtsFieldCapabilities(slug || "custom")
+              } satisfies TtsAiCatalog)
+            : null;
+      const resolvedCatalog = resolveTtsCatalogForProvider(effectiveProvider(nextForm), nextCatalog ?? null);
+      setForm(applyCatalog(resolvedCatalog, nextForm));
+    }
+  }
+
+  async function onRefreshCatalog() {
+    if (catalogRefreshPhase !== "idle") return;
+    setCatalogRefreshPhase("preparing");
+    await new Promise<void>((resolve) => {
+      catalogPreloadTimerRef.current = setTimeout(() => {
+        catalogPreloadTimerRef.current = null;
+        resolve();
+      }, 250);
+    });
+    setCatalogRefreshPhase("loading");
+    try {
+      await onTest();
+    } finally {
+      setCatalogRefreshPhase("idle");
     }
   }
 
@@ -1081,12 +1299,12 @@ export function OpsTtsAiPage() {
     });
   }
 
-  async function pollInstallUntilDone(workingForm: FormState) {
+  async function pollInstallUntilDone(workingForm: FormState): Promise<TtsAiInstallResponse | null> {
     const maxAttempts = 180;
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-      if (installPollCancelledRef.current) return;
+      if (installPollCancelledRef.current) return null;
       await waitInstallPollDelay(2000);
-      if (installPollCancelledRef.current) return;
+      if (installPollCancelledRef.current) return null;
       const status = await fetchTtsAiInstallStatus();
       if (status.status === "running") {
         setInstallResult({
@@ -1099,7 +1317,7 @@ export function OpsTtsAiPage() {
         continue;
       }
       applyInstallFinished(status, workingForm);
-      return;
+      return status;
     }
     setInstallResult({
       ok: false,
@@ -1108,6 +1326,7 @@ export function OpsTtsAiPage() {
       log_tail: "",
       already_satisfied: false
     });
+    return null;
   }
 
   async function onInstall(options?: { forceReinstall?: boolean }) {
@@ -1174,17 +1393,152 @@ export function OpsTtsAiPage() {
     }
   }
 
+  function applyEngineInstallJob(result: TtsAiEngineInstallJobResponse) {
+    setEngineInstallJob(result);
+    const succeeded = result.status === "succeeded" || result.status === "already_installed";
+    setInstallResult({
+      ok: succeeded,
+      detail: result.detail,
+      command: "",
+      log_tail: result.log_tail,
+      already_satisfied: result.status === "already_installed"
+    });
+    if (succeeded) {
+      notify({
+        id: "tts-engine-install-finished",
+        message:
+          result.status === "already_installed"
+            ? t("opsTtsAi.engineAlreadyInstalled")
+            : t("opsTtsAi.engineInstallOk"),
+        tone: "success"
+      });
+    }
+  }
+
+  async function pollEngineInstallUntilDone(): Promise<void> {
+    const maxAttempts = 3600;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      if (installPollCancelledRef.current) return;
+      await waitInstallPollDelay(2000);
+      if (installPollCancelledRef.current) return;
+      const status = await fetchTtsAiEngineInstallStatus();
+      applyEngineInstallJob(status);
+      if (status.status === "running") {
+        continue;
+      }
+      return;
+    }
+    setInstallResult({
+      ok: false,
+      detail: t("opsTtsAi.installPollTimeout"),
+      command: "",
+      log_tail: "",
+      already_satisfied: false
+    });
+  }
+
+  async function reattachEngineInstallJob(): Promise<void> {
+    try {
+      const status = await fetchTtsAiEngineInstallStatus();
+      setEngineInstallJob(status);
+      if (status.status !== "running") return;
+      setEngineInstallingId(status.engine_id);
+      setInstalling(true);
+      await pollEngineInstallUntilDone();
+      await loadOmnivoiceEngines();
+    } catch {
+      // A missing status is expected before the first engine install.
+    } finally {
+      setEngineInstallingId(null);
+      setInstalling(false);
+    }
+  }
+
+  async function onInstallEngine(engine: TtsAiEngineOption) {
+    if (!form || !engine.installable) return;
+    installPollCancelledRef.current = false;
+    setEngineInstallingId(engine.id);
+    setInstalling(true);
+    setInstallResult(null);
+    setEngineInstallJob(null);
+    setError(null);
+    try {
+      const result = await installTtsAiEngine(engine.id, {
+        profile_id: editingProfileId || undefined
+      });
+      applyEngineInstallJob(result);
+      if (result.status === "running" || result.status === "already_running") {
+        await pollEngineInstallUntilDone();
+      }
+      await loadOmnivoiceEngines();
+    } catch (err) {
+      setInstallResult({
+        ok: false,
+        detail: err instanceof Error ? err.message : t("opsTtsAi.engineInstallError"),
+        command: engine.install_command || "",
+        log_tail: "",
+        already_satisfied: false
+      });
+    } finally {
+      setEngineInstallingId(null);
+      setInstalling(false);
+    }
+  }
+
+  function friendlyPreviewFailure(raw: string): string {
+    const message = (raw || "").trim();
+    if (/cloud TTS adapter is not enabled|settings are saved, but the cloud TTS adapter/i.test(message)) {
+      return t("opsTtsAi.previewCloudUnavailable");
+    }
+    if (/requires an API key|api[_ -]?key/i.test(message)) {
+      return t("opsTtsAi.previewNeedApiKey");
+    }
+    if (/base URL/i.test(message)) {
+      return t("opsTtsAi.previewNeedBaseUrl");
+    }
+    if (/adapter.+not enabled|known adapter|synthesis adapter/i.test(message)) {
+      return t("opsTtsAi.previewAdapterUnavailable");
+    }
+    return message || t("opsTtsAi.previewError");
+  }
+
+  function showPreviewFailure(message: string) {
+    setError(null);
+    setPreviewMeta(null);
+    setPreviewFeedback(friendlyPreviewFailure(message));
+  }
+
+  function previewValidationMessage(sample: string): string {
+    if (!sample) return t("opsTtsAi.previewEmpty");
+    if (!form) return t("opsTtsAi.previewConfigurationIncomplete");
+    const provider = nameProviderForTest(form);
+    if (kindRequiresNamedProvider(kind) && !provider) return t("opsTtsAi.previewNeedProvider");
+    if (form.providerChoice === "custom" && !/^[a-z][a-z0-9_\-]{0,62}$/.test(provider)) {
+      return t("opsTtsAi.customProviderInvalid");
+    }
+    if (kind === "cloud" && !["edge", "vieneu"].includes(form.fallbackProvider || "")) {
+      return t("opsTtsAi.previewCloudUnavailable");
+    }
+    if (kind === "http" && !form.baseUrl.trim()) return t("opsTtsAi.previewNeedBaseUrl");
+    return "";
+  }
+
   async function onPreview() {
-    const payload = buildPayload();
-    if (!payload) return;
     const sample = previewText.trim();
-    if (!sample) {
-      setError(t("opsTtsAi.previewEmpty"));
+    const validationMessage = previewValidationMessage(sample);
+    if (validationMessage) {
+      showPreviewFailure(validationMessage);
+      return;
+    }
+    const payload = buildPayload();
+    if (!payload) {
+      showPreviewFailure(t("opsTtsAi.previewConfigurationIncomplete"));
       return;
     }
     previewPollCancelledRef.current = false;
     setPreviewing(true);
     setError(null);
+    setPreviewFeedback(null);
     setPreviewMeta(null);
     try {
       const started = await previewTtsAiSpeech({
@@ -1221,14 +1575,15 @@ export function OpsTtsAiPage() {
           if (!status.ok || status.status === "failed" || status.status === "cancelled") {
             if (status.status === "cancelled") {
               setPreviewMeta(null);
+              setPreviewFeedback(null);
               setError(null);
               return;
             }
-            setError(status.detail || t("opsTtsAi.previewError"));
+            showPreviewFailure(status.detail || t("opsTtsAi.previewError"));
             return;
           }
           if (!status.audio_base64) {
-            setError(t("opsTtsAi.previewError"));
+            showPreviewFailure(t("opsTtsAi.previewError"));
             return;
           }
           const binary = Uint8Array.from(atob(status.audio_base64), (c) => c.charCodeAt(0));
@@ -1246,7 +1601,7 @@ export function OpsTtsAiPage() {
           notify({ id: "tts-preview-finished", message: status.detail || t("opsTtsAi.preview"), tone: "success" });
           return;
         }
-        setError(t("opsTtsAi.previewPollTimeout"));
+        showPreviewFailure(t("opsTtsAi.previewPollTimeout"));
         try {
           await cancelTtsAiPreview();
         } catch {
@@ -1255,7 +1610,7 @@ export function OpsTtsAiPage() {
         return;
       }
       if (!started.ok || !started.audio_base64) {
-        setError(started.detail || t("opsTtsAi.previewError"));
+        showPreviewFailure(started.detail || t("opsTtsAi.previewError"));
         return;
       }
       const binary = Uint8Array.from(atob(started.audio_base64), (c) => c.charCodeAt(0));
@@ -1277,13 +1632,13 @@ export function OpsTtsAiPage() {
       if (/already running/i.test(message)) {
         try {
           await cancelTtsAiPreview();
-          setError(t("opsTtsAi.previewUnlockedRetry"));
+          showPreviewFailure(t("opsTtsAi.previewUnlockedRetry"));
         } catch {
-          setError(message);
+          showPreviewFailure(message);
         }
         return;
       }
-      setError(message);
+      showPreviewFailure(message);
     } finally {
       setPreviewing(false);
     }
@@ -1298,10 +1653,11 @@ export function OpsTtsAiPage() {
     try {
       await cancelTtsAiPreview();
       setError(null);
+      setPreviewFeedback(null);
       setPreviewMeta(null);
       notify({ id: "tts-preview-cancelled", message: t("opsTtsAi.previewCancel"), tone: "info" });
     } catch (err) {
-      setError(err instanceof Error ? err.message : t("opsTtsAi.previewCancelError"));
+      showPreviewFailure(err instanceof Error ? err.message : t("opsTtsAi.previewCancelError"));
     } finally {
       setPreviewing(false);
     }
@@ -1342,9 +1698,15 @@ export function OpsTtsAiPage() {
         description={t("nav.ttsSettingsDesc")}
         title={t("nav.ttsSettings")}
       >
-      <main className="ops-page ops-page--settings ops-tts-page ops-ai-page is-compact">
+      <main className="ops-page ops-page--settings ops-tts-page ops-ai-page is-compact ops-ai-control-center is-tts">
         {error ? <div className="inline-error">{error}</div> : null}
         <div className="ops-tts-list-header">
+          <div className="ops-ai-registry-leading">
+            <span aria-hidden="true" className="ops-ai-registry-icon">
+              <svg fill="none" viewBox="0 0 24 24"><path d="M8 5v8a4 4 0 0 0 8 0V5" /><path d="M5 12v1a7 7 0 0 0 14 0v-1M12 20v2" /></svg>
+            </span>
+            <span><strong>{t("opsTtsAi.sectionProfiles")}</strong><small>{t("nav.ttsSettingsDesc")}</small></span>
+          </div>
           <div className="ops-tts-list-toolbar">
             <div className="ops-tts-list-toolbar__cluster" aria-label={t("opsTtsAi.sectionProfiles")}>
               {activeOnProfile ? (
@@ -1379,23 +1741,24 @@ export function OpsTtsAiPage() {
           <p className="ops-tts-empty">{t("opsTtsAi.profileEmpty")}</p>
         ) : (
           <div className="ops-tts-setup-table-wrap">
-            <table className="ops-tts-setup-table">
+            <table className="ops-tts-setup-table ops-ai-registry-table is-tts">
+              <colgroup>
+                <col className="ops-ai-col-drag" />
+                <col className="ops-ai-col-setup" />
+                <col className="ops-ai-col-voice" />
+                <col className="ops-ai-col-speech" />
+                <col className="ops-ai-col-status" />
+                <col className="ops-ai-col-actions" />
+              </colgroup>
               <thead>
                 <tr>
                   <th scope="col" className="ops-tts-setup-table__drag-col">
                     <span className="visually-hidden">{t("common.dragToReorder")}</span>
                   </th>
                   <th scope="col">{t("opsTtsAi.profileNameCol")}</th>
-                  <th scope="col">{t("opsTtsAi.statusLabel")}</th>
-                  <th scope="col">{t("opsTtsAi.profileActiveCol")}</th>
-                  <th scope="col">{t("opsTtsAi.apiKey")}</th>
-                  <th scope="col">{t("opsTtsAi.provider")}</th>
-                  <th scope="col">{t("opsTtsAi.voiceId")}</th>
-                  <th scope="col">{t("opsTtsAi.languageCode")}</th>
-                  <th scope="col">{t("opsTtsAi.speakingRate")}</th>
-                  <th scope="col">{t("opsTtsAi.modelId")}</th>
-                  <th scope="col">{t("opsTtsAi.fallbackProvider")}</th>
-                  <th scope="col">{t("opsTtsAi.localBackend")}</th>
+                  <th scope="col">{t("opsTtsAi.voiceRuntimeCol")}</th>
+                  <th scope="col">{t("opsTtsAi.speechRuntimeCol")}</th>
+                  <th scope="col">{t("opsTtsAi.statusControlCol")}</th>
                   <th scope="col">{t("opsTtsAi.profileActionsCol")}</th>
                 </tr>
               </thead>
@@ -1403,6 +1766,9 @@ export function OpsTtsAiPage() {
                   {profiles.map((profile) => {
                   const isActive = Boolean(profile.is_active) || profile.id === activeProfileId;
                   const isOn = isActive && Boolean(profile.enabled);
+                  const hasFallback = Boolean(
+                    profile.fallback_provider?.trim() && profile.fallback_provider.trim().toLowerCase() !== "none"
+                  );
                   const rowReady = resolveTtsReadyState({
                     test: profile.runtime?.last_probe
                       ? {
@@ -1465,31 +1831,31 @@ export function OpsTtsAiPage() {
                         </span>
                       </td>
                       <td className="ops-tts-setup-table__name">
-                        {renamingProfileId === profile.id ? (
-                          <input
-                            ref={renameInputRef}
-                            className="ops-tts-setup-table__rename-input"
-                            type="text"
-                            value={renameDraft}
-                            maxLength={80}
-                            disabled={profileBusy}
-                            aria-label={t("opsTtsAi.profileRename")}
-                            onChange={(e) => setRenameDraft(e.target.value)}
-                            onKeyDown={(e) => {
-                              if (e.key === "Enter") {
-                                e.preventDefault();
-                                void commitRenameProfile();
-                              } else if (e.key === "Escape") {
-                                e.preventDefault();
-                                cancelRenameProfile();
-                              }
-                            }}
-                            onBlur={() => {
-                              if (!profileBusy) void commitRenameProfile();
-                            }}
-                          />
-                        ) : (
-                          <>
+                        <div className="ops-ai-setup-identity">
+                          {renamingProfileId === profile.id ? (
+                            <input
+                              ref={renameInputRef}
+                              className="ops-tts-setup-table__rename-input"
+                              type="text"
+                              value={renameDraft}
+                              maxLength={80}
+                              disabled={profileBusy}
+                              aria-label={t("opsTtsAi.profileRename")}
+                              onChange={(e) => setRenameDraft(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") {
+                                  e.preventDefault();
+                                  void commitRenameProfile();
+                                } else if (e.key === "Escape") {
+                                  e.preventDefault();
+                                  cancelRenameProfile();
+                                }
+                              }}
+                              onBlur={() => {
+                                if (!profileBusy) void commitRenameProfile();
+                              }}
+                            />
+                          ) : (
                             <button
                               type="button"
                               className="ops-tts-setup-table__name-btn"
@@ -1499,84 +1865,76 @@ export function OpsTtsAiPage() {
                             >
                               {profile.name}
                             </button>
-                          </>
-                        )}
+                          )}
+                        </div>
                       </td>
-                      <td>
-                        <div className="ops-tts-setup-table__chips">
-                          <span className={`ops-ai-chip ops-tts-chip ${ttsReadyChipClass(rowReady)}`}>
-                            {t(ttsReadyLabelKey(rowReady))}
-                          </span>
-                          <span className="ops-ai-chip ops-tts-chip is-muted">
-                            {t(kindLabelKey(resolveTtsProviderKind(profile.provider || "auto")))}
-                          </span>
+                      <td className="ops-ai-voice-runtime-cell">
+                        <div
+                          className="ops-ai-inline-config"
+                          title={[
+                            profile.provider || "auto",
+                            profile.voice_id?.trim(),
+                            profile.model_id?.trim(),
+                            hasFallback ? `FB: ${profile.fallback_provider}${profile.fallback_voice_id?.trim() ? ` / ${profile.fallback_voice_id}` : ""}` : ""
+                          ].filter(Boolean).join(" · ")}
+                        >
+                          <strong>{profile.provider || "auto"}</strong>
+                          <span aria-hidden="true">·</span>
+                          <span>{profile.voice_id?.trim() || "—"}</span>
+                          {profile.model_id?.trim() ? <><span aria-hidden="true">·</span><span>{profile.model_id}</span></> : null}
+                          {showsTtsApiKey(profile.provider) ? <span className={profile.api_key_set ? "is-key-set" : "is-key-missing"}>· {profile.api_key_set ? t("opsTtsAi.profileKeySet") : t("opsTtsAi.profileKeyUnset")}</span> : null}
+                          {hasFallback ? <span className="is-muted">· FB: {profile.fallback_provider}{profile.fallback_voice_id?.trim() ? ` / ${profile.fallback_voice_id}` : ""}</span> : null}
                         </div>
                       </td>
                       <td>
-                        <label className="ops-tts-setup-switch" title={t("opsTtsAi.profileActiveHint")}>
-                          <input
-                            type="checkbox"
-                            checked={isOn}
-                            disabled={profileBusy}
-                            aria-label={
-                              isOn
-                                ? t("opsTtsAi.profileOn")
-                                : t("opsTtsAi.profileOff")
-                            }
-                            onChange={(e) => void onSetActive(profile.id, e.target.checked)}
-                          />
-                          <span className="ops-tts-setup-switch__track" aria-hidden="true" />
-                        </label>
-                      </td>
-                      <td
-                        className="ops-tts-setup-table__api-key"
-                        title={
-                          profile.api_key_set
-                            ? profile.api_key_masked || t("opsTtsAi.profileKeySet")
-                            : t("opsTtsAi.profileKeyUnset")
-                        }
-                      >
-                        {profile.api_key_set ? (
-                          <code>{profile.api_key_masked || t("opsTtsAi.profileKeySet")}</code>
-                        ) : (
-                          <span className="ops-tts-setup-table__api-key--empty">{t("opsTtsAi.profileKeyUnset")}</span>
-                        )}
-                      </td>
-                      <td>{profile.provider || "auto"}</td>
-                      <td title={profile.voice_id || undefined}>{profile.voice_id?.trim() || "—"}</td>
-                      <td>{profile.language_code || "vi"}</td>
-                      <td>×{profile.speaking_rate ?? 1}</td>
-                      <td title={profile.model_id || undefined}>{profile.model_id?.trim() || "—"}</td>
-                      <td>
-                        {profile.fallback_provider && profile.fallback_provider !== "none"
-                          ? profile.fallback_provider
-                          : "—"}
+                        <div className="ops-ai-inline-config is-secondary" title={`${profile.language_code || "vi"} · ×${profile.speaking_rate ?? 1} · ${profile.local_backend || "auto"}${profile.device ? `/${profile.device}` : ""}`}>
+                          <strong>{(profile.language_code || "vi").toUpperCase()}</strong>
+                          <span aria-hidden="true">·</span>
+                          <span>×{profile.speaking_rate ?? 1}</span>
+                          <span aria-hidden="true">·</span>
+                          <span>{profile.local_backend || "auto"}{profile.device ? `/${profile.device}` : ""}</span>
+                        </div>
                       </td>
                       <td>
-                        {profile.local_backend || "auto"}
-                        {profile.device ? `/${profile.device}` : ""}
+                        <div className="ops-ai-inline-status is-tts">
+                          <span className={`ops-ai-chip ops-tts-chip ${ttsReadyChipClass(rowReady)}`}>
+                            {t(ttsReadyLabelKey(rowReady))}
+                          </span>
+                          <label className="ops-tts-setup-switch" title={t("opsTtsAi.profileActiveHint")}>
+                            <input
+                              type="checkbox"
+                              checked={isOn}
+                              disabled={profileBusy}
+                              aria-label={isOn ? t("opsTtsAi.profileOn") : t("opsTtsAi.profileOff")}
+                              onChange={(e) => void onSetActive(profile.id, e.target.checked)}
+                            />
+                            <span className="ops-tts-setup-switch__track" aria-hidden="true" />
+                          </label>
+                        </div>
                       </td>
                       <td className="ops-tts-setup-table__actions">
-                        <button
-                          type="button"
-                          className="ops-tts-setup-table__icon-btn"
-                          disabled={profileBusy}
-                          aria-label={t("opsTtsAi.profileEdit")}
-                          title={t("opsTtsAi.profileEdit")}
-                          onClick={() => void openEditor(profile.id)}
-                        >
-                          <TtsSetupActionIcon kind="edit" />
-                        </button>
-                        <button
-                          type="button"
-                          className="ops-tts-setup-table__icon-btn ops-tts-setup-table__icon-btn--danger"
-                          disabled={profileBusy || profiles.length <= 1}
-                          aria-label={t("opsTtsAi.profileDelete")}
-                          title={t("opsTtsAi.profileDelete")}
-                          onClick={() => void onDeleteProfile(profile.id, profile.name)}
-                        >
-                          <TtsSetupActionIcon kind="delete" />
-                        </button>
+                        <div className="ops-ai-row-actions">
+                          <button
+                            type="button"
+                            className="ops-tts-setup-table__icon-btn"
+                            disabled={profileBusy}
+                            aria-label={t("opsTtsAi.profileEdit")}
+                            title={t("opsTtsAi.profileEdit")}
+                            onClick={() => void openEditor(profile.id)}
+                          >
+                            <TtsSetupActionIcon kind="edit" />
+                          </button>
+                          <button
+                            type="button"
+                            className="ops-tts-setup-table__icon-btn ops-tts-setup-table__icon-btn--danger"
+                            disabled={profileBusy || profiles.length <= 1}
+                            aria-label={t("opsTtsAi.profileDelete")}
+                            title={t("opsTtsAi.profileDelete")}
+                            onClick={() => void onDeleteProfile(profile.id, profile.name)}
+                          >
+                            <TtsSetupActionIcon kind="delete" />
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   );
@@ -1613,6 +1971,7 @@ export function OpsTtsAiPage() {
           rateLimited: t("opsTtsAi.errorRateLimited"),
           failed: t("opsTtsAi.errorFailed"),
           checkKey: t("opsTtsAi.errorCheckKey"),
+          checkForbidden: t("opsTtsAi.errorCheckForbidden"),
           checkEndpoint: t("opsTtsAi.errorCheckEndpoint")
         })
       : null;
@@ -1629,6 +1988,14 @@ export function OpsTtsAiPage() {
   const isLocal = kind === "local";
   const isCloud = kind === "cloud";
   const isHttp = kind === "http";
+  const catalogRefreshBusy = catalogRefreshPhase !== "idle";
+  const localDraftProvider = nameProviderForTest(form);
+  const localDraftNeedsProvider = Boolean(
+    isLocal &&
+    !editingProfileId &&
+    (!localDraftProvider ||
+      (form.providerChoice === "custom" && !/^[a-z][a-z0-9_\-]{0,62}$/.test(localDraftProvider)))
+  );
   const fieldCaps = getTtsFieldCapabilities(
     activeProvider,
     form?.localBackend || "auto",
@@ -1651,6 +2018,28 @@ export function OpsTtsAiPage() {
   const catalogVoices = catalog?.voices?.length ? catalog.voices : null;
   const catalogStyles = catalog?.styles?.length ? catalog.styles : null;
   const catalogModels = catalog?.models?.length ? catalog.models : null;
+  const isOmniEngine = isOmnivoiceProvider(activeProvider);
+  const engineModelOptions = isOmniEngine && engineCatalog.length ? engineCatalog : null;
+  const engineGroups: Array<{
+    id: EngineCatalogCategory;
+    label: string;
+    engines: TtsAiEngineOption[];
+  }> = (
+    [
+      ["ready", t("opsTtsAi.engineGroupReady")],
+      ["installable", t("opsTtsAi.engineGroupInstallable")],
+      ["installed", t("opsTtsAi.engineGroupInstalled")],
+      ["setup", t("opsTtsAi.engineGroupSetup")],
+      ["unavailable", t("opsTtsAi.engineGroupUnavailable")]
+    ] as Array<[EngineCatalogCategory, string]>
+  )
+    .map(([id, label]) => ({
+      id,
+      label,
+      engines: engineCatalog.filter((engine) => engineCatalogCategory(engine) === id)
+    }));
+  const activeEngineGroup =
+    engineGroups.find((group) => group.id === engineGroupTab) || engineGroups[0];
 
   return (
     <OpsConsoleShell
@@ -1681,7 +2070,9 @@ export function OpsTtsAiPage() {
                 pendingLabel={t("opsTtsAi.testing")}
                 leadingIcon={<TtsSetupActionIcon kind="test" />}
                 onClick={() => void asyncAction.run("test", onTest)}
-                disabled={saving || installing || previewing || profileBusy}
+                disabled={
+                  saving || installing || previewing || profileBusy || localDraftNeedsProvider || catalogRefreshBusy
+                }
                 aria-label={t("opsTtsAi.test")}
                 title={t("opsTtsAi.test")}
               >
@@ -1693,7 +2084,9 @@ export function OpsTtsAiPage() {
                 pendingLabel={t("opsTtsAi.saving")}
                 leadingIcon={<TtsSetupActionIcon kind="save" />}
                 onClick={() => void asyncAction.run("save", onSave)}
-                disabled={testing || installing || previewing || profileBusy}
+                disabled={
+                  testing || installing || previewing || profileBusy || localDraftNeedsProvider || catalogRefreshBusy
+                }
                 aria-label={t("opsTtsAi.save")}
                 title={t("opsTtsAi.save")}
               >
@@ -1808,7 +2201,12 @@ export function OpsTtsAiPage() {
                         ? t("opsTtsAi.testNeedBaseUrlHint")
                         : testResult.detail === t("opsTtsAi.customProviderInvalid")
                           ? t("opsTtsAi.customProviderInvalidHint")
-                          : t("opsTtsAi.testErrorHint")}
+                          : providerTestErrorHint(testFailure?.httpStatus, {
+                              key: t("opsTtsAi.testErrorHintKey"),
+                              forbidden: t("opsTtsAi.testErrorHintForbidden"),
+                              quota: t("opsTtsAi.testErrorHintQuota"),
+                              generic: t("opsTtsAi.testErrorHint")
+                            })}
                 </span>
               </div>
               <button
@@ -1862,6 +2260,7 @@ export function OpsTtsAiPage() {
                   aria-selected={kind === item}
                   className={`ops-tts-kind-tab${kind === item ? " is-active" : ""}`}
                   onClick={() => onKindChange(item)}
+                  disabled={catalogRefreshBusy}
                   title={t(kindHintKey(item))}
                 >
                   {t(kindLabelKey(item))}
@@ -1878,11 +2277,19 @@ export function OpsTtsAiPage() {
                   ? providerSelect
                   : providerSelect === "custom" && kind === "local"
                     ? "custom"
-                    : defaultProviderForKind(kind)
+                    : isLocal && !editingProfileId
+                      ? ""
+                      : defaultProviderForKind(kind)
               }
               onChange={(e) => onProviderSelect(e.target.value)}
+              disabled={catalogRefreshBusy}
               title={t("opsTtsAi.providerHint")}
             >
+              {isLocal && !editingProfileId ? (
+                <option value="" disabled>
+                  {t("opsTtsAi.providerSelectPlaceholder")}
+                </option>
+              ) : null}
               {TTS_PROVIDERS_BY_KIND[kind].map((slug) => (
                 <option key={slug} value={slug}>
                   {slug === "custom" ? t("opsTtsAi.providerCustom") : slug}
@@ -1898,12 +2305,33 @@ export function OpsTtsAiPage() {
                 id="tts-ai-custom-slug"
                 value={form?.customProviderSlug || ""}
                 onChange={(e) => onCustomSlugInput(e.target.value)}
+                disabled={catalogRefreshBusy}
                 placeholder={t("opsTtsAi.customProviderSlugPlaceholder")}
                 title={t("opsTtsAi.customProviderHint")}
                 spellCheck={false}
                 autoComplete="off"
               />
               <p className="ops-tts-field-hint">{t("opsTtsAi.customProviderHint")}</p>
+            </div>
+          ) : null}
+          {localDraftNeedsProvider ? (
+            <div className="ops-tts-provider-gate ops-tts-span-2" role="status">
+              <span className="ops-tts-provider-gate__icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24">
+                  <path
+                    d="M7 7.5h10M7 12h10M7 16.5h6"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.7"
+                    strokeLinecap="round"
+                  />
+                  <rect x="3.5" y="3.5" width="17" height="17" rx="4" fill="none" stroke="currentColor" strokeWidth="1.5" />
+                </svg>
+              </span>
+              <div>
+                <strong>{t("opsTtsAi.providerRequiredTitle")}</strong>
+                <p>{t("opsTtsAi.providerRequiredHint")}</p>
+              </div>
             </div>
           ) : null}
           </div>
@@ -1952,7 +2380,7 @@ export function OpsTtsAiPage() {
           </section>
         ) : null}
 
-        {isLocal ? (
+        {isLocal && !localDraftNeedsProvider ? (
           <section className="ops-tts-section ops-tts-section--install">
             <header
               className="ops-tts-section__head"
@@ -2219,28 +2647,66 @@ export function OpsTtsAiPage() {
           </section>
         ) : null}
 
-        {(isLocal || isCloud || isHttp) ? (
+        {(isLocal || isCloud || isHttp) && !localDraftNeedsProvider ? (
           <section className="ops-tts-section">
-            <header className="ops-tts-section__head" title={t("opsTtsAi.sectionVoiceHint")}>
-              <h3>{t("opsTtsAi.sectionVoice")}</h3>
-              <p>{t("opsTtsAi.sectionVoiceHint")}</p>
+            <header
+              className="ops-tts-section__head ops-tts-section__head--with-action"
+              title={t("opsTtsAi.sectionVoiceHint")}
+            >
+              <div>
+                <h3>{t("opsTtsAi.sectionVoice")}</h3>
+                <p>{t("opsTtsAi.sectionVoiceHint")}</p>
+              </div>
+              <button
+                className={`ops-tts-catalog-refresh${
+                  catalogRefreshPhase === "preparing"
+                    ? " is-preparing"
+                    : catalogRefreshPhase === "loading"
+                      ? " is-loading"
+                      : ""
+                }`}
+                type="button"
+                onClick={() => void onRefreshCatalog()}
+                disabled={catalogRefreshBusy || testing}
+                aria-busy={catalogRefreshBusy}
+                aria-live="polite"
+                data-phase={catalogRefreshPhase}
+              >
+                <svg viewBox="0 0 20 20" aria-hidden="true">
+                  <path
+                    d="M15.2 7.1A5.8 5.8 0 1 0 15 13.2M15.2 7.1V3.8m0 3.3h-3.3"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.6"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+                {catalogRefreshPhase === "preparing"
+                  ? t("opsTtsAi.catalogPreparing")
+                  : catalogRefreshPhase === "loading"
+                    ? t("opsTtsAi.catalogLoading")
+                    : t("opsTtsAi.catalogRefresh")}
+              </button>
             </header>
               {catalog ? (
                 <div className="ops-tts-status ops-tts-status--compact" aria-label={t("opsTtsAi.providerMetaLabel")}>
-                  <span className="ops-tts-chip is-ok">
-                    {t("opsTtsAi.catalogSource")}: {catalog.source}
-                    {catalogVoices ? ` · ${catalogVoices.length}` : ""}
-                  </span>
-                  {catalog.sample_rate ? (
-                    <span className="ops-tts-chip is-muted">
-                      {t("opsTtsAi.sampleRate")}: {catalog.sample_rate} Hz
+                  <>
+                    <span className="ops-tts-chip is-ok">
+                      {t("opsTtsAi.catalogSource")}: {catalog.source}
+                      {catalogVoices ? ` · ${catalogVoices.length}` : ""}
                     </span>
-                  ) : null}
-                  {catalog.models?.length ? (
-                    <span className="ops-tts-chip is-muted">
-                      {t("opsTtsAi.modelId")}: {form.modelId || catalog.models[0]}
-                    </span>
-                  ) : null}
+                    {catalog.sample_rate ? (
+                      <span className="ops-tts-chip is-muted">
+                        {t("opsTtsAi.sampleRate")}: {catalog.sample_rate} Hz
+                      </span>
+                    ) : null}
+                    {catalog.models?.length ? (
+                      <span className="ops-tts-chip is-muted">
+                        {t("opsTtsAi.modelId")}: {form.modelId || catalog.models[0]}
+                      </span>
+                    ) : null}
+                  </>
                 </div>
               ) : null}
               <div className="ops-tts-grid">
@@ -2317,17 +2783,32 @@ export function OpsTtsAiPage() {
                 {fieldCaps.model ? (
                   <div className="ops-form-field ops-tts-span-2">
                     <label htmlFor="tts-ai-model">{t("opsTtsAi.modelId")}</label>
-                    {catalogModels ? (
+                    {engineModelOptions || catalogModels ? (
                       <select
                         id="tts-ai-model"
-                        value={catalogModels.includes(form.modelId) ? form.modelId : catalogModels[0] || ""}
+                        value={
+                          engineModelOptions
+                            ? engineModelOptions.some((engine) => engine.id === form.modelId)
+                              ? form.modelId
+                              : catalogModels?.[0] || ""
+                            : catalogModels?.includes(form.modelId)
+                              ? form.modelId
+                              : catalogModels?.[0] || ""
+                        }
                         onChange={(e) => setForm({ ...form, modelId: e.target.value })}
                       >
-                        {catalogModels.map((m) => (
-                          <option key={m} value={m}>
-                            {m}
-                          </option>
-                        ))}
+                        {engineModelOptions
+                          ? engineModelOptions.map((engine) => (
+                              <option key={engine.id} value={engine.id} disabled={!engine.selectable}>
+                                {engine.label}
+                                {engine.selectable ? "" : ` — ${t("opsTtsAi.engineNotReadyShort")}`}
+                              </option>
+                            ))
+                          : catalogModels?.map((m) => (
+                              <option key={m} value={m}>
+                                {m}
+                              </option>
+                            ))}
                       </select>
                     ) : (
                       <input
@@ -2343,10 +2824,205 @@ export function OpsTtsAiPage() {
                   </div>
                 ) : null}
               </div>
+              {isOmniEngine ? (
+                <div className="ops-tts-engine-catalog">
+                  <div className="ops-tts-engine-catalog__head">
+                    <div>
+                      <strong>{t("opsTtsAi.engineCatalogTitle")}</strong>
+                      <p>{t("opsTtsAi.engineCatalogHint")}</p>
+                      <div
+                        className="ops-tts-engine-catalog__meta"
+                        aria-label={t("opsTtsAi.engineSummaryLabel")}
+                      >
+                        <span><strong>{engineCatalog.length}</strong> {t("opsTtsAi.engineSummaryTotal")}</span>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      className="ops-tts-catalog-refresh"
+                      onClick={() => void loadOmnivoiceEngines()}
+                      disabled={engineCatalogLoading || installing}
+                    >
+                      <svg viewBox="0 0 20 20" aria-hidden="true">
+                        <path
+                          d="M15.2 7.1A5.8 5.8 0 1 0 15 13.2M15.2 7.1V3.8m0 3.3h-3.3"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="1.6"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      </svg>
+                      {engineCatalogLoading
+                        ? t("opsTtsAi.engineCatalogLoading")
+                        : t("opsTtsAi.engineCatalogRefresh")}
+                    </button>
+                  </div>
+                  {engineCatalogError ? <div className="inline-error">{engineCatalogError}</div> : null}
+                  <div
+                    className="ops-tts-engine-tabs"
+                    role="tablist"
+                    aria-label={t("opsTtsAi.engineGroupTabsLabel")}
+                  >
+                    {engineGroups.map((group) => (
+                      <button
+                        type="button"
+                        role="tab"
+                        id={`tts-engine-tab-${group.id}`}
+                        aria-controls={`tts-engine-panel-${group.id}`}
+                        aria-selected={engineGroupTab === group.id}
+                        className={engineGroupTab === group.id ? `is-active is-${group.id}` : `is-${group.id}`}
+                        key={group.id}
+                        onClick={() => {
+                          setEngineGroupTab(group.id);
+                          setEngineExpandedId(null);
+                        }}
+                      >
+                        <span className={`ops-tts-engine-tabs__indicator is-${group.id}`} aria-hidden="true" />
+                        <span>{group.label}</span>
+                        <strong>{group.engines.length}</strong>
+                      </button>
+                    ))}
+                  </div>
+                  {activeEngineGroup ? (
+                    <div
+                      className="ops-tts-engine-tabpanel"
+                      role="tabpanel"
+                      id={`tts-engine-panel-${activeEngineGroup.id}`}
+                      aria-labelledby={`tts-engine-tab-${activeEngineGroup.id}`}
+                    >
+                      <div className="ops-tts-engine-catalog__grid" role="list">
+                        {activeEngineGroup.engines.map((engine) => {
+                      const guideOpen = engineExpandedId === engine.id;
+                      const activeInstall = engineInstallJob?.engine_id === engine.id ? engineInstallJob : null;
+                      const category = engineCatalogCategory(engine);
+                      const hasGuide =
+                        engine.dependency_status !== "incompatible" &&
+                        (engine.install_mode === "manual" || engine.install_mode === "external");
+                      const hasDetails = Boolean(engine.install_hint);
+                      const installingThisEngine = engineInstallingId === engine.id;
+                      const installActionLabel = installingThisEngine
+                        ? t("opsTtsAi.engineInstalling")
+                        : t("opsTtsAi.engineInstall");
+                      const guideActionLabel = guideOpen
+                        ? t("opsTtsAi.engineHideGuide")
+                        : engine.install_mode === "external"
+                          ? t("opsTtsAi.engineConfigure")
+                          : t("opsTtsAi.engineSetupGuide");
+                      return (
+                        <article className={`ops-tts-engine-card is-${category}`} key={engine.id} role="listitem">
+                          <div className="ops-tts-engine-card__row">
+                            <span className={`ops-tts-engine-card__indicator is-${category}`} aria-hidden="true" />
+                            <div className="ops-tts-engine-card__identity">
+                              <div className="ops-tts-engine-card__identity-top">
+                                <strong>{engine.label}</strong>
+                                {engine.estimated_size_gb ? (
+                                  <span className="ops-tts-engine-card__size">~{engine.estimated_size_gb} GB</span>
+                                ) : null}
+                              </div>
+                              <div className="ops-tts-engine-card__meta">
+                                <span>{engine.id}</span>
+                                <i aria-hidden="true" />
+                                <span className={`is-${category}`}>
+                                  {t(engineDependencyLabelKey(engine.dependency_status))}
+                                </span>
+                                <i aria-hidden="true" />
+                                <span>
+                                  {engine.adapter_status === "ready"
+                                    ? t("opsTtsAi.engineAdapterReady")
+                                    : t("opsTtsAi.engineAdapterPlanned")}
+                                </span>
+                              </div>
+                            </div>
+                            <div className="ops-tts-engine-card__controls">
+                              {engine.installable ? (
+                                <button
+                                  type="button"
+                                  className="ops-tts-engine-card__action is-icon is-primary"
+                                  onClick={() => void onInstallEngine(engine)}
+                                  disabled={installing || testing || engineInstallingId !== null}
+                                  aria-label={installActionLabel}
+                                  title={installActionLabel}
+                                >
+                                  <EngineCatalogActionIcon kind={installingThisEngine ? "loading" : "install"} />
+                                </button>
+                              ) : hasGuide ? (
+                                <button
+                                  type="button"
+                                  className={`ops-tts-engine-card__action is-icon${guideOpen ? " is-active" : ""}`}
+                                  aria-expanded={guideOpen}
+                                  aria-label={guideActionLabel}
+                                  title={guideActionLabel}
+                                  onClick={() => setEngineExpandedId(guideOpen ? null : engine.id)}
+                                >
+                                  <EngineCatalogActionIcon
+                                    kind={guideOpen
+                                      ? "collapse"
+                                      : engine.install_mode === "external"
+                                        ? "server"
+                                        : "guide"}
+                                  />
+                                </button>
+                              ) : null}
+                              {hasDetails && !hasGuide ? (
+                                <button
+                                  type="button"
+                                  className={`ops-tts-engine-card__details-toggle${guideOpen ? " is-active" : ""}`}
+                                  aria-expanded={guideOpen}
+                                  aria-label={guideOpen
+                                    ? t("opsTtsAi.engineHideDetails")
+                                    : t("opsTtsAi.engineShowDetails")}
+                                  title={guideOpen
+                                    ? t("opsTtsAi.engineHideDetails")
+                                    : t("opsTtsAi.engineShowDetails")}
+                                  onClick={() => setEngineExpandedId(guideOpen ? null : engine.id)}
+                                >
+                                  <svg viewBox="0 0 20 20" aria-hidden="true">
+                                    <circle cx="5" cy="10" r="1.15" />
+                                    <circle cx="10" cy="10" r="1.15" />
+                                    <circle cx="15" cy="10" r="1.15" />
+                                  </svg>
+                                </button>
+                              ) : null}
+                            </div>
+                          </div>
+                          {activeInstall ? (
+                            <div
+                              className={`ops-tts-engine-card__progress${
+                                activeInstall.status === "failed" ? " is-error" : ""
+                              }`}
+                              aria-live="polite"
+                            >
+                              <div className="ops-tts-engine-card__progress-heading">
+                                <span>{t(engineInstallStepLabelKey(activeInstall.step))}</span>
+                                <strong>{activeInstall.progress}%</strong>
+                              </div>
+                              <progress max={100} value={activeInstall.progress} />
+                              <p>
+                                {activeInstall.status === "failed"
+                                  ? activeInstall.error || activeInstall.detail
+                                  : activeInstall.detail}
+                              </p>
+                            </div>
+                          ) : null}
+                          {guideOpen && engine.install_hint ? (
+                            <p className="ops-tts-engine-card__detail">{engine.install_hint}</p>
+                          ) : null}
+                        </article>
+                      );
+                        })}
+                        {activeEngineGroup.engines.length === 0 ? (
+                          <p className="ops-tts-engine-tabpanel__empty">{t("opsTtsAi.engineGroupEmpty")}</p>
+                        ) : null}
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
           </section>
         ) : null}
 
-        {(isLocal || isCloud || isHttp) ? (
+        {(isLocal || isCloud || isHttp) && !localDraftNeedsProvider ? (
           <section className="ops-tts-section ops-tts-section--preview">
             <header className="ops-tts-section__head" title={t("opsTtsAi.sectionPreviewHint")}>
               <div>
@@ -2372,7 +3048,10 @@ export function OpsTtsAiPage() {
                   id="tts-ai-preview-text"
                   rows={3}
                   value={previewText}
-                  onChange={(e) => setPreviewText(e.target.value)}
+                  onChange={(e) => {
+                    setPreviewText(e.target.value);
+                    if (previewFeedback) setPreviewFeedback(null);
+                  }}
                   maxLength={280}
                   spellCheck={false}
                   placeholder={t("opsTtsAi.previewTextPlaceholder")}
@@ -2380,6 +3059,43 @@ export function OpsTtsAiPage() {
                 />
                 <p className="ops-tts-field-hint ops-tts-field-hint--quiet">{t("opsTtsAi.previewTextHint")}</p>
               </div>
+
+              {previewFeedback ? (
+                <div className="ops-tts-preview-feedback" role="alert">
+                  <span className="ops-tts-preview-feedback__icon" aria-hidden="true">
+                    <svg viewBox="0 0 20 20">
+                      <circle cx="10" cy="10" r="6.4" fill="none" stroke="currentColor" strokeWidth="1.6" />
+                      <path
+                        d="M10 6.8v3.8M10 13.25h.01"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="1.7"
+                        strokeLinecap="round"
+                      />
+                    </svg>
+                  </span>
+                  <div>
+                    <strong>{t("opsTtsAi.previewBlockedTitle")}</strong>
+                    <span>{previewFeedback}</span>
+                  </div>
+                  <button
+                    type="button"
+                    aria-label={t("common.close")}
+                    title={t("common.close")}
+                    onClick={() => setPreviewFeedback(null)}
+                  >
+                    <svg viewBox="0 0 20 20" aria-hidden="true">
+                      <path
+                        d="M6.5 6.5 13.5 13.5M13.5 6.5 6.5 13.5"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="1.6"
+                        strokeLinecap="round"
+                      />
+                    </svg>
+                  </button>
+                </div>
+              ) : null}
 
               <div className="ops-tts-preview-bar">
                 <AsyncButton
@@ -2431,7 +3147,7 @@ export function OpsTtsAiPage() {
           </section>
         ) : null}
 
-        {!isSystem ? (
+        {!isSystem && !localDraftNeedsProvider ? (
           <section className="ops-tts-section ops-tts-section--advanced">
             <header className="ops-tts-section__head">
               <h3>{t("opsTtsAi.sectionAdvanced")}</h3>

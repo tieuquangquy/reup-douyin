@@ -28,6 +28,9 @@ from src.schemas.operations import (
     TranslationPromptResponse,
     TranslationPromptUpdateRequest,
     TtsAiCatalog,
+    TtsAiEngineCatalogResponse,
+    TtsAiEngineInstallJobResponse,
+    TtsAiEngineInstallRequest,
     TtsAiInstallRequest,
     TtsAiInstallResponse,
     TtsAiPreviewRequest,
@@ -52,6 +55,15 @@ from src.tts_pipeline.install_runner import (
     TtsInstallError,
     build_tts_install_plan,
     is_tts_package_installed,
+)
+from src.tts_pipeline.omnivoice_engine_catalog import (
+    discover_omnivoice_engines,
+    get_omnivoice_engine_install,
+)
+from src.tts_pipeline.omnivoice_engine_install_job import (
+    get_engine_install_status,
+    is_managed_engine_installed,
+    start_engine_install,
 )
 from src.tts_pipeline.preview_job import (
     cancel_tts_preview_job,
@@ -1243,6 +1255,74 @@ def install_tts_ai_package(
     return _tts_install_response_from_job(job)
 
 
+@router.get("/tts-ai/engines", response_model=TtsAiEngineCatalogResponse)
+def list_tts_ai_engines(
+    workspace_id: UUID = Depends(get_current_workspace),
+) -> TtsAiEngineCatalogResponse:
+    """Return host-aware OmniVoice engine readiness without importing heavy models."""
+    _ = workspace_id
+    settings = get_settings()
+    root = getattr(settings, "audio_tts_engine_root", "./data/tts-engines")
+    return TtsAiEngineCatalogResponse(
+        engines=discover_omnivoice_engines(
+            managed_installed=lambda engine_id: is_managed_engine_installed(engine_id, root=root)
+        )
+    )
+
+
+@router.post("/tts-ai/engines/{engine_id}/install", response_model=TtsAiEngineInstallJobResponse)
+def install_tts_ai_engine(
+    engine_id: str,
+    body: TtsAiEngineInstallRequest,
+    workspace_id: UUID = Depends(get_current_workspace),
+) -> TtsAiEngineInstallJobResponse:
+    """Start a registry-owned pip or managed-source engine install."""
+    rows = {str(row["id"]): row for row in discover_omnivoice_engines()}
+    row = rows.get(engine_id)
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown OmniVoice engine")
+
+    recipe = get_omnivoice_engine_install(engine_id)
+    if recipe is None:
+        hint = str(row.get("install_hint") or "This engine requires manual setup")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"One-click install is unavailable for {engine_id}. {hint}",
+        )
+
+    settings = get_settings()
+    if not bool(getattr(settings, "audio_tts_allow_install", True)):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="TTS package install is disabled (AUDIO_TTS_ALLOW_INSTALL=false)",
+        )
+
+    try:
+        payload = start_engine_install(
+            workspace_id=str(workspace_id),
+            recipe=recipe,
+            root=getattr(settings, "audio_tts_engine_root", "./data/tts-engines"),
+            force_reinstall=body.force_reinstall,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    return TtsAiEngineInstallJobResponse.model_validate(payload)
+
+
+@router.get("/tts-ai/engines/install/status", response_model=TtsAiEngineInstallJobResponse)
+def get_tts_ai_engine_install_status(
+    workspace_id: UUID = Depends(get_current_workspace),
+) -> TtsAiEngineInstallJobResponse:
+    settings = get_settings()
+    payload = get_engine_install_status(
+        workspace_id=str(workspace_id),
+        root=getattr(settings, "audio_tts_engine_root", "./data/tts-engines"),
+    )
+    if payload is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No OmniVoice engine install job")
+    return TtsAiEngineInstallJobResponse.model_validate(payload)
+
+
 @router.get("/tts-ai/install/status", response_model=TtsAiInstallResponse)
 def get_tts_ai_install_status(
     workspace_id: UUID = Depends(get_current_workspace),
@@ -1387,4 +1467,3 @@ def cancel_tts_ai_preview(
             detail="No TTS preview job for this workspace",
         )
     return _tts_preview_response_from_job(job)
-

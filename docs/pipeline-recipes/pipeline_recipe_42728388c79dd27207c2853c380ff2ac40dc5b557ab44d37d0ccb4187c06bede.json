@@ -1,0 +1,147 @@
+{
+  "schema_version": "pipeline_recipe_lock_v2",
+  "status": "LOCKED_FOR_CONTROLLED_PILOT_WITH_GAPS",
+  "locked_at": "2026-07-28T11:59:03.585674+00:00",
+  "operator_id": "operator-user-batch-regression-ready-v20",
+  "phase1": {
+    "extractor": "v58_candidate",
+    "step": 1,
+    "pad": 1,
+    "authority": "master_timeline.json",
+    "authority_v3_6_full_duration": false,
+    "scorer": "score_phase1_pass",
+    "final_coverage_fade_tail_max_frames": 5,
+    "post_refinement_sparse_compact_guard": {
+      "policy_version": "post_refinement_sparse_compact_text_consensus_v1",
+      "max_width_frac": 0.08,
+      "max_height_frac": 0.065,
+      "visual_normalized_height": 64,
+      "texture_max_laplacian_variance": 150.0,
+      "texture_max_edge_density": 0.1,
+      "texture_min_saturation": 120.0,
+      "recognizer_failure_policy": "fail_soft_to_operator_review"
+    }
+  },
+  "phase2": {
+    "provider": "local",
+    "model_versions": [
+      "ppocrv6-medium-det-8e0f56fb_rec-e5a92bcb_paddleocr-3.8.0.dev11-g2661c7c0e"
+    ],
+    "geometry_authority": "master_timeline.json",
+    "output_artifact": "phase2_ocr_timeline.json",
+    "overwrite_master_timeline": false,
+    "approval_policy": "exact_operator_review",
+    "llm_context_correction_allowed": true,
+    "llm_correction_is_approval_authority": false
+  },
+  "phase3": {
+    "scope": "title_labels_ingredients_units_endcard",
+    "duplicate_transition_policy": "translate_once_cover_all_geometry_refs",
+    "duration_policy": "meaning_preserving_compaction_then_measured_audio_fit",
+    "approval_policy": "operator_locked_translation"
+  },
+  "tts": {
+    "provider": "auto",
+    "voice_id": "vi-VN-HoaiMyNeural",
+    "speaking_rate": 1.0,
+    "timing_policy": "measured_duration_segment_fit",
+    "atempo_policy": "bounded_only_after_text_compaction"
+  },
+  "render": {
+    "renderer": "phase4_adaptive_pts_preserving",
+    "video_encoder_policy": "auto",
+    "hardware_smoke_probe": true,
+    "hardware_fallback_enabled": true,
+    "background_mix_gain": 0.22,
+    "loudness_target_lufs": -14.0,
+    "narration_only_loudness": {
+      "policy_version": "two_pass_loudnorm_aac_headroom_v1",
+      "measurement": "ffmpeg_loudnorm_two_pass",
+      "encode_true_peak_db": -2.7,
+      "aac_headroom_db": 1.2
+    },
+    "residual_cjk_policy": {
+      "policy_version": "source_intrinsic_cjk_v2",
+      "source_intrinsic_edge_print_requires_source_ocr_match": true,
+      "texture_false_positive": {
+        "max_area": 0.0006,
+        "max_pixel_aspect": 0.55,
+        "max_mean_abs_delta": 4.0,
+        "max_p95_abs_delta": 10.0,
+        "active_cover_overlap_blocks_exclusion": true
+      }
+    },
+    "invisible_perturbation": false,
+    "mirror": false,
+    "duplicate_detection_evasion": false
+  },
+  "audio_authority": {
+    "no_dialogue_source_audio": {
+      "policy_version": "verified_silero_no_dialogue_source_audio_v1",
+      "vad_provider": "silero_vad",
+      "requires_measured_execution": true,
+      "requires_zero_speech_seconds": true,
+      "requires_zero_speech_segments": true,
+      "operator_audio_approval_required": true,
+      "source_hash_binding_required": true
+    }
+  },
+  "operator_gates": [
+    "OCR_APPROVED",
+    "TRANSLATION_APPROVED",
+    "VISUAL_APPROVED",
+    "AUDIO_APPROVED",
+    "FINAL_APPROVED",
+    "METADATA_APPROVED",
+    "SOURCE_RIGHTS_AND_MUSIC_APPROVED"
+  ],
+  "execution": {
+    "resume": true,
+    "idempotent_stage_checks": true,
+    "transient_retry_policy": "pipeline_retry_policy",
+    "external_publish": false
+  },
+  "evidence": {
+    "corpus": {
+      "path": "docs/pipeline-regression-corpus-v14-grid-peer-guard.json",
+      "file_sha256": "e507d446958e78e934cb98e0a07ca4131e2c6fec650b9d1339c3fd60650715c9",
+      "corpus_sha256": "0c6634cc4da25ed981de2c26ebe7fc835e545421446276357e9155e45ae58f1c"
+    },
+    "report": {
+      "path": "apps/api/regression_runs/pipeline_v15_recipe_lock_candidate_20260727/pipeline_regression_report.json",
+      "file_sha256": "f647cc5344d75cdd65b8a05c2ccda240d8cd5aef7d89e80f4a86481f8a09e5c1",
+      "report_sha256": "1b204fdb88747eab853783dc5030e948a4462f6f63b28637d2f8a809f384c241"
+    },
+    "e2e_report": {
+      "path": "apps/api/regression_runs/pipeline_v20_dense_grid_hardsub_guard_20260728/pipeline_e2e_regression_report.json",
+      "file_sha256": "8dfd3f8c33850d34ec8285276cd27ed5909c2f4ae17da313862a58c372d64c53",
+      "report_sha256": "963a2be06db150e3b3a9f60e180ae5e5e766d420f79a15dfc1dc8fda6d6445c6",
+      "case_count": 3
+    },
+    "real_video_gaps": {
+      "resolution": [
+        "720p_or_lower"
+      ],
+      "frame_rate": [
+        "above_30fps"
+      ],
+      "duration_band": [
+        "35_to_45s"
+      ],
+      "lighting": [
+        "light"
+      ],
+      "motion": [
+        "medium"
+      ]
+    }
+  },
+  "claims": {
+    "universal_video_support": false,
+    "controlled_pilot_ready_through_phase2_execution": true,
+    "approved_no_text_bypass_count": 1,
+    "full_batch_end_to_end_pass": true,
+    "end_to_end_case_count": 3
+  },
+  "recipe_sha256": "42728388c79dd27207c2853c380ff2ac40dc5b557ab44d37d0ccb4187c06bede"
+}

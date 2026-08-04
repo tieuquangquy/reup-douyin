@@ -1,0 +1,377 @@
+{
+  "schema_version": "pipeline_regression_corpus_v1",
+  "policy_version": "pipeline_regression_policy_v1",
+  "status": "CORPUS_READY_WITH_GAPS",
+  "case_count": 8,
+  "cases": [
+    {
+      "case_id": "local_public_pd_nasa_spectra_vertical",
+      "source_video_external_id": "public_pd_nasa_spectra_vertical",
+      "status": "READY_FOR_BATCH_REGRESSION",
+      "video_path": ".douyin_profiles/regression_gap_staging/public_pd_nasa_spectra_vertical.webm",
+      "phase1_artifact_root": null,
+      "probe": {
+        "duration_seconds": 59.421,
+        "size_bytes": 28212430,
+        "width": 1080,
+        "height": 1920,
+        "r_frame_rate": "30000/1001",
+        "avg_frame_rate": "30000/1001",
+        "has_audio": true
+      },
+      "visual_sample": {
+        "sample_count": 6,
+        "mean_brightness": 36.725,
+        "brightness_range": 63.433,
+        "mean_contrast": 34.727,
+        "mean_motion": 44.404,
+        "lighting": "mixed",
+        "motion": "high"
+      },
+      "phase1_baseline": {
+        "track_count": null,
+        "hardsub_count": null
+      },
+      "dimensions": {
+        "orientation": "portrait",
+        "resolution": "1080p_or_higher",
+        "timebase": "CFR",
+        "frame_rate": "30fps_or_lower",
+        "duration_band": "45_to_60s",
+        "audio": "present",
+        "lighting": "mixed",
+        "motion": "high",
+        "text_density": "unknown"
+      }
+    },
+    {
+      "case_id": "local_public_pd_nasa_arctic_vertical_noaudio",
+      "source_video_external_id": "public_pd_nasa_arctic_vertical_noaudio",
+      "status": "READY_FOR_BATCH_REGRESSION",
+      "video_path": ".douyin_profiles/regression_gap_staging/public_pd_nasa_arctic_vertical_noaudio.webm",
+      "phase1_artifact_root": null,
+      "probe": {
+        "duration_seconds": 53.834,
+        "size_bytes": 15407523,
+        "width": 1080,
+        "height": 1920,
+        "r_frame_rate": "60/1",
+        "avg_frame_rate": "60/1",
+        "has_audio": false
+      },
+      "visual_sample": {
+        "sample_count": 7,
+        "mean_brightness": 114.903,
+        "brightness_range": 73.857,
+        "mean_contrast": 81.901,
+        "mean_motion": 33.441,
+        "lighting": "mixed",
+        "motion": "high"
+      },
+      "phase1_baseline": {
+        "track_count": null,
+        "hardsub_count": null
+      },
+      "dimensions": {
+        "orientation": "portrait",
+        "resolution": "1080p_or_higher",
+        "timebase": "CFR",
+        "frame_rate": "above_30fps",
+        "duration_band": "45_to_60s",
+        "audio": "absent",
+        "lighting": "mixed",
+        "motion": "high",
+        "text_density": "unknown"
+      }
+    },
+    {
+      "case_id": "local_public_ccbysa_snail_portrait",
+      "source_video_external_id": "public_ccbysa_snail_portrait",
+      "status": "READY_FOR_BATCH_REGRESSION",
+      "video_path": ".douyin_profiles/regression_gap_staging/public_ccbysa_snail_portrait.webm",
+      "phase1_artifact_root": null,
+      "probe": {
+        "duration_seconds": 10.933,
+        "size_bytes": 4570588,
+        "width": 1080,
+        "height": 1920,
+        "r_frame_rate": "30/1",
+        "avg_frame_rate": "30/1",
+        "has_audio": false
+      },
+      "visual_sample": {
+        "sample_count": 7,
+        "mean_brightness": 124.04,
+        "brightness_range": 1.32,
+        "mean_contrast": 58.505,
+        "mean_motion": 19.222,
+        "lighting": "light",
+        "motion": "high"
+      },
+      "phase1_baseline": {
+        "track_count": null,
+        "hardsub_count": null
+      },
+      "dimensions": {
+        "orientation": "portrait",
+        "resolution": "1080p_or_higher",
+        "timebase": "CFR",
+        "frame_rate": "30fps_or_lower",
+        "duration_band": "under_35s",
+        "audio": "absent",
+        "lighting": "light",
+        "motion": "high",
+        "text_density": "unknown"
+      }
+    },
+    {
+      "case_id": "local_public_pd_nasa_radio_signal_portrait",
+      "source_video_external_id": "public_pd_nasa_radio_signal_portrait",
+      "status": "READY_FOR_BATCH_REGRESSION",
+      "video_path": ".douyin_profiles/regression_gap_staging/public_pd_nasa_radio_signal_portrait.webm",
+      "phase1_artifact_root": null,
+      "probe": {
+        "duration_seconds": 4.966,
+        "size_bytes": 119964,
+        "width": 1080,
+        "height": 1920,
+        "r_frame_rate": "30/1",
+        "avg_frame_rate": "30/1",
+        "has_audio": false
+      },
+      "visual_sample": {
+        "sample_count": 7,
+        "mean_brightness": 66.851,
+        "brightness_range": 0.773,
+        "mean_contrast": 68.123,
+        "mean_motion": 0.139,
+        "lighting": "dark",
+        "motion": "low"
+      },
+      "phase1_baseline": {
+        "track_count": null,
+        "hardsub_count": null
+      },
+      "dimensions": {
+        "orientation": "portrait",
+        "resolution": "1080p_or_higher",
+        "timebase": "CFR",
+        "frame_rate": "30fps_or_lower",
+        "duration_band": "under_35s",
+        "audio": "absent",
+        "lighting": "dark",
+        "motion": "low",
+        "text_density": "unknown"
+      }
+    },
+    {
+      "case_id": "local_public_ccbysa_cell_division",
+      "source_video_external_id": "public_ccbysa_cell_division",
+      "status": "READY_FOR_BATCH_REGRESSION",
+      "video_path": ".douyin_profiles/regression_gap_staging/public_ccbysa_cell_division.ogv",
+      "phase1_artifact_root": null,
+      "probe": {
+        "duration_seconds": 39.778,
+        "size_bytes": 1004635,
+        "width": 320,
+        "height": 208,
+        "r_frame_rate": "9/1",
+        "avg_frame_rate": "0/0",
+        "has_audio": false
+      },
+      "visual_sample": {
+        "sample_count": 7,
+        "mean_brightness": 12.235,
+        "brightness_range": 1.018,
+        "mean_contrast": 31.329,
+        "mean_motion": 10.463,
+        "lighting": "dark",
+        "motion": "medium"
+      },
+      "phase1_baseline": {
+        "track_count": null,
+        "hardsub_count": null
+      },
+      "dimensions": {
+        "orientation": "landscape",
+        "resolution": "720p_or_lower",
+        "timebase": "VFR",
+        "frame_rate": "30fps_or_lower",
+        "duration_band": "35_to_45s",
+        "audio": "absent",
+        "lighting": "dark",
+        "motion": "medium",
+        "text_density": "unknown"
+      }
+    },
+    {
+      "case_id": "local_public_ccbysa_organelle_motion",
+      "source_video_external_id": "public_ccbysa_organelle_motion",
+      "status": "READY_FOR_BATCH_REGRESSION",
+      "video_path": ".douyin_profiles/regression_gap_staging/public_ccbysa_organelle_motion.webm",
+      "phase1_artifact_root": null,
+      "probe": {
+        "duration_seconds": 20.834,
+        "size_bytes": 25360057,
+        "width": 1920,
+        "height": 1080,
+        "r_frame_rate": "24/1",
+        "avg_frame_rate": "24/1",
+        "has_audio": false
+      },
+      "visual_sample": {
+        "sample_count": 7,
+        "mean_brightness": 128.152,
+        "brightness_range": 4.812,
+        "mean_contrast": 18.004,
+        "mean_motion": 6.398,
+        "lighting": "light",
+        "motion": "medium"
+      },
+      "phase1_baseline": {
+        "track_count": null,
+        "hardsub_count": null
+      },
+      "dimensions": {
+        "orientation": "landscape",
+        "resolution": "1080p_or_higher",
+        "timebase": "CFR",
+        "frame_rate": "30fps_or_lower",
+        "duration_band": "under_35s",
+        "audio": "absent",
+        "lighting": "light",
+        "motion": "medium",
+        "text_density": "unknown"
+      }
+    },
+    {
+      "case_id": "local_public_cc0_flameless_candle",
+      "source_video_external_id": "public_cc0_flameless_candle",
+      "status": "READY_FOR_BATCH_REGRESSION",
+      "video_path": ".douyin_profiles/regression_gap_staging/public_cc0_flameless_candle.webm",
+      "phase1_artifact_root": null,
+      "probe": {
+        "duration_seconds": 8.683,
+        "size_bytes": 1891323,
+        "width": 1920,
+        "height": 1080,
+        "r_frame_rate": "25/1",
+        "avg_frame_rate": "1000/1",
+        "has_audio": true
+      },
+      "visual_sample": {
+        "sample_count": 7,
+        "mean_brightness": 24.124,
+        "brightness_range": 0.772,
+        "mean_contrast": 42.905,
+        "mean_motion": 1.195,
+        "lighting": "dark",
+        "motion": "low"
+      },
+      "phase1_baseline": {
+        "track_count": null,
+        "hardsub_count": null
+      },
+      "dimensions": {
+        "orientation": "landscape",
+        "resolution": "1080p_or_higher",
+        "timebase": "VFR",
+        "frame_rate": "30fps_or_lower",
+        "duration_band": "under_35s",
+        "audio": "present",
+        "lighting": "dark",
+        "motion": "low",
+        "text_density": "unknown"
+      }
+    },
+    {
+      "case_id": "local_public_ccbysa_blocked_pendulum",
+      "source_video_external_id": "public_ccbysa_blocked_pendulum",
+      "status": "READY_FOR_BATCH_REGRESSION",
+      "video_path": ".douyin_profiles/regression_gap_staging/public_ccbysa_blocked_pendulum.webm",
+      "phase1_artifact_root": null,
+      "probe": {
+        "duration_seconds": 20.0,
+        "size_bytes": 1759473,
+        "width": 1280,
+        "height": 720,
+        "r_frame_rate": "30/1",
+        "avg_frame_rate": "30/1",
+        "has_audio": false
+      },
+      "visual_sample": {
+        "sample_count": 7,
+        "mean_brightness": 117.968,
+        "brightness_range": 4.012,
+        "mean_contrast": 52.696,
+        "mean_motion": 4.908,
+        "lighting": "light",
+        "motion": "low"
+      },
+      "phase1_baseline": {
+        "track_count": null,
+        "hardsub_count": null
+      },
+      "dimensions": {
+        "orientation": "landscape",
+        "resolution": "720p_or_lower",
+        "timebase": "CFR",
+        "frame_rate": "30fps_or_lower",
+        "duration_band": "under_35s",
+        "audio": "absent",
+        "lighting": "light",
+        "motion": "low",
+        "text_density": "unknown"
+      }
+    }
+  ],
+  "coverage": {
+    "orientation": [
+      "landscape",
+      "portrait"
+    ],
+    "resolution": [
+      "1080p_or_higher",
+      "720p_or_lower"
+    ],
+    "timebase": [
+      "CFR",
+      "VFR"
+    ],
+    "frame_rate": [
+      "30fps_or_lower",
+      "above_30fps"
+    ],
+    "duration_band": [
+      "35_to_45s",
+      "45_to_60s",
+      "under_35s"
+    ],
+    "lighting": [
+      "dark",
+      "light",
+      "mixed"
+    ],
+    "motion": [
+      "high",
+      "low",
+      "medium"
+    ],
+    "audio": [
+      "absent",
+      "present"
+    ],
+    "text_density": [
+      "unknown"
+    ]
+  },
+  "real_video_gaps": {
+    "text_density": [
+      "dense",
+      "light",
+      "medium"
+    ]
+  },
+  "closure_rule": "Do not claim universal closure while real_video_gaps is non-empty.",
+  "corpus_sha256": "6a53e527aff3a856126ed7f96fcf0a818c477c30e76193b7f2bd88aa060f3ef2"
+}

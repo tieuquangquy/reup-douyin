@@ -26,6 +26,21 @@ class RiskPolicyTests(unittest.TestCase):
         self.assertEqual(findings[0].risk_type, RiskFlagType.MANUAL_REVIEW_REQUIRED)
         self.assertEqual(findings[0].severity, RiskSeverity.HIGH)
 
+    def test_render_scanner_dedupes_summary_and_manifest_warnings(self) -> None:
+        shared = ["using_cleaned_video", "subtitle_lines_wrapped_for_burn", "slightly_long"]
+        render = SimpleNamespace(
+            warning_summary_json={"warnings": list(shared)},
+            metadata_json={"manifest": {"warnings": list(shared)}},
+            subtitle_burned=True,
+        )
+        findings = scan_render_output(render)
+        evidences = [finding.evidence_summary for finding in findings]
+        self.assertEqual(len(evidences), len(set(evidences)), "Duplicate warning strings must collapse to one flag")
+        self.assertNotIn("using_cleaned_video", evidences)
+        self.assertIn("subtitle_lines_wrapped_for_burn", evidences)
+        self.assertIn("slightly_long", evidences)
+        self.assertEqual(len(findings), 2)
+
     def test_publish_draft_scanner_flags_missing_metadata(self) -> None:
         draft = SimpleNamespace(caption="", hashtags_json=[])
         findings = scan_publish_draft(draft)

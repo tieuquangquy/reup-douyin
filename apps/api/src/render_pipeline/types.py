@@ -11,6 +11,7 @@ class RenderRequest:
     source_video_id: UUID
     render_mode: str = "final"
     force_refresh: bool = False
+    workflow_version: str = "legacy_render_v1"
 
 
 @dataclass(frozen=True)

@@ -141,23 +141,26 @@ class PaddleOcrProvider:
                 "paddleocr is not installed. Run: pip install paddleocr paddlepaddle",
             ) from exc
         _configure_paddle_cpu_safe_runtime()
-        # enable_mkldnn=False is required on Paddle 3.3.x (PIR↔oneDNN crash).
+        # enable_mkldnn=False is required on Windows Paddle 3.3.x (PIR↔oneDNN crash).
+        # Douyin hardsub is horizontal → use_angle_cls=False; prefer lightweight PP-OCRv4.
         init_attempts: list[dict] = [
             {
                 "lang": "ch",
-                "use_textline_orientation": True,
+                "use_angle_cls": False,
+                "ocr_version": "PP-OCRv4",
+                "use_textline_orientation": False,
                 "use_doc_orientation_classify": False,
                 "use_doc_unwarping": False,
                 "enable_mkldnn": False,
             },
             {
                 "lang": "ch",
-                "use_angle_cls": True,
+                "use_angle_cls": False,
                 "enable_mkldnn": False,
                 "use_gpu": False,
             },
+            {"lang": "ch", "use_angle_cls": False, "enable_mkldnn": False},
             {"lang": "ch", "enable_mkldnn": False},
-            {"lang": "ch", "use_angle_cls": True},
             {"lang": "ch"},
         ]
         last_exc: Exception | None = None

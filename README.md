@@ -38,7 +38,13 @@ Phase 1 targets one local Windows operator and focuses on building a reliable fo
 - Allow manual edits at important checkpoints.
 - Export videos for multiple target platforms.
 
-The current alpha foundation includes local-first implementations for ingest, filtering/scoring, review, media assets, transcript editing, TTS/subtitle preparation, render, final review, publish draft preparation, risk warnings, Facebook Page/Reels publishing, publish reconciliation, analytics-lite, multi-account routing, and optimization hints. TikTok/YouTube connectors, deep analytics, social inbox/comment workflows, and production OAuth onboarding remain intentionally out of scope.
+The Reup Queue `Start auto` action is now bound to the content-addressed V24
+controlled-pilot recipe. Durable Download/Audio/Translate/TTS/OCR/Render jobs carry
+the same recipe reference through retry/resume and stop fail-closed if its evidence
+changes. Final Review and Manual Export remain operator gates; external publishing
+is not triggered by this path.
+
+The current alpha foundation includes local-first implementations for ingest, filtering/scoring, review, media assets, transcript editing, TTS/subtitle preparation, render, final review, publish draft preparation, risk warnings, Facebook Page/Reels publishing, publish reconciliation, analytics-lite, publication metric snapshots/growth summaries, a durable metrics collector job, an adaptive cadence scheduler, a network-free local adapter, a fail-closed Facebook Reels insights adapter with controlled-live preflight, and Meta OAuth Page onboarding with encrypted local credentials. Facebook publishing also has Page-level concurrency, warm-up, cadence, failure and cooldown/hold guardrails. Live Meta App Review/verification, TikTok/YouTube connectors, attribution/revenue analytics, social inbox/comment workflows, hosted vault/KMS integration and automatic scheduler activation remain intentionally out of scope.
 
 ## Development Direction
 
@@ -78,6 +84,7 @@ Start with:
 - `docs/bug-bash-plan.md`
 - `docs/go-no-go-criteria.md`
 - `docs/facebook-reels-connector.md`
+- `docs/facebook-reels-insights-adapter-v1.md`
 - `docs/platform-account-setup-phase1.md`
 - `docs/publish-attempt-lifecycle.md`
 - `docs/publish-retry-and-idempotency.md`

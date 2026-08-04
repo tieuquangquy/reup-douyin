@@ -29,6 +29,7 @@ def list_jobs(
     status_filter: JobStatus | None = Query(default=None, alias="status"),
     job_type: JobType | None = None,
     source_video_id: UUID | None = None,
+    q: str | None = Query(default=None, max_length=200),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     service: JobService = Depends(get_job_service),
@@ -37,6 +38,7 @@ def list_jobs(
         status=status_filter,
         job_type=job_type,
         source_video_id=source_video_id,
+        query=q,
         limit=limit,
         offset=offset,
     )
@@ -109,4 +111,3 @@ def delete_job(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-

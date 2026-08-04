@@ -3,16 +3,19 @@ import {
   defaultProviderForKind,
   getLocalInstallRecipe,
   getTtsFieldCapabilities,
+  isPresetLocalProvider,
   looksLikeEdgeVoiceId,
   OMNIVOICE_CURATED_MODELS,
   OMNIVOICE_CURATED_VOICES,
+  OMNIVOICE_SUPPORTED_MODELS,
   resolveProviderSlugFromInstall,
+  resolveTtsCatalogForProvider,
   resolveTtsProviderKind,
   showsTtsBaseUrl,
   TTS_PROVIDERS_BY_KIND
 } from "../lib/opsTtsProviderCatalog";
 
-assert.deepEqual([...TTS_PROVIDERS_BY_KIND.local], ["edge", "vieneu", "cli", "custom"]);
+assert.deepEqual([...TTS_PROVIDERS_BY_KIND.local], ["edge", "vieneu", "omnivoice", "cli", "custom"]);
 assert.equal(defaultProviderForKind("cloud"), "google");
 assert.equal(resolveTtsProviderKind("http_custom"), "http");
 assert.equal(resolveTtsProviderKind("my_tts_sdk"), "local");
@@ -44,14 +47,65 @@ assert.equal(looksLikeEdgeVoiceId("Phạm Tuyên"), false);
 assert.equal(looksLikeEdgeVoiceId(""), false);
 
 assert.equal(resolveProviderSlugFromInstall("OmniVoice-Studio"), "omnivoice");
+assert.equal(isPresetLocalProvider("omnivoice"), true);
 const omniRecipe = getLocalInstallRecipe("OmniVoice-Studio");
 assert.ok(omniRecipe);
-assert.equal(omniRecipe.defaultModel, "omnivoice");
+assert.equal(omniRecipe.defaultModel, "k2-fsa/OmniVoice");
 assert.equal(omniRecipe.defaultVoice, "auto");
 assert.equal(omniRecipe.defaultLanguage, "vi");
 assert.ok(OMNIVOICE_CURATED_MODELS.length >= 12);
 assert.ok(OMNIVOICE_CURATED_VOICES.length >= 10);
 assert.equal(OMNIVOICE_CURATED_VOICES[0].id, "auto");
+assert.deepEqual([...OMNIVOICE_SUPPORTED_MODELS], ["k2-fsa/OmniVoice"]);
+
+const omniFallbackCatalog = resolveTtsCatalogForProvider("omnivoice", null);
+assert.ok(omniFallbackCatalog, "OmniVoice must hydrate a curated catalog when persisted probe catalog is missing");
+assert.ok((omniFallbackCatalog?.voices.length ?? 0) >= 10);
+assert.deepEqual(omniFallbackCatalog?.models, ["k2-fsa/OmniVoice"]);
+assert.equal(omniFallbackCatalog?.default_voice_id, "auto");
+
+const staleOmniCatalog = resolveTtsCatalogForProvider("omnivoice", {
+  source: "sdk",
+  voices: [],
+  styles: [],
+  models: ["cosyvoice", "k2-fsa/OmniVoice"],
+  default_voice_id: "",
+  warning: "legacy catalog"
+});
+assert.ok((staleOmniCatalog?.voices.length ?? 0) >= 10, "Missing persisted voices must use curated fallback");
+assert.deepEqual(
+  staleOmniCatalog?.models,
+  ["k2-fsa/OmniVoice"],
+  "Models without a wired synthesize adapter must not be selectable"
+);
+
+const persistedOmniCatalog = resolveTtsCatalogForProvider("omnivoice", {
+  source: "sdk",
+  voices: [{ id: "provider-voice", label: "Provider voice" }],
+  styles: [],
+  models: ["k2-fsa/OmniVoice"],
+  default_voice_id: "provider-voice",
+  warning: ""
+});
+assert.deepEqual(
+  persistedOmniCatalog?.voices,
+  [{ id: "provider-voice", label: "Provider voice" }],
+  "A persisted OmniVoice catalog must take precedence over the curated voice fallback"
+);
+
+const customCatalog = {
+  source: "sdk",
+  voices: [{ id: "voice-a", label: "Voice A" }],
+  styles: [],
+  models: ["model-a"],
+  default_voice_id: "voice-a",
+  warning: ""
+};
+assert.equal(
+  resolveTtsCatalogForProvider("my_tts_sdk", customCatalog),
+  customCatalog,
+  "Unknown custom providers must preserve their provider-owned catalog"
+);
 
 const overridden = getTtsFieldCapabilities("edge", "auto", { model: true });
 assert.equal(overridden.model, true);

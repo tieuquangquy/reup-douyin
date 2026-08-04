@@ -402,8 +402,9 @@ def resolve_ocr_endpoint_url() -> str:
         raise OcrFilteringError(
             OcrFilteringErrorCode.OCR_PROVIDER_UNAVAILABLE,
             f"{OCR_ENDPOINT_ENV} is not set. "
-            "Run deploy/hf-paddle-ocr/auto_deploy.py after gcloud auth, "
-            "or set OCR_ENDPOINT_URL=<service-url>/predict in the repo root .env.",
+            "For local $0 OCR: powershell -ExecutionPolicy Bypass -File deploy/hf-paddle-ocr/run_local.ps1 "
+            "then set OCR_ENDPOINT_URL=http://127.0.0.1:8080/predict. "
+            "For Cloud: run deploy/hf-paddle-ocr/auto_deploy.py and set the /predict URL.",
         )
     return normalize_predict_endpoint(value)
 

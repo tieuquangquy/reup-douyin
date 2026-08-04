@@ -1,11 +1,10 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
-import { useSearchParams } from "next/navigation";
-import { deleteJob, fetchJobs, fetchOperationalMetrics, retryJob } from "../../lib/api";
+import { Fragment, useEffect, useMemo, useState } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { cancelJob, deleteJob, fetchJobs, fetchOperationalMetrics, resumeJob, retryJob } from "../../lib/api";
 import { useT } from "../../lib/i18n";
-import { hasMoreOffsetItems, mergeOffsetItemsById } from "../../lib/offsetListPagination";
 import { useAsyncAction } from "../../lib/useAsyncAction";
 import { useLatestRequest, type LatestRequestMode } from "../../lib/useLatestRequest";
 import {
@@ -19,13 +18,21 @@ import type { OperationalMetrics } from "../../types/operations";
 import { OpsConsoleShell } from "../app-shell/OpsConsoleShell";
 import { TopbarRefreshButton } from "../app-shell/TopbarRefreshButton";
 import { OpsState, statusTone, type OpsTone } from "./OpsShared";
-import { OffsetLoadMoreFooter } from "../shared/OffsetLoadMoreFooter";
 import { AsyncButton } from "../shared/AsyncButton";
 import { AsyncContentBoundary } from "../shared/AsyncContentBoundary";
 import { useNotice } from "../shared/NoticeCenter";
 
-const STALE_RUNNING_MINUTES = 60;
 const JOBS_PAGE_SIZE_DEFAULT = 50;
+
+function parsePositivePage(raw: string | null): number {
+  const value = Number(raw);
+  return Number.isInteger(value) && value > 0 ? value : 1;
+}
+
+function parsePageSize(raw: string | null): number | null {
+  const value = Number(raw);
+  return (OPERATOR_LIST_PAGE_SIZE_PRESETS as readonly number[]).includes(value) ? value : null;
+}
 
 type StatusFilter = "all" | "stale" | JobStatus;
 
@@ -81,10 +88,41 @@ function formatJobDuration(startedAt: string | null | undefined, finishedAt: str
   return `${seconds}s`;
 }
 
-type JobActionIconKind = "retry" | "delete";
+function formatJobElapsed(startedAt: string | null | undefined): string {
+  if (!startedAt) return "—";
+  return formatJobDuration(startedAt, new Date().toISOString());
+}
+
+function formatAge(value: string | null | undefined): string {
+  if (!value) return "—";
+  const timestamp = new Date(value).getTime();
+  if (Number.isNaN(timestamp)) return "—";
+  const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h`;
+  return `${Math.floor(seconds / 86400)}d`;
+}
+
+function formatMetricTime(value: string | null | undefined): string {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "—";
+  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+}
+
+function metricStatusCount(metrics: OperationalMetrics | null, status: JobStatus): number {
+  if (!metrics) return 0;
+  return Object.values(metrics.job_counts_by_type_status).reduce(
+    (total, statuses) => total + (Number(statuses[status]) || 0),
+    0
+  );
+}
+
+type JobActionIconKind = "retry" | "resume" | "cancel" | "delete";
 
 function JobActionIcon({ kind }: { kind: JobActionIconKind }) {
-  if (kind === "retry") {
+  if (kind === "retry" || kind === "resume") {
     return (
       <svg className="ops-jobs-table__icon" viewBox="0 0 24 24" aria-hidden="true">
         <path
@@ -102,6 +140,14 @@ function JobActionIcon({ kind }: { kind: JobActionIconKind }) {
           strokeLinecap="round"
           strokeLinejoin="round"
         />
+      </svg>
+    );
+  }
+  if (kind === "cancel") {
+    return (
+      <svg className="ops-jobs-table__icon" viewBox="0 0 24 24" aria-hidden="true">
+        <circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" strokeWidth="1.8" />
+        <path d="m8.8 8.8 6.4 6.4m0-6.4-6.4 6.4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
       </svg>
     );
   }
@@ -142,25 +188,8 @@ function jobTypePillTone(jobType: string): "mint" | "slate" | "amber" | "sky" | 
   return (["mint", "slate", "amber", "sky", "rose"] as const)[hash];
 }
 
-function isStaleRunning(job: Job): boolean {
-  if (job.status !== "RUNNING") return false;
-  const started = new Date(job.started_at ?? job.updated_at);
-  if (Number.isNaN(started.getTime())) return false;
-  return Date.now() - started.getTime() > STALE_RUNNING_MINUTES * 60 * 1000;
-}
-
-function jobMatchesSearch(job: Job, query: string): boolean {
-  const q = query.trim().toLowerCase();
-  if (!q) return true;
-  return (
-    job.id.toLowerCase().includes(q) ||
-    job.job_type.toLowerCase().includes(q) ||
-    formatJobTypeLabel(job.job_type).toLowerCase().includes(q) ||
-    (job.source_video_id ?? "").toLowerCase().includes(q) ||
-    (job.current_step_key ?? "").toLowerCase().includes(q) ||
-    (job.error_code ?? "").toLowerCase().includes(q) ||
-    (job.error_message ?? "").toLowerCase().includes(q)
-  );
+function isStaleRunning(job: Job, staleJobIds: ReadonlySet<string>): boolean {
+  return job.status === "RUNNING" && staleJobIds.has(job.id);
 }
 
 function videoSourceLabel(job: Job): { label: string; href: string | null } {
@@ -185,160 +214,361 @@ function videoSourceLabel(job: Job): { label: string; href: string | null } {
   return { label: "—", href: null };
 }
 
-type KpiKind = "running" | "failed" | "retryable" | "stale" | "backlog" | "retries";
+type JobFlowIconKind =
+  | "queued"
+  | "running"
+  | "review"
+  | "completed"
+  | "workers"
+  | "locked"
+  | "unclaimed"
+  | "oldest";
 
-function KpiIcon({ kind }: { kind: KpiKind }) {
+function JobFlowIcon({ kind }: { kind: JobFlowIconKind }) {
+  if (kind === "queued") {
+    return <svg className="ops-jobs-v2-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14M5 12h14M5 17h9" /></svg>;
+  }
   if (kind === "running") {
-    return (
-      <svg className="ops-jobs-kpi__icon" viewBox="0 0 24 24" aria-hidden="true">
-        <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" strokeWidth="1.8" />
-        <circle cx="12" cy="7" r="1.4" fill="currentColor" />
-        <circle cx="16.2" cy="14.5" r="1.4" fill="currentColor" />
-        <circle cx="7.8" cy="14.5" r="1.4" fill="currentColor" />
-      </svg>
-    );
+    return <svg className="ops-jobs-v2-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5" /><path d="m10 8.8 5 3.2-5 3.2Z" /></svg>;
   }
-  if (kind === "failed") {
-    return (
-      <svg className="ops-jobs-kpi__icon" viewBox="0 0 24 24" aria-hidden="true">
-        <path
-          d="M12 3.5 21 20H3L12 3.5Z"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.8"
-          strokeLinejoin="round"
-        />
-        <path d="M12 10v5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-        <circle cx="12" cy="17.5" r="1" fill="currentColor" />
-      </svg>
-    );
+  if (kind === "review") {
+    return <svg className="ops-jobs-v2-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 12s3.2-5.3 8.5-5.3 8.5 5.3 8.5 5.3-3.2 5.3-8.5 5.3S3.5 12 3.5 12Z" /><circle cx="12" cy="12" r="2.3" /></svg>;
   }
-  if (kind === "retryable") {
-    return (
-      <svg className="ops-jobs-kpi__icon" viewBox="0 0 24 24" aria-hidden="true">
-        <path
-          d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.8"
-          strokeLinecap="round"
-        />
-        <path d="M19.5 5v5h-5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-      </svg>
-    );
+  if (kind === "completed") {
+    return <svg className="ops-jobs-v2-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5" /><path d="m8.2 12.2 2.5 2.5 5.4-5.6" /></svg>;
   }
-  if (kind === "backlog") {
-    return (
-      <svg className="ops-jobs-kpi__icon" viewBox="0 0 24 24" aria-hidden="true">
-        <path d="M4 7h16M4 12h16M4 17h10" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-      </svg>
-    );
+  if (kind === "workers") {
+    return <svg className="ops-jobs-v2-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8.5" r="3" /><circle cx="16.5" cy="10" r="2.2" /><path d="M3.8 19c.5-3.2 2.2-5 5.2-5s4.7 1.8 5.2 5M14 14.8c3.3-.7 5.4.8 5.9 3.7" /></svg>;
   }
-  if (kind === "retries") {
-    return (
-      <svg className="ops-jobs-kpi__icon" viewBox="0 0 24 24" aria-hidden="true">
-        <path
-          d="M7 8h7a4 4 0 0 1 0 8H9"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.8"
-          strokeLinecap="round"
-        />
-        <path d="M10 5 7 8l3 3" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-      </svg>
-    );
+  if (kind === "locked") {
+    return <svg className="ops-jobs-v2-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="5.5" y="10" width="13" height="10" rx="2" /><path d="M8.5 10V7.5a3.5 3.5 0 0 1 7 0V10" /></svg>;
   }
+  if (kind === "unclaimed") {
+    return <svg className="ops-jobs-v2-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="5.5" y="10" width="13" height="10" rx="2" /><path d="M15.5 10V7.5a3.5 3.5 0 0 0-6.8-1.2" /></svg>;
+  }
+  return <svg className="ops-jobs-v2-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5" /><path d="M12 7.5V12l3 2" /></svg>;
+}
+
+function JobStateFlow({
+  counts,
+  staleCount,
+  currentFilter,
+  onFilter,
+  meta,
+  generatedAt,
+  labels,
+}: {
+  counts: Record<JobStatus, number>;
+  staleCount: number;
+  currentFilter: StatusFilter;
+  onFilter: (status: StatusFilter) => void;
+  meta: { workers: number; locked: number; unclaimed: number; oldest: string };
+  generatedAt: string | null;
+  labels: Record<string, string>;
+}) {
+  const exceptionCount = counts.FAILED + counts.RETRYABLE + staleCount;
+  const attention = exceptionCount + meta.unclaimed;
+  const total = Object.values(counts).reduce((sum, count) => sum + count, 0);
+  const active = counts.QUEUED + counts.RUNNING + counts.WAITING_FOR_REVIEW;
+  const completionRate = total > 0 ? Math.round((counts.COMPLETED / total) * 100) : 0;
+  const summary = exceptionCount > 0
+    ? labels.exceptionSummary.replace("{count}", String(exceptionCount))
+    : meta.unclaimed > 0
+      ? labels.unclaimedSummary.replace("{count}", String(meta.unclaimed))
+      : active > 0
+        ? labels.activeSummary.replace("{active}", String(active)).replace("{running}", String(counts.RUNNING))
+        : labels.clearSummary.replace("{completed}", String(counts.COMPLETED));
+  const main: Array<{ key: JobStatus; label: string; icon: JobFlowIconKind }> = [
+    { key: "QUEUED", label: labels.queued, icon: "queued" },
+    { key: "RUNNING", label: labels.running, icon: "running" },
+    { key: "WAITING_FOR_REVIEW", label: labels.review, icon: "review" },
+    { key: "COMPLETED", label: labels.completed, icon: "completed" },
+  ];
+  const exceptions: Array<{ key: StatusFilter; label: string; value: number }> = [
+    { key: "RETRYABLE", label: labels.retryable, value: counts.RETRYABLE },
+    { key: "FAILED", label: labels.failed, value: counts.FAILED },
+    { key: "stale", label: labels.stale, value: staleCount },
+    { key: "CANCELLED", label: labels.cancelled, value: counts.CANCELLED },
+  ];
   return (
-    <svg className="ops-jobs-kpi__icon" viewBox="0 0 24 24" aria-hidden="true">
-      <circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" strokeWidth="1.8" />
-      <path d="M12 7.5V12l3 2" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+    <section className={`ops-jobs-v2-command${attention > 0 ? " is-attention" : " is-clear"}`}>
+      <header>
+        <div className="ops-jobs-v2-command__headline">
+          <span>{labels.eyebrow}</span>
+          <h2>{labels.title}</h2>
+          <p>{summary}</p>
+        </div>
+        <div className="ops-jobs-v2-command__status">
+          <strong><i />{attention > 0 ? labels.attention : labels.clear}</strong>
+          <time dateTime={generatedAt ?? undefined}>{labels.updatedAt.replace("{time}", formatMetricTime(generatedAt))}</time>
+        </div>
+      </header>
+      <div className="ops-jobs-v2-flow">
+        <div className="ops-jobs-v2-flow__overview" aria-label={`${labels.completionRate}: ${completionRate}%`}>
+          <div
+            className="ops-jobs-v2-flow__gauge"
+            style={{ background: `conic-gradient(#46d6a1 0 ${completionRate}%, rgba(255, 255, 255, 0.09) ${completionRate}% 100%)` }}
+          >
+            <div><strong>{completionRate}%</strong><span>{labels.completionRate}</span></div>
+          </div>
+          <footer>
+            <span><small>{labels.totalJobs}</small><strong>{total}</strong></span>
+            <span><small>{labels.activeNow}</small><strong>{active}</strong></span>
+          </footer>
+        </div>
+        <div className="ops-jobs-v2-flow__main">
+          {main.map((item) => (
+            <button type="button" className={`is-${item.key.toLowerCase().replace(/_/g, "-")}`} aria-pressed={currentFilter === item.key} key={item.key} onClick={() => onFilter(item.key)}>
+              <i><JobFlowIcon kind={item.icon} /></i><strong>{counts[item.key]}</strong><span>{item.label}</span>
+              <small>{Math.round(total > 0 ? (counts[item.key] / total) * 100 : 0)}% {labels.ofTotal}</small>
+              <em aria-hidden="true"><b style={{ width: `${total > 0 ? (counts[item.key] / total) * 100 : 0}%` }} /></em>
+            </button>
+          ))}
+        </div>
+        <div className="ops-jobs-v2-flow__exceptions">
+          {exceptions.map((item) => (
+            <button type="button" className={`is-${String(item.key).toLowerCase()}`} aria-pressed={currentFilter === item.key} key={item.key} onClick={() => onFilter(item.key)}>
+              <strong>{item.value}</strong><span>{item.label}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+      <footer>
+        <span><JobFlowIcon kind="workers" /><em>{labels.workers}</em><b>{meta.workers}</b></span>
+        <span><JobFlowIcon kind="locked" /><em>{labels.locked}</em><b>{meta.locked}</b></span>
+        <span className={meta.unclaimed > 0 ? "is-danger" : ""}><JobFlowIcon kind="unclaimed" /><em>{labels.unclaimed}</em><b>{meta.unclaimed}</b></span>
+        <span><JobFlowIcon kind="oldest" /><em>{labels.oldest}</em><b>{meta.oldest}</b></span>
+      </footer>
+    </section>
+  );
+}
+
+function JobWorkloadChart({
+  record,
+  selectedType,
+  onSelectType,
+  emptyLabel,
+  labels,
+}: {
+  record: Record<string, Record<string, number>>;
+  selectedType: string;
+  onSelectType: (jobType: string) => void;
+  emptyLabel: string;
+  labels: Record<string, string>;
+}) {
+  const statusOrder: JobStatus[] = [
+    "QUEUED",
+    "RUNNING",
+    "WAITING_FOR_REVIEW",
+    "RETRYABLE",
+    "FAILED",
+    "CANCELLED",
+    "COMPLETED",
+  ];
+  const rows = Object.entries(record)
+    .map(([jobType, statuses]) => ({ jobType, statuses, total: statusOrder.reduce((sum, status) => sum + (Number(statuses[status]) || 0), 0) }))
+    .filter((row) => row.total > 0)
+    .sort((left, right) => right.total - left.total || left.jobType.localeCompare(right.jobType))
+    .slice(0, 8);
+  if (rows.length === 0) return <p className="ops-jobs-v2-empty">{emptyLabel}</p>;
+  const peak = Math.max(...rows.map((row) => row.total), 1);
+  return (
+    <div className="ops-jobs-v2-workload" role="group" aria-label={rows.map((row) => `${formatJobTypeLabel(row.jobType)} ${row.total}`).join(", ")}>
+      {rows.map((row) => (
+        <button type="button" aria-pressed={selectedType === row.jobType} key={row.jobType} onClick={() => onSelectType(row.jobType)}>
+          <span title={row.jobType}>{formatJobTypeLabel(row.jobType)}</span>
+          <i><b style={{ width: `${(row.total / peak) * 100}%` }}>{statusOrder.map((status) => {
+            const value = Number(row.statuses[status]) || 0;
+            return value > 0 ? <em className={`is-${status.toLowerCase().replace(/_/g, "-")}`} key={status} style={{ flexGrow: value, flexBasis: 0 }} /> : null;
+          })}</b></i>
+          <strong>{row.total}</strong>
+        </button>
+      ))}
+      <footer>
+        {statusOrder.map((status) => (
+          <span key={status}>
+            <i className={`is-${status.toLowerCase().replace(/_/g, "-")}`} />
+            {labels[status]}
+          </span>
+        ))}
+      </footer>
+    </div>
+  );
+}
+
+function JobExceptionPareto({
+  entries,
+  counts,
+  labels,
+}: {
+  entries: Array<{ error_code: string; count: number }>;
+  counts: { failed: number; retryable: number; stale: number };
+  labels: Record<string, string>;
+}) {
+  const visible = entries.slice(0, 5);
+  const peak = Math.max(...visible.map((entry) => entry.count), 1);
+  return (
+    <div className="ops-jobs-v2-exceptions">
+      <div className="ops-jobs-v2-exceptions__summary">
+        <span className="is-failed">{labels.failed}<b>{counts.failed}</b></span>
+        <span className="is-retryable">{labels.retryable}<b>{counts.retryable}</b></span>
+        <span className="is-stale">{labels.stale}<b>{counts.stale}</b></span>
+      </div>
+      {visible.length > 0 ? <div className="ops-jobs-v2-pareto">{visible.map((entry) => (
+        <div key={entry.error_code}><code>{entry.error_code}</code><i><b style={{ width: `${(entry.count / peak) * 100}%` }} /></i><strong>{entry.count}</strong></div>
+      ))}</div> : <p className="ops-jobs-v2-empty is-clear">{labels.noFailures}</p>}
+    </div>
+  );
+}
+
+function JobStepTrace({ job, labels }: { job: Job; labels: Record<string, string> }) {
+  const steps = [...job.steps].sort((left, right) => left.step_order - right.step_order);
+  return (
+    <div className="ops-jobs-v2-trace">
+      <header><strong>{labels.trace}</strong><span>{formatJobTypeLabel(job.job_type)} · #{job.id.slice(0, 8)}</span></header>
+      {steps.length > 0 ? <div>{steps.map((step, index) => (
+        <section className={`is-${step.status.toLowerCase().replace(/_/g, "-")}`} key={step.id}>
+          <i>{String(index + 1).padStart(2, "0")}</i>
+          <span><strong>{step.step_name}</strong><small>{formatStatusLabel(step.status)} · {step.progress_percent}% · {labels.attempt} {step.attempts}</small></span>
+          {step.error_code ? <code title={step.error_message ?? step.error_code}>{step.error_code}</code> : null}
+        </section>
+      ))}</div> : <p>{labels.noSteps}</p>}
+    </div>
+  );
+}
+
+function paginationItems(currentPage: number, totalPages: number): Array<number | string> {
+  if (totalPages <= 7) return Array.from({ length: totalPages }, (_, index) => index + 1);
+  if (currentPage <= 4) return [1, 2, 3, 4, 5, "ellipsis-right", totalPages];
+  if (currentPage >= totalPages - 3) {
+    return [1, "ellipsis-left", totalPages - 4, totalPages - 3, totalPages - 2, totalPages - 1, totalPages];
+  }
+  return [1, "ellipsis-left", currentPage - 1, currentPage, currentPage + 1, "ellipsis-right", totalPages];
+}
+
+function PaginationArrow({ direction }: { direction: "previous" | "next" }) {
+  return (
+    <svg className="ops-jobs-pagination__arrow" viewBox="0 0 20 20" aria-hidden="true">
+      <path d={direction === "previous" ? "m12 5-5 5 5 5" : "m8 5 5 5-5 5"} />
     </svg>
   );
 }
 
-function KpiTile({
-  kind,
-  label,
-  value,
-  detail,
-  sharePercent,
-  trend = "up",
-  tone = "muted",
-  active = false,
-  onClick,
+function OpsJobsPagination({
+  currentPage,
+  totalCount,
+  pageSize,
+  pageSizeOptions,
+  busy,
+  onPageChange,
+  onPageSizeChange,
+  labels,
 }: {
-  kind: KpiKind;
-  label: string;
-  value: string;
-  detail: string;
-  sharePercent: number;
-  trend?: "up" | "down" | "flat";
-  tone?: OpsTone | "info";
-  active?: boolean;
-  onClick?: () => void;
+  currentPage: number;
+  totalCount: number;
+  pageSize: number;
+  pageSizeOptions: readonly number[];
+  busy: boolean;
+  onPageChange: (page: number) => void;
+  onPageSizeChange: (pageSize: number) => void;
+  labels: Record<string, string>;
 }) {
-  const pct = Math.max(0, Math.min(100, Math.round(sharePercent)));
-  const className = `ops-jobs-kpi is-hotel tone-${tone}${active ? " is-active" : ""}${onClick ? "" : " is-static"}`;
-  const body = (
-    <>
-      <span className="ops-jobs-kpi__top">
-        <em className="ops-jobs-kpi__label">{label}</em>
-        <span className="ops-jobs-kpi__glyph">
-          <KpiIcon kind={kind} />
-        </span>
-      </span>
-      <strong className="ops-jobs-kpi__value">{value}</strong>
-      <span className="ops-jobs-kpi__foot">
-        <span className={`ops-jobs-kpi__trend is-${trend}${active ? " is-on-mint" : ""}`}>
-          <i aria-hidden="true" />
-          {pct}%
-        </span>
-        <span className="ops-jobs-kpi__hint">{detail}</span>
-      </span>
-    </>
-  );
-
-  if (onClick) {
-    return (
-      <button type="button" className={className} title={detail} aria-pressed={active} onClick={onClick}>
-        {body}
-      </button>
-    );
-  }
-
+  const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
+  const safePage = Math.min(currentPage, totalPages);
+  const start = totalCount > 0 ? (safePage - 1) * pageSize + 1 : 0;
+  const end = Math.min(safePage * pageSize, totalCount);
+  const items = paginationItems(safePage, totalPages);
   return (
-    <div className={className} title={detail}>
-      {body}
-    </div>
+    <nav className="ops-jobs-pagination" aria-label={labels.pagination}>
+      <div className="ops-jobs-pagination__size" role="group" aria-label={labels.perPage}>
+        <span>{labels.perPage}</span>
+        <div>
+          {pageSizeOptions.map((option) => (
+            <button
+              type="button"
+              className={option === pageSize ? "is-active" : ""}
+              aria-pressed={option === pageSize}
+              disabled={busy}
+              key={option}
+              onClick={() => onPageSizeChange(option)}
+            >
+              {option}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="ops-jobs-pagination__pages">
+        <button type="button" className="ops-jobs-pagination__nav" aria-label={labels.previous} disabled={busy || safePage <= 1} onClick={() => onPageChange(safePage - 1)}>
+          <PaginationArrow direction="previous" />
+        </button>
+        <div className="ops-jobs-pagination__numbers">
+          {items.map((item) => typeof item === "number" ? (
+            <button
+              type="button"
+              className={item === safePage ? "is-active" : ""}
+              aria-current={item === safePage ? "page" : undefined}
+              aria-label={`${labels.page} ${item}`}
+              disabled={busy}
+              key={item}
+              onClick={() => onPageChange(item)}
+            >
+              {item}
+            </button>
+          ) : <span key={item} aria-hidden="true">…</span>)}
+        </div>
+        <span className="ops-jobs-pagination__compact">{labels.page} {safePage} / {totalPages}</span>
+        <button type="button" className="ops-jobs-pagination__nav" aria-label={labels.next} disabled={busy || safePage >= totalPages} onClick={() => onPageChange(safePage + 1)}>
+          <PaginationArrow direction="next" />
+        </button>
+      </div>
+
+      <p className="ops-jobs-pagination__range">
+        <strong>{start.toLocaleString("en-US")}–{end.toLocaleString("en-US")}</strong>
+        <span>/ {totalCount.toLocaleString("en-US")} {labels.jobs}</span>
+      </p>
+    </nav>
   );
 }
 
 export function OpsJobsPage() {
   const t = useT();
+  const pathname = usePathname();
+  const router = useRouter();
   const searchParams = useSearchParams();
   const focusJobId = (searchParams.get("job_id") ?? "").trim() || null;
   const statusFromUrl = parseStatusFilter(searchParams.get("status") ?? "");
   const [pageSize, setPageSize] = useState(() =>
-    readOperatorListPageSize(OPS_JOBS_PAGE_SIZE_STORAGE_KEY, OPERATOR_LIST_PAGE_SIZE_PRESETS, JOBS_PAGE_SIZE_DEFAULT)
+    parsePageSize(searchParams.get("per_page"))
+      ?? readOperatorListPageSize(OPS_JOBS_PAGE_SIZE_STORAGE_KEY, OPERATOR_LIST_PAGE_SIZE_PRESETS, JOBS_PAGE_SIZE_DEFAULT)
   );
+  const [currentPage, setCurrentPage] = useState(() => parsePositivePage(searchParams.get("page")));
   const [jobs, setJobs] = useState<Job[]>([]);
   const [totalCount, setTotalCount] = useState(0);
   const [metrics, setMetrics] = useState<OperationalMetrics | null>(null);
-  const [loadingMore, setLoadingMore] = useState(false);
   const [inlineError, setInlineError] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>(() => statusFromUrl ?? "all");
   const [jobTypeFilter, setJobTypeFilter] = useState("all");
   const [searchQuery, setSearchQuery] = useState("");
+  const [queryForApi, setQueryForApi] = useState("");
   const [copiedJobId, setCopiedJobId] = useState<string | null>(null);
+  const [expandedJobId, setExpandedJobId] = useState<string | null>(null);
   const action = useAsyncAction();
   const request = useLatestRequest();
   const { notify } = useNotice();
 
-  async function load(mode: LatestRequestMode = jobs.length || metrics ? "refresh" : "initial", nextPageSize = pageSize) {
+  async function load(mode: LatestRequestMode = jobs.length || metrics ? "refresh" : "initial") {
     setInlineError(null);
+    const requestedStatus = statusFilter === "all" ? undefined : statusFilter === "stale" ? "RUNNING" : statusFilter;
+    const requestedType = jobTypeFilter === "all" ? undefined : jobTypeFilter;
     await request.run(
       async () => Promise.all([
-        fetchJobs(undefined, { limit: nextPageSize, offset: 0 }),
+        fetchJobs(requestedStatus, {
+          limit: pageSize,
+          offset: (currentPage - 1) * pageSize,
+          jobType: requestedType,
+          query: queryForApi || undefined,
+        }),
         fetchOperationalMetrics(),
       ]),
       ([jobPayload, metricsPayload]) => {
@@ -350,41 +580,61 @@ export function OpsJobsPage() {
     ).catch(() => undefined);
   }
 
-  async function loadMore() {
-    if (loadingMore || !hasMoreOffsetItems(jobs.length, totalCount)) return;
-    setLoadingMore(true);
-    setInlineError(null);
-    try {
-      const jobPayload = await fetchJobs(undefined, { limit: pageSize, offset: jobs.length });
-      setJobs((current) => mergeOffsetItemsById(current, jobPayload.jobs));
-      setTotalCount(jobPayload.total_count);
-    } catch (err) {
-      setInlineError(err instanceof Error ? err.message : t("opsJobs.unavailableTitle"));
-    } finally {
-      setLoadingMore(false);
-    }
-  }
-
   function handlePageSizeChange(nextPageSize: number) {
     if (nextPageSize === pageSize) return;
     writeOperatorListPageSize(OPS_JOBS_PAGE_SIZE_STORAGE_KEY, nextPageSize, OPERATOR_LIST_PAGE_SIZE_PRESETS);
     setPageSize(nextPageSize);
-    void load("refresh", nextPageSize);
+    setCurrentPage(1);
+  }
+
+  function handlePageChange(nextPage: number) {
+    if (nextPage === currentPage || nextPage < 1) return;
+    setExpandedJobId(null);
+    setCurrentPage(nextPage);
+    window.requestAnimationFrame(() => {
+      document.querySelector(".ops-jobs-sheet")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
   }
 
   function toggleStatusFilter(next: StatusFilter) {
+    setCurrentPage(1);
     setStatusFilter((current) => (current === next ? "all" : next));
   }
 
   function clearFilters() {
+    setCurrentPage(1);
     setStatusFilter("all");
     setJobTypeFilter("all");
     setSearchQuery("");
   }
 
   useEffect(() => {
-    void load("initial");
-  }, [t]);
+    const timer = window.setTimeout(() => {
+      setCurrentPage(1);
+      setQueryForApi(searchQuery.trim());
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [searchQuery]);
+
+  useEffect(() => {
+    void load(jobs.length || metrics ? "refresh" : "initial");
+  }, [t, statusFilter, jobTypeFilter, queryForApi, currentPage, pageSize]);
+
+  useEffect(() => {
+    const currentQuery = searchParams.toString();
+    const params = new URLSearchParams(currentQuery);
+    if (currentPage > 1) params.set("page", String(currentPage));
+    else params.delete("page");
+    params.set("per_page", String(pageSize));
+    const nextQuery = params.toString();
+    if (nextQuery !== currentQuery) router.replace(`${pathname}?${nextQuery}`, { scroll: false });
+  }, [currentPage, pageSize, pathname, router, searchParams]);
+
+  useEffect(() => {
+    if (totalCount <= 0) return;
+    const lastPage = Math.max(1, Math.ceil(totalCount / pageSize));
+    if (currentPage > lastPage) setCurrentPage(lastPage);
+  }, [currentPage, pageSize, totalCount]);
 
   useEffect(() => {
     if (!statusFromUrl) return;
@@ -403,9 +653,14 @@ export function OpsJobsPage() {
   );
 
   const jobTypeOptions = useMemo(() => {
-    const types = Array.from(new Set(jobs.map((job) => job.job_type))).sort();
+    const types = Array.from(
+      new Set([
+        ...Object.keys(metrics?.job_counts_by_type_status ?? {}),
+        ...jobs.map((job) => job.job_type),
+      ])
+    ).sort();
     return types;
-  }, [jobs]);
+  }, [jobs, metrics]);
 
   async function handleDelete(job: Job) {
     const confirmed = window.confirm(
@@ -420,9 +675,15 @@ export function OpsJobsPage() {
       setInlineError(null);
       try {
         await deleteJob(job.id);
+        // Remove immediately, then reload the canonical list and metrics from
+        // the API.  A page refresh must never make a "deleted" job reappear.
         setJobs((current) => current.filter((item) => item.id !== job.id));
         setTotalCount((current) => Math.max(0, current - 1));
-        notify({ message: `${t("common.delete")}: #${job.id.slice(0, 8)}`, tone: "success" });
+        await load("refresh");
+        notify({
+          message: t("opsJobs.deleteSuccess").replace("{jobId}", job.id.slice(0, 8)),
+          tone: "success",
+        });
       } catch (err) {
         const message = err instanceof Error ? err.message : t("opsJobs.deleteFailed");
         setInlineError(message);
@@ -446,6 +707,38 @@ export function OpsJobsPage() {
     });
   }
 
+  async function handleCancel(job: Job) {
+    const confirmed = window.confirm(t("opsJobs.cancelConfirm").replace("{jobId}", job.id.slice(0, 8)));
+    if (!confirmed) return;
+    await action.run(`cancel-${job.id}`, async () => {
+      setInlineError(null);
+      try {
+        const updated = await cancelJob(job.id);
+        setJobs((current) => current.map((item) => (item.id === job.id ? updated : item)));
+        notify({ message: `${t("opsJobs.cancel")}: #${job.id.slice(0, 8)}`, tone: "success" });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : t("opsJobs.cancelFailed");
+        setInlineError(message);
+        notify({ message, tone: "error" });
+      }
+    });
+  }
+
+  async function handleResume(job: Job) {
+    await action.run(`resume-${job.id}`, async () => {
+      setInlineError(null);
+      try {
+        const updated = await resumeJob(job.id);
+        setJobs((current) => current.map((item) => (item.id === job.id ? updated : item)));
+        notify({ message: `${t("opsJobs.resume")}: #${job.id.slice(0, 8)}`, tone: "success" });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : t("opsJobs.resumeFailed");
+        setInlineError(message);
+        notify({ message, tone: "error" });
+      }
+    });
+  }
+
   async function handleCopyId(jobId: string) {
     await action.run(`copy-${jobId}`, async () => {
       setInlineError(null);
@@ -462,25 +755,41 @@ export function OpsJobsPage() {
     });
   }
 
-  const staleRunning = useMemo(() => jobs.filter((job) => isStaleRunning(job)), [jobs]);
-  const failed = useMemo(() => jobs.filter((job) => job.status === "FAILED"), [jobs]);
-  const retryable = useMemo(() => jobs.filter((job) => job.status === "RETRYABLE"), [jobs]);
-  const running = useMemo(() => jobs.filter((job) => job.status === "RUNNING"), [jobs]);
+  const staleJobIds = useMemo(
+    () => new Set(metrics?.queue_backlog.stale_running_job_ids ?? []),
+    [metrics]
+  );
+  const staleRunning = useMemo(
+    () => jobs.filter((job) => isStaleRunning(job, staleJobIds)),
+    [jobs, staleJobIds]
+  );
 
-  const visibleJobs = useMemo(() => {
-    return jobs.filter((job) => {
-      if (!jobMatchesSearch(job, searchQuery)) return false;
-      if (jobTypeFilter !== "all" && job.job_type !== jobTypeFilter) return false;
-      if (statusFilter === "all") return true;
-      if (statusFilter === "stale") return isStaleRunning(job);
-      return job.status === statusFilter;
-    });
-  }, [jobs, searchQuery, statusFilter, jobTypeFilter]);
+  const visibleJobs = useMemo(
+    () => jobs.filter((job) => (statusFilter === "stale" ? isStaleRunning(job, staleJobIds) : true)),
+    [jobs, staleJobIds, statusFilter]
+  );
 
-  const hasMore = hasMoreOffsetItems(jobs.length, totalCount);
   const failureCategories = metrics?.common_failure_categories ?? [];
-  const backlog = metrics?.queue_backlog.queued ?? 0;
-  const retries = metrics?.total_retry_attempts ?? 0;
+  const countFor = (status: JobStatus) =>
+    metrics ? metricStatusCount(metrics, status) : jobs.filter((job) => job.status === status).length;
+  const stateCounts: Record<JobStatus, number> = {
+    QUEUED: countFor("QUEUED"),
+    RUNNING: countFor("RUNNING"),
+    WAITING_FOR_REVIEW: countFor("WAITING_FOR_REVIEW"),
+    RETRYABLE: countFor("RETRYABLE"),
+    FAILED: countFor("FAILED"),
+    CANCELLED: countFor("CANCELLED"),
+    COMPLETED: countFor("COMPLETED"),
+  };
+  const staleCount = metrics?.queue_backlog.stale_running ?? staleRunning.length;
+  const runningJobs = jobs.filter((job) => job.status === "RUNNING");
+  const workerCount = metrics?.queue_backlog.active_worker_count
+    ?? new Set(runningJobs.map((job) => job.locked_by).filter(Boolean)).size;
+  const lockedCount = metrics?.queue_backlog.running_with_lock
+    ?? runningJobs.filter((job) => Boolean(job.locked_by)).length;
+  const unclaimedCount = metrics?.queue_backlog.running_without_lock
+    ?? runningJobs.filter((job) => !job.locked_by).length;
+  const oldestQueuedAge = formatAge(metrics?.queue_backlog.oldest_queued_at);
   const filterActive = statusFilter !== "all" || jobTypeFilter !== "all" || searchQuery.trim().length > 0;
   const shownCount = filterActive ? visibleJobs.length : jobs.length;
 
@@ -496,76 +805,48 @@ export function OpsJobsPage() {
       <AsyncContentBoundary
         refreshing={request.refreshing}
         status={boundaryStatus}
-        skeleton={<OpsState title={t("opsJobs.loadingTitle")} detail={t("opsJobs.loadingDetail")} />}
+        skeletonVariant="table"
+        loadingLabel={t("opsJobs.loadingDetail")}
         errorState={<OpsState title={t("opsJobs.unavailableTitle")} detail={request.error?.message ?? t("opsJobs.unavailableTitle")} retry={() => void load("initial")} />}
       >
       <main className="ops-page ops-jobs-monitor is-compact">
         {visibleError ? <div className="inline-error">{visibleError}</div> : null}
 
-        <section className="ops-jobs-kpis is-hotel" role="group" aria-label={t("opsJobs.filterByStatus")}>
-          <KpiTile
-            kind="running"
-            label={t("opsJobs.running")}
-            value={String(running.length)}
-            detail={t("opsJobs.ofLoaded")}
-            sharePercent={jobs.length > 0 ? (running.length / jobs.length) * 100 : 0}
-            trend="up"
-            tone={running.length > 0 ? "info" : "muted"}
-            active={statusFilter === "RUNNING"}
-            onClick={() => toggleStatusFilter("RUNNING")}
-          />
-          <KpiTile
-            kind="failed"
-            label={t("opsJobs.failed")}
-            value={String(failed.length)}
-            detail={t("opsJobs.ofLoaded")}
-            sharePercent={jobs.length > 0 ? (failed.length / jobs.length) * 100 : 0}
-            trend="down"
-            tone={failed.length > 0 ? "danger" : "muted"}
-            active={statusFilter === "FAILED"}
-            onClick={() => toggleStatusFilter("FAILED")}
-          />
-          <KpiTile
-            kind="retryable"
-            label={t("opsJobs.retryable")}
-            value={String(retryable.length)}
-            detail={t("opsJobs.ofLoaded")}
-            sharePercent={jobs.length > 0 ? (retryable.length / jobs.length) * 100 : 0}
-            trend="up"
-            tone={retryable.length > 0 ? "warn" : "muted"}
-            active={statusFilter === "RETRYABLE"}
-            onClick={() => toggleStatusFilter("RETRYABLE")}
-          />
-          <KpiTile
-            kind="stale"
-            label={t("opsJobs.staleShort")}
-            value={String(staleRunning.length)}
-            detail={t("opsJobs.ofLoaded")}
-            sharePercent={jobs.length > 0 ? (staleRunning.length / jobs.length) * 100 : 0}
-            trend="flat"
-            tone="muted"
-            active={statusFilter === "stale"}
-            onClick={() => toggleStatusFilter("stale")}
-          />
-          <KpiTile
-            kind="backlog"
-            label={t("opsJobs.backlog")}
-            value={String(backlog)}
-            detail={t("opsJobs.queuedJobs")}
-            sharePercent={totalCount > 0 ? Math.min(100, (backlog / totalCount) * 100) : 0}
-            trend={backlog > 0 ? "down" : "flat"}
-            tone={backlog > 0 ? "warn" : "muted"}
-          />
-          <KpiTile
-            kind="retries"
-            label={t("opsJobs.retriesShort")}
-            value={String(retries)}
-            detail={t("opsJobs.allTimeAttempts")}
-            sharePercent={jobs.length > 0 ? Math.min(100, (retries / Math.max(jobs.length, 1)) * 100) : 0}
-            trend={retries > 0 ? "up" : "flat"}
-            tone={retries > 0 ? "info" : "muted"}
-          />
-        </section>
+        <JobStateFlow
+          counts={stateCounts}
+          staleCount={staleCount}
+          currentFilter={statusFilter}
+          onFilter={toggleStatusFilter}
+          meta={{ workers: workerCount, locked: lockedCount, unclaimed: unclaimedCount, oldest: oldestQueuedAge }}
+          generatedAt={metrics?.generated_at ?? null}
+          labels={{
+            eyebrow: t("opsJobs.executionState"),
+            title: t("opsJobs.jobControlRoom"),
+            attention: t("opsJobs.attentionRequired"),
+            clear: t("opsJobs.queueClear"),
+            queued: t("opsJobs.statusQueued"),
+            running: t("opsJobs.running"),
+            review: t("opsJobs.statusWaitingReview"),
+            completed: t("opsJobs.statusCompleted"),
+            retryable: t("opsJobs.retryable"),
+            failed: t("opsJobs.failed"),
+            stale: t("opsJobs.staleShort"),
+            cancelled: t("opsJobs.statusCancelled"),
+            completionRate: t("opsJobs.completionRate"),
+            totalJobs: t("opsJobs.totalJobs"),
+            activeNow: t("opsJobs.activeNow"),
+            ofTotal: t("opsJobs.ofTotal"),
+            clearSummary: t("opsJobs.clearSummary"),
+            activeSummary: t("opsJobs.activeSummary"),
+            exceptionSummary: t("opsJobs.exceptionSummary"),
+            unclaimedSummary: t("opsJobs.unclaimedSummary"),
+            updatedAt: t("opsJobs.updatedAt"),
+            workers: t("opsJobs.workers"),
+            locked: t("opsJobs.locked"),
+            unclaimed: t("opsJobs.unclaimed"),
+            oldest: t("opsJobs.oldestWait"),
+          }}
+        />
 
         <section className="ops-jobs-controls">
           <label className="ops-jobs-controls__search">
@@ -582,21 +863,29 @@ export function OpsJobsPage() {
             <span className="visually-hidden">{t("opsJobs.status")}</span>
             <select
               value={statusFilter}
-              onChange={(event) => setStatusFilter(event.target.value as StatusFilter)}
+              onChange={(event) => {
+                setCurrentPage(1);
+                setStatusFilter(event.target.value as StatusFilter);
+              }}
             >
               <option value="all">{t("opsJobs.statusAll")}</option>
               <option value="RUNNING">{t("opsJobs.running")}</option>
+              <option value="WAITING_FOR_REVIEW">{t("opsJobs.statusWaitingReview")}</option>
               <option value="COMPLETED">{t("opsJobs.statusCompleted")}</option>
               <option value="FAILED">{t("opsJobs.failed")}</option>
               <option value="RETRYABLE">{t("opsJobs.retryable")}</option>
               <option value="QUEUED">{t("opsJobs.statusQueued")}</option>
+              <option value="CANCELLED">{t("opsJobs.statusCancelled")}</option>
               <option value="stale">{t("opsJobs.staleShort")}</option>
             </select>
           </label>
 
           <label className="ops-jobs-controls__type">
             <span className="visually-hidden">{t("opsJobs.jobType")}</span>
-            <select value={jobTypeFilter} onChange={(event) => setJobTypeFilter(event.target.value)}>
+            <select value={jobTypeFilter} onChange={(event) => {
+              setCurrentPage(1);
+              setJobTypeFilter(event.target.value);
+            }}>
               <option value="all">{t("opsJobs.jobTypeAll")}</option>
               {jobTypeOptions.map((type) => (
                 <option key={type} value={type}>
@@ -611,6 +900,55 @@ export function OpsJobsPage() {
           </button>
         </section>
 
+        <section className="ops-jobs-v2-visuals">
+          <article className="ops-jobs-v2-panel">
+            <header>
+              <div>
+                <span>{t("opsJobs.workloadEyebrow")}</span>
+                <h2>{t("opsJobs.workloadByType")}</h2>
+              </div>
+              <p>{t("opsJobs.workloadHint")}</p>
+            </header>
+            <JobWorkloadChart
+              record={metrics?.job_counts_by_type_status ?? {}}
+              selectedType={jobTypeFilter}
+              onSelectType={(jobType) => {
+                setCurrentPage(1);
+                setJobTypeFilter((current) => current === jobType ? "all" : jobType);
+              }}
+              emptyLabel={t("opsJobs.noWorkloadData")}
+              labels={{
+                QUEUED: t("opsJobs.statusQueued"),
+                RUNNING: t("opsJobs.running"),
+                WAITING_FOR_REVIEW: t("opsJobs.statusWaitingReview"),
+                RETRYABLE: t("opsJobs.retryable"),
+                FAILED: t("opsJobs.failed"),
+                CANCELLED: t("opsJobs.statusCancelled"),
+                COMPLETED: t("opsJobs.statusCompleted"),
+              }}
+            />
+          </article>
+          <article className="ops-jobs-v2-panel is-exceptions">
+            <header>
+              <div>
+                <span>{t("opsJobs.healthEyebrow")}</span>
+                <h2>{t("opsJobs.exceptionRadar")}</h2>
+              </div>
+              <p>{t("opsJobs.exceptionHint")}</p>
+            </header>
+            <JobExceptionPareto
+              entries={failureCategories}
+              counts={{ failed: stateCounts.FAILED, retryable: stateCounts.RETRYABLE, stale: staleCount }}
+              labels={{
+                failed: t("opsJobs.failed"),
+                retryable: t("opsJobs.retryable"),
+                stale: t("opsJobs.staleShort"),
+                noFailures: t("opsJobs.noFailureCategories"),
+              }}
+            />
+          </article>
+        </section>
+
         {focusJobId ? (
           <div className={`ops-jobs-alert ${focusedJob ? "is-good" : "is-warn"}`} role="status">
             {focusedJob
@@ -621,20 +959,6 @@ export function OpsJobsPage() {
               : t("opsJobs.focusMissing")
                   .replace("{jobId}", focusJobId.slice(0, 8))
                   .replace("{count}", String(jobs.length))}
-          </div>
-        ) : null}
-
-        {failureCategories.length > 0 ? (
-          <div className="ops-jobs-failures" aria-label={t("opsJobs.commonFailureCategories")}>
-            <span>{t("opsJobs.commonFailureCategories")}</span>
-            <ul>
-              {failureCategories.map((item) => (
-                <li key={item.error_code}>
-                  <code>{item.error_code}</code>
-                  <em>{item.count}</em>
-                </li>
-              ))}
-            </ul>
           </div>
         ) : null}
 
@@ -655,14 +979,11 @@ export function OpsJobsPage() {
               <table className="ops-jobs-table is-sheet">
                 <thead>
                   <tr>
-                    <th>{t("opsJobs.jobId")}</th>
-                    <th>{t("opsJobs.videoSource")}</th>
-                    <th>{t("opsJobs.type")}</th>
-                    <th>{t("opsJobs.progress")}</th>
-                    <th>{t("opsJobs.startedAt")}</th>
-                    <th>{t("opsJobs.finishedAt")}</th>
-                    <th>{t("opsJobs.duration")}</th>
-                    <th>{t("opsJobs.status")}</th>
+                    <th>{t("opsJobs.jobAndSource")}</th>
+                    <th>{t("opsJobs.work")}</th>
+                    <th>{t("opsJobs.execution")}</th>
+                    <th>{t("opsJobs.health")}</th>
+                    <th>{t("opsJobs.timing")}</th>
                     <th>{t("opsJobs.actions")}</th>
                   </tr>
                 </thead>
@@ -683,30 +1004,44 @@ export function OpsJobsPage() {
                             : Number(job.progress_percent) || 0
                       )
                     );
-                    const canRetry = job.status === "FAILED" || job.status === "RETRYABLE";
+                    const canRetry =
+                      job.retryable &&
+                      (job.status === "FAILED" || job.status === "RETRYABLE") &&
+                      job.attempts < job.max_attempts;
+                    const canCancel = job.status !== "COMPLETED" && job.status !== "CANCELLED";
+                    const canResume = job.status === "WAITING_FOR_REVIEW";
                     return (
-                      <tr
-                        className={`tone-${tone}${job.id === focusJobId ? " is-focused" : ""}`}
-                        id={`ops-job-row-${job.id}`}
-                        key={job.id}
-                      >
-                        <td>
-                          <div className="ops-jobs-table__id">
-                            <strong title={job.id}>#{job.id.slice(0, 8)}</strong>
-                            <AsyncButton
-                              type="button"
-                              className="ops-jobs-table__copy"
-                              aria-label={t("opsJobs.copyId")}
-                              title={copiedJobId === job.id ? t("opsJobs.copied") : t("opsJobs.copyId")}
-                              pending={action.isPending(`copy-${job.id}`)}
-                              pendingLabel="…"
-                              onClick={() => void handleCopyId(job.id)}
-                            >
-                              {copiedJobId === job.id ? "✓" : "⧉"}
-                            </AsyncButton>
-                          </div>
-                        </td>
-                        <td>
+                      <Fragment key={job.id}>
+                        <tr
+                          className={`tone-${tone}${job.id === focusJobId ? " is-focused" : ""}${expandedJobId === job.id ? " is-expanded" : ""}`}
+                          id={`ops-job-row-${job.id}`}
+                        >
+                          <td>
+                            <div className="ops-jobs-table__id">
+                              <button
+                                type="button"
+                                className="ops-jobs-table__expand"
+                                aria-expanded={expandedJobId === job.id}
+                                aria-controls={`ops-job-trace-${job.id}`}
+                                title={t("opsJobs.stepTrace")}
+                                onClick={() => setExpandedJobId((current) => current === job.id ? null : job.id)}
+                              >
+                                <strong title={job.id}>#{job.id.slice(0, 8)}</strong>
+                                <span aria-hidden="true">⌄</span>
+                              </button>
+                              <AsyncButton
+                                type="button"
+                                className="ops-jobs-table__copy"
+                                aria-label={t("opsJobs.copyId")}
+                                title={copiedJobId === job.id ? t("opsJobs.copied") : t("opsJobs.copyId")}
+                                pending={action.isPending(`copy-${job.id}`)}
+                                pendingLabel="…"
+                                onClick={() => void handleCopyId(job.id)}
+                              >
+                                {copiedJobId === job.id ? "✓" : "⧉"}
+                              </AsyncButton>
+                            </div>
+                            <div className="ops-jobs-table__source-line">
                           {source.href ? (
                             <Link className="ops-jobs-table__source" href={source.href}>
                               {source.label}
@@ -716,77 +1051,99 @@ export function OpsJobsPage() {
                               {source.label}
                             </span>
                           )}
-                        </td>
-                        <td>
-                          <span className={`ops-jobs-table__type tone-${typeTone}`} title={job.job_type}>
-                            {formatJobTypeLabel(job.job_type)}
-                          </span>
-                        </td>
-                        <td>
-                          <div className="ops-jobs-table__progress" aria-label={`${progress}%`}>
-                            <div className="ops-jobs-table__bar">
-                              <span style={{ width: `${progress}%` }} />
                             </div>
-                            <em>{progress}%</em>
-                          </div>
-                        </td>
-                        <td>
-                          {job.started_at ? (
-                            <time dateTime={job.started_at} title={job.started_at}>
-                              {formatTableDateTime(job.started_at)}
-                            </time>
-                          ) : (
-                            <span className="ops-jobs-table__empty">—</span>
-                          )}
-                        </td>
-                        <td>
-                          {job.finished_at ? (
-                            <time dateTime={job.finished_at} title={job.finished_at}>
-                              {formatTableDateTime(job.finished_at)}
-                            </time>
-                          ) : (
-                            <span className="ops-jobs-table__empty">—</span>
-                          )}
-                        </td>
-                        <td>
-                          <span className="ops-jobs-table__duration" title={t("opsJobs.duration")}>
-                            {formatJobDuration(job.started_at, job.finished_at)}
-                          </span>
-                        </td>
-                        <td className="ops-jobs-table__status-cell">
-                          <span className={jobStatusChipClass(job.status, tone)}>
-                            <i className="ops-jobs-table__status-dot" aria-hidden="true" />
-                            {formatStatusLabel(job.status)}
-                          </span>
-                        </td>
-                        <td>
-                          <div className="ops-jobs-table__actions">
-                            <AsyncButton
-                              type="button"
-                              className="ops-jobs-table__retry is-icon"
-                              disabled={!canRetry}
-                              aria-label={t("opsJobs.retry")}
-                              title={t("opsJobs.retry")}
-                              pending={action.isPending(`retry-${job.id}`)}
-                              pendingLabel="…"
-                              onClick={() => void handleRetry(job)}
-                            >
-                              <JobActionIcon kind="retry" />
-                            </AsyncButton>
-                            <AsyncButton
-                              className="ops-jobs-delete is-icon"
-                              type="button"
-                              aria-label={t("common.delete")}
-                              title={t("common.delete")}
-                              pending={action.isPending(`delete-${job.id}`)}
-                              pendingLabel="…"
-                              onClick={() => void handleDelete(job)}
-                            >
-                              <JobActionIcon kind="delete" />
-                            </AsyncButton>
-                          </div>
-                        </td>
-                      </tr>
+                          </td>
+                          <td>
+                            <span className={`ops-jobs-table__type tone-${typeTone}`} title={job.job_type}>
+                              {formatJobTypeLabel(job.job_type)}
+                            </span>
+                            <span className="ops-jobs-table__step" title={job.current_step_key ?? undefined}>
+                              {job.current_step_key ? formatJobTypeLabel(job.current_step_key) : t("opsJobs.noCurrentStep")}
+                            </span>
+                          </td>
+                          <td>
+                            <div className="ops-jobs-table__progress" aria-label={`${progress}%`}>
+                              <div className="ops-jobs-table__bar">
+                                <span style={{ width: `${progress}%` }} />
+                              </div>
+                              <em>{progress}%</em>
+                            </div>
+                            <span className="ops-jobs-table__attempts">
+                              {t("opsJobs.attemptShort")} {job.attempts}/{job.max_attempts}
+                              <i aria-hidden="true">·</i>
+                              {job.completed_steps}/{job.total_steps} {t("opsJobs.stepsShort")}
+                            </span>
+                          </td>
+                          <td className="ops-jobs-table__status-cell">
+                            <span className={jobStatusChipClass(job.status, tone)}>
+                              <i className="ops-jobs-table__status-dot" aria-hidden="true" />
+                              {formatStatusLabel(job.status)}
+                            </span>
+                            {job.error_code ? (
+                              <code className="ops-jobs-table__error" title={job.error_message ?? job.error_code}>
+                                {job.error_code}
+                              </code>
+                            ) : null}
+                            {job.status === "RUNNING" ? (
+                              <span className={`ops-jobs-table__heartbeat${isStaleRunning(job, staleJobIds) ? " is-stale" : ""}`}>
+                                {job.locked_by ? `${job.locked_by} · ${formatAge(job.locked_at)}` : t("opsJobs.noWorkerLock")}
+                              </span>
+                            ) : null}
+                          </td>
+                          <td>
+                            <dl className="ops-jobs-table__timing">
+                              <div>
+                                <dt>{t("opsJobs.startedAt")}</dt>
+                                <dd>{job.started_at ? <time dateTime={job.started_at} title={job.started_at}>{formatTableDateTime(job.started_at)}</time> : "—"}</dd>
+                              </div>
+                              <div>
+                                <dt>{t("opsJobs.finishedAt")}</dt>
+                                <dd>{job.finished_at ? <time dateTime={job.finished_at} title={job.finished_at}>{formatTableDateTime(job.finished_at)}</time> : "—"}</dd>
+                              </div>
+                              <div>
+                                <dt>{t("opsJobs.duration")}</dt>
+                                <dd>{job.status === "RUNNING" ? formatJobElapsed(job.started_at) : formatJobDuration(job.started_at, job.finished_at)}</dd>
+                              </div>
+                            </dl>
+                          </td>
+                          <td>
+                            <div className="ops-jobs-table__actions">
+                              {canRetry ? (
+                                <AsyncButton type="button" className="ops-jobs-table__retry is-icon" aria-label={t("opsJobs.retry")} title={t("opsJobs.retry")} pending={action.isPending(`retry-${job.id}`)} pendingLabel="…" onClick={() => void handleRetry(job)}>
+                                  <JobActionIcon kind="retry" />
+                                </AsyncButton>
+                              ) : null}
+                              {canResume ? (
+                                <AsyncButton type="button" className="ops-jobs-table__resume is-icon" aria-label={t("opsJobs.resume")} title={t("opsJobs.resume")} pending={action.isPending(`resume-${job.id}`)} pendingLabel="…" onClick={() => void handleResume(job)}>
+                                  <JobActionIcon kind="resume" />
+                                </AsyncButton>
+                              ) : null}
+                              {canCancel ? (
+                                <AsyncButton type="button" className="ops-jobs-table__cancel is-icon" aria-label={t("opsJobs.cancel")} title={t("opsJobs.cancel")} pending={action.isPending(`cancel-${job.id}`)} pendingLabel="…" onClick={() => void handleCancel(job)}>
+                                  <JobActionIcon kind="cancel" />
+                                </AsyncButton>
+                              ) : null}
+                              <AsyncButton className="ops-jobs-delete is-icon" data-testid={`delete-job-${job.id}`} type="button" aria-label={t("common.delete")} title={t("common.delete")} pending={action.isPending(`delete-${job.id}`)} pendingLabel="…" onClick={() => void handleDelete(job)}>
+                                <JobActionIcon kind="delete" />
+                              </AsyncButton>
+                            </div>
+                          </td>
+                        </tr>
+                        {expandedJobId === job.id ? (
+                          <tr className="ops-jobs-v2-trace-row" id={`ops-job-trace-${job.id}`}>
+                            <td colSpan={6}>
+                              <JobStepTrace
+                                job={job}
+                                labels={{
+                                  trace: t("opsJobs.stepTrace"),
+                                  attempt: t("opsJobs.attemptShort"),
+                                  noSteps: t("opsJobs.noSteps"),
+                                }}
+                              />
+                            </td>
+                          </tr>
+                        ) : null}
+                      </Fragment>
                     );
                   })}
                 </tbody>
@@ -795,18 +1152,23 @@ export function OpsJobsPage() {
           </section>
         )}
 
-        {(hasMore || totalCount > 0) && jobs.length > 0 ? (
-          <OffsetLoadMoreFooter
-            className="ops-jobs-monitor__footer"
-            loadedCount={jobs.length}
-            loadingMore={loadingMore}
-            noun="jobs"
-            onLoadMore={() => void loadMore()}
+        {totalCount > 0 && jobs.length > 0 ? (
+          <OpsJobsPagination
+            busy={request.refreshing}
+            currentPage={currentPage}
+            labels={{
+              pagination: t("opsJobs.pagination"),
+              perPage: t("opsJobs.perPage"),
+              previous: t("opsJobs.previousPage"),
+              next: t("opsJobs.nextPage"),
+              page: t("opsJobs.page"),
+              jobs: t("opsJobs.jobsNoun"),
+            }}
+            onPageChange={handlePageChange}
             onPageSizeChange={handlePageSizeChange}
             pageSize={pageSize}
             pageSizeOptions={OPERATOR_LIST_PAGE_SIZE_PRESETS}
             totalCount={totalCount}
-            variant="inline"
           />
         ) : null}
       </main>

@@ -49,14 +49,20 @@ class AccurateInkMarkTests(unittest.TestCase):
         mask_x0 = float(refined.x) * w
         self.assertGreater(mask_x0, 50.0)  # not on icon
 
-    def test_process_frame_places_vi_on_recovered_glyph(self) -> None:
-        h, w = 120, 200
+    def test_process_frame_inpaints_box_and_burns_vi_at_anchor(self) -> None:
+        h, w = 200, 300
         frame = np.full((h, w, 3), 245, dtype=np.uint8)
-        frame[45:65, 100:150] = (15, 15, 15)
-        seg = OverlaySegment(0, 1000, 0.10, 0.30, 0.70, 0.40, "Cơm", kind="ui")
+        frame[80:100, 100:200] = (15, 15, 15)
+        # Plausible UI label (~33%×10%) — taller slabs are refused as food FP.
+        seg = OverlaySegment(0, 1000, 100 / w, 80 / h, 100 / w, 20 / h, "Cơm", kind="ui")
         out = process_frame_bgr(frame, [seg], fontfile=_font())
-        self.assertGreater(float((out[45:65, 100:145, 0] < 80).mean()), 0.01)
-        self.assertLess(float((out[45:65, 25:55, 0] < 80).mean()), 0.02)
+        # Chinese slab lifted by ROI inpaint.
+        self.assertGreater(float(out[80:100, 100:200].mean()), 40.0)
+        # VI stroke near center-bottom of the OCR box.
+        ax = int((seg.x + seg.width / 2) * w)
+        ay = int((seg.y + seg.height) * h)
+        band = out[max(0, ay - 40) : ay, max(0, ax - 30) : ax + 30, 0]
+        self.assertGreater(float((band < 80).mean()), 0.005)
 
 
 if __name__ == "__main__":

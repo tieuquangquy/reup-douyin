@@ -46,7 +46,7 @@ export function DouyinExtensionSetupPage() {
   if (!status && !request.error) {
     return (
       <OperatorStudioShell actions={refreshAction} description={t("extensionSetup.description")} title={t("extensionSetup.title")}>
-        <AsyncContentBoundary skeletonVariant="detail" status="loading"><span /></AsyncContentBoundary>
+        <AsyncContentBoundary skeletonVariant="detail" loadingLabel={t("extensionSetup.loadingDetail")} status="loading"><span /></AsyncContentBoundary>
       </OperatorStudioShell>
     );
   }

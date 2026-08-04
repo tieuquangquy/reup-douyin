@@ -116,3 +116,6 @@ class ReupQueueBatchActionRequest(BaseModel):
     item_ids: list[UUID] = Field(min_length=1, max_length=500)
     note: str | None = Field(default=None, max_length=1000)
     target_platform: PublishTargetPlatform | None = None
+    # START_AUTO_PIPELINE batch: auto_to_tts (default) | auto_to_render
+    # SET_AUTOMATION batch: manual | auto_to_tts | auto_to_render (required)
+    pipeline_mode: str | None = Field(default=None, max_length=40)

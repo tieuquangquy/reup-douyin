@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -13,10 +14,39 @@ from src.media_pipeline.frame_sampling.errors import FrameSamplingError, FrameSa
 
 logger = logging.getLogger(__name__)
 
-# chineseocr_lite dbnet.onnx expects long-edge ~320 (ImageNet-ish normalize).
-_DET_LONG_EDGE = 320
+
+def resolve_dbnet_execution_providers(available: list[str]) -> list[str]:
+    """Select an explicitly enabled accelerator, with deterministic CPU fallback."""
+
+    requested = os.environ.get("DBNET_ONNX_PROVIDER", "cpu").strip().lower()
+    aliases = {
+        "cuda": "CUDAExecutionProvider",
+        "directml": "DmlExecutionProvider",
+        "dml": "DmlExecutionProvider",
+        "cpu": "CPUExecutionProvider",
+    }
+    selected = aliases.get(requested, "CPUExecutionProvider")
+    if selected not in available:
+        logger.warning(
+            "dbnet_execution_provider_unavailable requested=%s available=%s fallback=cpu",
+            requested,
+            available,
+        )
+        selected = "CPUExecutionProvider"
+    providers = [selected]
+    if selected != "CPUExecutionProvider" and "CPUExecutionProvider" in available:
+        providers.append("CPUExecutionProvider")
+    return providers
+
+# Higher long-edge improves recall on 1080p; ONNX accepts dynamic H/W.
+_DET_LONG_EDGE = 640
 _BIN_THRESH = 0.3
 _MIN_BOX_AREA_FRAC = 0.00015  # drop tiny noise blobs on full frame
+_EXPAND_PAD_W_FRAC = 0.10
+_EXPAND_PAD_H_TOP_FRAC = 0.40
+_EXPAND_PAD_H_BOTTOM_FRAC = 0.25
+_MERGE_Y_CENTER_FRAC = 0.55  # |cy1-cy2| <= this * max(h1,h2)
+_MERGE_MAX_X_GAP_FRAC = 0.18  # title|body hardsub gaps on 1080p
 # Approximate ImageNet mean/std in 0–1 space (BGR→RGB before apply).
 _MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 _STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
@@ -166,6 +196,91 @@ def postprocess_prob_map(
     return boxes
 
 
+def expand_text_boxes(
+    boxes: list[TextBox],
+    *,
+    pad_w_frac: float = _EXPAND_PAD_W_FRAC,
+    pad_h_top_frac: float = _EXPAND_PAD_H_TOP_FRAC,
+    pad_h_bottom_frac: float = _EXPAND_PAD_H_BOTTOM_FRAC,
+    pad_h_frac: float | None = None,
+) -> list[TextBox]:
+    """Grow each normalized box (more pad on top) to cover truncated glyphs; clamp [0,1]."""
+    pw = max(0.0, float(pad_w_frac))
+    if pad_h_frac is not None:
+        ph_top = ph_bot = max(0.0, float(pad_h_frac))
+    else:
+        ph_top = max(0.0, float(pad_h_top_frac))
+        ph_bot = max(0.0, float(pad_h_bottom_frac))
+    out: list[TextBox] = []
+    for box in boxes:
+        dx = float(box.width) * pw
+        dy_top = float(box.height) * ph_top
+        dy_bot = float(box.height) * ph_bot
+        x0 = max(0.0, float(box.x) - dx)
+        y0 = max(0.0, float(box.y) - dy_top)
+        x1 = min(1.0, float(box.x) + float(box.width) + dx)
+        y1 = min(1.0, float(box.y) + float(box.height) + dy_bot)
+        ww = max(0.0, x1 - x0)
+        hh = max(0.0, y1 - y0)
+        if ww < 1e-6 or hh < 1e-6:
+            continue
+        out.append(TextBox(x=x0, y=y0, width=ww, height=hh))
+    return out
+
+
+def _boxes_same_text_line(a: TextBox, b: TextBox, *, max_x_gap: float) -> bool:
+    ax0, ay0, ax1, ay1 = a.as_xyxy()
+    bx0, by0, bx1, by1 = b.as_xyxy()
+    ah = max(1e-6, ay1 - ay0)
+    bh = max(1e-6, by1 - by0)
+    acy = (ay0 + ay1) * 0.5
+    bcy = (by0 + by1) * 0.5
+    if abs(acy - bcy) > _MERGE_Y_CENTER_FRAC * max(ah, bh):
+        return False
+    # Vertical overlap of y-intervals helps reject stacked UI rows.
+    y_overlap = max(0.0, min(ay1, by1) - max(ay0, by0))
+    if y_overlap < 0.35 * min(ah, bh):
+        return False
+    if ax1 < bx0:
+        gap = bx0 - ax1
+    elif bx1 < ax0:
+        gap = ax0 - bx1
+    else:
+        gap = 0.0
+    return gap <= float(max_x_gap)
+
+
+def merge_collinear_text_boxes(
+    boxes: list[TextBox],
+    *,
+    max_x_gap_frac: float = _MERGE_MAX_X_GAP_FRAC,
+) -> list[TextBox]:
+    """Union adjacent same-baseline fragments into one line box."""
+    if len(boxes) <= 1:
+        return list(boxes)
+    remaining = sorted(boxes, key=lambda b: (b.y + b.height * 0.5, b.x))
+    merged: list[TextBox] = []
+    while remaining:
+        cur = remaining.pop(0)
+        changed = True
+        while changed:
+            changed = False
+            nxt: list[TextBox] = []
+            for other in remaining:
+                if _boxes_same_text_line(cur, other, max_x_gap=max_x_gap_frac):
+                    x0 = min(cur.x, other.x)
+                    y0 = min(cur.y, other.y)
+                    x1 = max(cur.x + cur.width, other.x + other.width)
+                    y1 = max(cur.y + cur.height, other.y + other.height)
+                    cur = TextBox(x=x0, y=y0, width=x1 - x0, height=y1 - y0)
+                    changed = True
+                else:
+                    nxt.append(other)
+            remaining = nxt
+        merged.append(cur)
+    return merged
+
+
 class LocalTextDetector:
     """ONNX DBNet (det-only) for deciding whether a frame contains text glyphs."""
 
@@ -187,10 +302,16 @@ class LocalTextDetector:
         try:
             opts = ort.SessionOptions()
             opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+            # This exported dynamic-shape DBNet carries a stale 320x320 output
+            # annotation. ORT otherwise emits one VerifyOutputSizes warning per
+            # frame even though the dynamic output is valid, flooding long-video
+            # logs and hiding the actionable terminal exception.
+            opts.log_severity_level = 3  # errors only; inference failures still raise
+            providers = resolve_dbnet_execution_providers(list(ort.get_available_providers()))
             self._session = ort.InferenceSession(
                 str(path),
                 sess_options=opts,
-                providers=["CPUExecutionProvider"],
+                providers=providers,
             )
             self._input_name = self._session.get_inputs()[0].name
         except Exception as exc:  # noqa: BLE001
@@ -199,13 +320,22 @@ class LocalTextDetector:
                 f"Failed to load DBNet ONNX ({path.name}): {exc}",
             ) from exc
         self.model_path = path
-        logger.info("local_text_detector_ready model=%s", path.name)
+        logger.info(
+            "local_text_detector_ready model=%s providers=%s",
+            path.name,
+            self._session.get_providers(),
+        )
 
     def detect(
         self,
         frame_bgr: np.ndarray,
         *,
         long_edge: int = _DET_LONG_EDGE,
+        bin_thresh: float = _BIN_THRESH,
+        rematch_after_expand: bool = False,
+        expand_pad_w_frac: float | None = None,
+        expand_pad_h_top_frac: float | None = None,
+        expand_pad_h_bottom_frac: float | None = None,
     ) -> list[TextBox]:
         """Return normalized text boxes for one BGR frame."""
         h, w = int(frame_bgr.shape[0]), int(frame_bgr.shape[1])
@@ -222,4 +352,33 @@ class LocalTextDetector:
             ) from exc
         if not outputs:
             return []
-        return postprocess_prob_map(outputs[0], orig_h=h, orig_w=w, scale=scale)
+        boxes = postprocess_prob_map(
+            outputs[0],
+            orig_h=h,
+            orig_w=w,
+            scale=scale,
+            bin_thresh=float(bin_thresh),
+        )
+        boxes = merge_collinear_text_boxes(boxes)
+        boxes = expand_text_boxes(
+            boxes,
+            pad_w_frac=(
+                float(expand_pad_w_frac)
+                if expand_pad_w_frac is not None
+                else _EXPAND_PAD_W_FRAC
+            ),
+            pad_h_top_frac=(
+                float(expand_pad_h_top_frac)
+                if expand_pad_h_top_frac is not None
+                else _EXPAND_PAD_H_TOP_FRAC
+            ),
+            pad_h_bottom_frac=(
+                float(expand_pad_h_bottom_frac)
+                if expand_pad_h_bottom_frac is not None
+                else _EXPAND_PAD_H_BOTTOM_FRAC
+            ),
+        )
+        if rematch_after_expand and len(boxes) > 1:
+            # Expand can close title|body gaps that pre-expand merge missed.
+            boxes = merge_collinear_text_boxes(boxes)
+        return boxes

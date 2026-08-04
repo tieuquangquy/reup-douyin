@@ -113,6 +113,15 @@ class LocalTextVerifierRegressionTests(unittest.TestCase):
         self.assertEqual(len(verified), 1)
         self.assertEqual(verified[0].text, "测试字幕")
 
+    def test_title_mode_keeps_compact_action_label(self) -> None:
+        """加盐-sized mid box must form a title line (not dropped by w<0.10)."""
+        lines = group_text_lines(
+            [TimedBox(0.157, 0.462, 0.067, 0.064)],
+            mode="title",
+        )
+        self.assertEqual(len(lines), 1)
+        self.assertAlmostEqual(lines[0].box.w, 0.067, places=3)
+
     def test_scattered_food_fragments_do_not_form_a_text_line(self) -> None:
         lines = group_text_lines(
             [

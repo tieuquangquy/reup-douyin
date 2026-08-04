@@ -14,7 +14,9 @@ Analytics-lite answers:
 - which source/profile/preset/niche groups look promising;
 - what operator feedback says about published outputs.
 
-It does not track deep engagement metrics such as views, likes, comments, shares, conversion, or revenue.
+This analytics-lite dashboard itself does not calculate deep engagement. Publication-level
+views, likes, comments, shares and growth velocity are now captured by the separate
+`Publication Metrics V1` authority. Conversion and revenue attribution remain out of scope.
 
 It also does not make automatic ranking or publish decisions. Any source/preset/niche signal is directional operator feedback, not a scoring model.
 

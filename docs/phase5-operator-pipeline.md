@@ -39,7 +39,7 @@ Final Review → Publish Draft   ← Milestone C
 
 | Khối | Trạng thái | Đường vào |
 |------|------------|-----------|
-| Capture Inbox | UI + API + promote + test | `/ops/extensions/douyin/capture-inbox` (**Operator** nav → Work) |
+| Capture Inbox | UI + API + promote + test | `/selection/capture-inbox` (**Operator** nav → Work; legacy `/ops/extensions/douyin/capture-inbox` redirects) |
 | Review Board | Lọc, Reup Score, bulk approve/reject | `/selection/review-board` (**Operator** shell) |
 | Reup Queue / Export / Handoff | State machine + UI | `/selection/reup-queue`, `/publishing/export-packages` (**Operator** shell) |
 | Transcript editor | Save, merge, split, timing | `/production/transcript-editor/{sourceVideoId}` |
@@ -186,7 +186,7 @@ Theo `docs/operator-pilot-workflow.md`:
 ## Bước đầu tiên (hôm nay)
 
 1. `.\scripts\dev-doctor.ps1` → `.\scripts\dev-start.ps1`
-2. Mở `/ops/extensions/douyin/capture-inbox` — batch đã collect
+2. Mở `/selection/capture-inbox` — batch đã collect
 3. Promote 5 video → `/selection/review-board`
 4. Ghi: promote OK / skip count / lý do skip
 

@@ -118,6 +118,22 @@ assert.match(reviewPageSource, /In Reup Queue/, "Review Board must show the expl
 assert.match(reviewPageSource, /applyQueuedMembershipToCandidates/, "Review Board must mark local queue membership after enqueue");
 assert.match(reviewPageSource, /selectableBoardCandidates/, "Review Board must exclude queued tiles from bulk selection");
 assert.match(reviewTileActionsSource, /reviewBoardDetailsActionVisibility/, "Review Board tile/details must use stage-aware action visibility");
+assert.match(reviewTileActionsSource, /is-triple/, "Shortlisted companions must pack Approve only + Later + Reject into one triple row");
+assert.match(
+  reviewTileActionsSource,
+  /companions\.length === 3 \? "is-triple"|length === 3 \? "is-triple"/,
+  "Companion row class must switch to is-triple when three actions share one row"
+);
+assert.doesNotMatch(
+  reviewTileActionsSource,
+  /showApproveOnly && onApprove \? \(\s*<div className="review-board-tile-action-row is-secondary">/,
+  "Approve only must not sit alone on a dedicated secondary row when companions exist"
+);
+assert.match(
+  readFileSync(resolve(testDir, "../app/globals.css"), "utf8"),
+  /\.review-board-tile-action-row\.is-triple\s*\{[^}]*grid-template-columns:\s*repeat\(3/,
+  "CSS must define a three-column companion action row"
+);
 
 console.log("review-board-queue tests passed");
 

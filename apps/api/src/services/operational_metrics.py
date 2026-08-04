@@ -29,6 +29,7 @@ from src.services.operational_metrics_helpers import (
     summarize_counts,
     summarize_duration_samples,
 )
+from src.services.job_runner import job_type_stale_seconds
 
 
 class OperationalMetricsService:
@@ -46,6 +47,7 @@ class OperationalMetricsService:
                 for job_type, status_counts in job_counts.items()
             },
             queue_backlog=self._queue_backlog(),
+            oldest_job_at_by_status=self._oldest_job_at_by_status(),
             retryable_jobs=self._count_retryable_jobs(),
             total_retry_attempts=self._total_retry_attempts(),
             step_duration_by_job_type=self._step_duration_by_job_type(),
@@ -68,11 +70,67 @@ class OperationalMetricsService:
 
     def _queue_backlog(self) -> BacklogSummary:
         counts = self._status_counts(Job.status)
+        stale_running, stale_running_job_ids = self._stale_running_authority()
+        oldest_queued_at = self.db.scalar(
+            select(func.min(Job.created_at)).where(
+                Job.workspace_id == self.workspace_id,
+                Job.status == JobStatus.QUEUED,
+            )
+        )
+        running_with_lock = int(
+            self.db.scalar(
+                select(func.count(Job.id)).where(
+                    Job.workspace_id == self.workspace_id,
+                    Job.status == JobStatus.RUNNING,
+                    Job.locked_by.is_not(None),
+                    Job.locked_at.is_not(None),
+                )
+            )
+            or 0
+        )
+        running_without_lock = max(0, counts.get(JobStatus.RUNNING.value, 0) - running_with_lock)
+        active_worker_count = int(
+            self.db.scalar(
+                select(func.count(func.distinct(Job.locked_by))).where(
+                    Job.workspace_id == self.workspace_id,
+                    Job.status == JobStatus.RUNNING,
+                    Job.locked_by.is_not(None),
+                )
+            )
+            or 0
+        )
         return BacklogSummary(
             queued=counts.get(JobStatus.QUEUED.value, 0),
             retryable=counts.get(JobStatus.RETRYABLE.value, 0),
             running=counts.get(JobStatus.RUNNING.value, 0),
+            oldest_queued_at=oldest_queued_at,
+            running_with_lock=running_with_lock,
+            running_without_lock=running_without_lock,
+            active_worker_count=active_worker_count,
+            stale_running=stale_running,
+            stale_running_job_ids=stale_running_job_ids,
         )
+
+    def _stale_running_authority(self) -> tuple[int, list[str]]:
+        """Return RUNNING jobs past the worker's own heartbeat policy.
+
+        The UI must not guess a universal stale threshold: media and fetch stages have
+        different heartbeat budgets. This snapshot intentionally exposes only the small
+        set of stale ids needed for operator triage and filtering.
+        """
+        now = datetime.now(UTC)
+        rows = self.db.execute(
+            select(Job.id, Job.job_type, Job.locked_at)
+            .where(Job.workspace_id == self.workspace_id, Job.status == JobStatus.RUNNING)
+        ).all()
+        stale_ids: list[str] = []
+        for job_id, job_type, locked_at in rows:
+            if locked_at is None:
+                continue
+            heartbeat = locked_at if locked_at.tzinfo is not None else locked_at.replace(tzinfo=UTC)
+            if (now - heartbeat).total_seconds() >= job_type_stale_seconds(job_type):
+                stale_ids.append(str(job_id))
+        return len(stale_ids), stale_ids
 
     def _count_retryable_jobs(self) -> int:
         return int(
@@ -81,6 +139,14 @@ class OperationalMetricsService:
             )
             or 0
         )
+
+    def _oldest_job_at_by_status(self) -> dict[str, datetime]:
+        rows = self.db.execute(
+            select(Job.status, func.min(Job.created_at))
+            .where(Job.workspace_id == self.workspace_id)
+            .group_by(Job.status)
+        ).all()
+        return {status.value: oldest_at for status, oldest_at in rows if oldest_at is not None}
 
     def _total_retry_attempts(self) -> int:
         return int(self.db.scalar(select(func.coalesce(func.sum(Job.attempts), 0)).where(Job.workspace_id == self.workspace_id)) or 0)
@@ -219,4 +285,3 @@ class OperationalMetricsService:
             top_blocked_reasons=[FetchHealthReasonCount(reason=reason, count=count) for reason, count in ranked_reasons],
             by_account=account_rows,
         )
-

@@ -20,6 +20,8 @@ export type JobType =
   | "PUBLISH_CONTENT"
   | "REFRESH_PUBLISH_STATUS"
   | "RECONCILE_PUBLISH_ATTEMPT"
+  | "COLLECT_PUBLICATION_METRICS"
+  | "CLASSIFY_CONTENT"
   | string;
 
 export type JobStep = {
@@ -57,6 +59,8 @@ export type Job = {
   attempts: number;
   max_attempts: number;
   retryable: boolean;
+  locked_by?: string | null;
+  locked_at?: string | null;
   started_at: string | null;
   finished_at: string | null;
   error_code: string | null;

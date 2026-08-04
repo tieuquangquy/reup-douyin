@@ -9,9 +9,20 @@ from typing import Protocol
 
 from src.audio_pipeline.demucs_runner import (
     DEFAULT_DEMUCS_MODEL,
+    DemucsStemPaths,
+    background_storage_key_for_input,
     demucs_is_importable,
-    run_demucs_vocals,
+    run_demucs_two_stems,
     vocal_storage_key_for_input,
+)
+from src.audio_pipeline.speech_budget import (
+    DEFAULT_VI_UNITS_PER_SECOND,
+    count_spoken_units,
+)
+from src.audio_pipeline.silero_vad_runner import (
+    SpeechSummary,
+    run_silero_speech_summary,
+    silero_is_importable,
 )
 from src.audio_pipeline.types import (
     SourceSeparationResult,
@@ -26,7 +37,8 @@ from src.storage.base import StorageBackend
 
 logger = logging.getLogger(__name__)
 
-DemucsRunnerFn = Callable[..., Path]
+DemucsRunnerFn = Callable[..., object]
+SileroRunnerFn = Callable[[str], SpeechSummary]
 
 
 class SourceSeparationProvider(Protocol):
@@ -125,7 +137,7 @@ class DemucsSourceSeparationProvider:
             )
 
         storage = self.storage or LocalStorageBackend(get_settings().local_storage_root)
-        runner = self.runner or run_demucs_vocals
+        runner = self.runner or run_demucs_two_stems
         try:
             resolved = storage.resolve(audio_storage_key)
             input_path = resolved.absolute_path
@@ -133,7 +145,8 @@ class DemucsSourceSeparationProvider:
                 raise FileNotFoundError(f"Audio input missing for separation: {audio_storage_key}")
 
             vocal_key = vocal_storage_key_for_input(audio_storage_key)
-            if storage.exists(vocal_key):
+            background_key = background_storage_key_for_input(audio_storage_key)
+            if storage.exists(vocal_key) and storage.exists(background_key):
                 logger.info(
                     "demucs_vocal_cache_hit",
                     extra={"input_key": audio_storage_key, "vocal_key": vocal_key},
@@ -149,17 +162,34 @@ class DemucsSourceSeparationProvider:
                         "model": self.model_name,
                         "cache_hit": True,
                         "vocal_storage_key": vocal_key,
+                        "background_storage_key": background_key,
                     },
                 )
 
             with tempfile.TemporaryDirectory(prefix="demucs_out_") as out_tmp:
-                vocals_path = runner(
+                stem_result = runner(
                     input_path=input_path,
                     output_dir=Path(out_tmp),
                     model_name=self.model_name,
                 )
+                if isinstance(stem_result, DemucsStemPaths):
+                    vocals_path = stem_result.vocals
+                    background_path = stem_result.background
+                else:
+                    vocals_path = Path(stem_result)
+                    background_path = None
                 vocal_bytes = Path(vocals_path).read_bytes()
+                background_bytes = (
+                    Path(background_path).read_bytes()
+                    if background_path is not None and Path(background_path).is_file()
+                    else None
+                )
             write_result = storage.write_bytes(vocal_key, vocal_bytes)
+            background_write = (
+                storage.write_bytes(background_key, background_bytes)
+                if background_bytes
+                else None
+            )
             logger.info(
                 "demucs_vocal_persisted",
                 extra={
@@ -179,6 +209,9 @@ class DemucsSourceSeparationProvider:
                     "model": self.model_name,
                     "cache_hit": False,
                     "vocal_storage_key": write_result.storage_key,
+                    "background_storage_key": (
+                        background_write.storage_key if background_write is not None else None
+                    ),
                 },
             )
         except Exception as exc:
@@ -276,10 +309,19 @@ class HeuristicVadProvider:
 
 @dataclass
 class SileroVadProvider:
-    """Optional Silero VAD; falls back to HeuristicVadProvider when torch/silero missing."""
+    """Measured speech gate; falls back to HeuristicVadProvider when Silero cannot run.
+
+    ``min_speech_seconds`` keeps a stray cough or jingle vocal from opening a dubbing
+    lane, and works the same for a 10s clip and a 3min clip because it is an absolute
+    floor rather than a ratio tuned to one video length.
+    """
 
     provider_name: str = "silero_vad"
     fallback: VadProvider | None = None
+    storage: StorageBackend | None = None
+    runner: SileroRunnerFn | None = None
+    silero_importable: bool | None = None
+    min_speech_seconds: float = 0.8
 
     def detect(
         self,
@@ -289,43 +331,89 @@ class SileroVadProvider:
         source_caption: str | None = None,
     ) -> VadResult:
         fallback = self.fallback or HeuristicVadProvider()
-        try:
-            import torch  # noqa: F401
-        except Exception:
-            result = fallback.detect(
+        importable = silero_is_importable() if self.silero_importable is None else self.silero_importable
+        if not importable:
+            return self._fallback_result(
+                fallback,
                 audio_storage_key,
                 duration_seconds=duration_seconds,
                 source_caption=source_caption,
+                extra_flag="silero_unavailable",
             )
-            flags = list(result.difficulty_flags)
-            if "silero_unavailable" not in flags:
-                flags.append("silero_unavailable")
-            return VadResult(
-                has_speech=result.has_speech,
-                speech_ratio=result.speech_ratio,
-                difficulty_flags=flags,
-                metadata={
-                    **result.metadata,
-                    "requested_provider": self.provider_name,
-                    "fallback_provider": fallback.provider_name,
-                },
+
+        try:
+            storage = self.storage or LocalStorageBackend(get_settings().local_storage_root)
+            audio_path = storage.resolve(audio_storage_key).absolute_path
+            runner = self.runner or run_silero_speech_summary
+            summary = runner(audio_path)
+        except Exception as exc:
+            logger.exception(
+                "silero_vad_failed",
+                extra={"audio_storage_key": audio_storage_key, "error": str(exc)},
             )
-        # Full Silero waveform inference is wired when worker GPU path lands.
+            return self._fallback_result(
+                fallback,
+                audio_storage_key,
+                duration_seconds=duration_seconds,
+                source_caption=source_caption,
+                extra_flag="silero_failed",
+                error=str(exc)[:300],
+            )
+
+        total_seconds = summary.audio_seconds or float(duration_seconds or 0.0)
+        speech_ratio = round(summary.speech_seconds / total_seconds, 4) if total_seconds > 0 else 0.0
+        has_speech = summary.speech_seconds >= self.min_speech_seconds
+        flags = ["silero_vad_executed"]
+        if not has_speech:
+            flags.extend(["skip_dubbing", "no_speech_detected"])
+            if summary.speech_seconds > 0:
+                flags.append("speech_below_threshold")
+        return VadResult(
+            has_speech=has_speech,
+            speech_ratio=speech_ratio,
+            difficulty_flags=flags,
+            metadata={
+                "provider": self.provider_name,
+                "audio_storage_key": audio_storage_key,
+                "duration_seconds": duration_seconds,
+                "speech_seconds": summary.speech_seconds,
+                "audio_seconds": summary.audio_seconds,
+                "speech_segment_count": summary.segment_count,
+                "min_speech_seconds": self.min_speech_seconds,
+                "source_caption_present": bool(source_caption and source_caption.strip()),
+            },
+        )
+
+    def _fallback_result(
+        self,
+        fallback: VadProvider,
+        audio_storage_key: str,
+        *,
+        duration_seconds: float | None,
+        source_caption: str | None,
+        extra_flag: str,
+        error: str | None = None,
+    ) -> VadResult:
         result = fallback.detect(
             audio_storage_key,
             duration_seconds=duration_seconds,
             source_caption=source_caption,
         )
-        flags = list(result.difficulty_flags) + ["silero_not_executed"]
+        flags = list(result.difficulty_flags)
+        if extra_flag not in flags:
+            flags.append(extra_flag)
+        metadata = {
+            **result.metadata,
+            "requested_provider": self.provider_name,
+            "fallback_provider": fallback.provider_name,
+        }
+        if error is not None:
+            metadata["error"] = error
         return VadResult(
             has_speech=result.has_speech,
             speech_ratio=result.speech_ratio,
             difficulty_flags=flags,
-            metadata={
-                **result.metadata,
-                "requested_provider": self.provider_name,
-                "note": "silero_import_ok_execution_deferred",
-            },
+            metadata=metadata,
         )
 
 
@@ -400,8 +488,8 @@ class PlaceholderVietnameseTranslationProvider:
 
 
 def estimate_tts_duration_seconds(text: str) -> float:
-    # Conservative Vietnamese read speed for review-time budgeting.
-    return max(0.6, len(text.strip()) / 13.0)
+    # Advisory only; synthesized audio remains the duration authority.
+    return max(0.6, count_spoken_units(text) / DEFAULT_VI_UNITS_PER_SECOND)
 
 
 def _placeholder_translation(source_text: str, preset: TranslationPreset) -> str:

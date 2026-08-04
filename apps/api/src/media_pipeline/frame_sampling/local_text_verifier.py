@@ -11,6 +11,8 @@ import numpy as np
 
 from src.media_pipeline.frame_sampling.local_text_recognizer import LocalRecognition
 from src.media_pipeline.ocr_filtering.box_timeline_tracker import TimedBox, box_iou
+from src.media_pipeline.ocr_filtering.overlay_zones import is_compact_overlay_label
+from src.media_pipeline.ocr_filtering.types import DetectedTextBox
 
 VerificationMode = Literal["hardsub", "title", "endcard"]
 VerificationDecision = Literal["verified", "uncertain", "rejected"]
@@ -212,10 +214,21 @@ def group_text_lines(
                 continue
             geometry = min(1.0, aspect / 5.0) * 0.8 + min(1.0, fill_ratio) * 0.2
         elif mode == "title":
+            compact = is_compact_overlay_label(
+                DetectedTextBox(
+                    x=float(merged.x),
+                    y=float(merged.y),
+                    width=float(merged.w),
+                    height=float(merged.h),
+                )
+            )
             in_stack = _belongs_to_title_stack(merged, merged_groups)
-            if not in_stack and (aspect < 1.5 or merged.w < 0.10):
+            if compact:
+                if aspect < 0.85 or merged.w < 0.05:
+                    continue
+            elif not in_stack and (aspect < 1.5 or merged.w < 0.10):
                 continue
-            if in_stack and (aspect < 0.50 or merged.w < 0.012):
+            elif in_stack and (aspect < 0.50 or merged.w < 0.012):
                 continue
             geometry = min(1.0, aspect / 4.0) * 0.7 + min(1.0, fill_ratio) * 0.3
         else:

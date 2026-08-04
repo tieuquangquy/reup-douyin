@@ -30,8 +30,17 @@ import type {
 import type {
   PublishDraft,
   PublishDraftListResponse,
+  FacebookAccountSetupCheckResponse,
+  FacebookOAuthConfiguration,
+  FacebookOAuthConfigurationUpdate,
+  FacebookOAuthConnectPageResponse,
+  FacebookOAuthSession,
+  FacebookOAuthStartResponse,
+  FacebookPublishSafetyStatus,
+  FacebookInsightsPreflightResponse,
   PlatformAccount,
   PlatformAccountListResponse,
+  PlatformPublication,
   PublishHistoryResponse,
   PublishAttempt,
   PublishAttemptListResponse,
@@ -39,7 +48,20 @@ import type {
   PublishTargetPlatform
 } from "../types/publish-draft";
 import type { OperatorRiskDecisionType, RiskFlag, RiskSummary, RiskTargetType } from "../types/risk";
+import type {
+  FacebookReelDiscoveryResponse,
+  PlatformPublicationListResponse,
+  PublicationGrowthSummary,
+  PublicationMetricSchedule,
+  PublicationMetricSnapshotListResponse,
+  PublicationMetricTrackingMonitorResponse,
+} from "../types/publication-library";
+import type { AffiliateOpportunityQueueResponse, GrowthScoreRunResponse, PublicationGrowthAssessment } from "../types/growth-intelligence";
+import type { AffiliateCommentApproveResponse, AffiliateCommentHistoryResponse, AffiliateCommentPlacement, AffiliateCommentPreviewResponse, AffiliateCommentVerificationJobResponse } from "../types/affiliate-comment";
+import type { AffiliateCommentTemplate, AffiliateCommentTemplateInput, AffiliateCommentTemplateListResponse } from "../types/affiliate-comment-template";
 import type { AnalyticsWindow, OperatorFeedbackPayload, PublishHealthDashboard } from "../types/analytics";
+import type { ContentAiConfig, ContentAiConfigUpdate, ContentAiTestResponse, ContentClassification, ContentClassificationQueueResponse, ContentClassificationRunResponse, TopicCategory, TopicCategoryListResponse } from "../types/content-intelligence";
+import type { AffiliateProduct, AffiliateProductBulkImportResponse, AffiliateProductImageUpload, AffiliateProductInput, AffiliateProductListResponse, AffiliateProductMatch, AffiliateProductMatchQueueResponse, AffiliateProductMatchRunResponse } from "../types/affiliate";
 import type {
   AssignDraftPayload,
   BulkAssignPayload,
@@ -48,7 +70,7 @@ import type {
   RoutingRuleListResponse
 } from "../types/publish-control";
 import type { OptimizationDashboard, OutcomeScore, RoutingHints, SchedulingHints } from "../types/optimization";
-import type { OperationalMetrics, PipelineDashboardResponse } from "../types/operations";
+import type { OperationalMetrics, OperatorHomeSummaryResponse, OpsHomeSummaryResponse, PipelineDashboardResponse } from "../types/operations";
 import type {
   IntakeBootstrapResponse,
   IntakeDiscoverRequest,
@@ -125,7 +147,8 @@ import type {
   ReupQueueBatchActionRequest
 } from "../types/export-handoff";
 
-import { SESSION_PRESENCE_COOKIE } from "./authPaths";
+import { SESSION_PRESENCE_COOKIE, SESSION_SOFT_COOKIE_MAX_AGE_SECONDS } from "./authPaths";
+import { intakeDateRange, type IntakeFilterState } from "./reviewBoardIntake";
 import {
   type AuthSurface,
   loginPathForSurface,
@@ -139,7 +162,7 @@ const API_AUTH_TOKEN_STORAGE_KEY = "reup_douyin_api_auth_token";
 const API_REFRESH_TOKEN_STORAGE_KEY = "reup_douyin_api_refresh_token";
 const EXTENSION_AUTH_TOKEN_BRIDGE_EVENT = "REUP_DOUYIN_API_AUTH_TOKEN_SYNC";
 
-export { SESSION_PRESENCE_COOKIE };
+export { SESSION_PRESENCE_COOKIE, SESSION_SOFT_COOKIE_MAX_AGE_SECONDS };
 export type { AuthSurface };
 
 let refreshInFlight: Promise<boolean> | null = null;
@@ -160,7 +183,7 @@ function syncApiAuthTokenToExtension(token: string | null): void {
 function setSessionPresenceCookie(present: boolean): void {
   if (typeof document === "undefined") return;
   if (present) {
-    document.cookie = `${SESSION_PRESENCE_COOKIE}=1; Path=/; SameSite=Lax`;
+    document.cookie = `${SESSION_PRESENCE_COOKIE}=1; Path=/; Max-Age=${SESSION_SOFT_COOKIE_MAX_AGE_SECONDS}; SameSite=Lax`;
   } else {
     document.cookie = `${SESSION_PRESENCE_COOKIE}=; Path=/; Max-Age=0; SameSite=Lax`;
   }
@@ -169,7 +192,7 @@ function setSessionPresenceCookie(present: boolean): void {
 function setSessionSurfaceCookie(surface: AuthSurface | null): void {
   if (typeof document === "undefined") return;
   if (surface) {
-    document.cookie = `${SESSION_SURFACE_COOKIE}=${surface}; Path=/; SameSite=Lax`;
+    document.cookie = `${SESSION_SURFACE_COOKIE}=${surface}; Path=/; Max-Age=${SESSION_SOFT_COOKIE_MAX_AGE_SECONDS}; SameSite=Lax`;
     window.localStorage.setItem(SESSION_SURFACE_STORAGE_KEY, surface);
   } else {
     document.cookie = `${SESSION_SURFACE_COOKIE}=; Path=/; Max-Age=0; SameSite=Lax`;
@@ -205,6 +228,8 @@ export function setApiAuthToken(token: string | null): void {
   if (normalizedToken) {
     window.localStorage.setItem(API_AUTH_TOKEN_STORAGE_KEY, normalizedToken);
     setSessionPresenceCookie(true);
+    const surface = getAuthSurface();
+    if (surface) setSessionSurfaceCookie(surface);
   } else {
     window.localStorage.removeItem(API_AUTH_TOKEN_STORAGE_KEY);
     setApiRefreshToken(null);
@@ -283,6 +308,31 @@ async function apiFetch(input: string, init: RequestInit = {}, allowRefresh = tr
   }
   redirectToLogin();
   return response;
+}
+
+async function apiErrorMessage(response: Response, fallback: string): Promise<string> {
+  try {
+    const body = (await response.json()) as {
+      detail?: string | { message?: string; code?: string } | Array<{ msg?: string; loc?: Array<string | number> }>;
+    };
+    if (typeof body.detail === "string" && body.detail.trim()) return body.detail;
+    if (Array.isArray(body.detail)) {
+      const messages = body.detail
+        .map((item) => {
+          const message = String(item?.msg || "").trim();
+          const location = Array.isArray(item?.loc) ? item.loc.filter((part) => part !== "body").join(".") : "";
+          return message ? (location ? `${location}: ${message}` : message) : "";
+        })
+        .filter(Boolean);
+      if (messages.length > 0) return messages.join("; ");
+    }
+    if (body.detail && typeof body.detail === "object" && !Array.isArray(body.detail)) {
+      return body.detail.message || body.detail.code || `${fallback}: ${response.status}`;
+    }
+  } catch {
+    // Keep the fallback concise when an upstream returns a non-JSON body.
+  }
+  return `${fallback}: ${response.status}`;
 }
 
 export type AuthMembership = {
@@ -761,6 +811,10 @@ export async function fetchCandidates(
   if (filters.minScore) params.set("min_score", filters.minScore);
   if (filters.maxScore) params.set("max_score", filters.maxScore);
   if (filters.sourceProfileId) params.set("source_profile_id", filters.sourceProfileId);
+  if (filters.captureSessionId) params.set("capture_session_id", filters.captureSessionId);
+  const dateBounds = intakeDateRange(filters.dateChip, new Date(), { from: filters.dateFrom, to: filters.dateTo });
+  if (dateBounds.createdAfter) params.set("created_after", dateBounds.createdAfter);
+  if (dateBounds.createdBefore) params.set("created_before", dateBounds.createdBefore);
   const search = filters.search.trim();
   if (search) params.set("search", search);
   params.set("view", "summary");
@@ -1095,19 +1149,36 @@ export async function runCaptureInboxAction(captureSessionId: string, payload: C
   return (await response.json()) as CaptureInboxActionResponse;
 }
 
+export async function fetchReupQueueIntakeSessions(filters: { limit?: number } = {}): Promise<CaptureSessionListResponse> {
+  const params = new URLSearchParams();
+  params.set("limit", String(filters.limit ?? 50));
+  const response = await apiFetch(`${API_BASE_URL}/reup-queue/intake-sessions?${params.toString()}`, { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to load Reup Queue intake sessions"));
+  }
+  return (await response.json()) as CaptureSessionListResponse;
+}
+
 export async function fetchReupQueueItems(filters: {
   status?: ReupQueueStatus;
   statuses?: ReupQueueStatus[];
   sort?: string;
   limit?: number;
   offset?: number;
-} = {}): Promise<ReupQueueListResponse> {
+} & Partial<IntakeFilterState> = {}): Promise<ReupQueueListResponse> {
   const params = new URLSearchParams();
   if (filters.status) params.set("status", filters.status);
   if (filters.statuses?.length) {
     for (const status of filters.statuses) params.append("statuses", status);
   }
   if (filters.sort) params.set("sort", filters.sort);
+  if (filters.captureSessionId) params.set("capture_session_id", filters.captureSessionId);
+  const intakeBounds = intakeDateRange(filters.dateChip ?? "", new Date(), {
+    from: filters.dateFrom ?? "",
+    to: filters.dateTo ?? ""
+  });
+  if (intakeBounds.createdAfter) params.set("created_after", intakeBounds.createdAfter);
+  if (intakeBounds.createdBefore) params.set("created_before", intakeBounds.createdBefore);
   params.set("limit", String(filters.limit ?? 100));
   params.set("offset", String(filters.offset ?? 0));
   const response = await apiFetch(`${API_BASE_URL}/reup-queue/items?${params.toString()}`, { cache: "no-store" });
@@ -1465,21 +1536,24 @@ export async function fetchJobs(
         offset?: number;
         sourceVideoId?: string;
         jobType?: JobType;
+        query?: string;
       } = {}
 ): Promise<JobListResponse> {
   const normalized =
     typeof options === "number"
-      ? { limit: options, offset: 0, sourceVideoId: undefined as string | undefined, jobType: undefined as JobType | undefined }
+      ? { limit: options, offset: 0, sourceVideoId: undefined as string | undefined, jobType: undefined as JobType | undefined, query: undefined as string | undefined }
       : {
           limit: options.limit ?? 50,
           offset: options.offset ?? 0,
           sourceVideoId: options.sourceVideoId,
-          jobType: options.jobType
+          jobType: options.jobType,
+          query: options.query
         };
   const params = new URLSearchParams();
   if (status) params.set("status", status);
   if (normalized.sourceVideoId) params.set("source_video_id", normalized.sourceVideoId);
   if (normalized.jobType) params.set("job_type", normalized.jobType);
+  if (normalized.query?.trim()) params.set("q", normalized.query.trim());
   params.set("limit", String(normalized.limit));
   params.set("offset", String(normalized.offset));
 
@@ -2190,6 +2264,46 @@ export type TtsAiCatalog = {
   capabilities?: TtsAiFieldCapabilities | null;
 };
 
+export type TtsAiEngineOption = {
+  id: string;
+  label: string;
+  adapter_status: "ready" | "planned" | string;
+  dependency_status: "ready" | "installed" | "missing" | "manual" | "external" | "incompatible" | string;
+  selectable: boolean;
+  installable: boolean;
+  install_mode: "builtin" | "pip" | "manual" | "external" | string;
+  install_command?: string | null;
+  install_hint: string;
+  platforms: string[];
+  gpu_compat: string[];
+  estimated_size_gb?: number | null;
+};
+
+export type TtsAiEngineCatalogResponse = {
+  provider: string;
+  engines: TtsAiEngineOption[];
+};
+
+export type TtsAiEngineInstallJobResponse = {
+  engine_id: string;
+  status: "running" | "succeeded" | "failed" | "already_running" | "already_installed" | string;
+  step: string;
+  progress: number;
+  detail: string;
+  log_tail: string;
+  error: string;
+  started_at?: number | null;
+  finished_at?: number | null;
+};
+
+export async function fetchTtsAiEngines(): Promise<TtsAiEngineCatalogResponse> {
+  const response = await apiFetch(`${API_BASE_URL}/ops/tts-ai/engines`, { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to load TTS engine catalog"));
+  }
+  return (await response.json()) as TtsAiEngineCatalogResponse;
+}
+
 export type TtsAiRuntime = {
   last_install?: {
     at?: string;
@@ -2442,6 +2556,32 @@ export async function installTtsAiPackage(payload: TtsAiInstallPayload): Promise
   return (await response.json()) as TtsAiInstallResponse;
 }
 
+export async function installTtsAiEngine(
+  engineId: string,
+  payload: { profile_id?: string | null; force_reinstall?: boolean } = {}
+): Promise<TtsAiEngineInstallJobResponse> {
+  const response = await apiFetch(
+    `${API_BASE_URL}/ops/tts-ai/engines/${encodeURIComponent(engineId)}/install`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    }
+  );
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to install TTS engine"));
+  }
+  return (await response.json()) as TtsAiEngineInstallJobResponse;
+}
+
+export async function fetchTtsAiEngineInstallStatus(): Promise<TtsAiEngineInstallJobResponse> {
+  const response = await apiFetch(`${API_BASE_URL}/ops/tts-ai/engines/install/status`, { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to load TTS engine install status"));
+  }
+  return (await response.json()) as TtsAiEngineInstallJobResponse;
+}
+
 export async function fetchTtsAiInstallStatus(): Promise<TtsAiInstallResponse> {
   const response = await apiFetch(`${API_BASE_URL}/ops/tts-ai/install/status`, { cache: "no-store" });
   if (!response.ok) {
@@ -2504,6 +2644,30 @@ export async function fetchPipelineDashboard(): Promise<PipelineDashboardRespons
     throw new Error(await formatApiError(response, "Failed to load pipeline dashboard"));
   }
   return (await response.json()) as PipelineDashboardResponse;
+}
+
+export async function resumeJob(jobId: string): Promise<Job> {
+  const response = await apiFetch(`${API_BASE_URL}/jobs/${jobId}/resume`, { method: "POST" });
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to resume job"));
+  }
+  return (await response.json()) as Job;
+}
+
+export async function fetchOpsHomeSummary(): Promise<OpsHomeSummaryResponse> {
+  const response = await apiFetch(`${API_BASE_URL}/ops/home-summary`, { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(`Failed to load Ops Home summary: ${response.status}`);
+  }
+  return (await response.json()) as OpsHomeSummaryResponse;
+}
+
+export async function fetchOperatorHomeSummary(): Promise<OperatorHomeSummaryResponse> {
+  const response = await apiFetch(`${API_BASE_URL}/operator/home-summary`, { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to load operator home summary"));
+  }
+  return (await response.json()) as OperatorHomeSummaryResponse;
 }
 
 export async function applyCandidatePreset(filters: CandidateFilters): Promise<void> {
@@ -2623,6 +2787,14 @@ export type ApproveSourceTranscriptResponse = {
   source_video_id: string;
   approved_segments: number;
   dialogue_phase: string;
+};
+
+export type ApproveTranslationDraftResponse = {
+  source_video_id: string;
+  approved_segments: number;
+  binding_sha256: string;
+  resumed_queue_items: number;
+  job_id: string | null;
 };
 
 export async function approveSourceTranscript(
@@ -2794,7 +2966,7 @@ export async function createOcrJob(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       source_video_id: sourceVideoId,
-      force_refresh: options.forceRefresh ?? true,
+      force_refresh: options.forceRefresh ?? false,
       clean_hardsub: options.cleanHardsub ?? true,
       sample_fps: 1.0,
       hard_sub_band_ratio: 0.28
@@ -2944,6 +3116,18 @@ export async function fetchAllPlatformAccounts(platform: PublishTargetPlatform =
   return payload.accounts;
 }
 
+export async function createPlatformAccount(payload: Record<string, unknown>): Promise<PlatformAccount> {
+  const response = await apiFetch(`${API_BASE_URL}/platform-accounts`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  if (!response.ok) {
+    throw new Error(await apiErrorMessage(response, "Failed to create platform account"));
+  }
+  return (await response.json()) as PlatformAccount;
+}
+
 export async function updatePlatformAccount(accountId: string, payload: Record<string, unknown>): Promise<PlatformAccount> {
   const response = await apiFetch(`${API_BASE_URL}/platform-accounts/${accountId}`, {
     method: "PATCH",
@@ -2951,9 +3135,768 @@ export async function updatePlatformAccount(accountId: string, payload: Record<s
     body: JSON.stringify(payload)
   });
   if (!response.ok) {
-    throw new Error(`Failed to update platform account: ${response.status}`);
+    throw new Error(await apiErrorMessage(response, "Failed to update platform account"));
   }
   return (await response.json()) as PlatformAccount;
+}
+
+export async function checkFacebookAccountSetup(accountId: string): Promise<FacebookAccountSetupCheckResponse> {
+  const response = await apiFetch(`${API_BASE_URL}/platform-accounts/${accountId}/facebook-setup-check`, {
+    method: "POST"
+  });
+  if (!response.ok) {
+    throw new Error(await apiErrorMessage(response, "Failed to check Facebook Page setup"));
+  }
+  return (await response.json()) as FacebookAccountSetupCheckResponse;
+}
+
+export async function fetchFacebookPublishSafetyStatus(accountId: string): Promise<FacebookPublishSafetyStatus> {
+  const response = await apiFetch(`${API_BASE_URL}/platform-accounts/${accountId}/facebook-safety-status`, { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(await apiErrorMessage(response, "Failed to load Facebook Page safety status"));
+  }
+  return (await response.json()) as FacebookPublishSafetyStatus;
+}
+
+export async function fetchFacebookOAuthConfiguration(): Promise<FacebookOAuthConfiguration> {
+  const response = await apiFetch(`${API_BASE_URL}/platform-accounts/facebook-oauth/config`, { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(await apiErrorMessage(response, "Failed to load Meta OAuth configuration"));
+  }
+  return (await response.json()) as FacebookOAuthConfiguration;
+}
+
+export async function updateFacebookOAuthConfiguration(
+  payload: FacebookOAuthConfigurationUpdate
+): Promise<FacebookOAuthConfiguration> {
+  const response = await apiFetch(`${API_BASE_URL}/platform-accounts/facebook-oauth/config`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  if (!response.ok) {
+    throw new Error(await apiErrorMessage(response, "Failed to save Meta OAuth configuration"));
+  }
+  return (await response.json()) as FacebookOAuthConfiguration;
+}
+
+export async function startFacebookOAuth(): Promise<FacebookOAuthStartResponse> {
+  const response = await apiFetch(`${API_BASE_URL}/platform-accounts/facebook-oauth/start`, { method: "POST" });
+  if (!response.ok) {
+    throw new Error(await apiErrorMessage(response, "Failed to start Facebook connection"));
+  }
+  return (await response.json()) as FacebookOAuthStartResponse;
+}
+
+export async function completeFacebookOAuthCallback(code: string, state: string): Promise<FacebookOAuthSession> {
+  const response = await apiFetch(`${API_BASE_URL}/platform-accounts/facebook-oauth/callback`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ code, state })
+  });
+  if (!response.ok) {
+    throw new Error(await apiErrorMessage(response, "Failed to complete Facebook authorization"));
+  }
+  return (await response.json()) as FacebookOAuthSession;
+}
+
+export async function fetchFacebookOAuthSession(connectionId: string): Promise<FacebookOAuthSession> {
+  const response = await apiFetch(`${API_BASE_URL}/platform-accounts/facebook-oauth/sessions/${connectionId}`, { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(await apiErrorMessage(response, "Failed to load Facebook connection"));
+  }
+  return (await response.json()) as FacebookOAuthSession;
+}
+
+export async function connectFacebookOAuthPage(
+  connectionId: string,
+  pageId: string,
+  priority = 100
+): Promise<FacebookOAuthConnectPageResponse> {
+  const response = await apiFetch(`${API_BASE_URL}/platform-accounts/facebook-oauth/connect-page`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ connection_id: connectionId, page_id: pageId, priority })
+  });
+  if (!response.ok) {
+    throw new Error(await apiErrorMessage(response, "Failed to connect Facebook Page"));
+  }
+  return (await response.json()) as FacebookOAuthConnectPageResponse;
+}
+
+export async function fetchPublishDraftsByPlatform(platform: PublishTargetPlatform): Promise<PublishDraft[]> {
+  const response = await apiFetch(`${API_BASE_URL}/publish-drafts?platform=${platform}&limit=200`, { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(await apiErrorMessage(response, "Failed to load publish drafts"));
+  }
+  const payload = (await response.json()) as PublishDraftListResponse;
+  return payload.drafts;
+}
+
+export async function registerExistingFacebookReel(payload: Record<string, unknown>): Promise<PlatformPublication> {
+  const response = await apiFetch(`${API_BASE_URL}/platform-publications/manual-import`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  if (!response.ok) {
+    throw new Error(await apiErrorMessage(response, "Failed to register existing Facebook Reel"));
+  }
+  return (await response.json()) as PlatformPublication;
+}
+
+export async function fetchPlatformPublications(params: {
+  platformAccountId?: string;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<PlatformPublicationListResponse> {
+  const query = new URLSearchParams({
+    platform: "FACEBOOK_REELS",
+    limit: String(params.limit ?? 100),
+    offset: String(params.offset ?? 0),
+  });
+  if (params.platformAccountId) query.set("platform_account_id", params.platformAccountId);
+  const response = await apiFetch(`${API_BASE_URL}/platform-publications?${query.toString()}`, { cache: "no-store" });
+  if (!response.ok) throw new Error(await apiErrorMessage(response, "Failed to load publications"));
+  return (await response.json()) as PlatformPublicationListResponse;
+}
+
+export async function discoverFacebookReels(
+  accountId: string,
+  after?: string | null
+): Promise<FacebookReelDiscoveryResponse> {
+  const query = new URLSearchParams({ limit: "25" });
+  if (after) query.set("after", after);
+  const response = await apiFetch(`${API_BASE_URL}/platform-accounts/${accountId}/facebook-reels?${query.toString()}`, { cache: "no-store" });
+  if (!response.ok) throw new Error(await apiErrorMessage(response, "Failed to load Facebook Reels"));
+  return (await response.json()) as FacebookReelDiscoveryResponse;
+}
+
+export async function importDiscoveredFacebookReel(payload: {
+  platform_account_id: string;
+  reel_id: string;
+  description: string | null;
+  created_time: string | null;
+  permalink_url: string | null;
+  thumbnail_url: string | null;
+  publish_draft_id?: string | null;
+}): Promise<PlatformPublication> {
+  const response = await apiFetch(`${API_BASE_URL}/platform-publications/facebook-discovery-import`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) throw new Error(await apiErrorMessage(response, "Failed to import Facebook Reel"));
+  return (await response.json()) as PlatformPublication;
+}
+
+export async function linkPublicationDraft(publicationId: string, publishDraftId: string): Promise<PlatformPublication> {
+  const response = await apiFetch(`${API_BASE_URL}/platform-publications/${publicationId}/draft-link`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ publish_draft_id: publishDraftId }),
+  });
+  if (!response.ok) throw new Error(await apiErrorMessage(response, "Failed to link publication to draft"));
+  return (await response.json()) as PlatformPublication;
+}
+
+export async function fetchPublicationGrowthSummary(publicationId: string): Promise<PublicationGrowthSummary> {
+  const response = await apiFetch(`${API_BASE_URL}/platform-publications/${publicationId}/growth-summary`, { cache: "no-store" });
+  if (!response.ok) throw new Error(await apiErrorMessage(response, "Failed to load publication growth"));
+  return (await response.json()) as PublicationGrowthSummary;
+}
+
+export async function fetchPublicationMetricSnapshots(publicationId: string): Promise<PublicationMetricSnapshotListResponse> {
+  const response = await apiFetch(`${API_BASE_URL}/platform-publications/${publicationId}/metric-snapshots?limit=50&offset=0`, { cache: "no-store" });
+  if (!response.ok) throw new Error(await apiErrorMessage(response, "Failed to load publication metrics"));
+  return (await response.json()) as PublicationMetricSnapshotListResponse;
+}
+
+export async function fetchPublicationMetricSchedule(publicationId: string): Promise<PublicationMetricSchedule | null> {
+  const response = await apiFetch(`${API_BASE_URL}/platform-publications/${publicationId}/metric-schedule`, { cache: "no-store" });
+  if (response.status === 404) return null;
+  if (!response.ok) throw new Error(await apiErrorMessage(response, "Failed to load Insights tracking"));
+  return (await response.json()) as PublicationMetricSchedule;
+}
+
+export async function fetchPublicationMetricTrackingMonitor(options: {
+  status?: string;
+  health?: string;
+  platformAccountId?: string;
+  query?: string;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<PublicationMetricTrackingMonitorResponse> {
+  const params = new URLSearchParams();
+  if (options.status) params.set("status", options.status);
+  if (options.health) params.set("health", options.health);
+  if (options.platformAccountId) params.set("platform_account_id", options.platformAccountId);
+  if (options.query?.trim()) params.set("q", options.query.trim());
+  params.set("limit", String(options.limit ?? 100));
+  params.set("offset", String(options.offset ?? 0));
+  const response = await apiFetch(`${API_BASE_URL}/analytics/metric-tracking-monitor?${params.toString()}`, { cache: "no-store" });
+  if (!response.ok) throw new Error(await apiErrorMessage(response, "Failed to load Insights tracking monitor"));
+  return (await response.json()) as PublicationMetricTrackingMonitorResponse;
+}
+
+export async function enablePublicationMetricTracking(
+  publicationId: string,
+  maxAgeHours: number
+): Promise<PublicationMetricSchedule> {
+  const response = await apiFetch(`${API_BASE_URL}/platform-publications/${publicationId}/metric-schedule`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      collector: "FACEBOOK_GRAPH",
+      external_network_authorized: true,
+      operator_confirmation: "FACEBOOK_INSIGHTS_AUTO_TRACKING_APPROVED",
+      max_age_hours: maxAgeHours,
+    }),
+  });
+  if (!response.ok) throw new Error(await apiErrorMessage(response, "Failed to enable Insights tracking"));
+  return (await response.json()) as PublicationMetricSchedule;
+}
+
+export async function pausePublicationMetricTracking(scheduleId: string): Promise<PublicationMetricSchedule> {
+  const response = await apiFetch(`${API_BASE_URL}/publication-metric-schedules/${scheduleId}/pause`, { method: "POST" });
+  if (!response.ok) throw new Error(await apiErrorMessage(response, "Failed to pause Insights tracking"));
+  return (await response.json()) as PublicationMetricSchedule;
+}
+
+export async function resumePublicationMetricTracking(scheduleId: string): Promise<PublicationMetricSchedule> {
+  const response = await apiFetch(`${API_BASE_URL}/publication-metric-schedules/${scheduleId}/resume`, { method: "POST" });
+  if (!response.ok) throw new Error(await apiErrorMessage(response, "Failed to resume Insights tracking"));
+  return (await response.json()) as PublicationMetricSchedule;
+}
+
+export async function preflightFacebookInsights(
+  publicationId: string,
+  payload: Record<string, unknown>
+): Promise<FacebookInsightsPreflightResponse> {
+  const response = await apiFetch(
+    `${API_BASE_URL}/platform-publications/${publicationId}/facebook-insights-live-preflight`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    }
+  );
+  if (!response.ok) {
+    throw new Error(await apiErrorMessage(response, "Failed to run Facebook Insights preflight"));
+  }
+  return (await response.json()) as FacebookInsightsPreflightResponse;
+}
+
+export async function collectFacebookInsightsOnce(publicationId: string): Promise<Job> {
+  const collectionKey = `facebook-live-${new Date().toISOString().replace(/[^0-9]/g, "").slice(0, 14)}`;
+  const response = await apiFetch(`${API_BASE_URL}/platform-publications/${publicationId}/metric-collection-jobs`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      collection_key: collectionKey,
+      collector: "FACEBOOK_GRAPH",
+      external_network_authorized: true
+    })
+  });
+  if (!response.ok) {
+    throw new Error(await apiErrorMessage(response, "Failed to enqueue Facebook Insights collection"));
+  }
+  return (await response.json()) as Job;
+}
+
+export async function fetchContentTopics(includeInactive = false): Promise<TopicCategoryListResponse> {
+  const query = new URLSearchParams({
+    taxonomy_version: "CONTENT_TAXONOMY_V1",
+    include_inactive: String(includeInactive),
+  });
+  const response = await apiFetch(`${API_BASE_URL}/content-topics?${query.toString()}`, { cache: "no-store" });
+  if (!response.ok) throw new Error(await apiErrorMessage(response, "Failed to load content taxonomy"));
+  return (await response.json()) as TopicCategoryListResponse;
+}
+
+export async function approveTranslationDraft(
+  sourceVideoId: string
+): Promise<ApproveTranslationDraftResponse> {
+  const response = await apiFetch(
+    `${API_BASE_URL}/source-videos/${sourceVideoId}/translation-draft/approve`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ operator_id: "frontend_operator" })
+    }
+  );
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Translation review could not be approved"));
+  }
+  return (await response.json()) as ApproveTranslationDraftResponse;
+}
+
+export async function approveQualityAudioReview(sourceVideoId: string): Promise<OcrSummaryResponse> {
+  const response = await apiFetch(`${API_BASE_URL}/source-videos/${sourceVideoId}/audio-review-approve`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ operator_id: "frontend_operator" })
+  });
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to approve audio mix"));
+  }
+  return (await response.json()) as OcrSummaryResponse;
+}
+
+export async function submitOcrReview(
+  sourceVideoId: string,
+  decisions: Array<{
+    content_id: string;
+    decision: "APPROVE" | "EDIT" | "PRESERVE_SOURCE";
+    ocr_text_approved?: string | null;
+  }>
+): Promise<OcrCreateResponse> {
+  const response = await apiFetch(`${API_BASE_URL}/source-videos/${sourceVideoId}/ocr-review`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ decisions, operator_id: "frontend_operator" })
+  });
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to submit OCR review"));
+  }
+  return (await response.json()) as OcrCreateResponse;
+}
+
+export async function submitVisualTranslationReview(
+  sourceVideoId: string,
+  translations: Array<{ content_id: string; vi_text: string }>
+): Promise<OcrCreateResponse> {
+  const response = await apiFetch(`${API_BASE_URL}/source-videos/${sourceVideoId}/translation-review`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ translations, operator_id: "frontend_operator" })
+  });
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to submit visual translation review"));
+  }
+  return (await response.json()) as OcrCreateResponse;
+}
+
+export async function submitResidualTriage(
+  sourceVideoId: string,
+  suggestions: Array<{ ocr_text: string; ocr_text_corrected: string; vi_text_suggested: string }>
+): Promise<OcrCreateResponse> {
+  const response = await apiFetch(`${API_BASE_URL}/source-videos/${sourceVideoId}/residual-triage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ suggestions, operator_id: "frontend_operator" })
+  });
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to build residual remediation proposal"));
+  }
+  return (await response.json()) as OcrCreateResponse;
+}
+
+export async function approveResidualReview(
+  sourceVideoId: string,
+  proposalSha256: string
+): Promise<OcrCreateResponse> {
+  const response = await apiFetch(`${API_BASE_URL}/source-videos/${sourceVideoId}/residual-review-approve`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ proposal_sha256: proposalSha256, operator_id: "frontend_operator" })
+  });
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to approve residual remediation"));
+  }
+  return (await response.json()) as OcrCreateResponse;
+}
+
+export async function fetchLocalizationArtifactObjectUrl(
+  sourceVideoId: string,
+  artifactPath: string
+): Promise<string> {
+  const encoded = artifactPath
+    .split("/")
+    .map((part) => encodeURIComponent(part))
+    .join("/");
+  const response = await apiFetch(
+    `${API_BASE_URL}/source-videos/${sourceVideoId}/localization-artifacts/${encoded}`,
+    { cache: "no-store" }
+  );
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to load localization artifact"));
+  }
+  return URL.createObjectURL(await response.blob());
+}
+
+export async function fetchContentAiConfig(): Promise<ContentAiConfig> {
+  const response = await apiFetch(`${API_BASE_URL}/content-intelligence/ai-config`, { cache: "no-store" });
+  if (!response.ok) throw new Error(await apiErrorMessage(response, "Failed to load Content AI configuration"));
+  return (await response.json()) as ContentAiConfig;
+}
+
+export async function updateContentAiConfig(payload: ContentAiConfigUpdate): Promise<ContentAiConfig> {
+  const response = await apiFetch(`${API_BASE_URL}/content-intelligence/ai-config`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) throw new Error(await apiErrorMessage(response, "Failed to save Content AI configuration"));
+  return (await response.json()) as ContentAiConfig;
+}
+
+export async function testContentAi(): Promise<ContentAiTestResponse> {
+  const response = await apiFetch(`${API_BASE_URL}/content-intelligence/ai-config/test`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      external_network_authorized: true,
+      operator_confirmation: "CONTENT_CLASSIFICATION_AI_APPROVED",
+    }),
+  });
+  if (!response.ok) throw new Error(await apiErrorMessage(response, "Failed to test Content AI provider"));
+  return (await response.json()) as ContentAiTestResponse;
+}
+
+export async function createContentAiPrompt(name: string): Promise<ContentAiConfig> {
+  const response = await apiFetch(`${API_BASE_URL}/content-intelligence/prompts`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  if (!response.ok) throw new Error(await apiErrorMessage(response, "Failed to create Content AI prompt"));
+  return (await response.json()) as ContentAiConfig;
+}
+
+export async function updateContentAiPrompt(
+  promptId: string,
+  payload: { name?: string; prompt?: string }
+): Promise<ContentAiConfig> {
+  const response = await apiFetch(`${API_BASE_URL}/content-intelligence/prompts/${promptId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) throw new Error(await apiErrorMessage(response, "Failed to update Content AI prompt"));
+  return (await response.json()) as ContentAiConfig;
+}
+
+export async function activateContentAiPrompt(promptId: string): Promise<ContentAiConfig> {
+  const response = await apiFetch(`${API_BASE_URL}/content-intelligence/prompts/${promptId}/activate`, {
+    method: "POST",
+  });
+  if (!response.ok) throw new Error(await apiErrorMessage(response, "Failed to activate Content AI prompt"));
+  return (await response.json()) as ContentAiConfig;
+}
+
+export async function createContentTopic(payload: {
+  code: string;
+  name: string;
+  description?: string | null;
+  parent_id?: string | null;
+  keywords?: string[];
+  sort_order?: number;
+  is_active?: boolean;
+}): Promise<TopicCategory> {
+  const response = await apiFetch(`${API_BASE_URL}/content-topics`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ taxonomy_version: "CONTENT_TAXONOMY_V1", ...payload }),
+  });
+  if (!response.ok) throw new Error(await apiErrorMessage(response, "Failed to create content topic"));
+  return (await response.json()) as TopicCategory;
+}
+
+export async function updateContentTopic(
+  topicId: string,
+  payload: Partial<Pick<TopicCategory, "name" | "description" | "parent_id" | "sort_order" | "is_active">> & { keywords?: string[] }
+): Promise<TopicCategory> {
+  const response = await apiFetch(`${API_BASE_URL}/content-topics/${topicId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) throw new Error(await apiErrorMessage(response, "Failed to update content topic"));
+  return (await response.json()) as TopicCategory;
+}
+
+export async function fetchPublicationContentClassification(publicationId: string): Promise<ContentClassification | null> {
+  const response = await apiFetch(`${API_BASE_URL}/platform-publications/${publicationId}/content-classification`, { cache: "no-store" });
+  if (!response.ok) throw new Error(await apiErrorMessage(response, "Failed to load content classification"));
+  return (await response.json()) as ContentClassification | null;
+}
+
+export async function fetchContentClassificationQueue(options: {
+  platformAccountId?: string;
+  decisionStatus?: string;
+  lowConfidenceOnly?: boolean;
+  confidenceThreshold?: number;
+  query?: string;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<ContentClassificationQueueResponse> {
+  const params = new URLSearchParams();
+  if (options.platformAccountId) params.set("platform_account_id", options.platformAccountId);
+  if (options.decisionStatus) params.set("decision_status", options.decisionStatus);
+  if (options.lowConfidenceOnly) params.set("low_confidence_only", "true");
+  params.set("confidence_threshold", String(options.confidenceThreshold ?? 0.6));
+  if (options.query?.trim()) params.set("q", options.query.trim());
+  params.set("limit", String(options.limit ?? 100));
+  params.set("offset", String(options.offset ?? 0));
+  const response = await apiFetch(`${API_BASE_URL}/content-classifications/review-queue?${params.toString()}`, { cache: "no-store" });
+  if (!response.ok) throw new Error(await apiErrorMessage(response, "Failed to load classification review queue"));
+  return (await response.json()) as ContentClassificationQueueResponse;
+}
+
+export async function runPublicationContentClassification(publicationId: string): Promise<ContentClassificationRunResponse> {
+  const response = await apiFetch(`${API_BASE_URL}/platform-publications/${publicationId}/content-classification-jobs`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      taxonomy_version: "CONTENT_TAXONOMY_V1",
+      classifier_version: "HYBRID_CONTENT_V1",
+      external_network_authorized: true,
+      operator_confirmation: "CONTENT_CLASSIFICATION_AI_APPROVED",
+    }),
+  });
+  if (!response.ok) throw new Error(await apiErrorMessage(response, "Failed to queue content classification"));
+  return (await response.json()) as ContentClassificationRunResponse;
+}
+
+export async function decideContentClassification(
+  classificationId: string,
+  payload: {
+    decision: "APPROVED" | "OVERRIDDEN";
+    primary_topic_id?: string | null;
+    secondary_topic_ids?: string[];
+    reason?: string | null;
+  }
+): Promise<ContentClassification> {
+  const response = await apiFetch(`${API_BASE_URL}/content-classifications/${classificationId}/decision`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) throw new Error(await apiErrorMessage(response, "Failed to save classification decision"));
+  return (await response.json()) as ContentClassification;
+}
+
+export async function fetchAffiliateProducts(options: {
+  query?: string;
+  platform?: string;
+  availabilityStatus?: string;
+  activeOnly?: boolean;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<AffiliateProductListResponse> {
+  const params = new URLSearchParams();
+  if (options.query?.trim()) params.set("q", options.query.trim());
+  if (options.platform) params.set("platform", options.platform);
+  if (options.availabilityStatus) params.set("availability_status", options.availabilityStatus);
+  if (options.activeOnly) params.set("active_only", "true");
+  params.set("limit", String(options.limit ?? 100));
+  params.set("offset", String(options.offset ?? 0));
+  const response = await apiFetch(`${API_BASE_URL}/affiliate-products?${params.toString()}`, { cache: "no-store" });
+  if (!response.ok) throw new Error(await apiErrorMessage(response, "Failed to load affiliate catalog"));
+  return (await response.json()) as AffiliateProductListResponse;
+}
+
+export async function createAffiliateProduct(payload: AffiliateProductInput): Promise<AffiliateProduct> {
+  const response = await apiFetch(`${API_BASE_URL}/affiliate-products`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) throw new Error(await apiErrorMessage(response, "Failed to create affiliate product"));
+  return (await response.json()) as AffiliateProduct;
+}
+
+export async function uploadAffiliateProductImage(file: File): Promise<AffiliateProductImageUpload> {
+  const body = new FormData();
+  body.append("file", file);
+  const response = await apiFetch(`${API_BASE_URL}/affiliate-product-images`, {
+    method: "POST",
+    body,
+  });
+  if (!response.ok) throw new Error(await apiErrorMessage(response, "Failed to upload affiliate product image"));
+  return (await response.json()) as AffiliateProductImageUpload;
+}
+
+export async function updateAffiliateProduct(
+  productId: string,
+  payload: Partial<AffiliateProductInput>,
+): Promise<AffiliateProduct> {
+  const response = await apiFetch(`${API_BASE_URL}/affiliate-products/${productId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) throw new Error(await apiErrorMessage(response, "Failed to update affiliate product"));
+  return (await response.json()) as AffiliateProduct;
+}
+
+export async function bulkImportAffiliateProducts(
+  products: AffiliateProductInput[],
+): Promise<AffiliateProductBulkImportResponse> {
+  const response = await apiFetch(`${API_BASE_URL}/affiliate-products/bulk-import`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ products }),
+  });
+  if (!response.ok) throw new Error(await apiErrorMessage(response, "Failed to import affiliate products"));
+  return (await response.json()) as AffiliateProductBulkImportResponse;
+}
+
+export async function fetchAffiliateProductMatchQueue(options: {
+  decisionStatus?: string;
+  query?: string;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<AffiliateProductMatchQueueResponse> {
+  const params = new URLSearchParams();
+  if (options.decisionStatus) params.set("decision_status", options.decisionStatus);
+  if (options.query?.trim()) params.set("q", options.query.trim());
+  params.set("limit", String(options.limit ?? 100));
+  params.set("offset", String(options.offset ?? 0));
+  const response = await apiFetch(`${API_BASE_URL}/affiliate-product-matches/review-queue?${params.toString()}`, { cache: "no-store" });
+  if (!response.ok) throw new Error(await apiErrorMessage(response, "Failed to load product matching queue"));
+  return (await response.json()) as AffiliateProductMatchQueueResponse;
+}
+
+export async function runAffiliateProductMatch(publicationId: string): Promise<AffiliateProductMatchRunResponse> {
+  const response = await apiFetch(`${API_BASE_URL}/platform-publications/${publicationId}/affiliate-product-match-jobs`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ matcher_version: "AFFILIATE_MATCHER_V1", max_suggestions: 5 }),
+  });
+  if (!response.ok) throw new Error(await apiErrorMessage(response, "Failed to queue product matching"));
+  return (await response.json()) as AffiliateProductMatchRunResponse;
+}
+
+export async function decideAffiliateProductMatch(
+  matchId: string,
+  payload: {
+    decision: "APPROVED" | "REJECTED" | "OVERRIDDEN";
+    selected_product_id?: string | null;
+    reason?: string | null;
+  },
+): Promise<AffiliateProductMatch> {
+  const response = await apiFetch(`${API_BASE_URL}/affiliate-product-matches/${matchId}/decision`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) throw new Error(await apiErrorMessage(response, "Failed to save product match decision"));
+  return (await response.json()) as AffiliateProductMatch;
+}
+
+export async function fetchPublicationGrowthScore(publicationId: string): Promise<PublicationGrowthAssessment | null> {
+  const response = await apiFetch(`${API_BASE_URL}/platform-publications/${publicationId}/growth-score`, { cache: "no-store" });
+  if (!response.ok) throw new Error(await apiErrorMessage(response, "Failed to load Growth Score"));
+  return (await response.json()) as PublicationGrowthAssessment | null;
+}
+
+export async function runPublicationGrowthScore(publicationId: string): Promise<GrowthScoreRunResponse> {
+  const response = await apiFetch(`${API_BASE_URL}/platform-publications/${publicationId}/growth-score-jobs`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ score_version: "GROWTH_SCORE_V1" }),
+  });
+  if (!response.ok) throw new Error(await apiErrorMessage(response, "Failed to queue Growth Score"));
+  return (await response.json()) as GrowthScoreRunResponse;
+}
+
+export async function fetchAffiliateOpportunityQueue(options: {
+  recommendation?: string;
+  query?: string;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<AffiliateOpportunityQueueResponse> {
+  const params = new URLSearchParams();
+  if (options.recommendation) params.set("recommendation", options.recommendation);
+  if (options.query?.trim()) params.set("q", options.query.trim());
+  params.set("limit", String(options.limit ?? 100));
+  params.set("offset", String(options.offset ?? 0));
+  const response = await apiFetch(`${API_BASE_URL}/affiliate-opportunities/review-queue?${params.toString()}`, { cache: "no-store" });
+  if (!response.ok) throw new Error(await apiErrorMessage(response, "Failed to load Opportunity Ranking"));
+  return (await response.json()) as AffiliateOpportunityQueueResponse;
+}
+
+export async function fetchAffiliateCommentPlacement(publicationId: string): Promise<AffiliateCommentPlacement | null> {
+  const response = await apiFetch(`${API_BASE_URL}/platform-publications/${publicationId}/affiliate-comment-placement`, { cache: "no-store" });
+  if (!response.ok) throw new Error(await apiErrorMessage(response, "Failed to load affiliate comment placement"));
+  return (await response.json()) as AffiliateCommentPlacement | null;
+}
+
+export async function fetchAffiliateCommentHistory(publicationId: string): Promise<AffiliateCommentHistoryResponse> {
+  const response = await apiFetch(`${API_BASE_URL}/platform-publications/${publicationId}/affiliate-comment-placements`, { cache: "no-store" });
+  if (!response.ok) throw new Error(await apiErrorMessage(response, "Failed to load affiliate comment history"));
+  return (await response.json()) as AffiliateCommentHistoryResponse;
+}
+
+export async function fetchAffiliateCommentTemplates(): Promise<AffiliateCommentTemplateListResponse> {
+  const response = await apiFetch(`${API_BASE_URL}/affiliate-comment-templates`, { cache: "no-store" });
+  if (!response.ok) throw new Error(await apiErrorMessage(response, "Failed to load affiliate comment templates"));
+  return (await response.json()) as AffiliateCommentTemplateListResponse;
+}
+
+export async function createAffiliateCommentTemplate(payload: AffiliateCommentTemplateInput): Promise<AffiliateCommentTemplate> {
+  const response = await apiFetch(`${API_BASE_URL}/affiliate-comment-templates`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) throw new Error(await apiErrorMessage(response, "Failed to create affiliate comment template"));
+  return (await response.json()) as AffiliateCommentTemplate;
+}
+
+export async function reviseAffiliateCommentTemplate(templateId: string, payload: Partial<AffiliateCommentTemplateInput>): Promise<AffiliateCommentTemplate> {
+  const response = await apiFetch(`${API_BASE_URL}/affiliate-comment-templates/${templateId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) throw new Error(await apiErrorMessage(response, "Failed to revise affiliate comment template"));
+  return (await response.json()) as AffiliateCommentTemplate;
+}
+
+export async function activateAffiliateCommentTemplate(templateId: string): Promise<AffiliateCommentTemplate> {
+  const response = await apiFetch(`${API_BASE_URL}/affiliate-comment-templates/${templateId}/activate`, { method: "POST" });
+  if (!response.ok) throw new Error(await apiErrorMessage(response, "Failed to activate affiliate comment template"));
+  return (await response.json()) as AffiliateCommentTemplate;
+}
+
+export async function deleteAffiliateCommentTemplate(templateId: string): Promise<void> {
+  const response = await apiFetch(`${API_BASE_URL}/affiliate-comment-templates/${templateId}`, { method: "DELETE" });
+  if (!response.ok) throw new Error(await apiErrorMessage(response, "Failed to delete affiliate comment template"));
+}
+
+export async function previewAffiliateCommentPlacement(
+  publicationId: string,
+  payload: { cta_text: string; disclosure_text: string; comment_source?: "SHARED_TEMPLATE" | "ITEM_CUSTOM"; comment_message_template_override?: string; comment_message_override?: string; replaces_placement_id?: string; template_id?: string; attach_product_image?: boolean; create_another_comment?: boolean; previous_posted_placement_id?: string },
+): Promise<AffiliateCommentPreviewResponse> {
+  const response = await apiFetch(`${API_BASE_URL}/platform-publications/${publicationId}/affiliate-comment-placement/preview`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) throw new Error(await apiErrorMessage(response, "Failed to create affiliate comment preview"));
+  return (await response.json()) as AffiliateCommentPreviewResponse;
+}
+
+export async function approveAffiliateCommentPlacement(placementId: string): Promise<AffiliateCommentApproveResponse> {
+  const response = await apiFetch(`${API_BASE_URL}/affiliate-comment-placements/${placementId}/approve`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+  });
+  if (!response.ok) throw new Error(await apiErrorMessage(response, "Failed to approve affiliate comment placement"));
+  return (await response.json()) as AffiliateCommentApproveResponse;
+}
+
+export async function verifyAffiliateCommentPlacement(placementId: string): Promise<AffiliateCommentVerificationJobResponse> {
+  const response = await apiFetch(`${API_BASE_URL}/affiliate-comment-placements/${placementId}/verification-jobs`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ authorize_network: true }),
+  });
+  if (!response.ok) throw new Error(await apiErrorMessage(response, "Failed to queue affiliate comment verification"));
+  return (await response.json()) as AffiliateCommentVerificationJobResponse;
 }
 
 export async function fetchPublishAttempts(draftId: string): Promise<PublishAttempt[]> {

@@ -1,0 +1,106 @@
+{
+  "schema_version": "pipeline_gap_intake_requirements_v1",
+  "status": "SEMANTIC_LABEL_RECALL_RESOLVED_GAPS_REMAIN",
+  "current_evidence": {
+    "corpus_path": "docs/pipeline-regression-corpus-v4.json",
+    "corpus_sha256": "12a1a4ceb68365e8f3206239b96b181f478c3b381f158a83daae7d8193bdda09",
+    "recipe_sha256": "96d15f242a9697950ca7bbb503ef8d99c10cfcf332fd04154a6e9c4c7861f45d",
+    "baseline_discovery_path": "docs/pipeline-gap-discovery-v1.json",
+    "baseline_discovery_sha256": "290a25dcc2be8ffbaadcd21d49bc3b0a08d35f05b38bd69c08b2c7e6db7f9736",
+    "candidate_discovery_path": "docs/pipeline-gap-discovery-v3.json",
+    "candidate_discovery_sha256": "3275ba6d72bdb9f886d3fbb6cf8b066fd02c325c09217b37a59e7c019313dbb0",
+    "public_source_manifest_path": "docs/pipeline-public-regression-sources-v1.json",
+    "public_source_manifest_sha256": "06bc2182aa480f6e687727adaf8bc91c417cf9828c22bde8ac144c7dae7e2cbf",
+    "candidate_corpus_path": "docs/pipeline-regression-corpus-v9-semantic-scene-label.json",
+    "candidate_corpus_sha256": "bef63fdff9105c810cf01087f4703186f2580e994a1cfc21486c27204eb503c2",
+    "regression_run_path": "apps/api/regression_runs/pipeline_v9_semantic_scene_label_20260727",
+    "regression_run_sha256": "e539189efc25ee84fa55fda9855c8beeda25755887e42665b87a33cf4d80d50a",
+    "regression_report_sha256": "fea0803bb201817e2d0647f0b581eb0a79fe26a46a35213cf9eaaeb486358a06",
+    "operator_gates": {
+      "no_text_complete_video_reviews_pending": 0,
+      "portrait_exact_ocr_objects_pending": 0,
+      "portrait_phase3_ready": true,
+      "radio_semantic_label_recall_open": false,
+      "radio_phase3_ready": true,
+      "reused_baseline_exact_ocr_objects_pending": 69
+    }
+  },
+  "source_acceptance": {
+    "duration_seconds": {
+      "exclusive_min": 0,
+      "exclusive_max": 60
+    },
+    "allowed_extensions": [
+      ".mkv",
+      ".mov",
+      ".mp4",
+      ".ogv",
+      ".webm"
+    ],
+    "trusted_staging_markers": [
+      "download_staging",
+      "raw",
+      "regression_gap_staging"
+    ],
+    "required_integrity": "SHA256_OF_ORIGINAL_BYTES",
+    "required_provenance": "REAL_SOURCE_VIDEO",
+    "rights_review": "REQUIRED_BEFORE_EXTERNAL_USE"
+  },
+  "forbidden_gap_simulation": [
+    "crop_landscape_to_portrait",
+    "rotate_or_pad_to_portrait",
+    "strip_audio_to_create_no_audio",
+    "slow_or_freezeframe_to_create_low_motion",
+    "frame_interpolation_or_decimation_to_change_motion_class",
+    "use_rendered_final_or_export_artifacts"
+  ],
+  "requested_profiles": [
+    {
+      "profile_id": "portrait_medium_present",
+      "minimum_real_sources": 1,
+      "required_dimensions": {
+        "orientation": "portrait",
+        "motion": "medium",
+        "audio": "present"
+      }
+    },
+    {
+      "profile_id": "portrait_low_absent",
+      "minimum_real_sources": 1,
+      "required_dimensions": {
+        "orientation": "portrait",
+        "motion": "low",
+        "audio": "absent"
+      }
+    },
+    {
+      "profile_id": "landscape_medium_absent",
+      "minimum_real_sources": 1,
+      "required_dimensions": {
+        "orientation": "landscape",
+        "motion": "medium",
+        "audio": "absent"
+      }
+    },
+    {
+      "profile_id": "low_motion_independent_control",
+      "minimum_real_sources": 1,
+      "required_dimensions": {
+        "motion": "low"
+      },
+      "must_have_distinct_sha256_from_other_profiles": true
+    }
+  ],
+  "minimum_unique_source_count": 4,
+  "intake_workflow": [
+    "Place original files under a trusted source staging directory.",
+    "Run discover_pipeline_gap_candidates against the current corpus.",
+    "Review provenance, rights, duration and SHA-256 before corpus admission.",
+    "Run Phase 1 and scorer per accepted candidate.",
+    "Run Phase 2 local OCR while preserving exact operator review.",
+    "Build a new immutable corpus and full batch regression report.",
+    "Lock a new recipe only when every case reaches the operator gate."
+  ],
+  "closure_rule": "Radio semantic-label recall and spectra portrait OCR are approved in targeted v9 evidence. Do not remove declared corpus gaps, claim universal support, or replace the corpus-v4 recipe until the full lock workflow and remaining operator gates are explicitly approved.",
+  "requirements_sha256": "be9cf0f600f05f3a33cec72436e15acd885b7de005c4568bef16bb1cf67c179f"
+}

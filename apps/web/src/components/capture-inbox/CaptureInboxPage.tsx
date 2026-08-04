@@ -98,7 +98,7 @@ import {
 } from "../../lib/captureInboxReviewPresets";
 import {
   buildPromoteSuccessSummary,
-  CAPTURE_INBOX_REVIEW_BOARD_HREF
+  reviewBoardHrefForCaptureSession
 } from "../../lib/captureInboxPromoteNotice";
 import {
   buildReupScoreBreakdownBars,
@@ -1543,6 +1543,7 @@ function CaptureInboxCommandDeck({
             promoting={promoting}
             readyCount={readyCount}
             readyViewActive={filter === "ready"}
+            reviewBoardHref={reviewBoardHrefForCaptureSession(selectedSessionId)}
             selectedSession={selectedSession}
             visibleCount={visibleCount}
             working={working !== null}
@@ -1577,6 +1578,7 @@ function CaptureInboxHeroActionRail({
   promoting,
   readyCount,
   readyViewActive,
+  reviewBoardHref,
   selectedSession,
   visibleCount,
   working
@@ -1587,6 +1589,7 @@ function CaptureInboxHeroActionRail({
   promoting: boolean;
   readyCount: number;
   readyViewActive: boolean;
+  reviewBoardHref: string;
   selectedSession: boolean;
   visibleCount: number;
   working: boolean;
@@ -1604,7 +1607,7 @@ function CaptureInboxHeroActionRail({
         visibleCount={visibleCount}
         working={working}
       />
-      <a className="capture-inbox-hero-action-rail__item" href={CAPTURE_INBOX_REVIEW_BOARD_HREF}>
+      <a className="capture-inbox-hero-action-rail__item" href={reviewBoardHref}>
         <span aria-hidden="true" className="capture-inbox-hero-action-rail__icon">
           <WorkItemActionIcon className="capture-inbox-hero-action-rail__glyph" kind="open" />
         </span>
@@ -2890,7 +2893,10 @@ function MediaTile({ focused, item, onAction, onFocusItem, onToggleItem, pending
   }, [item, thumbnailUrl]);
 
   return (
-    <article className={`capture-inbox-media-tile capture-inbox-compact-card ${showTileMetrics ? "" : "is-metrics-collapsed"} ${selected ? "is-bulk-selected" : ""} ${focused ? "selected" : ""}`}>
+    <article
+      className={`capture-inbox-media-tile capture-inbox-compact-card ${showTileMetrics ? "" : "is-metrics-collapsed"} ${selected ? "is-bulk-selected" : ""} ${focused ? "selected" : ""}`}
+      data-tone={ready ? "ready" : itemStatusTone(item.status)}
+    >
       <div className="capture-inbox-media-frame">
         <button className="capture-inbox-media-thumbnail" onClick={() => onFocusItem(item.id)} type="button">
           {thumbnailUrl ? (

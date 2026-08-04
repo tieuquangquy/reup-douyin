@@ -96,6 +96,16 @@ function looksLikeConnectionFailure(text: string): boolean {
   );
 }
 
+/** Cloudflare / WAF / bare numeric codes that are not actionable for operators. */
+function looksLikeOpaqueGatewayCode(text: string): boolean {
+  const value = text.trim();
+  if (!value) return false;
+  if (/^error\s*code\s*:\s*\d+\s*$/i.test(value)) return true;
+  if (/\berror\s*code\s*:\s*10\d{2}\b/i.test(value)) return true;
+  if (/\bcloudflare\b/i.test(value) && /\berror\s*code\b/i.test(value)) return true;
+  return false;
+}
+
 function polishOperatorMessage(message: string): string {
   let text = message
     .replace(/\s*For more information on this error,?\s*head to:\s*https?:\/\/\S+/gi, "")
@@ -116,21 +126,28 @@ function titleForHttpStatus(status: number | null, labels: { unauthorized: strin
   return labels.failed;
 }
 
+export type ProviderErrorLabels = {
+  unauthorized: string;
+  forbidden: string;
+  notFound: string;
+  rateLimited: string;
+  failed: string;
+  checkKey: string;
+  checkForbidden: string;
+  checkEndpoint: string;
+};
+
+function fallbackMessageForStatus(httpStatus: number | null, labels: ProviderErrorLabels): string {
+  if (httpStatus === 401) return labels.checkKey;
+  if (httpStatus === 403) return labels.checkForbidden;
+  if (httpStatus === 429) return labels.rateLimited;
+  return labels.checkEndpoint;
+}
+
 /**
  * Turn provider dump like ``list_models_http_401:{ "error": {...}}`` into operator-facing copy.
  */
-export function formatProviderError(
-  detail: string,
-  labels: {
-    unauthorized: string;
-    forbidden: string;
-    notFound: string;
-    rateLimited: string;
-    failed: string;
-    checkKey: string;
-    checkEndpoint: string;
-  }
-): ProviderErrorView {
+export function formatProviderError(detail: string, labels: ProviderErrorLabels): ProviderErrorView {
   const raw = (detail || "").trim();
   if (looksLikeConnectionFailure(raw)) {
     return {
@@ -158,20 +175,31 @@ export function formatProviderError(
   if (!message) {
     const cleaned = redactSecrets(remainder).trim();
     // Avoid dumping truncated provider JSON / bare client errors into the UI.
-    if (!cleaned || looksLikeProviderDump(cleaned) || looksLikeConnectionFailure(cleaned)) {
-      if (httpStatus === 401 || httpStatus === 403) message = labels.checkKey;
-      else if (httpStatus === 429) message = labels.rateLimited;
-      else message = labels.checkEndpoint;
+    if (!cleaned || looksLikeProviderDump(cleaned) || looksLikeConnectionFailure(cleaned) || looksLikeOpaqueGatewayCode(cleaned)) {
+      message = fallbackMessageForStatus(httpStatus, labels);
     } else {
       message = cleaned;
     }
   }
 
-  if (looksLikeProviderDump(message) || looksLikeConnectionFailure(message)) {
-    if (httpStatus === 401 || httpStatus === 403) message = labels.checkKey;
-    else if (httpStatus === 429) message = labels.rateLimited;
-    else message = labels.checkEndpoint;
+  if (
+    looksLikeProviderDump(message) ||
+    looksLikeConnectionFailure(message) ||
+    looksLikeOpaqueGatewayCode(message)
+  ) {
+    message = fallbackMessageForStatus(httpStatus, labels);
   }
 
   return { title, message: polishOperatorMessage(message), httpStatus, raw };
+}
+
+/** Next-step hint under the Test failure banner, keyed by HTTP status. */
+export function providerTestErrorHint(
+  httpStatus: number | null | undefined,
+  labels: { key: string; forbidden: string; quota: string; generic: string }
+): string {
+  if (httpStatus === 401) return labels.key;
+  if (httpStatus === 403) return labels.forbidden;
+  if (httpStatus === 429) return labels.quota;
+  return labels.generic;
 }

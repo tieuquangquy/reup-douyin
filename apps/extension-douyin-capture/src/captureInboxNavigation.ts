@@ -1,4 +1,4 @@
-export const CAPTURE_INBOX_WEB_ROUTE = "/ops/extensions/douyin/capture-inbox";
+export const CAPTURE_INBOX_WEB_ROUTE = "/selection/capture-inbox";
 export const DEFAULT_WEB_APP_ORIGIN = "http://localhost:3000";
 
 export function normalizeWebAppOrigin(input: string | null | undefined): string {

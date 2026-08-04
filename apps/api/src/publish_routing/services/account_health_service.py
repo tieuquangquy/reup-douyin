@@ -14,8 +14,9 @@ from src.publish_routing.types import AccountHealthStats
 
 
 class AccountHealthService:
-    def __init__(self, db: Session):
+    def __init__(self, db: Session, *, workspace_id: UUID | None = None):
         self.db = db
+        self.workspace_id = workspace_id
 
     def list_account_health(self, platform: PublishTargetPlatform | None = None) -> list[AccountHealthStats]:
         accounts = list(self.db.scalars(self._account_query(platform)))
@@ -37,21 +38,27 @@ class AccountHealthService:
 
     def _account_query(self, platform: PublishTargetPlatform | None):
         stmt = select(PlatformAccount).order_by(PlatformAccount.priority.desc(), PlatformAccount.display_name.asc())
+        if self.workspace_id is not None:
+            stmt = stmt.where(PlatformAccount.workspace_id == self.workspace_id)
         if platform is not None:
             stmt = stmt.where(PlatformAccount.platform == platform)
         return stmt
 
     def _recent_attempts(self) -> list[PublishAttempt]:
         since = datetime.now(UTC) - timedelta(days=7)
-        return list(self.db.scalars(select(PublishAttempt).where(PublishAttempt.created_at >= since).order_by(PublishAttempt.created_at.desc())))
+        stmt = select(PublishAttempt).where(PublishAttempt.created_at >= since)
+        if self.workspace_id is not None:
+            stmt = stmt.where(PublishAttempt.workspace_id == self.workspace_id)
+        return list(self.db.scalars(stmt.order_by(PublishAttempt.created_at.desc())))
 
     def _active_drafts(self) -> list[PublishDraft]:
+        stmt = select(PublishDraft).where(
+            PublishDraft.status.in_([PublishDraftStatus.READY, PublishDraftStatus.SCHEDULED, PublishDraftStatus.PUBLISHING])
+        )
+        if self.workspace_id is not None:
+            stmt = stmt.where(PublishDraft.workspace_id == self.workspace_id)
         return list(
-            self.db.scalars(
-                select(PublishDraft).where(
-                    PublishDraft.status.in_([PublishDraftStatus.READY, PublishDraftStatus.SCHEDULED, PublishDraftStatus.PUBLISHING])
-                )
-            )
+            self.db.scalars(stmt)
         )
 
     def _build_stats(self, account: PlatformAccount, attempts: list[PublishAttempt], drafts: list[PublishDraft]) -> AccountHealthStats:
@@ -87,4 +94,3 @@ class AccountHealthService:
             success_rate_percent=success_rate,
             reasons=reasons,
         )
-

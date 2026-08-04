@@ -106,6 +106,10 @@ export const pageMetadata = {
     title: "Final Review",
     description: "Review rendered output and production readiness before publishing."
   }),
+  outputReview: createPageMetadata({
+    title: "Output Review",
+    description: "Watch finished localized videos back to back with their automated QA verdict."
+  }),
   publishDrafts: createPageMetadata({
     title: "Publish Drafts",
     description: "Browse publish-ready drafts and continue manual publishing preparation."
@@ -113,6 +117,18 @@ export const pageMetadata = {
   publishDraft: createPageMetadata({
     title: "Publish Draft",
     description: "Inspect a publish draft, caption, media summary, and scheduling skeleton."
+  }),
+  publications: createPageMetadata({
+    title: "Publication Library",
+    description: "Sync external Page Reels, link them to drafts, and inspect post-publish performance."
+  }),
+  contentIntelligenceSettings: createPageMetadata({
+    title: "Content Intelligence Settings",
+    description: "Configure workspace AI providers, classification policy, and versioned topic prompts."
+  }),
+  affiliateCatalogSettings: createPageMetadata({
+    title: "Affiliate Catalog Settings",
+    description: "Manage workspace affiliate products, availability, commission data, and taxonomy mappings."
   }),
   exportPackages: createPageMetadata({
     title: "Export Packages",

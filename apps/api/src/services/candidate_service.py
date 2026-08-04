@@ -8,6 +8,7 @@ from sqlalchemy import Select, Text, cast, func, select, or_, String
 from sqlalchemy.orm import Session, selectinload
 
 from src.enums import CandidateStatus, RiskFlagType, RiskSeverity
+from src.models.capture_inbox import CapturedItem
 from src.models.ingestion import SourceVideo, VideoMetricSnapshot
 from src.models.review import RiskFlag, VideoCandidate
 from src.services.candidate_filter import FilterResult, apply_candidate_filter
@@ -150,6 +151,9 @@ class CandidateEvaluationService:
         max_score: float | None = None,
         source_profile_id: UUID | None = None,
         search: str | None = None,
+        capture_session_id: UUID | None = None,
+        created_after: datetime | None = None,
+        created_before: datetime | None = None,
         limit: int = 50,
         offset: int = 0,
         hydrate_from_capture_inbox: bool = True,
@@ -172,6 +176,9 @@ class CandidateEvaluationService:
             max_score=max_score,
             source_profile_id=source_profile_id,
             search=search,
+            capture_session_id=capture_session_id,
+            created_after=created_after,
+            created_before=created_before,
         )
         candidates = list(self.db.scalars(stmt).unique())
         if hydrate_from_capture_inbox:
@@ -193,6 +200,9 @@ class CandidateEvaluationService:
         max_score: float | None = None,
         source_profile_id: UUID | None = None,
         search: str | None = None,
+        capture_session_id: UUID | None = None,
+        created_after: datetime | None = None,
+        created_before: datetime | None = None,
     ) -> int:
         stmt = select(func.count()).select_from(VideoCandidate)
         stmt = self._apply_candidate_list_filters(
@@ -202,6 +212,9 @@ class CandidateEvaluationService:
             max_score=max_score,
             source_profile_id=source_profile_id,
             search=search,
+            capture_session_id=capture_session_id,
+            created_after=created_after,
+            created_before=created_before,
         )
         return int(self.db.scalar(stmt) or 0)
 
@@ -212,6 +225,9 @@ class CandidateEvaluationService:
         max_score: float | None = None,
         source_profile_id: UUID | None = None,
         search: str | None = None,
+        capture_session_id: UUID | None = None,
+        created_after: datetime | None = None,
+        created_before: datetime | None = None,
     ) -> dict[str, int]:
         stmt = (
             select(VideoCandidate.status, func.count())
@@ -225,6 +241,9 @@ class CandidateEvaluationService:
             max_score=max_score,
             source_profile_id=source_profile_id,
             search=search,
+            capture_session_id=capture_session_id,
+            created_after=created_after,
+            created_before=created_before,
         )
         counts = {status.value: 0 for status in CandidateStatus}
         for candidate_status, count in self.db.execute(stmt).all():
@@ -241,6 +260,9 @@ class CandidateEvaluationService:
         max_score: float | None = None,
         source_profile_id: UUID | None = None,
         search: str | None = None,
+        capture_session_id: UUID | None = None,
+        created_after: datetime | None = None,
+        created_before: datetime | None = None,
     ) -> Select:
         search_term = search.strip() if search else ""
         if source_profile_id is not None or search_term:
@@ -255,6 +277,19 @@ class CandidateEvaluationService:
             stmt = stmt.where(VideoCandidate.score <= max_score)
         if source_profile_id is not None:
             stmt = stmt.where(SourceVideo.source_profile_id == source_profile_id)
+        if capture_session_id is not None:
+            # A subquery, not a join: one candidate can be referenced by several captured
+            # items, and a join would inflate both the gallery and the status tiles.
+            promoted_ids = (
+                select(CapturedItem.promoted_video_candidate_id)
+                .where(CapturedItem.capture_session_id == capture_session_id)
+                .where(CapturedItem.promoted_video_candidate_id.is_not(None))
+            )
+            stmt = stmt.where(VideoCandidate.id.in_(promoted_ids))
+        if created_after is not None:
+            stmt = stmt.where(VideoCandidate.created_at >= created_after)
+        if created_before is not None:
+            stmt = stmt.where(VideoCandidate.created_at < created_before)
         if search_term:
             like_term = f"%{search_term}%"
             candidate_metadata = func.coalesce(cast(VideoCandidate.metadata_json, Text), "")

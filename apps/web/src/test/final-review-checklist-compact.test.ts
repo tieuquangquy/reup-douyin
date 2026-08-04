@@ -18,6 +18,21 @@ const vi = JSON.parse(readFileSync(resolve(testDir, "../lib/i18n/vi.json"), "utf
 
 assert.match(checklistSource, /fr-check/, "Checklist must use compact fr-check layout");
 assert.match(checklistSource, /onSetAll|markAll/, "Checklist must offer mark-all for fast QA");
+assert.match(
+  checklistSource,
+  /fr-check__title-cluster[\s\S]*pill|fr-check__title-cluster[\s\S]*checkedCount/,
+  "Checklist progress pill must sit beside the QA checklist title"
+);
+assert.match(
+  checklistSource,
+  /fr-check__title-actions[\s\S]*fr-check__bulk|fr-check__bulk[\s\S]*fr-check__title-actions/,
+  "Mark all OK must sit in the checklist title actions row beside the progress pill"
+);
+assert.match(
+  checklistSource,
+  /WorkItemActionIcon[\s\S]*approve|kind=\{complete \? "clear-selection" : "approve"\}/,
+  "Mark all / Clear all must show an action icon"
+);
 assert.doesNotMatch(
   checklistSource,
   /checklist-row[\s\S]*<small>/,
@@ -25,6 +40,7 @@ assert.doesNotMatch(
 );
 assert.match(checklistSource, /title=\{/, "Hints stay available via title tooltip");
 assert.match(cssSource, /\.fr-check/, "Compact checklist styles must exist");
+assert.match(cssSource, /\.fr-rail__tab-icon/, "Rail tabs must style icon + label");
 
 assert.ok(en.finalReviewChecklist.markAll.length > 0);
 assert.ok(vi.finalReviewChecklist.markAll.length > 0);

@@ -47,6 +47,9 @@ assert.match(sharedSource, /ops-tts-list-header/, "Tabs + Active toolbar must sh
 assert.match(sharedSource, /OpsCaptionSettingsTabs/, "Must expose sibling tabs to Caption AI");
 assert.doesNotMatch(sharedSource, /testConnection|onTest\(|actionTest/, "Prompt setups must not expose a Test button");
 assert.doesNotMatch(sharedSource, /Setup renamed|profileRenamed/, "Do not show a rename toast on rename");
+assert.match(sharedSource, /ops-ai-control-center ops-prompt-registry/, "Caption prompt list must use the focused AI control-center surface");
+assert.match(sharedSource, /ops-prompt-preview-line[\s\S]*ops-prompt-char-count/, "Caption prompt preview must pair readable copy with a real character count");
+assert.match(sharedSource, /ops-prompt-row-status[\s\S]*ops-ai-row-actions/, "Caption prompt status and actions must use compact aligned groups");
 
 assert.match(apiSource, /\/ops\/caption-prompt/, "API helper must hit caption-prompt endpoints");
 assert.match(apiSource, /createCaptionPromptProfile/, "API helper must expose caption profile create");
@@ -57,11 +60,13 @@ for (const key of [
   "setupNamePlaceholder",
   "profileNew",
   "profileActive",
+  "profileInactiveBadge",
   "profileActiveHint",
   "profileSetupsCount",
   "profileNameCol",
   "profileActiveCol",
   "profileActionsCol",
+  "profileRename",
   "profileEmpty",
   "profileDeleteConfirm",
   "profileLastError",
@@ -71,6 +76,7 @@ for (const key of [
   "actionBack",
   "actionSave",
   "previewCol",
+  "charactersShort",
   "loadingDetail"
 ]) {
   const enBlock = enSource.split('"opsCaptionPrompt"')[1] || "";

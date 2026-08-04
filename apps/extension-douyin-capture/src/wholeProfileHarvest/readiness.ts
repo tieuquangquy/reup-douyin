@@ -1549,7 +1549,7 @@ export function getNextRecommendedAction(
     return {
       code: "review_results",
       label: "Open Capture Inbox",
-      reason: "Saving is complete. Open /extensions/douyin/capture-inbox to review collected videos."
+      reason: "Saving is complete. Open /selection/capture-inbox to review collected videos."
     };
   }
 

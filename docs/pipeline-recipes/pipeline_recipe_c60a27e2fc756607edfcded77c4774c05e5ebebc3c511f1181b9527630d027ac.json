@@ -1,0 +1,174 @@
+{
+  "schema_version": "pipeline_recipe_lock_v3",
+  "status": "LOCKED_FOR_CONTROLLED_PILOT_WITH_GAPS",
+  "locked_at": "2026-07-29T14:31:24.336921+00:00",
+  "operator_id": "operator-user-approved-v22-1",
+  "release_label": "V22.1",
+  "phase1": {
+    "extractor": "v58_candidate",
+    "step": 1,
+    "pad": 1,
+    "authority": "master_timeline.json",
+    "authority_v3_6_full_duration": false,
+    "scorer": "score_phase1_pass",
+    "final_coverage_fade_tail_max_frames": 5,
+    "post_refinement_sparse_compact_guard": {
+      "policy_version": "post_refinement_sparse_compact_text_consensus_v1",
+      "max_width_frac": 0.08,
+      "max_height_frac": 0.065,
+      "visual_normalized_height": 64,
+      "texture_max_laplacian_variance": 150.0,
+      "texture_max_edge_density": 0.1,
+      "texture_min_saturation": 120.0,
+      "recognizer_failure_policy": "fail_soft_to_operator_review"
+    }
+  },
+  "phase2": {
+    "provider": "local",
+    "model_versions": [
+      "ppocrv6-medium-det-8e0f56fb_rec-e5a92bcb_paddleocr-3.8.0.dev11-g2661c7c0e"
+    ],
+    "geometry_authority": "master_timeline.json",
+    "output_artifact": "phase2_ocr_timeline.json",
+    "overwrite_master_timeline": false,
+    "approval_policy": "exact_operator_review",
+    "llm_context_correction_allowed": true,
+    "llm_correction_is_approval_authority": false,
+    "residual_remediation": {
+      "active_pointer_schema": "phase2_residual_remediation_active_v1",
+      "generation_policy": "cumulative_versioned_hash_bound",
+      "ocr_probe_policy": "phase2_hash_bound_detector_probe_v1",
+      "visual_override_policy": "phase2_operator_visual_override_v1"
+    }
+  },
+  "phase3": {
+    "scope": "title_labels_ingredients_units_endcard",
+    "duplicate_transition_policy": "translate_once_cover_all_geometry_refs",
+    "duration_policy": "meaning_preserving_compaction_then_measured_audio_fit",
+    "approval_policy": "operator_locked_translation",
+    "additive_approval_rebind_policy": "exact_content_plus_hash_bound_geometry_v2"
+  },
+  "tts": {
+    "provider": "auto",
+    "voice_id": "vi-VN-HoaiMyNeural",
+    "speaking_rate": 1.0,
+    "timing_policy": "measured_duration_segment_fit",
+    "atempo_policy": "bounded_only_after_text_compaction"
+  },
+  "render": {
+    "renderer": "phase4_adaptive_pts_preserving",
+    "role_policy_version": "phase4_role_policy_v7",
+    "timing_normalization_policy_version": "transition_boundary_v2",
+    "video_encoder_policy": "auto",
+    "hardware_smoke_probe": true,
+    "hardware_fallback_enabled": true,
+    "background_mix_gain": 0.22,
+    "loudness_target_lufs": -14.0,
+    "narration_only_loudness": {
+      "policy_version": "two_pass_loudnorm_aac_headroom_v1",
+      "measurement": "ffmpeg_loudnorm_two_pass",
+      "encode_true_peak_db": -2.7,
+      "aac_headroom_db": 1.2
+    },
+    "residual_cjk_policy": {
+      "policy_version": "source_intrinsic_cjk_v6",
+      "source_intrinsic_edge_print_requires_source_ocr_match": true,
+      "texture_false_positive": {
+        "max_area": 0.0006,
+        "max_pixel_aspect": 0.55,
+        "max_mean_abs_delta": 4.0,
+        "max_p95_abs_delta": 10.0,
+        "active_cover_overlap_blocks_exclusion": true
+      }
+    },
+    "invisible_perturbation": false,
+    "mirror": false,
+    "duplicate_detection_evasion": false
+  },
+  "audio_authority": {
+    "no_dialogue_source_audio": {
+      "policy_version": "verified_silero_no_dialogue_source_audio_v1",
+      "vad_provider": "silero_vad",
+      "requires_measured_execution": true,
+      "requires_zero_speech_seconds": true,
+      "requires_zero_speech_segments": true,
+      "operator_audio_approval_required": true,
+      "source_hash_binding_required": true
+    }
+  },
+  "operator_gates": [
+    "OCR_APPROVED",
+    "TRANSLATION_APPROVED",
+    "VISUAL_APPROVED",
+    "AUDIO_APPROVED",
+    "FINAL_APPROVED",
+    "METADATA_APPROVED",
+    "SOURCE_RIGHTS_AND_MUSIC_APPROVED"
+  ],
+  "execution": {
+    "resume": true,
+    "idempotent_stage_checks": true,
+    "transient_retry_policy": "pipeline_retry_policy",
+    "external_publish": false
+  },
+  "evidence": {
+    "corpus": {
+      "path": "docs/pipeline-regression-corpus-v22-fresh-holdout.json",
+      "file_sha256": "4303fbbc2a490e1979b8e20a1e5fc3827f5be4c5dfd278532bc96e72ef209445",
+      "corpus_sha256": "288b085a8753b7f17962da81a33e5128affa63783d7a4f00eea19b8e2f03a368"
+    },
+    "report": {
+      "path": "apps/api/regression_runs/pipeline_v22_remediation_v22_1_20260729/pipeline_regression_report.json",
+      "file_sha256": "29a79a9380287ec1e6848b4066b51923cac96040573affe28228445dd13027ad",
+      "report_sha256": "3d15dafde98dc165475b5a507c40ab9644c36cbc0bfb61192af756ed37eb0648"
+    },
+    "e2e_report": null,
+    "phase4_preflight_closeout": {
+      "path": "apps/api/regression_runs/pipeline_v22_remediation_v22_1_20260729/pipeline_regression_closeout.json",
+      "file_sha256": "dad5bfbde89ae6a8539ede6ea7295d25dfedd204855bf52b31a69e6a118d4815",
+      "closeout_sha256": "ac819ab275bca5cf7f6f1b6196f9df0e7dad21635267d32c9606e25b7f9ec054",
+      "case_count": 6
+    },
+    "real_video_gaps": {
+      "orientation": [
+        "portrait"
+      ],
+      "resolution": [
+        "720p_or_lower"
+      ],
+      "timebase": [
+        "VFR"
+      ],
+      "frame_rate": [
+        "above_30fps"
+      ],
+      "lighting": [
+        "dark"
+      ],
+      "motion": [
+        "low",
+        "medium"
+      ],
+      "audio": [
+        "absent"
+      ],
+      "text_density": [
+        "dense",
+        "light",
+        "medium"
+      ]
+    }
+  },
+  "claims": {
+    "universal_video_support": false,
+    "controlled_pilot_ready_through_phase2_execution": true,
+    "controlled_pilot_ready_through_phase4_preflight": true,
+    "phase4_preflight_case_count": 6,
+    "approved_no_text_bypass_count": 0,
+    "full_batch_end_to_end_pass": false,
+    "included_cases_end_to_end_pass": false,
+    "end_to_end_case_count": 0,
+    "visual_localization_scope_case_count": 0
+  },
+  "recipe_sha256": "c60a27e2fc756607edfcded77c4774c05e5ebebc3c511f1181b9527630d027ac"
+}

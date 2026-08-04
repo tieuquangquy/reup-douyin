@@ -1,6 +1,4 @@
-/**
- * Operator Studio home — triage layout + P0–P2 enrichment contract.
- */
+/** Operator Studio Home V2 — one authority, decision-first command center. */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -10,92 +8,110 @@ const testDir = dirname(fileURLToPath(import.meta.url));
 const webSrc = resolve(testDir, "..");
 
 const page = readFileSync(resolve(webSrc, "components/operator-home/OperatorHomePage.tsx"), "utf8");
-const freshnessStrip = readFileSync(resolve(webSrc, "components/operator-home/FreshnessStrip.tsx"), "utf8");
-const nextWorkPanel = readFileSync(resolve(webSrc, "components/operator-home/NextWorkPanel.tsx"), "utf8");
-const overview = readFileSync(resolve(webSrc, "components/operator-home/OverviewCards.tsx"), "utf8");
-const continuePanel = readFileSync(resolve(webSrc, "components/operator-home/ContinuePanel.tsx"), "utf8");
-const actionPanel = readFileSync(resolve(webSrc, "components/operator-home/ActionQueuePanel.tsx"), "utf8");
-const activityPanel = readFileSync(resolve(webSrc, "components/operator-home/RecentActivityPanel.tsx"), "utf8");
-const quickLaunch = readFileSync(resolve(webSrc, "components/operator-home/QuickLaunchGrid.tsx"), "utf8");
-const state = readFileSync(resolve(webSrc, "lib/operatorHomeState.ts"), "utf8");
+const commandCenter = readFileSync(resolve(webSrc, "components/operator-home/OperatorHomeCommandCenter.tsx"), "utf8");
+const api = readFileSync(resolve(webSrc, "lib/api.ts"), "utf8");
+const types = readFileSync(resolve(webSrc, "types/operations.ts"), "utf8");
 const css = readFileSync(resolve(webSrc, "app/globals.css"), "utf8");
-const en = readFileSync(resolve(webSrc, "lib/i18n/en.json"), "utf8");
-const vi = readFileSync(resolve(webSrc, "lib/i18n/vi.json"), "utf8");
 const pkg = readFileSync(resolve(webSrc, "../package.json"), "utf8");
 
-assert.match(page, /operator-home/, "Home must use operator-home shell");
-assert.match(page, /OverviewCards/, "Home must render overview KPIs");
-assert.match(page, /ContinuePanel/, "Home must render Continue panel");
-assert.match(page, /ActionQueuePanel/, "Home must render Action queue");
-assert.match(page, /QuickLaunchGrid/, "Home must render Quick launch");
-assert.match(page, /RecentActivityPanel/, "Home must render Recent activity");
-assert.match(page, /FreshnessStrip/, "Home must render FreshnessStrip");
-assert.match(page, /NextWorkPanel/, "Home must render NextWorkPanel");
+assert.match(page, /OperatorStudioShell/, "Home must remain inside the shared Operator shell");
+assert.match(page, /OperatorHomeLoadingSkeleton/, "Home must keep its page-shaped loading state");
+assert.match(page, /fetchOperatorHomeSummary/, "Home must read one canonical summary contract");
+assert.doesNotMatch(page, /Promise\.all\(/, "Home must not compose conflicting list and dashboard authorities");
+assert.match(page, /OperatorHomeCommandCenter/, "Home must render the decision-first command center");
 
-const continueIdx = page.indexOf("<ContinuePanel");
-const actionIdx = page.indexOf("<ActionQueuePanel");
-const nextIdx = page.indexOf("<NextWorkPanel");
-assert.ok(continueIdx >= 0 && actionIdx >= 0, "Continue and Action panels must be present");
-assert.ok(continueIdx < actionIdx, "Continue must appear before Action queue in DOM order");
-assert.ok(nextIdx >= 0 && nextIdx < continueIdx, "Next work must appear before Continue");
+assert.match(api, /\/operator\/home-summary/, "API client must call the Home Summary endpoint");
+assert.match(types, /OperatorHomeSummaryResponse/, "Web types must model the Home Summary contract");
+assert.match(types, /output_review/, "The Home pipeline must include Output Review");
+assert.match(types, /output_qa_summary/, "Home contract must expose canonical Output QA buckets");
+assert.match(types, /attention_breakdown/, "Home contract must expose an exclusive attention breakdown");
+assert.match(types, /OperatorHomeCheckpoint[\s\S]*oldest_at/, "Manual checkpoints must expose canonical backlog age authority");
 
-assert.match(overview, /operator-home-kpis/, "Overview must use compact KPI strip class");
-assert.doesNotMatch(overview, /StatusBadge/, "Overview KPIs must not use StatusBadge");
-assert.doesNotMatch(overview, /operator-metric-card/, "Overview must leave tall metric cards");
+assert.match(commandCenter, /Priority command deck/, "Home must surface a single visual priority command deck");
+assert.match(commandCenter, /PriorityStageIcon/, "Priority rows must have a semantic stage icon");
+assert.match(commandCenter, /data-stage-icon/, "Priority stage icons must expose stable stage identity");
+assert.match(commandCenter, /stageKey === "capture"[\s\S]*stageKey === "review"[\s\S]*stageKey === "reup_queue"/, "Capture, Review, and Reup Queue priorities must use distinct glyphs");
+assert.match(commandCenter, /function PriorityHero[\s\S]*Do first[\s\S]*Open workspace/, "The critical priority must render as a clear do-first hero");
+assert.match(commandCenter, /function PriorityImpactCard[\s\S]*priority-impact__track/, "Remaining checkpoints must render as visual impact cards");
+assert.match(commandCenter, /find\(\(item\) => item\.severity === "critical"\)[\s\S]*slice\(0, 4\)/, "Command Deck must separate the critical hero from four impact checkpoints");
+assert.doesNotMatch(commandCenter, /function PriorityRow/, "Home must not retain the sparse full-width priority rows");
+assert.match(commandCenter, /Production pipeline/, "Home must render the full production flow");
+assert.match(commandCenter, /Active work/, "Home must render one resumable work context");
+assert.match(commandCenter, /Manual checkpoints/, "Home must make human gates explicit");
+assert.match(commandCenter, /Recent outputs/, "Home must surface finished media and QA");
+assert.match(commandCenter, /System readiness/, "Home must show local runtime readiness");
+assert.doesNotMatch(commandCenter, /Quick launch/, "Sidebar navigation should not be duplicated on Home");
+assert.match(commandCenter, /MetricCard/, "Home must render four visual decision metric cards");
+assert.match(commandCenter, /MetricIcon/, "Each decision metric must render a semantic corner icon");
+assert.match(commandCenter, /needs_attention[\s\S]*in_progress[\s\S]*awaiting_review[\s\S]*ready_downstream/, "Metric icons must cover all four canonical metric keys");
+assert.doesNotMatch(commandCenter, /operator-home-v2-metric__dot/, "Semantic icons must replace decorative metric dots");
+assert.match(commandCenter, /PipelineWorkloadChart/, "Home must render the pipeline as a stacked workload chart");
+assert.match(commandCenter, /has-failure/, "Pipeline rows must visually call out failed workload");
+assert.match(commandCenter, /has-running/, "Pipeline rows must visually call out active workload");
+assert.match(commandCenter, /AttentionDonutChart/, "Home must render the attention breakdown as a donut chart");
+assert.match(commandCenter, /OutputQaHealthChart/, "Home must render Output QA as a segmented chart");
+assert.match(commandCenter, /ActiveWorkLaunchpad/, "An idle workspace must become a visual start-work launchpad");
+assert.match(commandCenter, /data-step=\{index \+ 1\}[\s\S]*operator-home-v2-launchpad__route-main/, "Launch routes must use a compact visual step treatment");
+assert.match(commandCenter, /description:[\s\S]*signals:[\s\S]*action:[\s\S]*operator-home-v2-launchpad__route-signals[\s\S]*operator-home-v2-launchpad__route-action/, "Idle workflow routes must explain their purpose, scope, and next action");
+assert.match(commandCenter, /\/selection\/capture-inbox[\s\S]*\/selection\/review-board[\s\S]*\/selection\/reup-queue/, "The launchpad must preserve all three canonical entry routes");
+assert.match(commandCenter, /ManualCheckpointMatrix/, "Home must render manual checkpoint load as a visual gate matrix");
+assert.match(commandCenter, /candidate_review[\s\S]*translation_review[\s\S]*ocr_review[\s\S]*output_review/, "Manual gates must have distinct semantic icons");
+assert.match(commandCenter, /totalCount[\s\S]*activeGateCount[\s\S]*oldestAt[\s\S]*checkpoint-summary/, "Manual gates must summarize total load, active gates, and oldest backlog");
+assert.match(commandCenter, /percent\(item\.count, totalCount\)[\s\S]*formatCheckpointAge/, "Manual gate cards must expose load share and waiting age");
+assert.match(commandCenter, /OutputCard[\s\S]*operator-home-v2-output-card__art[\s\S]*operator-home-v2-output-card__body/, "Recent renders must use readable poster-and-body reel tickets");
+assert.match(commandCenter, /SystemReadinessOrbit/, "Runtime services must use a visual readiness orbit");
+assert.match(commandCenter, /conic-gradient\(#3b8b68[\s\S]*services ready/, "Readiness orbit must expose a data-driven health gauge");
+assert.match(commandCenter, /readySystemCount[\s\S]*system_readiness\.length/, "Readiness must expose an at-a-glance ready count");
+assert.match(commandCenter, /aria-label="Start production work"/, "The launchpad must retain an accessible navigation label");
+assert.match(commandCenter, /operator-home-v2-health-rail/, "Attention and Output QA must form one consistent health rail");
+assert.match(commandCenter, /operator-home-v2-progress__meta/, "Active work must expose progress context around the track");
+assert.doesNotMatch(commandCenter, /BottleneckMatrix/, "Home must not retain the rejected cockpit matrix");
+assert.doesNotMatch(commandCenter, /AttentionRankedBars/, "Home must not retain the rejected ranked bars");
 
-assert.match(continuePanel, /operator-home-continue/, "Continue must use scoped sheet class");
-assert.match(continuePanel, /operator-home-row|operator-home-continue__item/, "Continue must use sheet row markup");
-assert.doesNotMatch(continuePanel, /StatusBadge/, "Continue rows must not use StatusBadge");
+assert.match(css, /\.operator-home-v2\s*\{/, "CSS must define the redesigned home workspace");
+assert.match(css, /--home-type-eyebrow:\s*0\.6875rem/, "Home eyebrow text must be at least 11px");
+assert.match(css, /--home-type-meta:\s*0\.75rem/, "Home metadata must use a readable 12px token");
+assert.match(css, /--home-type-body:\s*0\.78125rem/, "Home body copy must use a readable 12.5px token");
+assert.match(css, /--home-type-label:\s*0\.8125rem/, "Home labels must use a readable 13px token");
+assert.match(css, /--home-type-title:\s*1rem/, "Home panel titles must use a 16px token");
+assert.match(css, /\.operator-home-v2-panel__head h2[\s\S]*font-size:\s*var\(--home-type-title\)/, "Panel titles must consume the title token");
+assert.match(css, /\.operator-home-v2-priority-hero__action[^{]*\{[^}]*font-size:\s*var\(--home-type-meta\)/, "Priority hero action must use the compact metadata token");
+assert.match(css, /\.operator-home-v2-pipeline-chart__label strong[^{]*\{[^}]*font-size:\s*var\(--home-type-body\)/, "Pipeline labels must consume the body token");
+assert.match(css, /\.operator-home-v2-metrics/, "CSS must define the four decision metrics");
+assert.match(css, /\.operator-home-v2-metric__icon/, "CSS must define the metric corner icon treatment");
+assert.match(css, /\.operator-home-v2-chart-grid/, "CSS must define the chart overview grid");
+assert.match(css, /\.operator-home-v2-pipeline-chart/, "CSS must define the pipeline workload chart");
+assert.match(css, /\.operator-home-v2-attention-chart/, "CSS must define the attention donut chart");
+assert.match(css, /\.operator-home-v2-qa-chart/, "CSS must define the QA segmented chart");
+assert.match(css, /\.operator-home-v2-launchpad__routes/, "CSS must define the empty-state workflow launchpad");
+assert.match(css, /\.operator-home-v2-launchpad__routes::before/, "The production runway must visually connect its workflow nodes");
+assert.match(css, /\.operator-home-v2-launchpad__route-copy/, "Workflow entry cards must support descriptive copy");
+assert.match(css, /\.operator-home-v2-checkpoint-matrix/, "CSS must define the human gate bento");
+assert.match(css, /\.operator-home-v2-checkpoint-summary\s*\{[^}]*grid-column:\s*1 \/ -1/, "Checkpoint overview must span the gate grid");
+assert.match(css, /\.operator-home-v2-gate__metric/, "Checkpoint cards must separate count and operational state");
+assert.match(css, /\.operator-home-v2-outputs \.operator-home-v2-output-grid\s*\{[^}]*padding:\s*0\.72rem 0\.78rem 0\.78rem/, "Recent output tickets must keep a visible inset from their outer panel");
+assert.match(css, /\.operator-home-v2-output-card\s*\{[^}]*grid-template-columns:\s*6\.2rem minmax\(0, 1fr\)/, "Reel tickets must reserve a compact poster column and readable body");
+assert.match(css, /\.operator-home-v2-output-card__body/, "Reel tickets must define a light information body");
+assert.match(css, /\.operator-home-v2-output-card__art::after/, "Reel ticket posters must retain visual depth");
+assert.match(css, /\.operator-home-v2-qa\s*\{[^}]*flex:\s*0 0 auto[^}]*white-space:\s*nowrap/, "Output QA badges must remain stable on narrow reel tickets");
+assert.match(css, /\.operator-home-v2-readiness-orbit/, "CSS must define the runtime health orbit");
+assert.match(css, /\.operator-home-v2-readiness-orbit__hub/, "The health orbit must define a central readiness gauge");
+assert.match(css, /\.operator-home-v2-readiness-nodes/, "The health orbit must define compact service nodes");
+assert.match(css, /@container \(max-width: 26\.99rem\)[\s\S]*grid-template-columns:\s*1fr/, "Readiness orbit must stack when its panel becomes narrow");
+assert.match(css, /\.operator-home-v2-surface-icon/, "The redesigned surfaces must share semantic icon styling");
+assert.match(css, /\.operator-home-v2-priority__deck/, "CSS must define the bento command deck");
+assert.match(css, /\.operator-home-v2-priority-hero/, "CSS must define the do-first hero");
+assert.match(css, /\.operator-home-v2-priority-impact/, "CSS must define impact checkpoint cards");
+assert.match(css, /\.operator-home-v2-priority__icon/, "CSS must define pastel priority stage icons");
+assert.match(css, /\.operator-home-v2-priority__impact-grid[\s\S]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/, "Impact checkpoints must use the available desktop width");
+assert.match(css, /\.operator-home-v2-pipeline-chart__row\.has-failure/, "CSS must emphasize failed pipeline stages");
+assert.match(css, /\.operator-home-v2-health-rail/, "CSS must unify the health rail cards");
+assert.match(css, /\.operator-home-v2-progress__meta/, "CSS must define active progress context");
+assert.match(css, /repeating-linear-gradient/, "Waiting and remaining tracks must use a subtle hatch treatment");
+assert.match(css, /@media \(max-width: 1480px\)[\s\S]*\.operator-home-v2-grid\.is-focus\s*\{\s*grid-template-columns:\s*1fr/, "Focus panels must stack before workflow cards become cramped on laptop viewports");
+assert.match(css, /@media \(max-width: 560px\)[\s\S]*\.operator-home-v2-outputs \.operator-home-v2-output-grid\s*\{\s*grid-template-columns:\s*1fr;\s*padding:\s*0\.55rem/, "Output cards must collapse to an inset single column on narrow screens");
+assert.match(css, /@media \(prefers-reduced-motion: reduce\)/, "Motion enhancements must respect reduced-motion preferences");
 
-assert.match(actionPanel, /operator-home-actions/, "Action queue must use scoped sheet class");
-assert.match(actionPanel, /operator-home-row|operator-home-actions__item/, "Action queue must use sheet row markup");
-assert.match(actionPanel, /operator-home-num|operator-home-count/, "Action queue must show compact count pill");
-
-assert.match(activityPanel, /operator-home-activity/, "Activity must use scoped sheet class");
-assert.match(activityPanel, /operator-home-activity__trail/, "Activity must cluster timestamp + open action");
-assert.match(activityPanel, /formatCompact|· /, "Activity must use compact time format");
-assert.doesNotMatch(activityPanel, /StatusBadge/, "Activity rows must not use StatusBadge");
-
-assert.match(quickLaunch, /operator-home-launch/, "Quick launch must use scoped launch class");
-assert.doesNotMatch(quickLaunch, /operator-quick-grid/, "Quick launch must leave heavy 2-col card grid");
-assert.doesNotMatch(quickLaunch, /operator-quick-card/, "Quick launch must leave heavy quick cards");
-
-/* P0–P2 enrichment */
-assert.match(page, /fetchPipelineDashboard/, "Home must fetch pipeline dashboard authority");
-assert.match(page, /fetchDouyinExtensionStatus/, "Home must fetch Douyin extension status");
-assert.match(freshnessStrip, /operator-home-freshness/, "Home must render freshness / pipeline status strip");
-assert.match(freshnessStrip, /operator-home-freshness__inline/, "Freshness must use compact inline meta");
-assert.match(freshnessStrip, /operator-home-freshness__action/, "Freshness actions must use prominent pill buttons");
-assert.doesNotMatch(freshnessStrip, /operator-home-signal/, "Freshness must not use mini signal cards");
-assert.match(nextWorkPanel, /operator-home-next/, "Home must render next-work triage");
-assert.match(state, /buildNextWork|pickNextWork/, "State must build next-work from pipeline attention");
-assert.match(state, /capture|reup_queue|export_package|publish_handoff/, "Metrics must cover capture/reup/export-handoff stages");
-assert.match(state, /blocked_by_risk|blockers/, "Metrics must surface risk blockers");
-assert.match(state, /succeeded_attempts|publishSuccess|publish_success/, "State must surface publish success window count");
-assert.match(state, /opsConsoleBoundary|isOpsConsoleHref/, "Home state must classify Ops Console hrefs via boundary");
-assert.doesNotMatch(state, /key: \"ops\"[\s\S]*href: \"\/ops\"/, "Quick launch must not include Ops Console entry");
-assert.doesNotMatch(state, /href: blockedByRisk[^;]*\/ops\/risk|href: \"\/ops\/risk\"|href: \"\/ops\/jobs\"|href: \"\/ops\/health\"|href: \"\/ops\/reconciliation\"|href: \"\/ops\/publish-health\"/, "Home builders must not assign Ops Console monitor hrefs");
-assert.match(page, /optimizationHint \?|optimizationHint &&/, "Optimization panel must only render when hint exists");
-
-assert.match(css, /\.operator-home-kpis/, "CSS must define compact KPI strip");
-assert.match(css, /\.operator-home-continue/, "CSS must define Continue sheet");
-assert.match(css, /\.operator-home-actions/, "CSS must define Action sheet");
-assert.match(css, /\.operator-home-activity/, "CSS must define Activity sheet");
-assert.match(css, /\.operator-home-launch/, "CSS must define Quick launch chips");
-assert.match(css, /\.operator-home-freshness/, "CSS must define freshness strip");
-assert.match(css, /\.operator-home-freshness__inline/, "CSS must define compact inline freshness meta");
-assert.match(css, /\.operator-home-freshness__action/, "CSS must define freshness action pills");
-assert.doesNotMatch(css, /\.operator-home-signal\s*\{/, "CSS must drop heavy freshness signal cards");
-assert.match(css, /\.operator-home-next/, "CSS must define next-work list");
-assert.match(
-  css,
-  /\.operator-home-activity__item\s*\{[^}]*border-bottom|\.operator-home-row\s*\{[^}]*border-bottom/,
-  "Sheet rows must use divider borders"
-);
-
-assert.match(en, /"nextWork"|"freshness"|"captureWaiting"|"reupQueue"|"exportHandoff"|"blockers"|"publishSuccess"|"extension"/, "en.json must define P0–P2 home labels");
-assert.match(vi, /"nextWork"|"freshness"|"captureWaiting"|"reupQueue"|"exportHandoff"|"blockers"|"publishSuccess"|"extension"/, "vi.json must define P0–P2 home labels");
-
-assert.match(pkg, /operator-home-ui\.test\.ts/, "package.json must run operator-home-ui test");
+assert.match(pkg, /operator-home-ui\.test\.ts/, "package.json must run the Home V2 UI contract test");
 
 console.log("operator-home-ui tests passed");

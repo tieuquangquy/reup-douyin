@@ -19,6 +19,49 @@ export const DEFAULT_FINAL_REVIEW_CHECKLIST: ChecklistState = {
 export type FinalReviewPrepFocus = "ocr" | "render";
 
 /**
+ * True when the operator has already completed at least one OCR/clean run.
+ * Empty API summary shells (always returned even before first analyze) must stay false.
+ */
+export function hasFinalReviewOcrRun(
+  summary: {
+    cleaned_video_asset_id?: string | null;
+    ocr_events_asset_id?: string | null;
+    pipeline_version?: string | null;
+    text_object_count?: number | null;
+    frame_detection_count?: number | null;
+    hardsub_events?: unknown[] | null;
+    warnings?: string[] | null;
+  } | null
+): boolean {
+  if (!summary) return false;
+  if (summary.cleaned_video_asset_id) return true;
+  if (summary.ocr_events_asset_id) return true;
+  if (summary.pipeline_version) return true;
+  if ((summary.text_object_count ?? 0) > 0) return true;
+  if ((summary.frame_detection_count ?? 0) > 0) return true;
+  if ((summary.hardsub_events?.length ?? 0) > 0) return true;
+  const warnings = summary.warnings ?? [];
+  return warnings.includes("no_hardsub_detected") || warnings.includes("clean_skipped_no_hardsub");
+}
+
+/**
+ * The OCR job has finished, but its artifact is intentionally blocked at the
+ * operator checkpoint.  This must not be treated as an in-flight job and must
+ * not expose the normal Analyze action, otherwise a second run can supersede
+ * the review authority of the current artifact.
+ */
+export function isFinalReviewOcrReviewPending(
+  summary: {
+    workflow_stage?: string | null;
+    review_required?: number | null;
+    review_objects?: unknown[] | null;
+  } | null
+): boolean {
+  if (!summary || summary.workflow_stage !== "WAITING_OCR_REVIEW") return false;
+  return (summary.review_required ?? 0) > 0 || (summary.review_objects?.length ?? 0) > 0;
+}
+
+/**
  * OCR prep is complete only when cleaned video exists, or OCR explicitly skipped clean
  * (no hard-sub / clean skipped). Orphan OCR events alone must not unlock Start render.
  */
@@ -28,9 +71,20 @@ export function isFinalReviewOcrPrepComplete(
     ocr_events_asset_id?: string | null;
     clean_produced?: boolean;
     warnings?: string[] | null;
+    workflow_version?: string | null;
+    workflow_stage?: string | null;
+    can_render_final?: boolean;
+    review_required?: number | null;
+    review_objects?: unknown[] | null;
   } | null
 ): boolean {
   if (!summary) return false;
+  if (summary.workflow_version === "QUALITY_LOCALIZATION_V24_1") {
+    return (
+      (summary.workflow_stage === "AUDIO_APPROVED" || summary.workflow_stage === "FINAL_READY") &&
+      summary.can_render_final === true
+    );
+  }
   if (summary.cleaned_video_asset_id) return true;
   const warnings = summary.warnings ?? [];
   return warnings.includes("no_hardsub_detected") || warnings.includes("clean_skipped_no_hardsub");
@@ -40,6 +94,131 @@ export function resolveFinalReviewPrepFocus(
   summary: Parameters<typeof isFinalReviewOcrPrepComplete>[0]
 ): FinalReviewPrepFocus {
   return isFinalReviewOcrPrepComplete(summary) ? "render" : "ocr";
+}
+
+/**
+ * Compare/review workspace needs a render the operator can inspect or that is still in flight.
+ * FAILED / ARCHIVED / PLANNED shells (e.g. missing render-prep) stay on prep so Start render remains available after refresh.
+ */
+export function isReviewableFinalRender(render: RenderOutput | null | undefined): boolean {
+  if (!render) return false;
+  return (
+    render.status === "READY_FOR_REVIEW" ||
+    render.status === "APPROVED" ||
+    render.status === "RENDERING"
+  );
+}
+
+export function resolveFinalReviewWorkspaceRender(
+  latest: RenderOutput | null | undefined
+): RenderOutput | null {
+  return isReviewableFinalRender(latest) ? latest! : null;
+}
+
+/** Strip `error_code: ` prefix from persisted render failure messages for operator copy. */
+export function formatFinalReviewFailedRenderDetail(errorMessage: string | null | undefined): string | null {
+  const raw = (errorMessage ?? "").trim();
+  if (!raw) return null;
+  const stripped = raw.replace(/^[a-z][a-z0-9_]*:\s*/i, "").trim();
+  return stripped || raw;
+}
+
+export type FinalReviewPrepStepProgress = {
+  clean: number;
+  render: number;
+  compare: number;
+};
+
+function clampInFlightPercent(raw: number | null | undefined, fallback = 8): number {
+  if (typeof raw !== "number" || !Number.isFinite(raw)) return fallback;
+  return Math.max(1, Math.min(99, Math.round(raw)));
+}
+
+/** Percent fill for prep step cards (Clean → Render → Compare). Compare stays 0 until a render exists. */
+export function resolveFinalReviewPrepStepProgress(input: {
+  ocrSummary: Parameters<typeof isFinalReviewOcrPrepComplete>[0];
+  ocrBusy?: boolean;
+  startRenderPending?: boolean;
+  /** Live ANALYZE_OCR job.progress_percent while Clean is in flight. */
+  ocrProgressPercent?: number | null;
+  /** Live RENDER_FINAL job.progress_percent while Render is in flight. */
+  renderProgressPercent?: number | null;
+}): FinalReviewPrepStepProgress {
+  const complete = isFinalReviewOcrPrepComplete(input.ocrSummary);
+  let clean = 0;
+  if (input.ocrBusy) clean = clampInFlightPercent(input.ocrProgressPercent);
+  else if (complete) clean = 100;
+  else if (typeof input.ocrProgressPercent === "number") {
+    // Keep last live job % across UI watch-pause (ocrBusy false) — do not snap to idle 0%.
+    clean = clampInFlightPercent(input.ocrProgressPercent);
+  }
+
+  let render = 0;
+  if (input.startRenderPending) render = clampInFlightPercent(input.renderProgressPercent);
+  else if (typeof input.renderProgressPercent === "number") {
+    // Keep last live job % across UI watch-pause (pending false) — do not snap to 0%.
+    render = clampInFlightPercent(input.renderProgressPercent);
+  }
+
+  return { clean, render, compare: 0 };
+}
+
+export type FinalReviewPrepBriefing = {
+  phase: "clean" | "render";
+  sourceLabel: string;
+  caption: string | null;
+  durationSeconds: number | null;
+  ocrStatus: "idle" | "running" | "review" | "partial" | "ready";
+  renderStatus: "none" | "running";
+};
+
+/** Operator-facing prep context derived from manifest + OCR authority (no extra network). */
+export function resolveFinalReviewPrepBriefing(input: {
+  sourceVideoId: string;
+  manifest: {
+    source_video?: {
+      caption?: string | null;
+      duration_seconds?: number | null;
+      external_id?: string | null;
+      source_video_external_id?: string | null;
+    } | null;
+  } | null;
+  ocrSummary: Parameters<typeof isFinalReviewOcrPrepComplete>[0];
+  ocrBusy?: boolean;
+  startRenderPending?: boolean;
+  prepFocus: FinalReviewPrepFocus;
+}): FinalReviewPrepBriefing {
+  const source = input.manifest?.source_video ?? null;
+  const caption = typeof source?.caption === "string" && source.caption.trim() ? source.caption.trim() : null;
+  const externalId =
+    (typeof source?.external_id === "string" && source.external_id.trim()
+      ? source.external_id.trim()
+      : null) ??
+    (typeof source?.source_video_external_id === "string" && source.source_video_external_id.trim()
+      ? source.source_video_external_id.trim()
+      : null);
+  const shortId =
+    input.sourceVideoId.length > 12 ? `${input.sourceVideoId.slice(0, 8)}…` : input.sourceVideoId;
+  const sourceLabel = externalId ?? shortId;
+  const durationSeconds =
+    typeof source?.duration_seconds === "number" && Number.isFinite(source.duration_seconds)
+      ? source.duration_seconds
+      : null;
+
+  let ocrStatus: FinalReviewPrepBriefing["ocrStatus"] = "idle";
+  if (input.ocrBusy) ocrStatus = "running";
+  else if (isFinalReviewOcrReviewPending(input.ocrSummary)) ocrStatus = "review";
+  else if (isFinalReviewOcrPrepComplete(input.ocrSummary)) ocrStatus = "ready";
+  else if (input.ocrSummary) ocrStatus = "partial";
+
+  return {
+    phase: input.prepFocus === "render" ? "render" : "clean",
+    sourceLabel,
+    caption,
+    durationSeconds,
+    ocrStatus,
+    renderStatus: input.startRenderPending ? "running" : "none"
+  };
 }
 
 export function getRenderWarnings(render: RenderOutput | null): string[] {
@@ -197,6 +376,143 @@ export function formatBytes(sizeBytes: number | null): string | null {
   if (sizeBytes < 1024) return `${sizeBytes} B`;
   if (sizeBytes < 1024 * 1024) return `${(sizeBytes / 1024).toFixed(1)} KB`;
   return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+export type FinalReviewReadinessTone = "good" | "warn" | "bad" | "muted";
+
+export type FinalReviewReadinessChip = {
+  id: "checklist" | "warnings" | "risk" | "approved" | "publish_ready";
+  tone: FinalReviewReadinessTone;
+  done: boolean;
+};
+
+export type FinalReviewReadinessBlocker =
+  | "checklist"
+  | "approve"
+  | "risk"
+  | "risk_decision";
+
+export type FinalReviewReadiness = {
+  checklistOk: boolean;
+  checklistCount: number;
+  checklistTotal: number;
+  warningCount: number;
+  riskScanned: boolean;
+  riskOk: boolean;
+  riskNeedsDecision: boolean;
+  approved: boolean;
+  publishReady: boolean;
+  blockers: FinalReviewReadinessBlocker[];
+  chips: FinalReviewReadinessChip[];
+};
+
+/** Workspace readiness strip authority: checklist + render + optional risk gate. */
+export function resolveFinalReviewReadiness(input: {
+  checklist: ChecklistState;
+  render: RenderOutput;
+  riskSummary?: {
+    gate?: {
+      can_continue?: boolean;
+      requires_operator_decision?: boolean;
+    } | null;
+    latest_decision?: unknown;
+  } | null;
+}): FinalReviewReadiness {
+  const checklistTotal = Object.keys(DEFAULT_FINAL_REVIEW_CHECKLIST).length;
+  const checklistCount = Object.values(input.checklist).filter(Boolean).length;
+  const checklistOk = checklistComplete(input.checklist);
+  const warningCount = getRenderWarnings(input.render).length;
+  const approved = isApproved(input.render);
+  const publishReady = isPublishReady(input.render);
+  const riskScanned = Boolean(input.riskSummary);
+  const gate = input.riskSummary?.gate ?? null;
+  const riskOk = !riskScanned || gate?.can_continue !== false;
+  const riskNeedsDecision = Boolean(
+    riskScanned && gate?.requires_operator_decision && !input.riskSummary?.latest_decision
+  );
+
+  const blockers: FinalReviewReadinessBlocker[] = [];
+  if (!publishReady) {
+    if (!checklistOk) blockers.push("checklist");
+    if (!approved) blockers.push("approve");
+    if (!riskOk) blockers.push("risk");
+    else if (riskNeedsDecision) blockers.push("risk_decision");
+  }
+
+  const chips: FinalReviewReadinessChip[] = [
+    {
+      id: "checklist",
+      done: checklistOk,
+      tone: checklistOk ? "good" : "warn"
+    },
+    {
+      id: "warnings",
+      done: warningCount === 0,
+      tone: warningCount === 0 ? "good" : "warn"
+    },
+    {
+      id: "risk",
+      done: riskOk && !riskNeedsDecision,
+      tone: !riskScanned ? "muted" : !riskOk || riskNeedsDecision ? "bad" : "good"
+    },
+    {
+      id: "approved",
+      done: approved,
+      tone: approved ? "good" : "warn"
+    },
+    {
+      id: "publish_ready",
+      done: publishReady,
+      tone: publishReady ? "good" : "muted"
+    }
+  ];
+
+  return {
+    checklistOk,
+    checklistCount,
+    checklistTotal,
+    warningCount,
+    riskScanned,
+    riskOk,
+    riskNeedsDecision,
+    approved,
+    publishReady,
+    blockers,
+    chips
+  };
+}
+
+export type FinalReviewCompareDiff = {
+  finalDurationSeconds: number | null;
+  originalDurationSeconds: number | null;
+  durationDeltaSeconds: number | null;
+  subtitleBurned: boolean;
+  resolution: string | null;
+  sizeLabel: string | null;
+};
+
+/** Compact compare meta for operators judging original vs final. */
+export function resolveFinalReviewCompareDiff(
+  render: RenderOutput,
+  manifest: SourceVideoAssetManifest | null = null
+): FinalReviewCompareDiff {
+  const specs = resolveRenderTechSpecs(render, manifest);
+  const originalDurationSeconds =
+    asPositiveNumber(manifest?.source_video?.duration_seconds) ?? null;
+  const finalDurationSeconds = specs.duration_seconds;
+  const durationDeltaSeconds =
+    finalDurationSeconds != null && originalDurationSeconds != null
+      ? Math.round((finalDurationSeconds - originalDurationSeconds) * 10) / 10
+      : null;
+
+  return {
+    finalDurationSeconds,
+    originalDurationSeconds,
+    durationDeltaSeconds,
+    subtitleBurned: specs.subtitle_burned,
+    resolution: formatResolution(specs.width, specs.height),
+    sizeLabel: formatBytes(specs.size_bytes)
+  };
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {

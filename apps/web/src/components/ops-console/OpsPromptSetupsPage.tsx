@@ -183,9 +183,7 @@ function nextBlankSetupName(existing: Array<{ name: string }>): string {
 }
 
 function previewFrom(prompt: string): string {
-  const collapsed = prompt.replace(/\s+/g, " ").trim();
-  if (collapsed.length <= 120) return collapsed;
-  return `${collapsed.slice(0, 117)}…`;
+  return prompt.replace(/\s+/g, " ").trim();
 }
 
 export function OpsPromptSetupsPage({ variant }: { variant: PromptVariant }) {
@@ -453,7 +451,7 @@ export function OpsPromptSetupsPage({ variant }: { variant: PromptVariant }) {
   if (viewMode === "list") {
     return (
       <OpsConsoleShell actions={refreshAction} description={navDesc} title={navTitle}>
-        <main className="ops-page ops-page--settings ops-ai-page is-compact">
+        <main className={`ops-page ops-page--settings ops-ai-page is-compact ops-ai-control-center ops-prompt-registry is-${variant}`}>
           {error ? <div className="inline-error">{error}</div> : null}
           <div className="ops-tts-list-header">
             {settingsTabs}
@@ -497,15 +495,22 @@ export function OpsPromptSetupsPage({ variant }: { variant: PromptVariant }) {
             <p className="ops-tts-empty">{t(`${i18n}.profileEmpty`)}</p>
           ) : (
             <div className="ops-tts-setup-table-wrap">
-              <table className="ops-tts-setup-table ops-tts-setup-table--prompt">
+              <table className="ops-tts-setup-table ops-tts-setup-table--prompt ops-ai-registry-table ops-prompt-registry-table">
+                <colgroup>
+                  <col className="ops-prompt-col-drag" />
+                  <col className="ops-prompt-col-setup" />
+                  <col className="ops-prompt-col-preview" />
+                  <col className="ops-prompt-col-status" />
+                  <col className="ops-prompt-col-actions" />
+                </colgroup>
                 <thead>
                   <tr>
                     <th scope="col" className="ops-tts-setup-table__drag-col">
                       <span className="visually-hidden">{t("common.dragToReorder")}</span>
                     </th>
                     <th scope="col">{t(`${i18n}.profileNameCol`)}</th>
-                    <th scope="col">{t(`${i18n}.profileActiveCol`)}</th>
                     <th scope="col">{t(`${i18n}.previewCol`)}</th>
+                    <th scope="col">{t(`${i18n}.profileActiveCol`)}</th>
                     <th scope="col" className="ops-tts-setup-table__actions">
                       {t(`${i18n}.profileActionsCol`)}
                     </th>
@@ -515,6 +520,7 @@ export function OpsPromptSetupsPage({ variant }: { variant: PromptVariant }) {
                   {profiles.map((profile) => {
                     const isActive = Boolean(profile.is_active) || profile.id === activeProfileId;
                     const preview = previewFrom(profile.prompt || "");
+                    const promptLength = (profile.prompt || "").trim().length;
                     const canDrag = !profileBusy && renamingProfileId !== profile.id;
                     const rowClass = [
                       isActive ? "is-active" : "",
@@ -561,30 +567,31 @@ export function OpsPromptSetupsPage({ variant }: { variant: PromptVariant }) {
                           </span>
                         </td>
                         <td className="ops-tts-setup-table__name">
-                          {renamingProfileId === profile.id ? (
-                            <input
-                              ref={renameInputRef}
-                              className="ops-tts-setup-table__rename-input"
-                              type="text"
-                              value={renameDraft}
-                              maxLength={80}
-                              disabled={profileBusy}
-                              onChange={(e) => setRenameDraft(e.target.value)}
-                              onKeyDown={(e) => {
-                                if (e.key === "Enter") {
-                                  e.preventDefault();
-                                  void commitRenameProfile();
-                                } else if (e.key === "Escape") {
-                                  e.preventDefault();
-                                  cancelRenameProfile();
-                                }
-                              }}
-                              onBlur={() => {
-                                if (!profileBusy) void commitRenameProfile();
-                              }}
-                            />
-                          ) : (
-                            <>
+                          <div className="ops-ai-setup-identity">
+                            {renamingProfileId === profile.id ? (
+                              <input
+                                ref={renameInputRef}
+                                className="ops-tts-setup-table__rename-input"
+                                type="text"
+                                value={renameDraft}
+                                maxLength={80}
+                                disabled={profileBusy}
+                                aria-label={t(`${i18n}.profileRename`)}
+                                onChange={(e) => setRenameDraft(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter") {
+                                    e.preventDefault();
+                                    void commitRenameProfile();
+                                  } else if (e.key === "Escape") {
+                                    e.preventDefault();
+                                    cancelRenameProfile();
+                                  }
+                                }}
+                                onBlur={() => {
+                                  if (!profileBusy) void commitRenameProfile();
+                                }}
+                              />
+                            ) : (
                               <button
                                 type="button"
                                 className="ops-tts-setup-table__name-btn"
@@ -593,55 +600,69 @@ export function OpsPromptSetupsPage({ variant }: { variant: PromptVariant }) {
                               >
                                 {profile.name}
                               </button>
-                            </>
-                          )}
-                        </td>
-                        <td>
-                          <label
-                            className="ops-tts-setup-switch"
-                            title={t(`${i18n}.profileActiveHint`)}
-                          >
-                            <input
-                              type="checkbox"
-                              checked={isActive}
-                              disabled={profileBusy}
-                              aria-label={
-                                isActive
-                                  ? t(`${i18n}.profileActiveBadge`)
-                                  : t(`${i18n}.profileActive`)
-                              }
-                              onChange={(e) => void onSetActive(profile.id, e.target.checked)}
-                            />
-                            <span className="ops-tts-setup-switch__track" aria-hidden="true" />
-                          </label>
+                            )}
+                          </div>
                         </td>
                         <td
                           className="ops-tts-setup-table__preview"
                           title={profile.prompt || undefined}
                         >
-                          {preview || <span className="ops-muted">—</span>}
+                          <div className="ops-prompt-preview-line">
+                            <span className="ops-prompt-preview-copy">
+                              {preview || <span className="ops-muted">—</span>}
+                            </span>
+                            <span className="ops-prompt-char-count">
+                              {promptLength.toLocaleString()} {t(`${i18n}.charactersShort`)}
+                            </span>
+                          </div>
+                        </td>
+                        <td>
+                          <div className={`ops-prompt-row-status ${isActive ? "is-active" : "is-inactive"}`}>
+                            <label
+                              className="ops-tts-setup-switch"
+                              title={t(`${i18n}.profileActiveHint`)}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={isActive}
+                                disabled={profileBusy}
+                                aria-label={
+                                  isActive
+                                    ? t(`${i18n}.profileActiveBadge`)
+                                    : t(`${i18n}.profileActive`)
+                                }
+                                onChange={(e) => void onSetActive(profile.id, e.target.checked)}
+                              />
+                              <span className="ops-tts-setup-switch__track" aria-hidden="true" />
+                            </label>
+                            <span>
+                              {isActive ? t(`${i18n}.profileActiveBadge`) : t(`${i18n}.profileInactiveBadge`)}
+                            </span>
+                          </div>
                         </td>
                         <td className="ops-tts-setup-table__actions">
-                          <button
-                            type="button"
-                            className="ops-tts-setup-table__icon-btn"
-                            disabled={profileBusy}
-                            aria-label={t(`${i18n}.profileEdit`)}
-                            title={t(`${i18n}.profileEdit`)}
-                            onClick={() => void openEditor(profile.id)}
-                          >
-                            <SetupActionIcon kind="edit" />
-                          </button>
-                          <button
-                            type="button"
-                            className="ops-tts-setup-table__icon-btn ops-tts-setup-table__icon-btn--danger"
-                            disabled={profileBusy || profiles.length <= 1}
-                            aria-label={t(`${i18n}.profileDelete`)}
-                            title={t(`${i18n}.profileDelete`)}
-                            onClick={() => void onDeleteProfile(profile.id, profile.name)}
-                          >
-                            <SetupActionIcon kind="delete" />
-                          </button>
+                          <div className="ops-ai-row-actions">
+                            <button
+                              type="button"
+                              className="ops-tts-setup-table__icon-btn"
+                              disabled={profileBusy}
+                              aria-label={t(`${i18n}.profileEdit`)}
+                              title={t(`${i18n}.profileEdit`)}
+                              onClick={() => void openEditor(profile.id)}
+                            >
+                              <SetupActionIcon kind="edit" />
+                            </button>
+                            <button
+                              type="button"
+                              className="ops-tts-setup-table__icon-btn ops-tts-setup-table__icon-btn--danger"
+                              disabled={profileBusy || profiles.length <= 1}
+                              aria-label={t(`${i18n}.profileDelete`)}
+                              title={t(`${i18n}.profileDelete`)}
+                              onClick={() => void onDeleteProfile(profile.id, profile.name)}
+                            >
+                              <SetupActionIcon kind="delete" />
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     );

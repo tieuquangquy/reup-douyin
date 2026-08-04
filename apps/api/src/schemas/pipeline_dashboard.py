@@ -7,7 +7,21 @@ from pydantic import BaseModel, Field
 
 PipelineDashboardStatus = Literal["healthy", "needs_attention", "blocked", "quiet", "in_progress"]
 PipelineDashboardSeverity = Literal["info", "warning", "critical"]
-PipelineStageKey = Literal["capture", "review", "reup_queue", "export_package", "publish_handoff", "publish_progress"]
+PipelineStageKey = Literal[
+    "capture",
+    "review",
+    "reup_queue",
+    "download",
+    "audio_analysis",
+    "translate",
+    "tts",
+    "ocr",
+    "render",
+    "output_review",
+    "draft",
+    "export_package",
+    "publish_handoff",
+]
 
 
 class PipelineDashboardMetric(BaseModel):
@@ -28,8 +42,22 @@ class PipelineDashboardStage(BaseModel):
     secondary_label: str
     metrics: list[PipelineDashboardMetric] = Field(default_factory=list)
     attention_count: int = 0
+    waiting_count: int = 0
+    running_count: int = 0
+    review_count: int = 0
+    failed_count: int = 0
+    ready_count: int = 0
+    total_count: int = 0
     href: str
     next_action: str
+
+
+class PipelineDashboardOutputQaSummary(BaseModel):
+    passed: int = 0
+    warned: int = 0
+    failed: int = 0
+    ungraded: int = 0
+    total: int = 0
 
 
 class PipelineDashboardAttentionItem(BaseModel):
@@ -66,5 +94,6 @@ class PipelineDashboardResponse(BaseModel):
     summary_metrics: list[PipelineDashboardMetric] = Field(default_factory=list)
     stages: list[PipelineDashboardStage] = Field(default_factory=list)
     attention_items: list[PipelineDashboardAttentionItem] = Field(default_factory=list)
+    output_qa_summary: PipelineDashboardOutputQaSummary = Field(default_factory=PipelineDashboardOutputQaSummary)
     recent_activity: list[PipelineDashboardActivityItem] = Field(default_factory=list)
     quick_links: list[PipelineDashboardQuickLink] = Field(default_factory=list)

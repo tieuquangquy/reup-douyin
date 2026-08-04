@@ -120,6 +120,36 @@ assertColor(".ops-health-daybar em", "#6b7280");
 assertColor(".ops-health-asset span, .ops-health-account span", "#4b5563");
 assertColor(".ops-health-matrix thead th", "#4b5563");
 
+/* V11 — the selectors used by the live Home V6–V9 and Health V4–V10 layouts. */
+const v11Marker = "/* Ops typography V11";
+const v11Start = css.indexOf(v11Marker);
+assert.ok(v11Start >= 0, "CSS must define the live Ops typography V11 layer");
+const v11 = css.slice(v11Start);
+
+function assertV11TokenUse(selector: string, token: string): void {
+  const selectorStart = v11.indexOf(selector);
+  assert.ok(selectorStart >= 0, `V11 must cover ${selector}`);
+  const blockEnd = v11.indexOf("}", selectorStart);
+  assert.ok(blockEnd > selectorStart, `V11 rule for ${selector} must close`);
+  const rule = v11.slice(selectorStart, blockEnd + 1);
+  assert.match(rule, new RegExp(`font-size\\s*:\\s*var\\(--${escapeRegExp(token)}\\)`), `${selector} must use --${token}`);
+}
+
+const semanticTokens = [...v11.matchAll(/--ops-type-[\w-]+:\s*([\d.]+)rem/g)].map((match) => Number(match[1]));
+assert.ok(semanticTokens.length >= 8, "V11 must define the complete semantic type scale");
+assert.ok(semanticTokens.every((value) => value >= 0.6875), "No Ops typography token may fall below 11px at a 16px root");
+
+assertV11TokenUse(".ops-home-v6 .ops-home-v6-panel__head h2", "ops-type-panel-title");
+assertV11TokenUse(".ops-home-v6 .ops-home-v6-incident__copy strong", "ops-type-body");
+assertV11TokenUse(".ops-home-v6 .ops-home-v6-axis", "ops-type-axis");
+assertV11TokenUse(".ops-home-v6 .ops-home-v9-risk__evidence small", "ops-type-meta");
+assertV11TokenUse(".ops-health-page .ops-health-v2-command p", "ops-type-body");
+assertV11TokenUse(".ops-health-page .ops-health-v4-flow-node__copy > strong", "ops-type-data");
+assertV11TokenUse(".ops-health-page .ops-health-v7-ledger__copy > strong", "ops-type-body");
+assertV11TokenUse(".ops-health-page .ops-health-v8-zone > header h3", "ops-type-body");
+assertV11TokenUse(".ops-health-page .ops-health-v10-columns__plot > aside", "ops-type-axis");
+assertV11TokenUse(".ops-health-page .ops-health-v10-columns__head nav span", "ops-type-meta");
+
 assert.match(pkg, /ops-type-scale\.test\.ts/, "package.json must run ops-type-scale test");
 
 console.log("ops-type-scale tests passed");

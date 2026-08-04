@@ -28,13 +28,13 @@ Ops Console is the operational area under `/ops`. It is for health, jobs, assets
 
 | Route | Status | Purpose | Component entry |
 | --- | --- | --- | --- |
-| `/ops` | Available | Ops home, operational summary, action queue, and section launch grid | `components/ops-console/OpsHomePage` |
+| `/ops` | Available | Decision-first Ops home with incidents, queue/worker signals, dependency health, workload, outcomes, and diagnostics | `components/ops-console/OpsHomePage` |
 | `/ops/health` | Available | API/DB inferred health, worker/job summary, storage/risk summary | `components/ops-console/OpsHealthPage` |
 | `/ops/jobs` | Available | Running, failed, retryable, stale jobs and failure categories | `components/ops-console/OpsJobsPage` |
 | `/ops/assets` | Available | Current vs historical asset summary and asset health limitations | `components/ops-console/OpsAssetsPage` |
 | `/ops/publish-attempts` | Available | Latest publish attempts, internal/external status, IDs, permalinks | `components/ops-console/OpsPublishAttemptsPage` |
 | `/ops/reconciliation` | Available | Attempts needing status reconciliation and manual refresh | `components/ops-console/OpsReconciliationPage` |
-| `/ops/accounts` | Available | Platform accounts and account health summary | `components/ops-console/OpsAccountsPage` |
+| `/publishing/accounts` | Available | Facebook Page connection, permissions, safety and warm-up in Operator Studio | `components/ops-console/OpsAccountsPage` |
 | `/ops/routing-rules` | Available | Routing rule table and queue coverage | `components/ops-console/OpsRoutingRulesPage` |
 | `/ops/risk` | Available | Open, acknowledged, waived, and resolved risk warnings | `components/ops-console/OpsRiskPage` |
 | `/ops/tools` | Available | Local commands, runbooks, Swagger reference, browser action policy | `components/ops-console/OpsToolsPage` |

@@ -52,6 +52,38 @@ class StartProcessingBatchLimitTests(unittest.TestCase):
         self.assertEqual(result.results[2].item_id, item_ids[2])
         self.assertEqual(result.results[3].item_id, item_ids[3])
 
+    def test_batch_start_auto_accepts_everything_because_the_lane_parks_overflow(self) -> None:
+        """The manual cap protected the download session before parking existed.
+
+        Auto now has its own admission control (`REUP_MAX_ITEMS_IN_FLIGHT`): extra clips are
+        queued and start themselves. Rejecting them here would ask the operator to babysit a
+        second batch for no reason.
+        """
+        item_ids = [uuid4() for _ in range(4)]
+        updated = MagicMock()
+        updated.status = ReupQueueStatus.READY_FOR_PROCESSING
+
+        with (
+            patch("src.services.export_handoff_service.get_settings") as mock_settings,
+            patch("src.services.export_handoff_service.ReupQueueService") as mock_queue_cls,
+        ):
+            mock_settings.return_value.reup_queue_start_processing_batch_limit = 2
+            mock_queue_cls.return_value.apply_action.return_value = updated
+
+            result = ExportHandoffService(MagicMock()).run_batch_action(
+                action=ReupQueueBatchAction.START_AUTO_PIPELINE,
+                item_ids=item_ids,
+                note="Start auto on everything",
+            )
+
+        self.assertEqual(result.succeeded_count, 4)
+        self.assertEqual(result.skipped_count, 0)
+        self.assertEqual(mock_queue_cls.return_value.apply_action.call_count, 4)
+        self.assertFalse(
+            any(entry.reason_code == "START_PROCESSING_BATCH_LIMIT" for entry in result.results),
+            "Auto clips must queue, not be rejected",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

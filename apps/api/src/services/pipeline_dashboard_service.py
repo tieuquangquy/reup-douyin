@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
@@ -17,16 +16,21 @@ from src.enums import (
     PublishHandoffStatus,
     ReupQueueMediaPrepStatus,
     ReupQueueStatus,
+    JobStatus,
+    JobType,
 )
 from src.models.capture_inbox import CapturedItem, CaptureSession
 from src.models.export_handoff import ExportPackage, PublishHandoff
 from src.models.publish import PublishAttempt, PublishDraft
+from src.models.jobs import Job
+from src.models.media import RenderOutput
 from src.models.reup_queue import ReupQueueItem
 from src.models.review import VideoCandidate
 from src.schemas.pipeline_dashboard import (
     PipelineDashboardActivityItem,
     PipelineDashboardAttentionItem,
     PipelineDashboardMetric,
+    PipelineDashboardOutputQaSummary,
     PipelineDashboardQuickLink,
     PipelineDashboardResponse,
     PipelineDashboardSeverity,
@@ -34,43 +38,19 @@ from src.schemas.pipeline_dashboard import (
     PipelineDashboardStatus,
     PipelineStageKey,
 )
-
-CAPTURE_HREF = "/ops/extensions/douyin/capture-inbox"
-REVIEW_HREF = "/selection/review-board"
-REUP_QUEUE_HREF = "/selection/reup-queue"
-EXPORT_HREF = "/publishing/export-packages"
-HANDOFF_HREF = "/publishing/publish-handoffs"
-PUBLISH_DRAFTS_HREF = "/publishing/drafts"
-PUBLISH_HEALTH_HREF = "/ops/publish-health"
-PUBLISH_ATTEMPTS_HREF = "/ops/publish-attempts"
-RECONCILIATION_HREF = "/ops/reconciliation"
-
-
-@dataclass(frozen=True)
-class PipelineCounts:
-    captures_last_24h: int
-    capture_ready_items: int
-    capture_failed_items: int
-    review_backlog: int
-    approved_candidates: int
-    approved_not_queued: int
-    queue_active: int
-    queue_waiting_media: int
-    queue_waiting_metadata: int
-    queue_failed: int
-    queue_ready_to_export: int
-    export_ready: int
-    export_failed: int
-    handoff_ready: int
-    handoff_failed: int
-    publish_ready: int
-    publish_scheduled: int
-    publish_active_drafts: int
-    publish_published: int
-    publish_failed_drafts: int
-    publish_active_attempts: int
-    publish_failed_attempts: int
-    publish_needs_reconciliation: int
+from src.services.pipeline_stage_snapshot import (
+    CAPTURE_HREF,
+    EXPORT_HREF,
+    HANDOFF_HREF,
+    JOB_STAGE_BY_TYPE,
+    OUTPUT_REVIEW_HREF,
+    PUBLISH_DRAFTS_HREF,
+    REVIEW_HREF,
+    REUP_QUEUE_HREF,
+    OutputQaCounts,
+    PipelineCounts,
+    build_pipeline_stage_snapshots,
+)
 
 
 class PipelineDashboardService:
@@ -81,16 +61,25 @@ class PipelineDashboardService:
     def snapshot(self) -> PipelineDashboardResponse:
         generated_at = datetime.now(UTC)
         counts = self._counts(generated_at)
-        stages = self._stages(counts)
-        attention_items = self._attention_items(counts)
+        job_matrix = self._job_matrix()
+        output_qa = self._output_qa_counts()
+        stages = self._stages(counts, job_matrix=job_matrix, output_qa=output_qa)
+        attention_items = self._attention_items(counts, stages=stages)
         overall_status = self._overall_status(stages, attention_items)
         return PipelineDashboardResponse(
             generated_at=generated_at,
             overall_status=overall_status,
             headline=self._headline(overall_status, counts, attention_items),
-            summary_metrics=self._summary_metrics(counts, attention_items),
+            summary_metrics=self._summary_metrics(counts, attention_items, stages=stages),
             stages=stages,
             attention_items=attention_items,
+            output_qa_summary=PipelineDashboardOutputQaSummary(
+                passed=output_qa.passed,
+                warned=output_qa.warned,
+                failed=output_qa.failed,
+                ungraded=output_qa.ungraded,
+                total=output_qa.total,
+            ),
             recent_activity=self._recent_activity(),
             quick_links=self._quick_links(),
         )
@@ -104,7 +93,7 @@ class PipelineDashboardService:
             .where(VideoCandidate.workspace_id == self.workspace_id, VideoCandidate.status == CandidateStatus.APPROVED, ReupQueueItem.id.is_(None))
         )
         return PipelineCounts(
-            captures_last_24h=self._count(CaptureSession, CaptureSession.created_at >= last_24h),
+            captures_last_24h=self._count(CapturedItem, CapturedItem.created_at >= last_24h),
             capture_ready_items=self._count(CapturedItem, CapturedItem.status.in_([CapturedItemStatus.READY, CapturedItemStatus.PREVIEW_MISSING])),
             capture_failed_items=self._count(CapturedItem, CapturedItem.status == CapturedItemStatus.FAILED),
             review_backlog=self._count(VideoCandidate, VideoCandidate.status.in_([CandidateStatus.SHORTLISTED, CandidateStatus.IN_REVIEW])),
@@ -121,16 +110,22 @@ class PipelineDashboardService:
                 ReupQueueStatus.PUBLISH_HANDOFF_CREATED,
                 ReupQueueStatus.FAILED_NEEDS_ATTENTION,
             ])),
+            queue_waiting_processing=self._count(ReupQueueItem, ReupQueueItem.status == ReupQueueStatus.READY_FOR_PROCESSING),
+            queue_processing=self._count(ReupQueueItem, ReupQueueItem.status == ReupQueueStatus.PROCESSING),
             queue_waiting_media=self._count(ReupQueueItem, ReupQueueItem.status == ReupQueueStatus.WAITING_FOR_MEDIA),
             queue_waiting_metadata=self._count(ReupQueueItem, ReupQueueItem.status == ReupQueueStatus.WAITING_FOR_METADATA),
             queue_failed=self._count(ReupQueueItem, ReupQueueItem.status == ReupQueueStatus.FAILED_NEEDS_ATTENTION),
             queue_ready_to_export=self._count(ReupQueueItem, ReupQueueItem.status == ReupQueueStatus.READY_TO_EXPORT, ReupQueueItem.media_prep_status == ReupQueueMediaPrepStatus.READY_FOR_EXPORT),
+            export_draft=self._count(ExportPackage, ExportPackage.status == ExportPackageStatus.DRAFT),
             export_ready=self._count(ExportPackage, ExportPackage.status == ExportPackageStatus.READY_FOR_HANDOFF),
             export_failed=self._count(ExportPackage, ExportPackage.status == ExportPackageStatus.FAILED_NEEDS_ATTENTION),
+            handoff_draft=self._count(PublishHandoff, PublishHandoff.status == PublishHandoffStatus.DRAFT),
             handoff_ready=self._count(PublishHandoff, PublishHandoff.status == PublishHandoffStatus.READY_FOR_OPERATOR),
             handoff_failed=self._count(PublishHandoff, PublishHandoff.status == PublishHandoffStatus.FAILED_NEEDS_ATTENTION),
+            publish_draft=self._count(PublishDraft, PublishDraft.status == PublishDraftStatus.DRAFT),
             publish_ready=self._count(PublishDraft, PublishDraft.status == PublishDraftStatus.READY),
             publish_scheduled=self._count(PublishDraft, PublishDraft.status == PublishDraftStatus.SCHEDULED),
+            publish_publishing=self._count(PublishDraft, PublishDraft.status == PublishDraftStatus.PUBLISHING),
             publish_active_drafts=self._count(PublishDraft, PublishDraft.status.in_([PublishDraftStatus.READY, PublishDraftStatus.SCHEDULED, PublishDraftStatus.PUBLISHING])),
             publish_published=self._count(PublishDraft, PublishDraft.status == PublishDraftStatus.PUBLISHED),
             publish_failed_drafts=self._count(PublishDraft, PublishDraft.status.in_([PublishDraftStatus.FAILED, PublishDraftStatus.NEEDS_ATTENTION])),
@@ -146,95 +141,21 @@ class PipelineDashboardService:
             publish_needs_reconciliation=self._count(PublishAttempt, PublishAttempt.status == PublishAttemptStatus.NEEDS_RECONCILIATION),
         )
 
-    def _stages(self, counts: PipelineCounts) -> list[PipelineDashboardStage]:
-        return [
-            PipelineDashboardStage(
-                key="capture",
-                label="Capture",
-                description="Staged Douyin captures waiting for promotion into canonical review.",
-                status=self._stage_status(blocked=counts.capture_failed_items, attention=counts.capture_ready_items, active=counts.captures_last_24h),
-                primary_count=counts.capture_ready_items,
-                primary_label="Ready to promote",
-                secondary_count=counts.captures_last_24h,
-                secondary_label="Captures in last 24h",
-                metrics=[self._metric("failed", "Failed items", counts.capture_failed_items)],
-                attention_count=counts.capture_failed_items + counts.capture_ready_items,
-                href=CAPTURE_HREF,
-                next_action="Promote ready capture items or inspect failures before review.",
-            ),
-            PipelineDashboardStage(
-                key="review",
-                label="Review",
-                description="Canonical review board for shortlisted candidates and approvals.",
-                status=self._stage_status(attention=counts.review_backlog + counts.approved_not_queued, active=counts.approved_candidates),
-                primary_count=counts.review_backlog,
-                primary_label="Review backlog",
-                secondary_count=counts.approved_not_queued,
-                secondary_label="Approved not queued",
-                metrics=[self._metric("approved", "Approved candidates", counts.approved_candidates)],
-                attention_count=counts.review_backlog + counts.approved_not_queued,
-                href=REVIEW_HREF,
-                next_action="Review shortlisted candidates and send approved work to Reup Queue.",
-            ),
-            PipelineDashboardStage(
-                key="reup_queue",
-                label="Reup Queue",
-                description="Downstream processing workspace for approved content.",
-                status=self._stage_status(blocked=counts.queue_failed, attention=counts.queue_waiting_media + counts.queue_waiting_metadata, active=counts.queue_active),
-                primary_count=counts.queue_active,
-                primary_label="Active queue items",
-                secondary_count=counts.queue_ready_to_export,
-                secondary_label="Ready to export",
-                metrics=[self._metric("waiting_media", "Waiting for media", counts.queue_waiting_media), self._metric("failed", "Needs retry", counts.queue_failed)],
-                attention_count=counts.queue_failed + counts.queue_waiting_media + counts.queue_waiting_metadata,
-                href=REUP_QUEUE_HREF,
-                next_action="Clear failed or waiting items, then package ready-to-export work.",
-            ),
-            PipelineDashboardStage(
-                key="export_package",
-                label="Export Package",
-                description="Operator-created packages ready to become publish handoffs.",
-                status=self._stage_status(blocked=counts.export_failed, attention=counts.export_ready),
-                primary_count=counts.queue_ready_to_export,
-                primary_label="Queue ready to package",
-                secondary_count=counts.export_ready,
-                secondary_label="Packages ready for handoff",
-                metrics=[self._metric("failed", "Failed packages", counts.export_failed)],
-                attention_count=counts.export_failed + counts.export_ready,
-                href=EXPORT_HREF,
-                next_action="Create or inspect export packages and prepare handoff payloads.",
-            ),
-            PipelineDashboardStage(
-                key="publish_handoff",
-                label="Publish Handoff",
-                description="Manual downstream handoff artifacts for external publishing.",
-                status=self._stage_status(blocked=counts.handoff_failed, attention=counts.handoff_ready),
-                primary_count=counts.handoff_ready,
-                primary_label="Ready for operator",
-                secondary_count=counts.handoff_failed,
-                secondary_label="Failed handoffs",
-                metrics=[],
-                attention_count=counts.handoff_ready + counts.handoff_failed,
-                href=HANDOFF_HREF,
-                next_action="Accept ready handoffs and continue manual platform-safe publishing.",
-            ),
-            PipelineDashboardStage(
-                key="publish_progress",
-                label="Publish progress",
-                description="Draft, attempt, publication, and reconciliation state after handoff.",
-                status=self._stage_status(blocked=counts.publish_failed_drafts + counts.publish_failed_attempts + counts.publish_needs_reconciliation, attention=counts.publish_ready, active=counts.publish_active_drafts + counts.publish_active_attempts),
-                primary_count=counts.publish_active_drafts,
-                primary_label="Active drafts",
-                secondary_count=counts.publish_published,
-                secondary_label="Published drafts",
-                metrics=[self._metric("active_attempts", "Active attempts", counts.publish_active_attempts), self._metric("needs_reconciliation", "Needs reconciliation", counts.publish_needs_reconciliation)],
-                attention_count=counts.publish_failed_drafts + counts.publish_failed_attempts + counts.publish_needs_reconciliation,
-                href=PUBLISH_DRAFTS_HREF,
-                next_action="Monitor active drafts, resolve failed attempts, and reconcile uncertain publications.",
-            ),
-        ]
+    def _stages(
+        self,
+        counts: PipelineCounts,
+        *,
+        job_matrix: dict[tuple[JobType, JobStatus], int] | None = None,
+        output_qa: OutputQaCounts | None = None,
+    ) -> list[PipelineDashboardStage]:
+        return build_pipeline_stage_snapshots(counts, job_matrix=job_matrix, output_qa=output_qa)
 
-    def _attention_items(self, counts: PipelineCounts) -> list[PipelineDashboardAttentionItem]:
+    def _attention_items(
+        self,
+        counts: PipelineCounts,
+        *,
+        stages: list[PipelineDashboardStage] | None = None,
+    ) -> list[PipelineDashboardAttentionItem]:
         items: list[PipelineDashboardAttentionItem] = []
         self._add_attention(items, counts.capture_failed_items, "critical", "capture", "Capture failures", "Captured items failed normalization or enrichment.", CAPTURE_HREF, "Open Capture Inbox and inspect failed item reasons.")
         self._add_attention(items, counts.capture_ready_items, "warning", "capture", "Capture items ready", "Captured items are staged and ready to promote to Review Board.", CAPTURE_HREF, "Promote ready items when they are suitable for review.")
@@ -245,7 +166,17 @@ class PipelineDashboardService:
         self._add_attention(items, counts.queue_ready_to_export, "info", "export_package", "Ready to export", "Queue items are ready to be grouped into an Export Package.", REUP_QUEUE_HREF, "Create an Export Package for ready items.")
         self._add_attention(items, counts.export_ready, "warning", "export_package", "Packages ready for handoff", "Export Packages are ready to become Publish Handoffs.", EXPORT_HREF, "Create Publish Handoffs for ready packages.")
         self._add_attention(items, counts.handoff_ready, "warning", "publish_handoff", "Handoffs ready for operator", "Publish Handoffs are waiting for manual downstream handling.", HANDOFF_HREF, "Open handoffs and continue platform-safe publishing.")
-        self._add_attention(items, counts.publish_failed_drafts + counts.publish_failed_attempts + counts.publish_needs_reconciliation, "critical", "publish_progress", "Publish issues", "Publish drafts or attempts failed or need reconciliation.", PUBLISH_ATTEMPTS_HREF, "Inspect failed attempts and run reconciliation where needed.")
+        self._add_attention(items, counts.publish_failed_drafts + counts.publish_failed_attempts + counts.publish_needs_reconciliation, "critical", "draft", "Publish issues", "Publish drafts or attempts failed or need reconciliation.", PUBLISH_DRAFTS_HREF, "Inspect failed drafts and reconcile uncertain attempts where needed.")
+        if stages:
+            for stage in stages:
+                if stage.key not in {spec.key for spec in JOB_STAGE_BY_TYPE.values()}:
+                    continue
+                self._add_attention(items, stage.failed_count, "critical", stage.key, f"{stage.label} failures", f"{stage.failed_count} durable job(s) failed or can be retried.", stage.href, f"Inspect and retry safe {stage.label.lower()} work.")
+                self._add_attention(items, stage.review_count, "warning", stage.key, f"{stage.label} review waiting", f"{stage.review_count} durable job(s) reached a manual checkpoint.", stage.href, f"Review {stage.label.lower()} results.")
+            output_stage = next((stage for stage in stages if stage.key == "output_review"), None)
+            if output_stage:
+                self._add_attention(items, output_stage.failed_count, "critical", "output_review", "Output QA failures", "Automated render QA found defects that need correction.", OUTPUT_REVIEW_HREF, "Open Output Review and fix failed renders.")
+                self._add_attention(items, output_stage.review_count, "warning", "output_review", "Outputs need review", "Warnings or ungraded renders need operator eyes.", OUTPUT_REVIEW_HREF, "Review flagged outputs.")
         return items
 
     def _recent_activity(self) -> list[PipelineDashboardActivityItem]:
@@ -254,13 +185,53 @@ class PipelineDashboardService:
             activity.append(self._activity(f"capture-{session.id}", "capture", "Capture session updated", f"Status {session.status}; {session.ready_item_count} ready item(s).", session.updated_at, CAPTURE_HREF))
         for item in self.db.scalars(select(ReupQueueItem).where(ReupQueueItem.workspace_id == self.workspace_id).order_by(ReupQueueItem.updated_at.desc()).limit(3)):
             activity.append(self._activity(f"queue-{item.id}", "reup_queue", "Queue item updated", f"Status {item.status}; media prep {item.media_prep_status}.", item.updated_at, REUP_QUEUE_HREF))
+        for job in self.db.scalars(select(Job).where(Job.workspace_id == self.workspace_id, Job.job_type.in_(list(JOB_STAGE_BY_TYPE))).order_by(Job.updated_at.desc()).limit(6)):
+            spec = JOB_STAGE_BY_TYPE.get(job.job_type)
+            if spec is None:
+                continue
+            activity.append(self._activity(f"job-{job.id}", spec.key, f"{spec.label} job updated", f"Status {job.status}; progress {job.progress_percent}%.", job.updated_at, spec.href))
+        for output in self.db.scalars(select(RenderOutput).where(RenderOutput.workspace_id == self.workspace_id).order_by(RenderOutput.updated_at.desc()).limit(3)):
+            activity.append(self._activity(f"output-{output.id}", "output_review", "Render output updated", f"Status {output.status}.", output.updated_at, OUTPUT_REVIEW_HREF))
         for package in self.db.scalars(select(ExportPackage).where(ExportPackage.workspace_id == self.workspace_id).order_by(ExportPackage.updated_at.desc()).limit(2)):
             activity.append(self._activity(f"export-{package.id}", "export_package", "Export Package updated", f"Status {package.status}; {package.item_count} item(s).", package.updated_at, f"{EXPORT_HREF}/{package.id}"))
         for handoff in self.db.scalars(select(PublishHandoff).where(PublishHandoff.workspace_id == self.workspace_id).order_by(PublishHandoff.updated_at.desc()).limit(2)):
             activity.append(self._activity(f"handoff-{handoff.id}", "publish_handoff", "Publish Handoff updated", f"Status {handoff.status}; target {handoff.target_platform}.", handoff.updated_at, f"{HANDOFF_HREF}/{handoff.id}"))
         for draft in self.db.scalars(select(PublishDraft).where(PublishDraft.workspace_id == self.workspace_id).order_by(PublishDraft.updated_at.desc()).limit(3)):
-            activity.append(self._activity(f"publish-{draft.id}", "publish_progress", "Publish draft updated", f"Status {draft.status}; platform {draft.target_platform}.", draft.updated_at, f"{PUBLISH_DRAFTS_HREF}/{draft.id}"))
+            activity.append(self._activity(f"publish-{draft.id}", "draft", "Publish draft updated", f"Status {draft.status}; platform {draft.target_platform}.", draft.updated_at, f"{PUBLISH_DRAFTS_HREF}/{draft.id}"))
         return sorted(activity, key=lambda item: item.occurred_at, reverse=True)[:10]
+
+    def _job_matrix(self) -> dict[tuple[JobType, JobStatus], int]:
+        rows = self.db.execute(
+            select(Job.job_type, Job.status, func.count())
+            .where(Job.workspace_id == self.workspace_id, Job.job_type.in_(list(JOB_STAGE_BY_TYPE)))
+            .group_by(Job.job_type, Job.status)
+        ).all()
+        return {(job_type, status): int(count) for job_type, status, count in rows}
+
+    def _output_qa_counts(self) -> OutputQaCounts:
+        counts = {"fail": 0, "warn": 0, "pass": 0, "ungraded": 0}
+        oldest_failed_at: datetime | None = None
+        oldest_review_at: datetime | None = None
+        for item in self.db.scalars(
+            select(ReupQueueItem).where(
+                ReupQueueItem.workspace_id == self.workspace_id,
+                ReupQueueItem.render_output_id.is_not(None),
+            )
+        ):
+            status = self._render_qa_status(item.metadata_json)
+            counts[status] += 1
+            if status == "fail" and (oldest_failed_at is None or item.updated_at < oldest_failed_at):
+                oldest_failed_at = item.updated_at
+            elif status in {"warn", "ungraded"} and (oldest_review_at is None or item.updated_at < oldest_review_at):
+                oldest_review_at = item.updated_at
+        return OutputQaCounts(
+            failed=counts["fail"],
+            warned=counts["warn"],
+            passed=counts["pass"],
+            ungraded=counts["ungraded"],
+            oldest_failed_at=oldest_failed_at,
+            oldest_review_at=oldest_review_at,
+        )
 
     def _count(self, model: Any, *criteria: Any) -> int:
         stmt = select(func.count()).select_from(model)
@@ -269,15 +240,6 @@ class PipelineDashboardService:
         for criterion in criteria:
             stmt = stmt.where(criterion)
         return int(self.db.scalar(stmt) or 0)
-
-    def _stage_status(self, *, blocked: int = 0, attention: int = 0, active: int = 0) -> PipelineDashboardStatus:
-        if blocked > 0:
-            return "blocked"
-        if attention > 0:
-            return "needs_attention"
-        if active > 0:
-            return "in_progress"
-        return "quiet"
 
     def _overall_status(self, stages: list[PipelineDashboardStage], attention_items: list[PipelineDashboardAttentionItem]) -> PipelineDashboardStatus:
         if any(item.severity == "critical" for item in attention_items):
@@ -292,23 +254,43 @@ class PipelineDashboardService:
 
     def _headline(self, status: PipelineDashboardStatus, counts: PipelineCounts, attention_items: list[PipelineDashboardAttentionItem]) -> str:
         if status == "blocked":
-            return f"{len([item for item in attention_items if item.severity == 'critical'])} critical pipeline issue(s) need operator attention."
+            affected = sum(item.count for item in attention_items if item.severity == "critical")
+            return f"{affected} affected record(s) are blocked and need operator attention."
         if status == "needs_attention":
-            return f"{len(attention_items)} attention item(s) are shaping today’s operator queue."
+            affected = sum(item.count for item in attention_items)
+            return f"{affected} affected record(s) are shaping today's operator queue."
         if status == "in_progress":
             return f"Pipeline is moving with {counts.queue_active + counts.publish_active_drafts} active downstream item(s)."
         if status == "quiet":
             return "Pipeline is quiet; start with Capture Inbox when new source content is ready."
         return "Pipeline is healthy."
 
-    def _summary_metrics(self, counts: PipelineCounts, attention_items: list[PipelineDashboardAttentionItem]) -> list[PipelineDashboardMetric]:
+    def _summary_metrics(
+        self,
+        counts: PipelineCounts,
+        attention_items: list[PipelineDashboardAttentionItem],
+        *,
+        stages: list[PipelineDashboardStage] | None = None,
+    ) -> list[PipelineDashboardMetric]:
+        stage_rows = stages or self._stages(counts)
+        active_backlog = sum(
+            stage.waiting_count + stage.running_count + stage.review_count + stage.failed_count
+            for stage in stage_rows
+        )
+        running = sum(stage.running_count for stage in stage_rows)
+        ready_downstream = sum(
+            stage.ready_count
+            for stage in stage_rows
+            if stage.key in {"output_review", "export_package", "publish_handoff"}
+        )
         return [
-            self._metric("captures_last_24h", "Captures 24h", counts.captures_last_24h),
-            self._metric("active_backlog", "Active backlog", counts.review_backlog + counts.queue_active + counts.publish_active_drafts),
-            self._metric("attention_items", "Attention items", len(attention_items)),
+            self._metric("captures_last_24h", "Captured items 24h", counts.captures_last_24h),
+            self._metric("active_backlog", "Active backlog", active_backlog, "Waiting, running, manual-review, or failed records across the stage map."),
+            self._metric("attention_items", "Attention workload", sum(item.count for item in attention_items), "Affected records represented by attention categories."),
+            self._metric("running", "Running", running, "Durable records currently running."),
+            self._metric("ready_downstream", "Ready downstream", ready_downstream, "QA-passed outputs, export packages, or handoffs ready to continue."),
             self._metric("export_ready", "Export ready", counts.queue_ready_to_export + counts.export_ready),
             self._metric("handoff_ready", "Handoff ready", counts.handoff_ready),
-            self._metric("published", "Published", counts.publish_published),
         ]
 
     def _quick_links(self) -> list[PipelineDashboardQuickLink]:
@@ -316,12 +298,10 @@ class PipelineDashboardService:
             PipelineDashboardQuickLink(label="Capture Inbox", href=CAPTURE_HREF, description="Stage and promote captured Douyin items.", stage_key="capture"),
             PipelineDashboardQuickLink(label="Review Board", href=REVIEW_HREF, description="Approve or reject candidates.", stage_key="review"),
             PipelineDashboardQuickLink(label="Reup Queue", href=REUP_QUEUE_HREF, description="Prepare approved content for export.", stage_key="reup_queue"),
+            PipelineDashboardQuickLink(label="Output Review", href=OUTPUT_REVIEW_HREF, description="Review final render QA.", stage_key="output_review"),
             PipelineDashboardQuickLink(label="Export Packages", href=EXPORT_HREF, description="Inspect package readiness.", stage_key="export_package"),
             PipelineDashboardQuickLink(label="Publish Handoffs", href=HANDOFF_HREF, description="Continue manual publish handoff.", stage_key="publish_handoff"),
-            PipelineDashboardQuickLink(label="Publish Drafts", href=PUBLISH_DRAFTS_HREF, description="Track draft readiness and publishing.", stage_key="publish_progress"),
-            PipelineDashboardQuickLink(label="Publish Health", href=PUBLISH_HEALTH_HREF, description="Review downstream publish health.", stage_key="publish_progress"),
-            PipelineDashboardQuickLink(label="Publish Attempts", href=PUBLISH_ATTEMPTS_HREF, description="Inspect attempt failures and progress.", stage_key="publish_progress"),
-            PipelineDashboardQuickLink(label="Reconciliation", href=RECONCILIATION_HREF, description="Resolve uncertain publication outcomes.", stage_key="publish_progress"),
+            PipelineDashboardQuickLink(label="Publish Drafts", href=PUBLISH_DRAFTS_HREF, description="Track draft readiness and publishing.", stage_key="draft"),
         ]
 
     def _add_attention(
@@ -344,3 +324,11 @@ class PipelineDashboardService:
 
     def _metric(self, key: str, label: str, value: int, detail: str | None = None) -> PipelineDashboardMetric:
         return PipelineDashboardMetric(key=key, label=label, value=value, detail=detail)
+
+    @staticmethod
+    def _render_qa_status(metadata: dict | None) -> str:
+        render_qa = (metadata or {}).get("render_qa")
+        if not isinstance(render_qa, dict):
+            return "ungraded"
+        status = render_qa.get("status")
+        return status if status in {"pass", "warn", "fail"} else "ungraded"

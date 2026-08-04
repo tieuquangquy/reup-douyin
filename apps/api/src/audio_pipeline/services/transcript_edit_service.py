@@ -1,15 +1,21 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from src.audio_pipeline.services.transcript_builder import normalize_source_text
+from src.audio_pipeline.speech_budget import assess_speech_budget
 from src.audio_pipeline.types import TranslationPreset
 from src.enums import TranscriptSegmentStatus
 from src.models.artifacts import TranscriptSegment, TranslationSegment
+from src.models.ingestion import SourceVideo
+from src.media_pipeline.ocr_filtering.script_filter import contains_cjk
 
 
 @dataclass(frozen=True)
@@ -27,7 +33,13 @@ class TranscriptEditService:
     def __init__(self, db: Session):
         self.db = db
 
-    def save_draft(self, source_video_id: UUID, edits: list[SegmentEdit]) -> dict:
+    def save_draft(
+        self,
+        source_video_id: UUID,
+        edits: list[SegmentEdit],
+        *,
+        commit: bool = True,
+    ) -> dict:
         self._validate_batch_timing(source_video_id, edits)
         changed = 0
         for edit in edits:
@@ -52,7 +64,10 @@ class TranscriptEditService:
                     "edited_in_transcript_editor": True,
                 }
             changed += 1
-        self.db.commit()
+        if commit:
+            self.db.commit()
+        else:
+            self.db.flush()
         return {"updated_segments": changed}
 
     def merge_segments(self, source_video_id: UUID, left_transcript_id: UUID, right_transcript_id: UUID) -> dict:
@@ -183,6 +198,117 @@ class TranscriptEditService:
             force_refresh=force_refresh,
             require_source_approved=require_source_approved,
         )
+
+    def approve_translation_draft(
+        self,
+        source_video_id: UUID,
+        *,
+        operator_id: str,
+        commit: bool = True,
+    ) -> dict:
+        """Approve current Vietnamese beats only when deterministic fit checks pass."""
+
+        rows = list(
+            self.db.scalars(
+                select(TranslationSegment)
+                .where(
+                    TranslationSegment.source_video_id == source_video_id,
+                    TranslationSegment.is_current.is_(True),
+                )
+                .order_by(TranslationSegment.segment_index.asc())
+            )
+        )
+        if not rows:
+            raise ValueError("No current Vietnamese translation is available")
+        issues: list[str] = []
+        authority_rows: list[dict] = []
+        for row in rows:
+            transcript = row.transcript_segment
+            text = str(row.text or "").strip()
+            slot_ms = int(
+                row.duration_budget_ms
+                or (int(transcript.end_ms) - int(transcript.start_ms))
+            )
+            if not text:
+                issues.append(f"segment {row.segment_index}: Vietnamese text is empty")
+                continue
+            if contains_cjk(text):
+                issues.append(f"segment {row.segment_index}: Vietnamese text still contains CJK")
+                continue
+            assessment = assess_speech_budget(
+                text,
+                slot_seconds=max(0.0, slot_ms / 1000.0),
+            )
+            if assessment.status == "too_long":
+                issues.append(
+                    f"segment {row.segment_index}: {assessment.spoken_units} spoken units "
+                    f"exceed safe maximum {assessment.max_units} for {slot_ms / 1000.0:.2f}s"
+                )
+                continue
+            authority_rows.append(
+                {
+                    "translation_segment_id": str(row.id),
+                    "segment_index": row.segment_index,
+                    "text": text,
+                    "start_ms": int(transcript.start_ms),
+                    "end_ms": int(transcript.end_ms),
+                    "speech_budget": assessment.to_dict(),
+                }
+            )
+        if issues:
+            preview = "; ".join(issues[:5])
+            remaining = len(issues) - min(5, len(issues))
+            suffix = f"; and {remaining} more" if remaining else ""
+            raise ValueError(
+                "Translation review cannot be approved: " + preview + suffix
+            )
+
+        operator = str(operator_id or "frontend_operator").strip()
+        approved_at = datetime.now(UTC).isoformat()
+        binding = {
+            "schema_version": "dialogue_translation_frontend_approval_v1",
+            "source_video_id": str(source_video_id),
+            "segments": authority_rows,
+        }
+        binding_sha256 = hashlib.sha256(
+            json.dumps(
+                binding,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        for row in rows:
+            row.status = TranscriptSegmentStatus.APPROVED
+            row.metadata_json = {
+                **dict(row.metadata_json or {}),
+                "translation_operator_approval": {
+                    "status": "DIALOGUE_TRANSLATION_APPROVED",
+                    "operator_id": operator,
+                    "approved_at": approved_at,
+                    "binding_sha256": binding_sha256,
+                },
+            }
+        source = self.db.get(SourceVideo, source_video_id)
+        if source is not None:
+            metadata = dict(source.metadata_json or {})
+            metadata["dialogue_translation_review"] = {
+                "status": "DIALOGUE_TRANSLATION_APPROVED",
+                "operator_id": operator,
+                "approved_at": approved_at,
+                "binding_sha256": binding_sha256,
+                "segment_count": len(rows),
+            }
+            source.metadata_json = metadata
+        if commit:
+            self.db.commit()
+        else:
+            self.db.flush()
+        return {
+            "source_video_id": str(source_video_id),
+            "approved_segments": len(rows),
+            "binding_sha256": binding_sha256,
+        }
 
     def _current_transcript(self, source_video_id: UUID, segment_id: UUID) -> TranscriptSegment:
         row = self.db.scalar(

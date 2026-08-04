@@ -109,7 +109,7 @@ export function OpsAssetsPage() {
   if (!metrics && !request.error) {
     return (
       <OpsConsoleShell actions={refreshAction} description={t("opsAssets.description")} title={t("opsAssets.title")}>
-        <AsyncContentBoundary skeletonVariant="list" status="loading"><span /></AsyncContentBoundary>
+        <AsyncContentBoundary skeletonVariant="list" loadingLabel={t("opsAssets.loadingDetail")} status="loading"><span /></AsyncContentBoundary>
       </OpsConsoleShell>
     );
   }

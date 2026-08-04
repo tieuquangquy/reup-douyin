@@ -6,6 +6,7 @@ import { useAsyncAction } from "../../lib/useAsyncAction";
 import { useNotice } from "../shared/NoticeCenter";
 import { AsyncContentBoundary } from "../shared/AsyncContentBoundary";
 import {
+  approveTranslationDraft,
   createAudioAnalysis,
   createTtsJob,
   cancelJob,
@@ -441,13 +442,24 @@ export const TranscriptEditorPage = forwardRef<TranscriptEditorPageHandle, { sou
       setError(t("transcriptEditorPage.ttsEmptyVi"));
       return;
     }
-    if (hasUnsavedChanges(state) && !window.confirm(t("transcriptEditorPage.ttsUnsavedConfirm"))) {
-      return;
-    }
+    const hasDirtyDraft = hasUnsavedChanges(state);
+    if (hasDirtyDraft && !window.confirm(t("transcriptEditorPage.ttsUnsavedConfirm"))) return;
     ttsPendingFingerprintRef.current = fingerprintVietnameseDraft(state.segments);
     try {
-      const created = await createTtsJob(sourceVideoId);
-      await trackJob("tts", created.job_id);
+      if (hasDirtyDraft) {
+        const payload = buildSavePayload(state);
+        if (payload.segments.length > 0) {
+          await saveTranscriptDraft(sourceVideoId, payload);
+        }
+      }
+      const approval = await approveTranslationDraft(sourceVideoId);
+      const jobId = approval.job_id;
+      if (jobId) {
+        await trackJob("tts", jobId);
+      } else {
+        const created = await createTtsJob(sourceVideoId);
+        await trackJob("tts", created.job_id);
+      }
     } catch (err) {
       ttsPendingFingerprintRef.current = null;
       setError(err instanceof Error ? err.message : t("transcriptEditorPage.ttsError"));

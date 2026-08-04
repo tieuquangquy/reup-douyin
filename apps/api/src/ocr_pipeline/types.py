@@ -54,6 +54,16 @@ class OcrRequest:
     sample_fps: float = DEFAULT_SAMPLE_FPS
     hard_sub_band_ratio: float = DEFAULT_HARD_SUB_BAND_RATIO
     clean_hardsub: bool = True
+    # None preserves the legacy env-selected profile. Locked V24 queue runs set
+    # True so worker execution cannot silently fall back to sparse sampling.
+    use_master_phase1: bool | None = None
+    # Callers must opt into the product quality workflow explicitly.  Keeping
+    # the request default legacy prevents unrelated internal callers from being
+    # silently migrated merely by constructing OcrRequest.
+    workflow_version: str = "legacy_media_e2e_v1"
+    workflow_action: str = "analyze"
+    review_decisions: list[dict] = field(default_factory=list)
+    operator_id: str = "frontend_operator"
 
 
 @dataclass(frozen=True)

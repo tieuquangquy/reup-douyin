@@ -9,7 +9,6 @@ from src.enums import ExternalPublicationStatus, PublishAttemptStatus, PublishDr
 from src.models.publish import PublishAttempt, PublishDraft
 from src.publish.connectors.base import PublishConnector
 from src.publish.services.publish_attempt_service import ACTIVE_ATTEMPT_STATUSES, PublishAttemptError, PublishAttemptService
-from src.publish.services.publish_lifecycle_service import PublishLifecycleService
 
 
 class PublishReconciliationError(ValueError):
@@ -22,7 +21,6 @@ class PublishReconciliationService:
     def __init__(self, db: Session, connector: PublishConnector | None = None):
         self.db = db
         self.attempts = PublishAttemptService(db, connector=connector)
-        self.lifecycle = PublishLifecycleService(db)
 
     def build_publication_summary(self, draft_id: UUID) -> dict:
         draft = self._get_draft(draft_id)
@@ -70,8 +68,7 @@ class PublishReconciliationService:
                 except (PublishAttemptError, ValueError) as exc:
                     errors.append({"publish_attempt_id": str(attempt.id), "error": str(exc)})
 
-        self.lifecycle.sync_attempt_to_draft(draft, self.attempts.attempts_for_draft(draft_id))
-        self.db.commit()
+        self.attempts.sync_draft_state(draft.id)
         return {
             "publish_draft_id": str(draft.id),
             "refreshed_attempt_ids": refreshed_attempt_ids,

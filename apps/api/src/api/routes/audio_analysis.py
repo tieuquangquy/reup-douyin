@@ -12,6 +12,8 @@ from src.audio_pipeline.types import AudioAnalysisRequest
 from src.db.session import get_db_session
 from src.schemas.audio_analysis import (
     ApproveSourceTranscriptResponse,
+    ApproveTranslationDraftRequest,
+    ApproveTranslationDraftResponse,
     AudioAnalysisCreateRequest,
     AudioAnalysisCreateResponse,
     AudioAnalysisSummaryResponse,
@@ -211,6 +213,43 @@ def rerun_source_video_translation_draft(
         status=job.status,
         source_video_id=source_video_id,
         translation_preset=request.translation_preset,
+    )
+
+
+@router.post(
+    "/source-videos/{source_video_id}/translation-draft/approve",
+    response_model=ApproveTranslationDraftResponse,
+)
+def approve_source_video_translation_draft(
+    source_video_id: UUID,
+    request: ApproveTranslationDraftRequest,
+    db: Session = Depends(get_db_session),
+) -> ApproveTranslationDraftResponse:
+    service = TranscriptEditService(db)
+    try:
+        result = service.approve_translation_draft(
+            source_video_id,
+            operator_id=request.operator_id,
+            commit=False,
+        )
+        from src.services.reup_pipeline_orchestrator import ReupPipelineOrchestrator
+
+        resumed, job_id = ReupPipelineOrchestrator(db).resume_translation_approved_items(
+            source_video_id=source_video_id
+        )
+        db.commit()
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return ApproveTranslationDraftResponse(
+        source_video_id=source_video_id,
+        approved_segments=int(result["approved_segments"]),
+        binding_sha256=str(result["binding_sha256"]),
+        resumed_queue_items=resumed,
+        job_id=job_id,
     )
 
 

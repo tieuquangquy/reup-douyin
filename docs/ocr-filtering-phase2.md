@@ -1,4 +1,6 @@
-# OCR filtering Phase 2
+# OCR filtering Phase 2 (legacy sampled/bottom-band path)
+
+> This document does not describe the closed v58 `master_timeline.json` flow. Use [`phase2-v58-ocr-contract.md`](./phase2-v58-ocr-contract.md) for the current Phase 2 contract.
 
 
 

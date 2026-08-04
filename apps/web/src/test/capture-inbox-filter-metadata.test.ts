@@ -358,6 +358,33 @@ const missingThumbnailItem: CapturedItem = {
   performance_status: "missing",
   processing_fit_status: "missing"
 };
-assert.equal(formatCaptureInboxTileMetadataGap(missingThumbnailItem), "thumbnail", "Tile gap must list canonical missing fields");
+assert.equal(
+  formatCaptureInboxTileMetadataGap(missingThumbnailItem),
+  null,
+  "Tile gap must not repeat Missing thumbnail — media placeholder already owns that signal"
+);
+assert.equal(
+  getDouyinMetadataCompletenessForItem(missingThumbnailItem).missingFields.includes("thumbnail"),
+  true,
+  "Canonical completeness must still detect missing thumbnail for filters/score"
+);
+
+const missingPostedOnlyItem: CapturedItem = {
+  ...baseItem,
+  posted_at: null,
+  posted_display: null,
+  posted_text: null,
+  posted_text_raw: null
+};
+assert.equal(
+  formatCaptureInboxTileMetadataGap(missingPostedOnlyItem),
+  "posted",
+  "Tile gap must still list non-visual missing fields such as posted"
+);
+assert.doesNotMatch(
+  formatCaptureInboxTileMetadataGap({ ...missingPostedOnlyItem, thumbnail_url: null, preview_url: null, has_thumbnail: false }) ?? "",
+  /\bthumbnail\b/,
+  "Tile gap must omit thumbnail even when other gaps remain"
+);
 
 console.log("capture-inbox-filter-metadata tests passed");

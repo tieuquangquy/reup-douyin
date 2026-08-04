@@ -4,10 +4,12 @@ from datetime import UTC, datetime
 import logging
 from uuid import UUID
 
-from sqlalchemy import Select, func, select, update
+from sqlalchemy import Select, String, cast, func, or_, select, update
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 
 from src.db.bootstrap import ensure_default_workspace
+from src.db.base import Base
 from src.enums import JobStatus, JobStepStatus, JobType
 from src.models.jobs import Job, JobStep
 from src.services.job_factory import build_job
@@ -51,6 +53,7 @@ class JobService:
         priority: int = 0,
         max_attempts: int = 3,
         context_json: dict | None = None,
+        scheduled_at: datetime | None = None,
     ) -> Job:
         workspace = None
         if workspace_id is None:
@@ -70,6 +73,7 @@ class JobService:
             priority=priority,
             max_attempts=max_attempts,
             context_json=context_json,
+            scheduled_at=scheduled_at,
         )
         self.db.add(job)
         self.db.commit()
@@ -83,6 +87,7 @@ class JobService:
         status: JobStatus | None = None,
         job_type: JobType | None = None,
         source_video_id: UUID | None = None,
+        query: str | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> tuple[list[Job], int]:
@@ -97,6 +102,19 @@ class JobService:
         if source_video_id is not None:
             stmt = stmt.where(Job.source_video_id == source_video_id)
             count_stmt = count_stmt.where(Job.source_video_id == source_video_id)
+        cleaned_query = (query or "").strip()
+        if cleaned_query:
+            pattern = f"%{cleaned_query}%"
+            search_clause = or_(
+                cast(Job.id, String).ilike(pattern),
+                cast(Job.source_video_id, String).ilike(pattern),
+                cast(Job.job_type, String).ilike(pattern),
+                Job.current_step_key.ilike(pattern),
+                Job.error_code.ilike(pattern),
+                Job.error_message.ilike(pattern),
+            )
+            stmt = stmt.where(search_clause)
+            count_stmt = count_stmt.where(search_clause)
         stmt = stmt.order_by(Job.created_at.desc()).limit(limit).offset(offset)
         jobs = list(self.db.scalars(stmt).unique())
         total = int(self.db.scalar(count_stmt) or 0)
@@ -234,13 +252,27 @@ class JobService:
         job = self.get_job(job_id)
         if not can_delete_job(job.status):
             raise ValueError("Job cannot be deleted")
-        self._preserve_job_id_in_metadata(job_id)
-        self._clear_job_references(job_id)
-        for step in list(job.steps):
-            self.db.delete(step)
-        self.db.delete(job)
-        self.db.commit()
-        logger.info("job_deleted", extra={"job_id": str(job_id), "status": job.status})
+        # A worker may still hold this row in another transaction.  Deleting an
+        # actively claimed job would leave the worker with an orphaned execution
+        # and can make it recreate/overwrite state on its next heartbeat.
+        if job.status == JobStatus.RUNNING and getattr(job, "locked_by", None):
+            raise ValueError("Running job is locked by a worker; cancel it and wait for the lock to clear before deleting")
+
+        job_status = job.status
+        try:
+            self._preserve_job_id_in_metadata(job_id)
+            self._clear_job_references(job_id)
+            for step in list(job.steps):
+                self.db.delete(step)
+            self.db.delete(job)
+            self.db.commit()
+        except SQLAlchemyError as exc:
+            # The UI must never treat a failed transaction as a successful
+            # deletion.  Roll back so the request-scoped session remains usable.
+            self.db.rollback()
+            logger.exception("job_delete_failed", extra={"job_id": str(job_id)})
+            raise ValueError("Job could not be deleted because linked data could not be detached") from exc
+        logger.info("job_deleted", extra={"job_id": str(job_id), "status": job_status})
 
     def _preserve_job_id_in_metadata(self, job_id: UUID) -> None:
         """Keep a durable string job id on renders before FK columns are cleared."""
@@ -263,20 +295,23 @@ class JobService:
             self.db.flush()
 
     def _clear_job_references(self, job_id: UUID) -> None:
-        from src.models.artifacts import SubtitleSegment, TranscriptSegment, TranslationSegment
-        from src.models.media import MediaAsset, RenderOutput
-        from src.models.publish import PublishAttempt
-        from src.models.reup_queue import ReupQueueItem
+        """Detach every nullable FK pointing at ``jobs.id`` before deleting.
 
-        self.db.execute(update(ReupQueueItem).where(ReupQueueItem.job_id == job_id).values(job_id=None))
-        for model in (
-            PublishAttempt,
-            MediaAsset,
-            RenderOutput,
-            TranscriptSegment,
-            TranslationSegment,
-            SubtitleSegment,
-        ):
-            self.db.execute(
-                update(model).where(model.created_by_job_id == job_id).values(created_by_job_id=None)
-            )
+        Job provenance is intentionally retained on artifacts as metadata, but
+        the relational FK must be cleared.  Discovering the columns from the
+        mapped metadata prevents newer modules (analytics, affiliate, etc.) from
+        silently reintroducing a delete failure when they add another job FK.
+        ``job_steps.job_id`` is non-null and is deleted explicitly by the caller.
+        """
+        for table in Base.metadata.tables.values():
+            if table.name in {"jobs", "job_steps"}:
+                continue
+            for column in table.columns:
+                if not column.nullable:
+                    continue
+                if not any(
+                    fk.target_fullname in {"jobs.id", "public.jobs.id"}
+                    for fk in column.foreign_keys
+                ):
+                    continue
+                self.db.execute(update(table).where(column == job_id).values({column.key: None}))

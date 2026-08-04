@@ -17,6 +17,11 @@ const pkg = readFileSync(resolve(webSrc, "../package.json"), "utf8");
 assert.match(auth, /auth-boot/, "AuthProvider must render branded auth-boot screen while booting");
 assert.doesNotMatch(auth, /className=\"auth-loading\"/, "AuthProvider must leave bare auth-loading full-page text");
 assert.match(auth, /role=\"status\"|aria-live/, "Auth boot must expose polite status for assistive tech");
+assert.match(
+  auth,
+  /const loginBounce = authenticatedLoginBounceTarget\([\s\S]*?if \(loginBounce\) \{\s*return <AuthBootScreen/,
+  "Authenticated login bounce must keep AuthBootScreen instead of painting LoginPage"
+);
 
 assert.match(shared, /state-panel is-loading|is-loading/, "OpsState loading must use state-panel is-loading skeleton");
 assert.match(shared, /state-panel__spinner|state-panel__skeleton/, "OpsState loading must show spinner/skeleton chrome");

@@ -21,7 +21,9 @@ from src.media_pipeline.video_renderer.overlays import (
     OverlaySegment,
     expand_cover_rect,
     is_artifact_vi_text,
+    is_plausible_text_cover_segment,
 )
+from src.media_pipeline.video_renderer.render_runtime import FrameRenderState
 
 logger = logging.getLogger(__name__)
 
@@ -127,8 +129,8 @@ def build_text_mask(
     return mask
 
 
-_TIGHT_PAD_X = 0.010
-_TIGHT_PAD_Y = 0.008
+_TIGHT_PAD_X = 0.014
+_TIGHT_PAD_Y = 0.020
 _BLUR_KERNEL = 9
 # Search around OCR AABB so slightly biased/narrow boxes still catch full glyphs.
 _INK_SEARCH_PAD_X = 0.04
@@ -145,10 +147,30 @@ _INK_INSIDE_MIN_AREA_FRAC = 0.08
 # VI point size is larger than box_h because Pillow em-size > ink height.
 _VI_FONT_HEIGHT_FRAC = 1.25
 _VI_FONT_SIZE_CAP = 120
+# Phase-4 burn: fixed size relative to frame (never fit-to-ZH-box).
+GLOBAL_VI_FONT_FRAC = 0.04
+_GLOBAL_VI_FONT_MIN = 12
+# ROI Telea inpaint around each active text box.
+_INPAINT_ROI_PAD_PX = 15
+_INPAINT_DILATE_K = 7
+_INPAINT_RADIUS = 3
+# Mask pad (separate from ROI crop pad): stylized hard-sub outlines often
+# sit outside a tight Paddle AABB. ROI pad alone only grows Telea context.
+_MASK_PAD_Y_FRAC = 0.55
+_MASK_PAD_X_FRAC = 0.08
+_MASK_PAD_MIN_Y_PX = 10
+_MASK_PAD_MIN_X_PX = 4
+_MASK_PAD_MAX_Y_PX = 28
+_MASK_PAD_MAX_X_PX = 20
+
+
+def global_vi_font_size_px(frame_h: int) -> int:
+    """Fixed VI font size ≈ ``GLOBAL_VI_FONT_FRAC`` of frame height."""
+    return max(_GLOBAL_VI_FONT_MIN, int(round(float(frame_h) * GLOBAL_VI_FONT_FRAC)))
 
 
 def _vi_font_size_px(*, box_h_px: int) -> int:
-    """Pillow font size matched to OCR/snap box height."""
+    """Legacy helper (box-relative). Prefer ``global_vi_font_size_px`` for burn-in."""
     return max(8, min(_VI_FONT_SIZE_CAP, int(max(6, box_h_px) * _VI_FONT_HEIGHT_FRAC)))
 
 
@@ -1078,8 +1100,122 @@ def inpaint_frame(
     return cv2.inpaint(frame_bgr, mask, max(1, int(radius)), flags)
 
 
+def _mask_pad_xy_px(box_w: int, box_h: int) -> tuple[int, int]:
+    """Pixel pad applied to the inpaint *mask* (not only the ROI crop)."""
+    pad_y = int(round(float(max(1, box_h)) * _MASK_PAD_Y_FRAC))
+    pad_x = int(round(float(max(1, box_w)) * _MASK_PAD_X_FRAC))
+    pad_y = max(_MASK_PAD_MIN_Y_PX, min(_MASK_PAD_MAX_Y_PX, pad_y))
+    pad_x = max(_MASK_PAD_MIN_X_PX, min(_MASK_PAD_MAX_X_PX, pad_x))
+    return pad_x, pad_y
+
+
+def inpaint_segments_roi(
+    frame_bgr: np.ndarray,
+    segments: Sequence[OverlaySegment],
+    *,
+    pad_px: int = _INPAINT_ROI_PAD_PX,
+    dilate_k: int = _INPAINT_DILATE_K,
+    radius: int = _INPAINT_RADIUS,
+    state: FrameRenderState | None = None,
+) -> np.ndarray:
+    """
+    Per-ROI Telea inpaint (merged overlapping boxes; optional static-frame cache).
+
+    Dense UI panels are skipped here. Mask is expanded beyond the OCR AABB so
+    glyph outlines outside a tight detector box are covered; ``pad_px`` still
+    grows the Telea context crop separately.
+    """
+    import cv2
+
+    from src.media_pipeline.video_renderer.render_runtime import merge_pixel_rois
+
+    if frame_bgr is None or frame_bgr.size == 0 or not segments:
+        return frame_bgr
+    out = frame_bgr.copy()
+    h, w = out.shape[:2]
+    k = max(1, int(dilate_k))
+    kernel = np.ones((k, k), np.uint8)
+    pad = max(0, int(pad_px))
+
+    boxes: list[tuple[int, int, int, int]] = []
+    for seg in segments:
+        if seg.kind == DENSE_UI_KIND:
+            continue
+        x0, y0, x1, y1 = _norm_box_to_pixels(
+            float(seg.x),
+            float(seg.y),
+            float(seg.width),
+            float(seg.height),
+            frame_w=w,
+            frame_h=h,
+        )
+        if x1 > x0 and y1 > y0:
+            boxes.append((x0, y0, x1, y1))
+    if not boxes:
+        return out
+
+    # Mask-expanded boxes drive both the cover footprint and ROI merge.
+    mask_boxes: list[tuple[int, int, int, int]] = []
+    for x0, y0, x1, y1 in boxes:
+        mx, my = _mask_pad_xy_px(x1 - x0, y1 - y0)
+        mask_boxes.append(
+            (
+                max(0, x0 - mx),
+                max(0, y0 - my),
+                min(w, x1 + mx),
+                min(h, y1 + my),
+            )
+        )
+
+    # ROI crop = mask box + Telea neighbor pad.
+    padded = [
+        (
+            max(0, x0 - pad),
+            max(0, y0 - pad),
+            min(w, x1 + pad),
+            min(h, y1 + pad),
+        )
+        for x0, y0, x1, y1 in mask_boxes
+    ]
+    rois = merge_pixel_rois(padded, pad_px=0)
+    cache = state.inpaint_cache if state is not None else None
+
+    for rx0, ry0, rx1, ry1 in rois:
+        if rx1 <= rx0 + 1 or ry1 <= ry0 + 1:
+            continue
+        source_roi = out[ry0:ry1, rx0:rx1]
+        mask = np.zeros(source_roi.shape[:2], dtype=np.uint8)
+        for x0, y0, x1, y1 in mask_boxes:
+            lx0 = max(0, x0 - rx0)
+            ly0 = max(0, y0 - ry0)
+            lx1 = min(mask.shape[1], x1 - rx0)
+            ly1 = min(mask.shape[0], y1 - ry0)
+            if lx1 > lx0 and ly1 > ly0:
+                mask[ly0:ly1, lx0:lx1] = 255
+        mask = cv2.dilate(mask, kernel, iterations=1)
+        if int(mask.max()) == 0:
+            continue
+
+        def _compute(roi: np.ndarray = source_roi, m: np.ndarray = mask) -> np.ndarray:
+            return cv2.inpaint(roi.copy(), m, max(1, int(radius)), cv2.INPAINT_TELEA)
+
+        key = (int(rx0), int(ry0), int(rx1), int(ry1))
+        if cache is not None:
+            cleaned = cache.get_or_compute(
+                key=key,
+                source_roi=source_roi,
+                compute_fn=_compute,
+            )
+        else:
+            cleaned = _compute()
+        out[ry0:ry1, rx0:rx1] = cleaned
+    return out
+
+
 def _active_segments(overlays: Sequence[OverlaySegment], time_ms: int) -> list[OverlaySegment]:
-    return [seg for seg in overlays if int(seg.start_ms) <= time_ms < int(seg.end_ms)]
+    from src.media_pipeline.video_renderer.render_runtime import segment_is_active
+
+    return [seg for seg in overlays if segment_is_active(seg, time_ms)]
 
 
 def _expanded_boxes_for_segments(segments: Sequence[OverlaySegment]) -> list[tuple[float, float, float, float]]:
@@ -1091,74 +1227,45 @@ def draw_vi_overlays(
     segments: Sequence[OverlaySegment],
     *,
     fontfile: Path | str,
-    align: str = "left",
+    align: str = "center",
+    state: FrameRenderState | None = None,
 ) -> np.ndarray:
-    """Burn Vietnamese text with Pillow; default left-aligned to the OCR box."""
-    from PIL import Image, ImageDraw, ImageFont
+    """
+    Burn Vietnamese via cached RGBA glyphs; role-aware fixed size; clamp + collision.
 
+    Never scales font to fit the Chinese AABB. Empty ``text_vi`` → skip.
+    """
+    from src.media_pipeline.video_renderer.render_runtime import (
+        ViGlyphCache,
+        blit_rgba_bgr,
+        plan_vi_placements,
+    )
+
+    del align
     if not segments:
         return frame_bgr
     h, w = frame_bgr.shape[:2]
-    rgb = frame_bgr[:, :, ::-1].copy()
-    img = Image.fromarray(rgb, mode="RGB")
-    draw = ImageDraw.Draw(img)
-    font_path = Path(fontfile)
-    mode = (align or "left").strip().lower()
+    glyph_cache = state.glyph_cache if state is not None else ViGlyphCache()
+    burnable: list[OverlaySegment] = []
     for seg in segments:
         if seg.kind == DENSE_UI_KIND:
             continue
         text = (seg.text_vi or "").strip()
         if not text or is_artifact_vi_text(text):
             continue
-        # VI uses raw OCR AABB (cover pad stays on the mask path only).
-        x0 = float(seg.x)
-        y0 = float(seg.y)
-        bw = float(seg.width)
-        bh = float(seg.height)
-        # Match scanned Chinese label height; shrink if VI is wider than the box.
-        size = _vi_font_size_px(box_h_px=int(bh * h))
-        box_w = max(8, int(bw * w))
-        box_h = max(8, int(bh * h))
-        px = int(x0 * w)
-        py = int(y0 * h)
-        stroke = 1
-        try:
-            font = ImageFont.truetype(str(font_path), size=size)
-        except OSError:
-            font = ImageFont.load_default()
-        # Shrink until text fits width / height of the OCR box.
-        for _ in range(8):
-            bbox = draw.textbbox((0, 0), text, font=font, stroke_width=stroke)
-            tw = bbox[2] - bbox[0]
-            th = bbox[3] - bbox[1]
-            if tw <= box_w * 0.98 and th <= box_h * 0.98:
-                break
-            size = max(7, int(size * 0.92))
-            try:
-                font = ImageFont.truetype(str(font_path), size=size)
-            except OSError:
-                break
-        bbox = draw.textbbox((0, 0), text, font=font, stroke_width=stroke)
-        tw = bbox[2] - bbox[0]
-        th = bbox[3] - bbox[1]
-        if mode == "center":
-            tx = px + max(0, (box_w - tw) // 2) - bbox[0]
-        else:
-            # Left-align to OCR box — matches Chinese UI label layout.
-            tx = px + 1 - bbox[0]
-        ty = py + max(0, (box_h - th) // 2) - bbox[1]
-        fill_rgb, stroke_rgb = _vi_colors_for_box(
-            frame_bgr, px=px, py=py, box_w=box_w, box_h=box_h
-        )
-        draw.text(
-            (tx, ty),
-            text,
-            font=font,
-            fill=fill_rgb,
-            stroke_width=stroke,
-            stroke_fill=stroke_rgb,
-        )
-    out = np.asarray(img)[:, :, ::-1].copy()
+        burnable.append(seg)
+    if not burnable:
+        return frame_bgr
+    out = frame_bgr.copy()
+    placements = plan_vi_placements(
+        burnable,
+        frame_w=w,
+        frame_h=h,
+        fontfile=fontfile,
+        glyph_cache=glyph_cache,
+    )
+    for place in placements:
+        blit_rgba_bgr(out, place.rgba, x0=place.x0, y0=place.y0)
     return out
 
 
@@ -1168,50 +1275,9 @@ def _expand_segments_width_for_vi(
     *,
     fontfile: Path | str,
 ) -> list[OverlaySegment]:
-    """Grow box width to the right when VI text is wider than the OCR AABB."""
-    from PIL import Image, ImageDraw, ImageFont
-
-    if not segments:
-        return []
-    h, w = frame_bgr.shape[:2]
-    probe = Image.new("RGB", (max(8, w), max(8, h)), (0, 0, 0))
-    draw = ImageDraw.Draw(probe)
-    font_path = Path(fontfile)
-    out: list[OverlaySegment] = []
-    for seg in segments:
-        if seg.kind == DENSE_UI_KIND:
-            out.append(seg)
-            continue
-        text = (seg.text_vi or "").strip()
-        if not text or is_artifact_vi_text(text):
-            out.append(seg)
-            continue
-        bw = float(seg.width)
-        bh = float(seg.height)
-        size = _vi_font_size_px(box_h_px=int(bh * h))
-        try:
-            font = ImageFont.truetype(str(font_path), size=size)
-        except OSError:
-            font = ImageFont.load_default()
-        bbox = draw.textbbox((0, 0), text, font=font, stroke_width=1)
-        tw = bbox[2] - bbox[0]
-        need_w = max(float(seg.width), (tw + 4) / float(w))
-        # Keep left edge; grow right, clamp to frame.
-        max_w = max(0.01, 1.0 - float(seg.x) - 0.01)
-        out.append(
-            OverlaySegment(
-                start_ms=seg.start_ms,
-                end_ms=seg.end_ms,
-                x=float(seg.x),
-                y=float(seg.y),
-                width=min(max_w, max(float(seg.width), need_w)),
-                height=float(seg.height),
-                text_vi=seg.text_vi,
-                kind=seg.kind,
-                authority_bounds=seg.authority_bounds,
-            )
-        )
-    return out
+    """No-op: VI no longer grows cover width to fit text (fixed font size)."""
+    del frame_bgr, fontfile
+    return list(segments)
 
 
 def process_frame_bgr(
@@ -1219,32 +1285,43 @@ def process_frame_bgr(
     segments: Sequence[OverlaySegment],
     *,
     fontfile: Path | str,
+    state: FrameRenderState | None = None,
 ) -> np.ndarray:
-    """Cover Chinese (dense panel and/or OCR boxes) → burn VI on label boxes.
+    """Cover Chinese (ROI inpaint or dense panel) → burn VI at fixed size.
 
-    Dense endcards: wipe the near-full ``dense_ui`` panel (OCR authority for VI —
-    no ink-snap, which otherwise drifts off white-card labels). Sparse hard-sub /
-    title: snap VI to ink inside each OCR box, then local cover.
+    Sparse hard-sub / title / ui: merged-ROI Telea inpaint (+ optional cache).
+    Dense endcards: panel wipe first, then ROI inpaint on label boxes + VI.
+    Empty ``text_vi`` → inpaint only (Pillow skipped).
     """
     if not segments:
         return frame_bgr
     panel_segs = [seg for seg in segments if seg.kind == DENSE_UI_KIND]
-    text_segs = [seg for seg in segments if seg.kind != DENSE_UI_KIND]
+    # Drop detector false-positives that are too large to be text lines
+    # (general across videos — prevents wiping food / mid-frame texture).
+    text_segs = [
+        seg
+        for seg in segments
+        if seg.kind != DENSE_UI_KIND and is_plausible_text_cover_segment(seg)
+    ]
     if not text_segs and not panel_segs:
         return frame_bgr
     if panel_segs:
-        # Full-screen Chinese UI: panel wipe + VI at OCR boxes (no refine drift).
         cover_segs = list(panel_segs) + list(text_segs)
         mask = build_cover_mask(frame_bgr, cover_segs, include_dense_panel=True)
         cleaned = apply_blur_cover(frame_bgr, mask)
-        if not text_segs:
-            return cleaned
-        return draw_vi_overlays(cleaned, text_segs, fontfile=fontfile, align="left")
-    text_segs = refine_segments_to_ink_inside_ocr(frame_bgr, text_segs)
-    mask = _build_text_cover_mask(frame_bgr, text_segs)
-    cleaned = apply_blur_cover(frame_bgr, mask)
-    vi_segs = refine_segments_to_ink(frame_bgr, text_segs)
-    return draw_vi_overlays(cleaned, vi_segs, fontfile=fontfile, align="left")
+        if text_segs:
+            cleaned = inpaint_segments_roi(cleaned, text_segs, state=state)
+            return draw_vi_overlays(
+                cleaned, text_segs, fontfile=fontfile, align="center", state=state
+            )
+        return cleaned
+
+    # Sparse cover: OCR AABB + modest Telea pad only (no ink-union blur).
+    # Ink refine + blur previously painted peach blobs on food for false UI boxes.
+    cleaned = inpaint_segments_roi(frame_bgr, text_segs, state=state)
+    return draw_vi_overlays(
+        cleaned, text_segs, fontfile=fontfile, align="center", state=state
+    )
 
 
 def render_image_opencv_inpaint(
@@ -1413,6 +1490,7 @@ def render_video_opencv_inpaint(
     frame_width: int | None = None,
     frame_height: int | None = None,
     attached_pic: Path | str | None = None,
+    sample_dir: Path | str | None = None,
 ) -> Path:
     """
     Decode → per-frame inpaint+VI (passthrough when idle) → encode with anti-hash.
@@ -1567,20 +1645,46 @@ def render_video_opencv_inpaint(
         bar = tqdm.tqdm(total=total_frames, desc="inpaint", unit="frame", leave=False)
     pipe_error: BaseException | None = None
 
+    from src.media_pipeline.video_renderer.render_runtime import (
+        FrameRenderState,
+        frame_index_to_ms,
+        write_render_sample_if_due,
+    )
+
+    render_state = FrameRenderState()
+
     try:
         while True:
             raw = read_exact_bytes(decoder.stdout, frame_bytes)
             if len(raw) < frame_bytes:
                 break
-            frame = np.frombuffer(raw, dtype=np.uint8).reshape((height, width, 3)).copy()
-            time_ms = int(round(frame_index * 1000.0 / fps))
+            time_ms = frame_index_to_ms(frame_index, fps)
             active = _active_segments(overlays, time_ms)
-            out_frame = process_frame_bgr(frame, active, fontfile=font)
-            try:
-                encoder.stdin.write(out_frame.tobytes())
-            except BrokenPipeError as exc:
-                pipe_error = exc
-                break
+            # 1) Idle passthrough — no BGR copy / inpaint / Pillow.
+            if not active:
+                try:
+                    encoder.stdin.write(raw)
+                except BrokenPipeError as exc:
+                    pipe_error = exc
+                    break
+            else:
+                frame = np.frombuffer(raw, dtype=np.uint8).reshape((height, width, 3)).copy()
+                out_frame = process_frame_bgr(
+                    frame, active, fontfile=font, state=render_state
+                )
+                write_render_sample_if_due(
+                    sample_dir,
+                    frame_bgr=out_frame,
+                    frame_index=frame_index,
+                    time_ms=time_ms,
+                    active=active,
+                    state=render_state,
+                )
+                try:
+                    encoder.stdin.write(out_frame.tobytes())
+                except BrokenPipeError as exc:
+                    pipe_error = exc
+                    break
             frame_index += 1
             if bar is not None:
                 bar.update(1)

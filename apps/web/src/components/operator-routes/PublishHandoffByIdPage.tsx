@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { fetchPublishHandoff } from "../../lib/api";
+import { useT } from "../../lib/i18n";
 import { useLatestRequest, type LatestRequestMode } from "../../lib/useLatestRequest";
 import type { PublishHandoff } from "../../types/export-handoff";
 import { OperatorStudioShell } from "../app-shell/OperatorStudioShell";
@@ -10,6 +11,7 @@ import { AsyncContentBoundary } from "../shared/AsyncContentBoundary";
 import { OpsDetailPanel, OpsDetailSection, OpsMetadataList, OpsStatePanel, OpsSummaryCards, statusTone, type OpsSummaryCardItem } from "../ops-console/OpsShared";
 
 export function PublishHandoffByIdPage({ handoffId }: { handoffId: string }) {
+  const t = useT();
   const [handoff, setHandoff] = useState<PublishHandoff | null>(null);
   const request = useLatestRequest();
 
@@ -44,7 +46,8 @@ export function PublishHandoffByIdPage({ handoffId }: { handoffId: string }) {
       <AsyncContentBoundary
         refreshing={request.refreshing}
         status={boundaryStatus}
-        skeleton={<OpsStatePanel detail="Loading manual handoff payload and diagnostics." title="Loading Publish Handoff" variant="loading" />}
+        skeletonVariant="detail"
+        loadingLabel={t("opsPublishHandoffs.loadingDetail")}
         errorState={
           <OpsStatePanel
             action={<button type="button" onClick={() => void load("initial")}>Retry</button>}

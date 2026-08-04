@@ -1,0 +1,64 @@
+{
+  "schema_version": "pipeline_final_regression_fixture_v1",
+  "policy_version": "phase4_final_hardening_v1",
+  "status": "READY_FOR_VALIDATION",
+  "cases": [
+    {
+      "case_id": "local_7659353684397302207",
+      "artifact_root": "apps/api/regression_runs/pipeline_v22_remediation_v22_1_20260729/local_7659353684397302207",
+      "assertions": {
+        "source_intrinsic": {
+          "region_id": "source_intrinsic_v22_72_1",
+          "track_ids": [
+            "sub_05",
+            "sub_07",
+            "p4out_1e825348141c",
+            "p4out_a4cbe3b8648a",
+            "p4out_d0f2129fec73",
+            "p4out_09b49dfa8179",
+            "p4out_4e96868f71ed",
+            "p4out_47a32eb10b9b",
+            "p4out_de7ef72062bd",
+            "p4out_8ed87770bc03",
+            "p4out_183c6dbbbc5d"
+          ],
+          "roi": {
+            "x": 0.41,
+            "y": 0.25,
+            "width": 0.15,
+            "height": 0.18
+          },
+          "sample_frames": [228, 240, 252],
+          "max_mean_abs_delta": 3.0,
+          "max_changed_fraction_gt12": 0.001
+        },
+        "semantic_duplicate": {
+          "text": "Khối lượng tịnh: 150 g",
+          "frame_window": [200, 270],
+          "max_rendered_labels": 0
+        },
+        "dense_group_layout": {
+          "track_ids": [
+            "sub_12",
+            "sub_13",
+            "sub_14",
+            "sub_15",
+            "sub_16",
+            "sub_17",
+            "sub_18",
+            "sub_19",
+            "sub_20"
+          ],
+          "expected_side": "left",
+          "max_span_ratio": 1.2
+        },
+        "audio": {
+          "max_atempo": 1.2,
+          "background_gain": 1.0,
+          "duration_tolerance_seconds": 0.08
+        }
+      }
+    }
+  ],
+  "fixture_sha256": "0f029a691f2eea3200b09ce5426b4362957d4b419b25647b0690b7dd31118b0a"
+}

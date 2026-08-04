@@ -60,6 +60,8 @@ class JobResponse(BaseModel):
     attempts: int
     max_attempts: int
     retryable: bool
+    locked_by: str | None = None
+    locked_at: datetime | None = None
     started_at: datetime | None
     finished_at: datetime | None
     error_code: str | None
@@ -74,4 +76,3 @@ class JobListResponse(BaseModel):
     total_count: int
     limit: int
     offset: int
-

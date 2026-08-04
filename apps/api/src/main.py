@@ -9,9 +9,14 @@ os.environ.setdefault("FLAGS_enable_pir_api", "0")
 os.environ.setdefault("PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT", "0")
 
 from src.api.routes.analytics import router as analytics_router
+from src.api.routes.affiliate_intelligence import router as affiliate_intelligence_router
+from src.api.routes.affiliate_intelligence import public_router as affiliate_intelligence_public_router
+from src.api.routes.affiliate_comments import router as affiliate_comments_router
 from src.api.routes.auth import router as auth_router
 from src.api.routes.audio_analysis import router as audio_analysis_router
 from src.api.routes.candidates import router as candidates_router
+from src.api.routes.content_intelligence import router as content_intelligence_router
+from src.api.routes.growth_intelligence import router as growth_intelligence_router
 from src.api.routes.capture_inbox import public_router as capture_inbox_public_router
 from src.api.routes.capture_inbox import router as capture_inbox_router
 from src.api.routes.downloads import router as downloads_router
@@ -22,8 +27,10 @@ from src.api.routes.intake import router as intake_router
 from src.api.routes.export_handoff import router as export_handoff_router
 from src.api.routes.jobs import router as jobs_router
 from src.api.routes.operations import router as operations_router
+from src.api.routes.ops_home import router as ops_home_router
 from src.api.routes.optimization import router as optimization_router
 from src.api.routes.ocr import router as ocr_router
+from src.api.routes.operator_home import router as operator_home_router
 from src.api.routes.pipeline_dashboard import router as pipeline_dashboard_router
 from src.api.routes.publish import router as publish_router
 from src.api.routes.publish_control import router as publish_control_router
@@ -49,9 +56,13 @@ def create_app() -> FastAPI:
 
     protected_dependencies = [Depends(get_current_principal)] if settings.api_auth_required else []
     protected_routers = [
+        affiliate_intelligence_router,
+        affiliate_comments_router,
         analytics_router,
         audio_analysis_router,
         candidates_router,
+        content_intelligence_router,
+        growth_intelligence_router,
         capture_inbox_router,
         downloads_router,
         douyin_accounts_router,
@@ -60,8 +71,10 @@ def create_app() -> FastAPI:
         export_handoff_router,
         jobs_router,
         operations_router,
+        ops_home_router,
         optimization_router,
         ocr_router,
+        operator_home_router,
         pipeline_dashboard_router,
         publish_control_router,
         publish_router,
@@ -74,6 +87,7 @@ def create_app() -> FastAPI:
 
     app.include_router(auth_router)
     app.include_router(capture_inbox_public_router)
+    app.include_router(affiliate_intelligence_public_router)
     app.include_router(internal_douyin_download_router)
     for router in protected_routers:
         app.include_router(router, dependencies=protected_dependencies)

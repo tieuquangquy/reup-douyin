@@ -57,12 +57,12 @@ STEP_TEMPLATES: dict[JobType, tuple[StepTemplate, ...]] = {
         StepTemplate("finalize", "Finalize", 8),
     ),
     JobType.ANALYZE_OCR: (
-        StepTemplate("sample_frames", "Sample frames for OCR", 0),
-        StepTemplate("detect_text", "Detect on-screen text", 1),
-        StepTemplate("group_objects", "Group hard-sub events", 2),
-        StepTemplate("remove_hardsub", "Blur hard-sub band", 3),
-        StepTemplate("persist_outputs", "Persist OCR outputs", 4),
-        StepTemplate("finalize", "Finalize", 5),
+        StepTemplate("sample_frames", "Prepare Phase 1 v58 geometry", 0),
+        StepTemplate("detect_text", "Run local Phase 2 OCR", 1),
+        StepTemplate("group_objects", "Build hash-bound OCR review", 2),
+        StepTemplate("remove_hardsub", "Prepare localization authority", 3),
+        StepTemplate("persist_outputs", "Persist quality localization artifacts", 4),
+        StepTemplate("finalize", "Finalize OCR checkpoint", 5),
     ),
     JobType.BUILD_TRANSLATION_DRAFT: (
         StepTemplate("load_transcript", "Load approved transcript beats", 0),
@@ -83,10 +83,10 @@ STEP_TEMPLATES: dict[JobType, tuple[StepTemplate, ...]] = {
         StepTemplate("finalize", "Finalize", 9),
     ),
     JobType.RENDER_PREVIEW: (
-        StepTemplate("prepare_timeline", "Prepare timeline placeholder", 0),
-        StepTemplate("render_preview", "Render preview placeholder", 1),
-        StepTemplate("persist_output", "Persist output placeholder", 2),
-        StepTemplate("finalize", "Finalize", 3),
+        StepTemplate("prepare_timeline", "Apply translation review", 0),
+        StepTemplate("render_preview", "Build adaptive visual preview", 1),
+        StepTemplate("persist_output", "Persist preview and Output QA", 2),
+        StepTemplate("finalize", "Finalize visual checkpoint", 3),
     ),
     JobType.RENDER_FINAL: (
         StepTemplate("validate_input", "Validate input", 0),
@@ -125,6 +125,43 @@ STEP_TEMPLATES: dict[JobType, tuple[StepTemplate, ...]] = {
         StepTemplate("apply_reconciliation_rules", "Apply reconciliation rules", 3),
         StepTemplate("persist_updates", "Persist reconciliation result", 4),
         StepTemplate("finalize", "Finalize", 5),
+    ),
+    JobType.COLLECT_PUBLICATION_METRICS: (
+        StepTemplate("validate_publication", "Validate platform publication", 0),
+        StepTemplate("validate_account", "Validate account and metrics cooldown", 1),
+        StepTemplate("collect_and_persist_snapshot", "Collect and persist metric snapshot", 2),
+        StepTemplate("finalize", "Finalize metric collection", 3),
+    ),
+    JobType.CLASSIFY_CONTENT: (
+        StepTemplate("validate_publication", "Validate publication and taxonomy", 0),
+        StepTemplate("collect_evidence", "Collect caption, transcript, and OCR evidence", 1),
+        StepTemplate("classify_and_persist", "Classify and persist topic result", 2),
+        StepTemplate("finalize", "Finalize content classification", 3),
+    ),
+    JobType.MATCH_AFFILIATE_PRODUCTS: (
+        StepTemplate("validate_classification", "Validate approved topic classification", 0),
+        StepTemplate("load_catalog", "Load active affiliate catalog", 1),
+        StepTemplate("match_and_persist", "Match products and persist review suggestions", 2),
+        StepTemplate("finalize", "Finalize product matching", 3),
+    ),
+    JobType.CALCULATE_GROWTH_SCORE: (
+        StepTemplate("validate_publication", "Validate platform publication", 0),
+        StepTemplate("load_metric_evidence", "Load stable metric evidence", 1),
+        StepTemplate("calculate_and_persist", "Calculate and persist Growth Score", 2),
+        StepTemplate("finalize", "Finalize Growth Score", 3),
+    ),
+    JobType.POST_AFFILIATE_COMMENT: (
+        StepTemplate("validate_approval", "Validate operator approval and opportunity gates", 0),
+        StepTemplate("resolve_page_credential", "Resolve Facebook Page credential", 1),
+        StepTemplate("post_comment", "Post affiliate comment to Facebook Reel", 2),
+        StepTemplate("persist_result", "Persist external comment result", 3),
+        StepTemplate("finalize", "Finalize affiliate comment placement", 4),
+    ),
+    JobType.VERIFY_AFFILIATE_COMMENT: (
+        StepTemplate("validate_target", "Validate posted comment target", 0),
+        StepTemplate("verify_comment_and_link", "Verify Facebook comment and affiliate link", 1),
+        StepTemplate("persist_result", "Persist verification result", 2),
+        StepTemplate("finalize", "Finalize comment verification", 3),
     ),
 }
 

@@ -1,6 +1,4 @@
-/**
- * Pipeline Dashboard — next-work triage (no duplicate attention side column).
- */
+/** Pipeline Dashboard — flat Operations Board, distinct from Home. */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -21,88 +19,98 @@ const pkg = readFileSync(resolve(webSrcDir, "../package.json"), "utf8");
 assert.match(routeSource, /PipelineDashboardPage/, "The /ops/pipeline route must render PipelineDashboardPage");
 assert.match(apiSource, /fetchPipelineDashboard/, "API client must expose fetchPipelineDashboard");
 assert.match(apiSource, /\/pipeline-dashboard/, "API client must call the operator-accessible aggregation endpoint");
-assert.doesNotMatch(apiSource, /\/ops\/pipeline-dashboard/, "Pipeline dashboard API must not stay under Ops-only /ops prefix");
-assert.match(operationsTypesSource, /PipelineDashboardResponse/, "Operations types must include the pipeline dashboard response contract");
-assert.match(operationsTypesSource, /PipelineStageKey/, "Operations types must define typed pipeline stage keys");
-assert.match(navSource, /\/ops\/pipeline/, "Navigation config must expose the pipeline dashboard route");
-assert.match(navSource, /nav\.pipelineDashboard/, "Navigation config must include a stable pipeline dashboard label key");
+assert.doesNotMatch(apiSource, /\/ops\/pipeline-dashboard/, "Pipeline API must not stay under the Ops-only prefix");
+assert.match(navSource, /\/ops\/pipeline/, "Navigation must expose the pipeline route");
+
+assert.match(
+  operationsTypesSource,
+  /"capture"[\s\S]*"review"[\s\S]*"reup_queue"[\s\S]*"download"[\s\S]*"audio_analysis"[\s\S]*"translate"[\s\S]*"tts"[\s\S]*"ocr"[\s\S]*"render"[\s\S]*"output_review"[\s\S]*"draft"[\s\S]*"export_package"[\s\S]*"publish_handoff"/,
+  "PipelineStageKey must define the canonical 13-stage order",
+);
+assert.match(
+  operationsTypesSource,
+  /waiting_count[\s\S]*running_count[\s\S]*review_count[\s\S]*failed_count[\s\S]*ready_count[\s\S]*total_count/,
+  "Stage contract must expose five exclusive workload buckets and a total",
+);
+assert.match(operationsTypesSource, /output_qa_summary/, "Pipeline contract must expose canonical Output QA buckets");
 
 assert.match(pageSource, /OperatorStudioShell/, "Pipeline must keep OperatorStudioShell");
-assert.match(pageSource, /TopbarRefreshButton/, "Pipeline must put Refresh in the Topbar");
-assert.match(pageSource, /ops-pipeline-page/, "Pipeline must use scoped ops-pipeline-page shell");
-assert.match(pageSource, /ops-pipeline-freshness[\s\S]*ops-pipeline-kpis[\s\S]*ops-pipeline-toolbar[\s\S]*ops-pipeline-next/, "Freshness must render first, then KPI + triage, then Next work");
-assert.match(pageSource, /slice\(0,\s*3\)|NEXT_WORK_LIMIT/, "Next work must cap to top 3 attention items");
-assert.match(pageSource, /severity === "critical"|critical/, "Next work must prioritize critical severity");
-assert.match(pageSource, /ops-pipeline-kpis/, "Pipeline must render scoped KPI band");
-assert.match(pageSource, /ops-pipeline-kpi/, "Pipeline must use scoped KPI cards");
-assert.match(pageSource, /active_backlog|attention_items|published/, "Pipeline must keep high-signal KPIs");
-assert.doesNotMatch(pageSource, /summary_metrics\.map/, "Pipeline must not dump all summary_metrics as KPIs");
-assert.match(pageSource, /ops-pipeline-toolbar|ops-pipeline-actions/, "Pipeline must render triage toolbar");
-assert.match(pageSource, /ops-pipeline-stages|ops-pipeline-stage/, "Pipeline must render stages sheet");
-assert.match(pageSource, /attentionByStage|inlineAttention/, "Stages must still receive attention grouping for hot/blocked tint");
-assert.doesNotMatch(pageSource, /opsPipeline\.attentionCount/, "Stages must not keep a duplicate Attention count column");
-assert.doesNotMatch(pageSource, /ops-pipeline-attention/, "Pipeline must not keep a duplicate attention side panel");
-assert.doesNotMatch(pageSource, /has-attention/, "Pipeline must not split layout for attention side column");
-assert.match(pageSource, /ops-pipeline-activity|recent_activity/, "Pipeline must surface recent activity");
-assert.match(pageSource, /humanizeStatus|humanizeDetail/, "Activity detail must humanize raw status strings");
-assert.match(pageSource, /ops-pipeline-footnote|readOnlyFootnote/, "Pipeline must footnote read-only honesty");
-assert.match(pageSource, /stage\.href/, "Stage rows must deep-link via authority href");
-assert.match(pageSource, /item\.href/, "Next work / activity must keep authority hrefs");
-assert.match(pageSource, /\/ops\/extensions\/douyin\/capture-inbox/, "Toolbar must link Capture Inbox");
-assert.match(pageSource, /\/selection\/review-board/, "Toolbar must link Review Board");
-assert.match(pageSource, /\/selection\/reup-queue/, "Toolbar must link Reup Queue");
-assert.match(pageSource, /\/publishing\/drafts/, "Toolbar must link Publish Drafts (not Ops publish-health)");
-assert.doesNotMatch(pageSource, /\/ops\/publish-health/, "Pipeline must not deep-link Ops Publish Health");
-assert.doesNotMatch(pageSource, /OpsNextActionBanner/, "Pipeline must not use OpsNextActionBanner");
-assert.doesNotMatch(pageSource, /OpsSummaryCards/, "Pipeline must not use OpsSummaryCards");
-assert.doesNotMatch(pageSource, /OpsWorkflowContext/, "Pipeline must not use OpsWorkflowContext");
-assert.doesNotMatch(pageSource, /OpsItemCard/, "Pipeline must not use OpsItemCard stage soup");
-assert.doesNotMatch(pageSource, /pipeline-stage-strip/, "Pipeline must not use legacy stage strip");
-assert.doesNotMatch(pageSource, /pipeline-quick-link-grid/, "Pipeline must not dump quick-link grid");
-assert.doesNotMatch(pageSource, /<OpsMetricCard/, "Pipeline must not use OpsMetricCard");
-assert.doesNotMatch(pageSource, /health-table/, "Pipeline must not use health-table");
-assert.doesNotMatch(pageSource, /PageShell/, "Pipeline must not nest PageShell under OperatorStudioShell");
-assert.doesNotMatch(pageSource, /cookie|secret|token/i, "Pipeline UI must not expose secrets, cookies, or tokens");
+assert.match(pageSource, /TopbarRefreshButton/, "Refresh must stay in the topbar");
+assert.match(pageSource, /AsyncContentBoundary/, "Pipeline must preserve loading, refresh, and error states");
+assert.match(pageSource, /ops-pipeline-control-strip[\s\S]*ops-pipeline-board[\s\S]*ops-pipeline-inspector/, "Control strip, Pipeline Composition, and Stage Inspector must define the primary hierarchy");
+assert.match(pageSource, /ops-pipeline-studio-grid[\s\S]*ops-pipeline-board[\s\S]*ops-pipeline-inspector/, "Desktop must compose Pipeline Composition and Stage Focus Rail in one studio grid");
+assert.match(pageSource, /active_backlog[\s\S]*attention_items[\s\S]*running/, "Control strip must keep the three decision-oriented point-in-time metrics");
+assert.doesNotMatch(pageSource, /\["active_backlog", "attention_items", "running", "ready_downstream"\]/, "Control strip must not repeat downstream readiness outside the stage chart");
+assert.match(pageSource, /function PipelineMetricIcon[\s\S]*attention_items[\s\S]*running/, "Control metrics must use dedicated semantic icons");
+assert.match(pageSource, /PipelineClockIcon[\s\S]*ops-pipeline-control-strip__time/, "Snapshot freshness must include a compact clock icon");
+assert.match(pageSource, /metric\.value > 0[\s\S]*has-value/, "Activity effects must be gated by real metric values");
+assert.doesNotMatch(pageSource, /byKey\.get\("published"\)|metric\.key === "published"/, "Lifetime Published must not be compared with point-in-time metrics");
 
-assert.match(globalCssSource, /\.ops-pipeline-page/, "CSS must define Pipeline page shell");
-assert.match(globalCssSource, /\.ops-pipeline-kpis/, "CSS must define Pipeline KPI grid");
-assert.match(globalCssSource, /\.ops-pipeline-next/, "CSS must define Next work strip");
-assert.match(globalCssSource, /\.ops-pipeline-chip\s*\{[^}]*font-weight:\s*400/, "Pipeline chips must not use bold weight");
-assert.doesNotMatch(globalCssSource, /\.ops-pipeline-main\.has-attention/, "CSS must not keep attention side split");
-assert.match(globalCssSource, /\.ops-pipeline-footnote/, "CSS must define footnote");
-assert.match(globalCssSource, /\.ops-pipeline-kpi strong\s*\{[^}]*font-size:\s*1\.[5-8]/, "KPI values must stay compact display type (not oversized)");
-assert.match(globalCssSource, /\.ops-pipeline-num/, "Stage/next-work numeric values must use ops-pipeline-num");
-assert.match(pageSource, /ops-pipeline-num/, "Pipeline must mark numeric figures for emphasis");
-assert.match(pageSource, /ops-pipeline-next__body/, "Next work items must use compact body layout");
-assert.match(globalCssSource, /\.ops-pipeline-next__item\s*\{[^}]*grid-template-columns/, "Next work rows must use compact grid arrangement");
-assert.match(globalCssSource, /\.ops-pipeline-stage\s*\{[^}]*padding:\s*0\.[35]/, "Stage worklist rows must stay compact");
-assert.match(globalCssSource, /\.ops-pipeline-stage__primary\s*\{[^}]*flex-direction:\s*row|\.ops-pipeline-stage__primary,\s*\n\.ops-pipeline-stage__secondary\s*\{[^}]*display:\s*flex/, "Stage metrics must stay inline for density");
-assert.doesNotMatch(globalCssSource, /\.ops-pipeline-kpi strong\s*\{[^}]*font-size:\s*2\./, "KPI values must not rely on oversized display type");
-assert.match(pageSource, /PipelineOpenIcon|ops-pipeline-open-icon/, "Open actions must render an icon glyph");
-assert.match(pageSource, /aria-label=\{label\}/, "Open icon links must keep accessible label");
-assert.match(pageSource, /label=\{t\("opsPipeline\.open"\)\}/, "Open icon links must use opsPipeline.open for accessibility");
-assert.doesNotMatch(pageSource, />\{t\("opsPipeline\.open"\)\}</, "Open actions must not show text label inside the link");
-assert.doesNotMatch(pageSource, /ops-pipeline-stage__meter|ops-pipeline-stage__bar|stageFillPercent|maxPrimary/, "Stage rows must not use fake relative progress meters");
-assert.match(pageSource, /ops-pipeline-stage__primary/, "Stage rows must emphasize primary count + label");
-assert.match(pageSource, /ops-pipeline-stage__secondary/, "Stage rows must keep secondary signal");
-assert.match(pageSource, /ops-pipeline-stage__identity/, "Stage rows must keep name + status identity cluster");
-assert.doesNotMatch(pageSource, /ops-pipeline-stage is-head|is-head" aria-hidden/, "Stage sheet must not keep multi-column table headers");
-assert.match(pageSource, /ops-pipeline-activity__body/, "Activity items must use compact body layout");
-assert.match(pageSource, /ops-pipeline-activity__trail/, "Activity must cluster timestamp + open action");
-assert.match(globalCssSource, /\.ops-pipeline-activity__item\s*\{[^}]*grid-template-columns/, "Activity rows must use compact grid arrangement");
-assert.match(globalCssSource, /\.ops-pipeline-activity__item\s*\{[^}]*border-bottom|\.ops-pipeline-activity__item \+|\.ops-pipeline-activity__item:not\(:last-child\)/, "Activity sheet must use divider rows instead of separate cards");
-assert.match(pageSource, /activityStageTone|toneForStageKey/, "Activity stage chips must use soft per-stage tones");
-assert.match(globalCssSource, /\.ops-pipeline-stage\.tone-|\.ops-pipeline-stage\.is-blocked|border-left/, "Stage rows must use status accent instead of full wash noise");
-assert.match(pageSource, /stage\.status === "blocked"/, "Stage hot tint must include blocked status");
-assert.doesNotMatch(pageSource, /attention_count > 0/, "Stage row tint must not light up for every attention_count");
-assert.match(pageSource, /M9 6l6 6-6 6|M10 6l6 6-6 6/, "Open icon must be an internal chevron, not external-link");
-assert.match(pageSource, /ops-pipeline-next__trail/, "Next work must cluster stage + count beside the open action");
-assert.match(pageSource, /formatCompactActivityTime|toLocaleTimeString/, "Activity timestamps must use a compact formatter");
+assert.match(pageSource, /function PipelineFlowMap/, "Pipeline must render a dedicated visual flow map");
+assert.match(pageSource, /ops-pipeline-composition__node-state[\s\S]*ops-pipeline-composition__track[\s\S]*ops-pipeline-composition__segment/, "Each stage node must expose status and a stacked workload strip");
+assert.match(pageSource, /PIPELINE_GROUPS[\s\S]*intake[\s\S]*production[\s\S]*delivery/, "The 13 stages must be grouped into Intake, Production, and Delivery");
+assert.match(pageSource, /stage\.waiting_count[\s\S]*stage\.running_count[\s\S]*stage\.review_count[\s\S]*stage\.failed_count[\s\S]*stage\.ready_count/, "Board cells must read canonical stage buckets");
+assert.match(pageSource, /value \/ stage\.total_count/, "Stacked segments must use the stage total as their composition denominator");
+assert.match(pageSource, /stage\.total_count > 0[\s\S]*noWorkload/, "Zero-workload stages must render an explicit empty state");
+assert.match(pageSource, /selectedStageKey[\s\S]*setSelectedStageKey/, "Selecting a stage must update the Stage Inspector locally");
+assert.match(pageSource, /aria-pressed=\{selected\}/, "Stage selection must expose its current state to assistive technology");
+assert.match(pageSource, /function BottleneckSpotlight[\s\S]*featured[\s\S]*remaining/, "Pipeline must promote the largest bottleneck into a visual spotlight");
+assert.match(pageSource, /function OutputQaGauge[\s\S]*conic-gradient[\s\S]*summary\.total|function OutputQaGauge[\s\S]*summary\.total[\s\S]*conic-gradient/, "Output QA must render as a canonical gauge distribution");
+assert.match(pageSource, /href="\/production\/output-review"/, "Output QA chart must link to the operator review authority");
+assert.match(pageSource, /function ActionDeck[\s\S]*ops-pipeline-action-deck__card/, "Exceptions must render as a compact action deck");
+assert.match(pageSource, /ACTION_DECK_LIMIT\s*=\s*3[\s\S]*items\.slice\(0, ACTION_DECK_LIMIT\)[\s\S]*item\.recommended_action/, "Action Deck must show three action-oriented priorities instead of duplicating every bottleneck");
+assert.match(pageSource, /function ActivityPulse[\s\S]*clusterActivity/, "Recent events must render as a clustered activity pulse");
+assert.match(pageSource, /JSON\.stringify\(\[item\.stage_key, item\.title, item\.detail, item\.href\]\)/, "Activity clustering must only combine fully equivalent event signals");
+assert.match(pageSource, /ACTIVITY_CLUSTER_WINDOW_MS\s*=\s*2 \* 60 \* 1000[\s\S]*withinClusterWindow/, "Equivalent activity signals must only cluster inside the two-minute time window");
+assert.match(pageSource, /time\(earliest\) === time\(latest\)[\s\S]*formatCompactActivityTime/, "Activity ranges within the same displayed minute must collapse to one timestamp");
+assert.match(pageSource, /activity-pulse__summary[\s\S]*stageKeyLabel\(stageKey, t\)/, "Activity summary icons must keep visible stage labels");
 
-assert.match(en, /"opsPipeline"/, "en.json must define opsPipeline namespace");
-assert.match(en, /"nextWork"|"stages"|"recentActivity"/, "en.json must define next-work labels");
-assert.match(vi, /"opsPipeline"/, "vi.json must define opsPipeline namespace");
-assert.match(vi, /"nextWork"|"stages"|"recentActivity"/, "vi.json must define next-work labels");
-assert.match(pkg, /reup-pipeline-dashboard\.test\.ts|ops-pipeline-ui\.test\.ts/, "package.json must run pipeline UI test");
+assert.doesNotMatch(pageSource, /TRIAGE_LINKS/, "Toolbar must not keep a second hardcoded quick-link authority");
+assert.doesNotMatch(pageSource, /\/ops\/publish-health|\/ops\/publish-attempts|\/ops\/reconciliation/, "Operator page must not deep-link Ops Console surfaces");
+assert.match(pageSource, /EXCEPTION_LIMIT[\s\S]*slice\(0, EXCEPTION_LIMIT\)/, "Exception Queue must stay bounded");
+assert.match(pageSource, /recent_activity/, "Recent Activity must remain visible");
+assert.match(pageSource, /stage\.href|item\.href|row\.href/, "Board and lists must preserve authority deep links");
+assert.match(pageSource, /PipelineOpenIcon|ops-pipeline-open-icon/, "Compact open actions must keep an icon");
+assert.match(pageSource, /aria-label=\{label\}/, "Icon-only open actions must have an accessible label");
+assert.match(pageSource, /ops-pipeline-control-strip__beacon/, "Control status must have a dedicated semantic beacon");
+assert.match(pageSource, /ops-pipeline-stage-marker/, "Stages must have compact ordinal markers for scanability");
+assert.doesNotMatch(pageSource, /cookie|secret|token/i, "Pipeline UI must not expose sensitive data");
 
-console.log("reup pipeline dashboard source tests passed");
+assert.doesNotMatch(pageSource, /ops-pipeline-kpi|PipelineKpi/, "Pipeline must not reuse Home-style KPI cards");
+assert.doesNotMatch(pageSource, /ops-pipeline-workload-map|WorkloadMap/, "Pipeline must not reuse Home's Workload Map composition");
+assert.doesNotMatch(pageSource, /ops-pipeline-attention-chart|AttentionByStage/, "Pipeline must not reuse Home's Attention chart");
+
+assert.match(globalCssSource, /\.ops-pipeline-control-strip/, "CSS must define the flat control strip");
+assert.match(globalCssSource, /\.ops-pipeline-control-strip__metric-icon/, "CSS must define visual KPI icon tiles");
+assert.match(globalCssSource, /@keyframes ops-pipeline-control-reveal[\s\S]*@keyframes ops-pipeline-control-item-reveal[\s\S]*@keyframes ops-pipeline-beacon-pulse/, "Control strip must define restrained entrance and status motion");
+assert.match(globalCssSource, /\.is-running\.has-value[\s\S]*ops-pipeline-running-ripple/, "Running motion must only appear for active work");
+assert.match(globalCssSource, /@media \(prefers-reduced-motion: reduce\)[\s\S]*ops-pipeline-control-strip/, "Control strip motion must respect reduced-motion preferences");
+assert.match(globalCssSource, /\.ops-pipeline-studio-grid\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0,\s*2fr\)\s+minmax\(18rem,\s*0\.72fr\)/, "Desktop Studio must use an approximately 70/30 Board-to-Focus split");
+assert.match(globalCssSource, /\.ops-pipeline-composition__row/, "CSS must define composition chart stage rows");
+assert.match(globalCssSource, /\.ops-pipeline-composition__row:not\(:last-child\)::after[\s\S]*\.ops-pipeline-composition__row:not\(:last-child\)::before/, "Stage nodes must use directional connectors");
+assert.match(globalCssSource, /\.ops-pipeline-composition__segment\.is-running[\s\S]*\.is-review[\s\S]*\.is-failed[\s\S]*\.is-ready/, "CSS must use stable semantic colors for stacked status segments");
+assert.match(globalCssSource, /\.ops-pipeline-analytics-grid/, "CSS must define a dedicated analytics row");
+assert.match(globalCssSource, /\.ops-pipeline-bottleneck-spotlight__hero/, "CSS must define the bottleneck spotlight");
+assert.match(pageSource, /ops-pipeline-visual-head__title/, "Visual panel titles must use a dedicated wrapper instead of overriding icon spans");
+assert.doesNotMatch(globalCssSource, /\.ops-pipeline-visual-head > div > span\s*\{/, "Visual header selectors must not force every icon span into text layout");
+assert.match(globalCssSource, /\.ops-pipeline-panel-glyph,[\s\S]*place-items:\s*center/, "Panel glyph boxes must center their SVG content");
+assert.match(globalCssSource, /\.ops-pipeline-qa-gauge__ring/, "CSS must define the Output QA gauge");
+assert.match(globalCssSource, /\.ops-pipeline-qa-gauge\.is-empty[\s\S]*min-height:\s*6\.1rem/, "Empty Output QA must collapse into a compact status card");
+assert.match(globalCssSource, /\.ops-pipeline-action-deck__grid/, "CSS must define the action tile grid");
+assert.match(globalCssSource, /\.ops-pipeline-activity-pulse__summary/, "CSS must define the compact activity summary");
+assert.match(globalCssSource, /\.ops-pipeline-inspector/, "CSS must define the selected-stage inspector");
+assert.match(globalCssSource, /\.ops-pipeline-inspector\s*\{[^}]*position:\s*sticky[^}]*top:/, "Stage Focus Rail must stay visible beside the board on desktop");
+assert.match(globalCssSource, /\.ops-pipeline-lower-grid\s*\{[^}]*align-items:\s*stretch/, "Lower panels must balance their heights instead of leaving a large blank column");
+assert.match(globalCssSource, /\.ops-pipeline-flat-section\s*\{[^}]*border:[^}]*border-radius:[^}]*background:\s*#fff/, "Lower sections must render as independent polished panels");
+assert.match(globalCssSource, /\.ops-pipeline-event-tape/, "CSS must define the Event Tape");
+assert.match(globalCssSource, /@media \(max-width: 900px\)[\s\S]*ops-pipeline-analytics-grid[\s\S]*ops-pipeline-lower-grid/, "Analytics and operations layouts must collapse on narrower screens");
+assert.match(globalCssSource, /@media \(max-width: 1100px\)[\s\S]*ops-pipeline-studio-grid[\s\S]*grid-template-columns:\s*1fr[\s\S]*ops-pipeline-inspector[\s\S]*position:\s*static/, "Stage Focus Rail must move below the board on narrower screens");
+assert.match(globalCssSource, /@media \(max-width: 640px\)[\s\S]*ops-pipeline-action-deck__grid\s*\{\s*grid-template-columns:\s*minmax\(0,\s*1fr\)/, "Action Deck must collapse without widening the mobile document");
+
+assert.doesNotThrow(() => JSON.parse(en), "English translations must stay valid JSON");
+assert.doesNotThrow(() => JSON.parse(vi), "Vietnamese translations must stay valid JSON");
+assert.match(en, /"pipelineComposition"[\s\S]*"bottlenecks"[\s\S]*"stageInspector"[\s\S]*"exceptionQueue"[\s\S]*"eventTape"/, "English chart and operations labels must exist");
+assert.match(vi, /"pipelineComposition"[\s\S]*"bottlenecks"[\s\S]*"stageInspector"[\s\S]*"exceptionQueue"[\s\S]*"eventTape"/, "Vietnamese chart and operations labels must exist");
+assert.match(pkg, /reup-pipeline-dashboard\.test\.ts/, "Web test script must run Pipeline contract checks");
+
+console.log("reup pipeline dashboard visualization tests passed");

@@ -74,7 +74,7 @@ export function ExportPackagesIndexPage() {
   if (!loadedAt && !request.error) {
     return (
       <OperatorStudioShell actions={refreshAction} description={t("opsExportPackages.description")} title={t("opsExportPackages.title")}>
-        <AsyncContentBoundary skeletonVariant="list" status="loading"><span /></AsyncContentBoundary>
+        <AsyncContentBoundary skeletonVariant="table" loadingLabel={t("opsExportPackages.loadingDetail")} status="loading"><span /></AsyncContentBoundary>
       </OperatorStudioShell>
     );
   }
@@ -82,14 +82,14 @@ export function ExportPackagesIndexPage() {
   if (request.error && !loadedAt) {
     return (
       <OperatorStudioShell actions={refreshAction} description={t("opsExportPackages.description")} title={t("opsExportPackages.title")}>
-        <AsyncContentBoundary errorState={<OpsState title={t("opsExportPackages.unavailableTitle")} detail={request.error.message} retry={() => void load()} />} skeletonVariant="list" status="error"><span /></AsyncContentBoundary>
+        <AsyncContentBoundary errorState={<OpsState title={t("opsExportPackages.unavailableTitle")} detail={request.error.message} retry={() => void load()} />} skeletonVariant="table" status="error"><span /></AsyncContentBoundary>
       </OperatorStudioShell>
     );
   }
 
   return (
     <OperatorStudioShell actions={refreshAction} description={t("opsExportPackages.description")} title={t("opsExportPackages.title")}>
-      <AsyncContentBoundary refreshing={request.refreshing} skeletonVariant="list" status="success">
+      <AsyncContentBoundary refreshing={request.refreshing} skeletonVariant="table" status="success">
       <main className="ops-page ops-export-page">
 
         <div className="ops-export-freshness">

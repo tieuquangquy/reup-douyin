@@ -26,6 +26,15 @@ MID_TITLE_MIN_WIDTH = 0.18
 MID_TITLE_CENTER_X_MIN = 0.12
 MID_TITLE_CENTER_X_MAX = 0.88
 
+# Compact action labels (加盐 / 花): narrower than mid-title but still mid-frame.
+COMPACT_LABEL_Y_MIN = 0.28
+COMPACT_LABEL_Y_MAX = 0.62
+COMPACT_LABEL_MIN_HEIGHT = 0.028
+COMPACT_LABEL_MIN_WIDTH = 0.055
+COMPACT_LABEL_MAX_WIDTH = 0.35
+COMPACT_LABEL_CENTER_X_MIN = 0.05
+COMPACT_LABEL_CENTER_X_MAX = 0.95
+
 ENDCARD_MIN_BOXES = 4
 ENDCARD_MANY_BOXES = 6
 # Real PaddleOCR UI crumbs are tiny; allow lower area when count/span is high.
@@ -110,9 +119,29 @@ def is_mid_title_box(box: DetectedTextBox | Mapping[str, Any]) -> bool:
         return False
     if h < MID_TITLE_MIN_HEIGHT:
         return False
-    if w < MID_TITLE_MIN_WIDTH and h < 0.05:
+    # Always require width — tall-narrow action labels (加盐) are compact, not titles.
+    if w < MID_TITLE_MIN_WIDTH:
         return False
     if cx < MID_TITLE_CENTER_X_MIN or cx > MID_TITLE_CENTER_X_MAX:
+        return False
+    return True
+
+
+def is_compact_overlay_label(box: DetectedTextBox | Mapping[str, Any]) -> bool:
+    """Short mid-frame action labels (e.g. 加盐) that fail the wide mid-title gate."""
+    if is_mid_title_box(box):
+        return False
+    cy = _box_center_y(box)
+    cx = _box_center_x(box)
+    w = _box_width(box)
+    h = _box_height(box)
+    if cy < COMPACT_LABEL_Y_MIN or cy > COMPACT_LABEL_Y_MAX:
+        return False
+    if h < COMPACT_LABEL_MIN_HEIGHT or h > 0.09:
+        return False
+    if w < COMPACT_LABEL_MIN_WIDTH or w > COMPACT_LABEL_MAX_WIDTH:
+        return False
+    if cx < COMPACT_LABEL_CENTER_X_MIN or cx > COMPACT_LABEL_CENTER_X_MAX:
         return False
     return True
 

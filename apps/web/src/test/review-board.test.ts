@@ -169,6 +169,11 @@ assert.doesNotMatch(reviewPageSource, /review-board-soft-chip/, "Review Board mu
 assert.doesNotMatch(reviewPageSource, /review-board-pipeline-segmented/, "Review Board must not use pipeline segmented control");
 assert.match(reviewPageSource, /review-board-media-tile/, "Tiles must use review-board overlay styling scope");
 assert.match(reviewPageSource, /is-bulk-selected/, "Bulk selection must highlight tile border");
+assert.match(
+  reviewPageSource,
+  /data-tone=\{reviewBoardStatusTone\(candidate\.status\)\}/,
+  "Review Board tiles must expose data-tone for status-tint hover"
+);
 assert.match(reviewPageSource, /WorkMediaTileOverlay/, "Tiles must use shared Work overlay labels");
 assert.doesNotMatch(reviewPageSource, /review-board-tile-star|Star finalist|Unstar finalist/, "Review tiles must not show a duplicate finalist star beside the score badge");
 assert.match(reviewPageSource, /useReviewCandidateTileScoreBadge/, "Tiles must use shared score badge authority");
@@ -183,6 +188,13 @@ assert.doesNotMatch(reviewPageSource, /capture-inbox-tile-metrics/, "Review Boar
 assert.match(globalStylesSource, /\.review-board-tile-action-bar\.is-queue-pair\.review-board-queue-pair\.is-promoted-pair\s*\{[^}]*grid-template-columns: minmax\(0, 1fr\);/, "Approved in-queue tiles must use a full-width single-column action layout");
 assert.match(globalStylesSource, /\.review-board-tile-action-bar\.is-queue-pair \.review-board-tile-btn\.is-primary\.is-promoted-open\s*\{[^}]*grid-column: 1 \/ -1;[^}]*width: 100%;/, "Open queue must span the full tile action width");
 assert.match(reviewBoardSource, /ReviewBoardTileActions/, "Review Board tiles must use dedicated tile action component");
+assert.match(reviewPageSource, /TileMediaThumbnail/, "Review Board tiles must use shared thumbnail with broken-image fallback");
+assert.match(
+  readFileSync(resolve(webSrcDir, "components/shared/TileMediaThumbnail.tsx"), "utf8"),
+  /onError=\{|onError=/,
+  "TileMediaThumbnail must swap to placeholder when the image fails to load"
+);
+assert.match(globalStylesSource, /capture-inbox-thumbnail-placeholder__glyph|is-missing-media/, "Missing thumbnail must show a visual alt glyph, not a broken browser image");
 assert.match(reviewBoardSource, /review-board-tile-action-bar/, "Review Board tiles must use structured action bar layout");
 assert.doesNotMatch(reviewTileActionsSource, /View details|Inspect candidate details|kind="details"/, "Review Board tiles must rely on the image or title instead of a redundant details button");
 assert.match(reviewBoardSource, /is-promoted-open/, "Approved in-queue tiles must use promoted-open primary action");

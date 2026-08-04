@@ -1,52 +1,56 @@
 # Reup Pipeline Dashboard Architecture
 
-## Overview
+## Boundary
 
-The Reup Pipeline Dashboard is a read-only operator command surface for the end-to-end workflow:
+`apps/web` renders `/ops/pipeline` from one read-only API contract. It does not query persistence, infer job state, or mutate work.
 
-Capture -> Review -> Reup Queue -> Export Package -> Publish Handoff -> Publish progress.
+`apps/api` owns aggregation at `GET /pipeline-dashboard`. The endpoint is workspace-scoped and returns safe counts, labels, timestamps, and navigation targets. Long-running work remains in `apps/worker` and existing durable job orchestration.
 
-It summarizes health, progress, bottlenecks, blockers, and recommended next actions while preserving existing stage ownership.
+## Canonical stage authority
 
-## Boundary Decisions
+`apps/api/src/services/pipeline_stage_snapshot.py` owns the shared 13-stage builder used by Pipeline and consumed by Home:
 
-### Web boundary
+1. `capture`
+2. `review`
+3. `reup_queue`
+4. `download`
+5. `audio_analysis`
+6. `translate`
+7. `tts`
+8. `ocr`
+9. `render`
+10. `output_review`
+11. `draft`
+12. `export_package`
+13. `publish_handoff`
 
-`apps/web` owns presentation only:
+Each `PipelineDashboardStage` exposes exclusive buckets within that stage:
 
-- Render `/ops/pipeline`.
-- Fetch one dashboard summary contract from `apps/api`.
-- Render stage cards, pipeline visualization, attention panels, recent activity, and quick links.
-- Reuse Ops Console Design System primitives.
+- `waiting_count`
+- `running_count`
+- `review_count`
+- `failed_count`
+- `ready_count`
+- `total_count`
 
-`apps/web` must not:
+`total_count` is the sum of those five fields. Status is derived in priority order: failed, review/waiting, running, ready, quiet.
 
-- Query the database directly.
-- Run long-running work.
-- Infer storage/queue/publish internals beyond the API contract.
-- Trigger publish attempts automatically.
+Legacy primary/secondary fields remain in the contract temporarily for older Home fallback consumers, but chart code must read the canonical bucket fields.
 
-### API boundary
+## Aggregation sources
 
-`apps/api` owns aggregation:
+- Capture: `captured_items`; the 24-hour metric counts items, not sessions.
+- Review: `video_candidates` plus the absence of `reup_queue_items.video_candidate_id` for approved-not-queued work.
+- Reup Queue: stage-owned `ReupQueueStatus` values.
+- Download through Render: `jobs` grouped by `JobType` and `JobStatus`.
+- Output Review: `reup_queue_items.metadata_json.render_qa` for rows linked to a render output.
+- Draft: current `publish_drafts` states; lifetime Published is excluded from workload KPIs.
+- Export Package: `export_packages` stage-owned statuses.
+- Publish Handoff: `publish_handoffs` stage-owned statuses.
 
-- Query stage tables.
-- Normalize stage status into an operator-safe dashboard model.
-- Count backlogs and failures.
-- Produce recent activity rows from safe metadata and timestamps.
-- Avoid raw secrets, tokens, cookies, credentials, and private local paths.
+## Response contract
 
-### Worker boundary
-
-`apps/worker` remains unchanged. The dashboard does not introduce background jobs.
-
-## Proposed API Contract
-
-Endpoint:
-
-- `GET /ops/pipeline-dashboard`
-
-Top-level response fields:
+Top-level fields:
 
 - `generated_at`
 - `overall_status`
@@ -54,229 +58,39 @@ Top-level response fields:
 - `summary_metrics`
 - `stages`
 - `attention_items`
+- `output_qa_summary`
 - `recent_activity`
 - `quick_links`
 
-### Dashboard status model
+Attention workload is the sum of affected record counts, not the number of warning categories. Attention categories remain explicit because some stages use different entity types.
 
-Use a small operator-facing status model:
+Output QA keeps four canonical buckets: `passed`, `warned`, `failed`, and `ungraded`.
 
-- `healthy`: stage is moving and no blocking backlog is detected.
-- `needs_attention`: stage has backlog, warnings, or operator action required.
-- `blocked`: stage has failed records or unresolved blocked work.
-- `quiet`: stage has no recent activity and no active backlog.
-- `in_progress`: stage has active work moving through it.
+Quick links are API-owned so the web does not maintain a second stage-navigation authority.
 
-The status model is separate from persistence enums. It does not rewrite canonical stage status meanings.
+## Operations Board decisions
 
-### Stage model
+- Control strip: overall status, freshness, and four comparable metrics rendered inline rather than as KPI cards.
+- Operations Board: semantic 13-row table grouped into Intake, Production, and Delivery.
+- Bucket cells: exact values with column-relative heat intensity; intensity is never presented as progress.
+- Stage Focus Rail: local selected-stage detail with recommended action and stage-scoped exceptions, composed beside the board in an approximately 70/30 desktop grid and moved below it responsively.
+- Output QA: appears only when Output Review is selected, not as a permanent Home-style panel.
+- Exception Queue: bounded severity-ranked action table.
+- Event Tape: compact lifecycle timeline.
 
-Each stage should include:
+No chart dependency is required. The matrix uses semantic HTML and scoped CSS, preserving the local-first Windows setup and keyboard-accessible stage selection.
 
-- `key`
-- `label`
-- `description`
-- `status`
-- `primary_count`
-- `primary_label`
-- `secondary_count`
-- `secondary_label`
-- `metrics`
-- `attention_count`
-- `href`
-- `next_action`
+Historical throughput, cycle time, and backlog trend charts are deferred until persisted snapshots or event history provide a valid time-series authority. Funnel, Sankey, radar, and gauge views are intentionally excluded.
 
-Stage keys:
+## Safety and observability
 
-- `capture`
-- `review`
-- `reup_queue`
-- `export_package`
-- `publish_handoff`
-- `publish_progress`
+- All queries are scoped by authenticated `workspace_id`.
+- The endpoint is read-only.
+- No secrets, tokens, credentials, raw external payloads, or private local paths are returned.
+- Recent Activity uses stable record IDs, safe status text, timestamps, and stage-owned links.
 
-### Attention model
+## Regression tests
 
-Each attention item should include:
+API tests verify affected-workload Attention counts, the 13-stage order, exclusive production buckets, quiet state, Home reuse, and route authorization.
 
-- `id`
-- `severity`: `info`, `warning`, or `critical`
-- `stage_key`
-- `title`
-- `detail`
-- `count`
-- `href`
-- `recommended_action`
-
-Attention should highlight operator-actionable conditions, such as failed capture items, approved candidates not queued, queue failures, packages ready for handoff, handoffs waiting for operator acceptance, and publish attempts needing reconciliation.
-
-### Recent activity model
-
-Each recent activity item should include:
-
-- `id`
-- `stage_key`
-- `title`
-- `detail`
-- `occurred_at`
-- `href`
-
-Activity sources should be safe, high-level lifecycle changes derived from timestamps such as `created_at`, `updated_at`, `ready_at`, `failed_at`, `accepted_at`, `published_at`, or attempt status timestamps.
-
-## Aggregation Sources
-
-### Capture stage
-
-Tables:
-
-- `capture_sessions`
-- `captured_items`
-
-Useful fields:
-
-- `CaptureSession.status`
-- `CaptureSession.created_at`
-- `CaptureSession.ready_item_count`
-- `CaptureSession.promoted_item_count`
-- `CaptureSession.failed_item_count`
-- `CapturedItem.status`
-- `CapturedItem.error_code`
-- `CapturedItem.error_message`
-- `CapturedItem.promoted_video_candidate_id`
-
-### Review stage
-
-Table:
-
-- `video_candidates`
-
-Useful fields:
-
-- `VideoCandidate.status`
-- `VideoCandidate.score`
-- `VideoCandidate.priority`
-- `VideoCandidate.created_at`
-- `VideoCandidate.updated_at`
-
-Approved but not queued requires checking for missing `reup_queue_items.video_candidate_id`.
-
-### Reup Queue stage
-
-Table:
-
-- `reup_queue_items`
-
-Useful fields:
-
-- `status`
-- `media_prep_status`
-- `blocked_reason`
-- `blocked_at`
-- `held_at`
-- `failed_at`
-- `last_error_code`
-- `last_error_message`
-- `queued_at`
-- `started_at`
-- `completed_at`
-- `updated_at`
-
-### Export Package stage
-
-Tables:
-
-- `export_packages`
-- `export_package_items`
-
-Useful fields:
-
-- `ExportPackage.status`
-- `ExportPackage.item_count`
-- `ExportPackage.ready_at`
-- `ExportPackage.failed_at`
-- `ExportPackage.cancelled_at`
-- `ExportPackage.created_at`
-- Relationship to publish handoffs.
-
-### Publish Handoff stage
-
-Table:
-
-- `publish_handoffs`
-
-Useful fields:
-
-- `status`
-- `target_platform`
-- `ready_at`
-- `accepted_at`
-- `failed_at`
-- `cancelled_at`
-- `created_at`
-- `updated_at`
-
-### Publish progress stage
-
-Tables:
-
-- `publish_drafts`
-- `publish_attempts`
-
-Useful fields:
-
-- `PublishDraft.status`
-- `PublishDraft.ready_at`
-- `PublishDraft.scheduled_at`
-- `PublishDraft.published_at`
-- `PublishDraft.current_publication_status`
-- `PublishDraft.last_publish_synced_at`
-- `PublishAttempt.status`
-- `PublishAttempt.reconciliation_required`
-- `PublishAttempt.reconciliation_status`
-- `PublishAttempt.started_at`
-- `PublishAttempt.finished_at`
-- `PublishAttempt.error_code`
-- `PublishAttempt.error_message`
-
-## UX Architecture
-
-The `/ops/pipeline` page should use existing Ops Console primitives:
-
-- `OpsConsoleShell`
-- `PageShell`
-- `OpsWorkflowContext`
-- `OpsNextActionBanner`
-- `OpsSummaryCards`
-- `OpsItemCard`
-- `OpsDetailPanel`
-- `OpsDetailSection`
-- `OpsMetadataList`
-- `OpsStatePanel`
-- `OpsActionRow`
-
-Dashboard-specific layout can use existing panel/card classes from `apps/web/src/app/globals.css` and add minimal scoped classes only if required.
-
-## Observability and Safety
-
-- Aggregation should return stable counts and IDs only where useful for navigation.
-- Error summaries must be actionable without dumping raw payloads.
-- No raw secrets, tokens, cookies, account credentials, or private local paths should be returned.
-- The endpoint should be read-only.
-
-## Testing Strategy
-
-API tests should validate:
-
-- Empty database returns quiet/empty dashboard safely.
-- Failed capture/queue/publish records create attention items.
-- Approved candidates without queue items are counted.
-- Export packages and handoffs readiness counts are correct.
-- Response contract is stable.
-
-Web tests should validate:
-
-- `/ops/pipeline` route exists.
-- Page uses Ops Console Design System primitives.
-- Stage labels and canonical links are present.
-- Attention and recent activity sections are present.
-- API client function and types are wired.
+Web tests verify the API contract, flat Operations Board hierarchy, semantic table, heatmap cells, Stage Inspector selection, conditional Output QA, Exception Queue, Event Tape, accessibility labels, responsive CSS, and translation JSON validity.

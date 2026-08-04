@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import {
   classifyFlagTone,
+  flagsForFocusQuietSummary,
   isPipelineFlag,
+  isTtsFitDuplicateFlag,
   partitionSegmentFlags,
   resolveSegmentCompareState,
   textsEqualForCompare
@@ -18,6 +20,38 @@ assert.equal(isPipelineFlag("caption_asr_conflict"), false);
 assert.equal(classifyFlagTone("too_long"), "danger");
 assert.equal(classifyFlagTone("caption_asr_conflict"), "danger");
 assert.equal(classifyFlagTone("needs_operator_review"), "warn");
+
+assert.equal(isTtsFitDuplicateFlag("too_long"), true);
+assert.equal(isTtsFitDuplicateFlag("translation_too_long_for_slot"), true);
+assert.equal(isTtsFitDuplicateFlag("slightly_long"), true);
+assert.equal(isTtsFitDuplicateFlag("too_short"), true);
+assert.equal(isTtsFitDuplicateFlag("low_confidence_source"), false);
+assert.equal(isTtsFitDuplicateFlag("caption_asr_conflict"), false);
+
+{
+  // When TTS fit banner owns the length signal, quiet summary must not re-list fit/length flags.
+  const quiet = flagsForFocusQuietSummary(
+    [
+      "too_long",
+      "translation_too_long_for_slot",
+      "low_confidence_source",
+      "caption_asr_conflict",
+      "needs_operator_review"
+    ],
+    "slightly_long"
+  );
+  assert.ok(!quiet.includes("too_long"));
+  assert.ok(!quiet.includes("translation_too_long_for_slot"));
+  assert.ok(quiet.includes("low_confidence_source"));
+  assert.ok(quiet.includes("caption_asr_conflict"));
+}
+
+{
+  // No fit problem banner → leave flags intact for the normal quiet partition.
+  const untouched = flagsForFocusQuietSummary(["too_long", "low_confidence_source"], "fits_well");
+  assert.ok(untouched.includes("too_long"));
+  assert.ok(untouched.includes("low_confidence_source"));
+}
 
 {
   // Operator default: hide pipeline + length noise; only source-quality signal may surface.

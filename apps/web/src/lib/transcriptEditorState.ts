@@ -259,6 +259,39 @@ export function formatMs(ms: number): string {
   return `${minutes}:${seconds.toFixed(2).padStart(5, "0")}`;
 }
 
+/** Stable seconds display for timing fields (always `.`, never locale commas). */
+export function formatTimingSeconds(ms: number, digits = 2): string {
+  return (Math.max(0, ms) / 1000).toFixed(digits);
+}
+
+/** Parse operator-typed seconds; accepts `.` or `,` as decimal. */
+export function parseTimingSecondsToMs(raw: string): number | null {
+  const normalized = raw.trim().replace(",", ".");
+  if (!normalized) return null;
+  const sec = Number(normalized);
+  if (!Number.isFinite(sec) || sec < 0) return null;
+  return Math.round(sec * 1000);
+}
+
+/**
+ * Parse NLE-style timecode `M:SS.cc` (or `,` decimal) back to ms.
+ * Also accepts bare seconds for mid-edit drafts.
+ */
+export function parseTimingTimecodeToMs(raw: string): number | null {
+  const normalized = raw.trim().replace(",", ".");
+  if (!normalized) return null;
+  const match = normalized.match(/^(\d+):(\d{1,2}(?:\.\d{1,2})?)$/);
+  if (match) {
+    const minutes = Number(match[1]);
+    const seconds = Number(match[2]);
+    if (!Number.isFinite(minutes) || !Number.isFinite(seconds) || minutes < 0 || seconds < 0 || seconds >= 60) {
+      return null;
+    }
+    return Math.round((minutes * 60 + seconds) * 1000);
+  }
+  return parseTimingSecondsToMs(normalized);
+}
+
 function isSegmentDirty(segment: EditableSegment): boolean {
   return (
     segment.startMs !== segment.originalStartMs ||

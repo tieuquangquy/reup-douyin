@@ -96,6 +96,8 @@ The API exposes render-prep endpoints:
 
 The pipeline reads current edited translation rows, creates placeholder Vietnamese TTS assets, builds subtitle rows/files, and writes a render-prep manifest. A real Vietnamese TTS provider can replace the placeholder provider later.
 
+Ops OmniVoice engine installs use reviewed backend recipes only. Set `AUDIO_TTS_ALLOW_INSTALL=false` to disable all one-click TTS installs and use `AUDIO_TTS_ENGINE_ROOT` (default `./data/tts-engines`) for managed source checkouts, isolated environments, weights, and resumable install state. Installing an engine is separate from implementing its synthesis adapter; only adapter-ready engines are exposed to Preview and durable jobs.
+
 ## Render Engine Foundation
 
 The API exposes render endpoints:
@@ -109,13 +111,20 @@ The render service consumes the current render-prep manifest, resolves source vi
 
 ## Publish And Operations Foundation
 
-The API also exposes publish preparation, risk, Facebook Page/Reels publishing, reconciliation, analytics-lite, routing/control-plane, and optimization endpoints. These remain local-first and operator-assist oriented:
+The API also exposes publish preparation, risk, Facebook Page/Reels publishing, reconciliation, analytics-lite, publication metric snapshots/growth summaries, routing/control-plane, and optimization endpoints. These remain local-first and operator-assist oriented:
 
 - publish draft metadata and scheduling skeleton
 - risk scan/gating helpers
 - Facebook Page/Reels `PlatformAccount` and `PublishAttempt` flow
 - publish reconciliation and canonical publication summary
 - publish health and operator feedback summaries
+- idempotent `COLLECT_PUBLICATION_METRICS` jobs and publication growth snapshots
+- adaptive publication metric schedules with pause/resume and due dispatch
+- fail-closed `FACEBOOK_GRAPH` Reels insights adapter with worker-only token resolution
+- read-only Facebook controlled-live preflight with exact identity/scope attestation
+- Meta OAuth Page discovery with operator/workspace-bound state and encrypted Page-token storage
+- fail-closed Facebook Page publish capability checks, per-Page cadence budgets,
+  one-active-attempt enforcement and automatic cooldown/hold reactions
 - multi-account routing/control-plane APIs
 - feedback-driven optimization hints
 
@@ -150,4 +159,4 @@ Run this from `apps/api`.
 
 ## Current Status
 
-The API foundation covers the full local Phase 1 pipeline through publish/reconciliation/analytics-lite/routing/optimization. Remaining intentionally limited areas include Redis queue runner replacement, real Douyin crawling, production STT/TTS/OCR providers, production OAuth onboarding, connector platforms beyond Facebook Reels, cloud object storage, multi-user auth, deep analytics, and legal/compliance automation.
+The API foundation covers the full local Phase 1 pipeline through publish/reconciliation/analytics-lite/publication metrics/routing/optimization. Publication metric collection is a durable job with an adaptive cadence scheduler, a network-free local adapter and a fail-closed Facebook Reels insights adapter. Meta OAuth onboarding can discover Pages and store selected Page tokens in encrypted local credentials once an operator configures a Meta App. Live Meta verification, App Review, hosted vault/KMS integration and automatic scheduler activation remain deployment responsibilities. Other intentionally limited areas include Redis queue runner replacement, real Douyin crawling, production STT/TTS/OCR providers, connector platforms beyond Facebook Reels, attribution/revenue analytics, cloud object storage, multi-user auth, and legal/compliance automation.

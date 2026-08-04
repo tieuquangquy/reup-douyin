@@ -45,6 +45,31 @@ class RenderService:
 
     def create_render_job(self, request: RenderRequest):
         source_video = self._load_source_video(request.source_video_id)
+        from src.services.quality_localization_service import (
+            QUALITY_METADATA_KEY,
+            QUALITY_WORKFLOW_VERSION,
+            QualityLocalizationService,
+        )
+        from src.services.pipeline_recipe_runtime import bind_job_to_recipe_reference
+
+        quality_summary = QualityLocalizationService(self.db, storage=self.storage).summary(source_video.id)
+        quality_state = dict(dict(source_video.metadata_json or {}).get(QUALITY_METADATA_KEY) or {})
+        quality_active = quality_summary.get("workflow_stage") != "NOT_STARTED"
+        workflow_version = QUALITY_WORKFLOW_VERSION if quality_active else request.workflow_version
+        if workflow_version == QUALITY_WORKFLOW_VERSION and not bool(quality_summary.get("can_render_final")):
+            raise RenderPipelineError(
+                RenderPipelineErrorCode.QUALITY_REVIEW_REQUIRED,
+                f"Quality localization is at {quality_summary.get('workflow_stage')}; "
+                "visual review and explicit audio approval are required",
+            )
+        recipe_reference = quality_state.get("pipeline_recipe_lock")
+        if workflow_version == QUALITY_WORKFLOW_VERSION and (
+            not isinstance(recipe_reference, dict) or not recipe_reference
+        ):
+            raise RenderPipelineError(
+                RenderPipelineErrorCode.PIPELINE_RECIPE_WORKFLOW_MISMATCH,
+                "Quality localization has no immutable pipeline recipe reference",
+            )
         job = JobService(self.db).create_job(
             job_type=JobType.RENDER_FINAL,
             workspace_id=source_video.workspace_id,
@@ -53,15 +78,33 @@ class RenderService:
                 "source_video_id": str(source_video.id),
                 "render_mode": request.render_mode,
                 "force_refresh": request.force_refresh,
+                "workflow_version": workflow_version,
             },
             idempotency_key=None,
         )
+        if workflow_version == QUALITY_WORKFLOW_VERSION:
+            bind_job_to_recipe_reference(job, recipe_reference)
+            self.db.commit()
         logger.info("render_job_created", extra={"job_id": str(job.id), "source_video_id": str(source_video.id)})
         return job
 
     def run_render(self, request: RenderRequest, *, job_id: UUID | None = None) -> RenderPipelineResult:
         source_video = self._load_source_video(request.source_video_id)
         context = self._storage_context(source_video)
+        from src.services.quality_localization_service import (
+            QUALITY_WORKFLOW_VERSION,
+            QualityLocalizationService,
+        )
+
+        quality_service = QualityLocalizationService(self.db, storage=self.storage)
+        quality_summary = quality_service.summary(source_video.id)
+        quality_expected = request.workflow_version == QUALITY_WORKFLOW_VERSION
+        if quality_expected and not bool(quality_summary.get("can_render_final")):
+            raise RenderPipelineError(
+                RenderPipelineErrorCode.QUALITY_REVIEW_REQUIRED,
+                f"Quality localization is at {quality_summary.get('workflow_stage')}; "
+                "visual review and explicit audio approval are required",
+            )
         render_version = self._next_render_version(source_video.id)
         profile = RenderProfile()
         started_at = datetime.now(UTC)
@@ -82,6 +125,18 @@ class RenderService:
         )
         self.db.add(render_output)
         self.db.flush()
+
+        if quality_expected:
+            return self._run_quality_adaptive_render(
+                request=request,
+                source_video=source_video,
+                render_output=render_output,
+                render_version=render_version,
+                profile=profile,
+                started_at=started_at,
+                job_id=job_id,
+                quality_service=quality_service,
+            )
 
         try:
             self._mark_previous_render_assets_non_current(source_video.id)
@@ -199,6 +254,111 @@ class RenderService:
             warnings=merged_warnings,
         )
 
+    def _run_quality_adaptive_render(
+        self,
+        *,
+        request: RenderRequest,
+        source_video: SourceVideo,
+        render_output: RenderOutput,
+        render_version: str,
+        profile: RenderProfile,
+        started_at: datetime,
+        job_id: UUID | None,
+        quality_service,
+    ) -> RenderPipelineResult:
+        """Persist the same adaptive Phase 4 output validated by regression."""
+
+        try:
+            self._mark_previous_render_assets_non_current(source_video.id)
+            final_path = quality_service.run_final_adaptive(
+                source_video.id,
+                operator_id="frontend_operator",
+            )
+            output_key = final_path.resolve().relative_to(self.storage.root).as_posix()
+            output_probe = self.probe_service.probe(output_key)
+            output_asset = self._register_existing_file_asset(
+                source_video,
+                output_key,
+                MediaAssetType.FINAL_RENDER_VIDEO,
+                mime_type="video/mp4",
+                manifest_group="quality_adaptive_final",
+                job_id=job_id,
+            )
+            root = final_path.parent
+            adaptive_meta = json.loads(
+                (root / "phase4_adaptive_render_meta.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            output_qa_path = root / "qa" / "phase4_adaptive_final_output_qa.json"
+            output_qa = json.loads(output_qa_path.read_text(encoding="utf-8"))
+            warnings = [str(value) for value in list(output_qa.get("warnings") or [])]
+            manifest = {
+                "schema_version": "quality_adaptive_render_manifest_v1",
+                "pipeline_version": "QUALITY_LOCALIZATION_V24_1",
+                "source_video_id": str(source_video.id),
+                "render_output_id": str(render_output.id),
+                "render_version": render_version,
+                "output": {
+                    "media_asset_id": str(output_asset.id),
+                    "storage_key": output_asset.storage_key,
+                    "sha256": output_asset.checksum_sha256,
+                    "size_bytes": output_asset.size_bytes,
+                },
+                "adaptive_render_meta": adaptive_meta,
+                "output_qa": output_qa,
+                "artifact_root": root.relative_to(self.storage.root).as_posix(),
+            }
+            context = self._storage_context(source_video)
+            manifest_asset = self._persist_json_asset(
+                source_video,
+                context,
+                MediaAssetType.RENDER_MANIFEST,
+                manifest,
+                filename=f"{render_version}_quality_adaptive_manifest.json",
+                manifest_group="render_debug",
+                job_id=job_id,
+            )
+            render_output.status = RenderOutputStatus.READY_FOR_REVIEW
+            render_output.media_asset_id = output_asset.id
+            render_output.width = output_probe.width
+            render_output.height = output_probe.height
+            render_output.fps = output_probe.fps
+            render_output.duration_seconds = output_probe.duration_seconds
+            render_output.video_codec = output_probe.video_codec or profile.video_codec
+            render_output.audio_codec = output_probe.audio_codec or profile.audio_codec
+            render_output.subtitle_burned = True
+            render_output.audio_strategy = str(
+                dict(adaptive_meta.get("audio_mix") or {}).get("strategy")
+                or "quality_adaptive_mix"
+            )
+            render_output.render_version = render_version
+            render_output.warning_summary_json = {"warnings": warnings}
+            render_output.metadata_json = {
+                "render_manifest_asset_id": str(manifest_asset.id),
+                "manifest": manifest,
+                "quality_workflow": True,
+                "created_by_job_id": str(job_id) if job_id else None,
+            }
+            render_output.started_at = started_at
+            render_output.finished_at = datetime.now(UTC)
+            self._mark_superseded_render_outputs(source_video.id, render_output.id)
+            source_video.status = SourceVideoStatus.READY_FINAL_REVIEW
+            self.db.commit()
+            return RenderPipelineResult(
+                render_output_id=render_output.id,
+                output_asset_id=output_asset.id,
+                render_version=render_version,
+                manifest=manifest,
+                warnings=warnings,
+            )
+        except Exception as exc:
+            self.db.rollback()
+            raise RenderPipelineError(
+                RenderPipelineErrorCode.PERSISTENCE_FAILED,
+                f"Adaptive quality render failed: {exc}",
+            ) from exc
+
     def list_renders(self, source_video_id: UUID) -> list[RenderOutput]:
         return [
             self._hydrate_render_display_fields(render)
@@ -240,10 +400,62 @@ class RenderService:
                 "publish_ready_source_video_id": str(source_video.id),
             },
         )
+        self._sync_reup_queue_ready_to_export(render)
         self.db.commit()
         self.db.refresh(render)
         logger.info("source_video_marked_publish_ready", extra={"render_id": str(render.id), "source_video_id": str(source_video.id)})
         return render
+
+    def _sync_reup_queue_ready_to_export(self, render: RenderOutput) -> None:
+        """Reconcile a successful manual Final Review back to its queue item.
+
+        Final Review retries create independent RENDER_FINAL jobs.  Without this
+        reconciliation an earlier failed auto job leaves the Reup Queue tile in
+        FAILED_NEEDS_ATTENTION even though a later approved output is durable.
+        """
+        from src.enums import ReupQueueMediaPrepStatus, ReupQueueStatus
+        from src.models.reup_queue import ReupQueueItem
+
+        terminal = {
+            ReupQueueStatus.COMPLETED,
+            ReupQueueStatus.CANCELLED,
+            ReupQueueStatus.PUBLISH_HANDOFF_CREATED,
+        }
+        now = datetime.now(UTC)
+        items = list(
+            self.db.scalars(
+                select(ReupQueueItem).where(
+                    ReupQueueItem.source_video_id == render.source_video_id
+                )
+            )
+        )
+        for item in items:
+            if item.status in terminal:
+                continue
+            item.status = ReupQueueStatus.READY_TO_EXPORT
+            item.media_prep_status = ReupQueueMediaPrepStatus.READY_FOR_EXPORT
+            item.render_output_id = render.id
+            if render.created_by_job_id is not None:
+                item.job_id = render.created_by_job_id
+            item.media_ready_at = item.media_ready_at or now
+            item.blocked_reason = None
+            item.blocked_at = None
+            item.failed_at = None
+            item.last_error_code = None
+            item.last_error_message = None
+            item.last_action_at = now
+            item.last_action_note = (
+                "Final Review approved; adaptive output is ready for manual export."
+            )
+            item.metadata_json = {
+                **dict(item.metadata_json or {}),
+                "render_qa": {
+                    "status": "pass",
+                    "summary": "Adaptive encoded-output QA PASS",
+                    "failed": [],
+                    "warned": [],
+                },
+            }
 
     def latest_render(self, source_video_id: UUID) -> RenderOutput | None:
         render = self.db.scalar(
@@ -502,10 +714,57 @@ class RenderService:
             .values(is_current=False)
         )
 
+    def _mark_superseded_render_outputs(
+        self, source_video_id: UUID, current_render_output_id: UUID
+    ) -> None:
+        """Close abandoned RENDERING rows after a later output is durable."""
+        self.db.execute(
+            update(RenderOutput)
+            .where(
+                RenderOutput.source_video_id == source_video_id,
+                RenderOutput.id != current_render_output_id,
+                RenderOutput.status == RenderOutputStatus.RENDERING,
+            )
+            .values(
+                status=RenderOutputStatus.FAILED,
+                error_message="Superseded by a later durable render output",
+                finished_at=datetime.now(UTC),
+            )
+        )
+
     def _register_existing_file_asset(self, source_video: SourceVideo, logical_key: str, asset_type: MediaAssetType, *, mime_type: str, manifest_group: str, job_id: UUID | None) -> MediaAsset:
         metadata = self.storage.metadata(logical_key)
         if not metadata.exists or not metadata.size_bytes:
             raise RenderPipelineError(RenderPipelineErrorCode.OUTPUT_VALIDATION_FAILED, "Rendered output asset missing after export")
+        existing = self.db.scalar(
+            select(MediaAsset).where(
+                MediaAsset.workspace_id == source_video.workspace_id,
+                MediaAsset.storage_key == logical_key,
+            )
+        )
+        if existing is not None:
+            if existing.source_video_id != source_video.id:
+                raise RenderPipelineError(
+                    RenderPipelineErrorCode.PERSISTENCE_FAILED,
+                    "Rendered output storage key belongs to another source video",
+                )
+            existing.asset_type = asset_type
+            existing.status = MediaAssetStatus.AVAILABLE
+            existing.is_current = True
+            existing.logical_key = logical_key
+            existing.relative_path = logical_key
+            existing.manifest_group = manifest_group
+            existing.created_by_job_id = job_id
+            existing.mime_type = mime_type
+            existing.size_bytes = metadata.size_bytes
+            existing.checksum_sha256 = metadata.checksum_sha256
+            existing.metadata_json = {
+                **dict(existing.metadata_json or {}),
+                "absolute_path": metadata.absolute_path,
+            }
+            existing.error_message = None
+            self.db.flush()
+            return existing
         asset = MediaAsset(
             workspace_id=source_video.workspace_id,
             source_video_id=source_video.id,

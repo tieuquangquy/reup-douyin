@@ -42,7 +42,7 @@
   - `/ops/publish-attempts`
   - `/ops/reconciliation`
 - Accounts & Routing
-  - `/ops/accounts`
+  - `/publishing/accounts`
   - `/ops/routing-rules`
 - Risk & Tools
   - `/ops/risk`

@@ -17,7 +17,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     FLAGS_enable_pir_api=0 \
     FLAGS_enable_pir_in_executor=0 \
     PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT=0 \
-    PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True
+    PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True \
+    OCR_PADDLE_ENGINE=vl16 \
+    OCR_PADDLE_NO_FALLBACK=1 \
+    OCR_PADDLE_VL_DEVICE=cpu \
+    OCR_PADDLE_VL_SKIP_PROBE=1
 
 # Thư mục làm việc trong container.
 WORKDIR /app
@@ -25,6 +29,7 @@ WORKDIR /app
 # Thư viện hệ thống Linux cần cho OpenCV headless + Paddle (không có GUI).
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
+        git \
         libgl1 \
         libglib2.0-0 \
         libgomp1 \
@@ -39,6 +44,18 @@ RUN pip install --no-cache-dir --upgrade pip \
 
 # Sao chép mã nguồn FastAPI.
 COPY app.py /app/app.py
+
+# Optional bake of PaddleOCR-VL-1.6 weights (skip download on Cloud Run cold start).
+# Host path: deploy/hf-paddle-ocr/models/PaddleOCR-VL-1.6/
+COPY models/ /tmp/vl_models/
+RUN mkdir -p /root/.paddlex/official_models \
+    && if [ -f /tmp/vl_models/PaddleOCR-VL-1.6/inference.yml ]; then \
+         cp -a /tmp/vl_models/PaddleOCR-VL-1.6 /root/.paddlex/official_models/PaddleOCR-VL-1.6 ; \
+         echo "Baked PaddleOCR-VL-1.6 weights into image" ; \
+       else \
+         echo "No baked VL weights; model will download on first /predict" ; \
+       fi \
+    && rm -rf /tmp/vl_models
 
 # Google Cloud Run mặc định route tới cổng 8080.
 EXPOSE 8080

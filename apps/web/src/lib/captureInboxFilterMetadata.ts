@@ -438,10 +438,13 @@ function computedMissingFields(flags: Record<string, boolean>): string[] {
   return missing;
 }
 
-/** Tile missing-metadata line — same authority as filters/score (canonical resolvers). */
+/** Tile missing-metadata line — same authority as filters/score (canonical resolvers).
+ * Thumbnail is omitted: the media placeholder already owns that visual signal.
+ */
 export function formatCaptureInboxTileMetadataGap(item: CapturedItem): string | null {
   const { missingFields } = getDouyinMetadataCompletenessForItem(item);
-  return missingFields.length > 0 ? missingFields.join(", ") : null;
+  const bodyGaps = missingFields.filter((field) => field !== "thumbnail");
+  return bodyGaps.length > 0 ? bodyGaps.join(", ") : null;
 }
 
 function formatCompactNumber(value: number): string {

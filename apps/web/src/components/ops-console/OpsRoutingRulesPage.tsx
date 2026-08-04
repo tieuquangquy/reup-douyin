@@ -43,7 +43,8 @@ export function OpsRoutingRulesPage() {
       <AsyncContentBoundary
         refreshing={request.refreshing}
         status={boundaryStatus}
-        skeleton={<OpsState title={t("opsRoutingRules.loadingTitle")} detail={t("opsRoutingRules.loadingDetail")} />}
+        skeletonVariant="dashboard"
+        loadingLabel={t("opsRoutingRules.loadingDetail")}
         errorState={<OpsState title={t("opsRoutingRules.unavailableTitle")} detail={request.error?.message ?? t("opsRoutingRules.unavailableTitle")} retry={() => void load("initial")} />}
       >
       <main className="ops-page">

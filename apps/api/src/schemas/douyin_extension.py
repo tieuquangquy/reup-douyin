@@ -529,7 +529,7 @@ class DouyinExtensionCaptureResponse(BaseModel):
     preflight_ran: bool = False
     videos_normalized_count: int = 0
     videos_persisted_count: int = 0
-    next_suggested_route: str = "/ops/extensions/douyin/capture-inbox"
+    next_suggested_route: str = "/selection/capture-inbox"
     warning: str | None = None
     discovered_at: datetime
     current_page_url: str | None = None
