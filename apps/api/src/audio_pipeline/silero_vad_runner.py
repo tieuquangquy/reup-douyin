@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from src.audio_pipeline.demucs_runner import run_captured
+from src.audio_pipeline.model_manager import get_silero_model
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +58,7 @@ class SpeechSummary:
     speech_seconds: float
     audio_seconds: float
     segment_count: int
+    speech_intervals: tuple[tuple[float, float], ...] = ()
 
 
 def silero_is_importable() -> bool:
@@ -70,9 +72,9 @@ def silero_is_importable() -> bool:
 
 def run_silero_speech_summary(audio_path: str) -> SpeechSummary:
     """Run Silero VAD on ``audio_path``; model weights ship with the package (no download)."""
-    from silero_vad import get_speech_timestamps, load_silero_vad, read_audio
+    from silero_vad import get_speech_timestamps, read_audio
 
-    model = load_silero_vad()
+    model = get_silero_model()
     with tempfile.TemporaryDirectory(prefix="silero_vad_") as tmp:
         read_path = _decode_to_wav(audio_path, Path(tmp)) if needs_audio_decode(audio_path) else Path(audio_path)
         waveform = read_audio(str(read_path), sampling_rate=SILERO_SAMPLE_RATE)
@@ -83,6 +85,13 @@ def run_silero_speech_summary(audio_path: str) -> SpeechSummary:
         speech_seconds=round(speech_samples / float(SILERO_SAMPLE_RATE), 3),
         audio_seconds=round(audio_seconds, 3),
         segment_count=len(stamps),
+        speech_intervals=tuple(
+            (
+                round(float(stamp["start"]) / SILERO_SAMPLE_RATE, 3),
+                round(float(stamp["end"]) / SILERO_SAMPLE_RATE, 3),
+            )
+            for stamp in stamps
+        ),
     )
     logger.info(
         "silero_vad_measured",

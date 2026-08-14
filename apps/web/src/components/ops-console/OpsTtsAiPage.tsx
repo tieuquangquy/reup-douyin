@@ -2,7 +2,6 @@
 
 import { useEffect, useRef, useState } from "react";
 import {
-  activateTtsAiProfile,
   createTtsAiProfile,
   deleteTtsAiProfile,
   fetchTtsAi,
@@ -25,6 +24,7 @@ import {
   type TtsAiEngineOption,
   type TtsAiInstallResponse,
   type TtsAiProfileSummary,
+  type TtsAiProbeCheck,
   type TtsAiResponse,
   type TtsAiRuntime
 } from "../../lib/api";
@@ -45,7 +45,11 @@ import {
 } from "../../lib/opsTtsReadyState";
 import {
   deriveTtsInstallFromRepoUrl,
+  canonicalizeGeminiVoiceId,
   defaultProviderForKind,
+  filterTtsCatalogLanguages,
+  filterTtsCatalogModels,
+  filterTtsCatalogVoices,
   getLocalInstallRecipe,
   getTtsFieldCapabilities,
   isCustomLocalProvider,
@@ -59,6 +63,8 @@ import {
   showsTtsBaseUrl,
   showsTtsCliBinary,
   showsTtsLocalBackend,
+  ttsCatalogLanguageOptions,
+  ttsCatalogModelOptions,
   TTS_FALLBACK_PROVIDERS,
   TTS_KIND_ORDER,
   TTS_PROVIDERS_BY_KIND,
@@ -71,6 +77,18 @@ import { AsyncButton } from "../shared/AsyncButton";
 import { AsyncContentBoundary } from "../shared/AsyncContentBoundary";
 import { useNotice } from "../shared/NoticeCenter";
 import { OpsPanel } from "./OpsShared";
+import {
+  defaultHttpConnector,
+  httpConnectorFromOptions,
+  httpConnectorToOptions,
+  lucylabJsonRpcPreset,
+  parseTtsCurl,
+  type HttpConnectorAuthType,
+  type HttpConnectorEndpoint,
+  type HttpConnectorFormState,
+  type HttpConnectorMode,
+  type HttpConnectorResponseType
+} from "../../lib/ttsHttpConnector";
 
 export {
   showsTtsApiKey,
@@ -92,6 +110,10 @@ type FormState = {
   languageCode: string;
   modelId: string;
   apiKeyInput: string;
+  credentialMode: string;
+  googleServiceAccountJson: string;
+  googleServiceAccountFileName: string;
+  clearGoogleServiceAccount: boolean;
   baseUrl: string;
   timeoutSeconds: string;
   fallbackProvider: string;
@@ -100,10 +122,18 @@ type FormState = {
   device: string;
   cliBinary: string;
   style: string;
+  expressiveMode: string;
+  synthesisStrategy: string;
+  maxWholeVideoSeconds: string;
+  maxBlockSeconds: string;
+  compactTriggerRatio: string;
   installCommand: string;
   extraRequirement: string;
   packageName: string;
   repoUrl: string;
+  /** Preserve unknown provider options while editing a setup. */
+  optionsJson: Record<string, unknown>;
+  httpConnector: HttpConnectorFormState;
 };
 
 function resolveProviderChoice(provider: string): { choice: string; customSlug: string } {
@@ -115,6 +145,10 @@ function resolveProviderChoice(provider: string): { choice: string; customSlug: 
 
 function toForm(data: TtsAiResponse): FormState {
   const options = data.options_json || {};
+  const expressive =
+    options.expressive_tts && typeof options.expressive_tts === "object"
+      ? (options.expressive_tts as Record<string, unknown>)
+      : {};
   const provider = data.provider || "auto";
   const recipe = getLocalInstallRecipe(provider);
   const choice = resolveProviderChoice(provider);
@@ -123,12 +157,19 @@ function toForm(data: TtsAiResponse): FormState {
     provider,
     providerChoice: choice.choice,
     customProviderSlug: choice.customSlug,
-    voiceId: data.voice_id || "",
+    voiceId:
+      provider === "google_gemini"
+        ? canonicalizeGeminiVoiceId(data.voice_id) || "Kore"
+        : data.voice_id || "",
     speakingRate: String(data.speaking_rate ?? 1),
     languageCode: data.language_code || "vi",
     modelId: data.model_id || "",
     apiKeyInput: "",
-    baseUrl: data.base_url || "",
+    credentialMode: data.credential_mode || (provider === "google" ? "google_service_account" : "api_key"),
+    googleServiceAccountJson: "",
+    googleServiceAccountFileName: "",
+    clearGoogleServiceAccount: false,
+    baseUrl: data.base_url || (provider === "google" ? "https://texttospeech.googleapis.com/v1" : ""),
     timeoutSeconds: String(data.timeout_seconds ?? 120),
     fallbackProvider: data.fallback_provider || "none",
     fallbackVoiceId: data.fallback_voice_id || "",
@@ -136,6 +177,21 @@ function toForm(data: TtsAiResponse): FormState {
     device: data.device || "auto",
     cliBinary: data.cli_binary || "",
     style: typeof options.style === "string" ? options.style : "tu_nhien",
+    expressiveMode:
+      typeof expressive.mode === "string"
+        ? expressive.mode
+        : provider === "google"
+          ? "required"
+          : "best_effort",
+    synthesisStrategy:
+      typeof expressive.synthesis_strategy === "string"
+        ? expressive.synthesis_strategy
+        : provider === "google_gemini"
+          ? "whole_video"
+          : "segment",
+    maxWholeVideoSeconds: String(expressive.max_whole_video_seconds ?? 180),
+    maxBlockSeconds: String(expressive.max_block_seconds ?? 45),
+    compactTriggerRatio: String(expressive.compact_trigger_ratio ?? 0.88),
     installCommand:
       typeof options.install_command === "string" && options.install_command.trim()
         ? options.install_command
@@ -145,7 +201,9 @@ function toForm(data: TtsAiResponse): FormState {
         ? options.extra_requirement
         : recipe?.extraRequirement || "",
     packageName: typeof options.package_name === "string" ? options.package_name : recipe?.packageName || "",
-    repoUrl: typeof options.repo_url === "string" ? options.repo_url : ""
+    repoUrl: typeof options.repo_url === "string" ? options.repo_url : "",
+    optionsJson: { ...options },
+    httpConnector: httpConnectorFromOptions(options)
   };
 }
 
@@ -197,6 +255,40 @@ function engineInstallStepLabelKey(step: string): string {
 
 type EngineCatalogCategory = "ready" | "installable" | "installed" | "setup" | "unavailable";
 type CatalogRefreshPhase = "idle" | "preparing" | "loading";
+
+const TTS_CATALOG_MANUAL_VALUE = "__manual__";
+const GOOGLE_SERVICE_ACCOUNT_MAX_BYTES = 64 * 1024;
+const GOOGLE_CREDENTIAL_MODES = [
+  "google_service_account",
+  "google_adc",
+  "google_oauth_token"
+] as const;
+const DIRECT_CLOUD_PREVIEW_PROVIDERS = new Set(["google", "google_gemini"]);
+const HTTP_CONNECTOR_MODES: HttpConnectorMode[] = ["auto", "openapi", "custom"];
+const HTTP_CATALOG_RESOURCES = ["models", "voices", "languages"] as const;
+
+function supportsDirectCloudPreview(provider: string): boolean {
+  return DIRECT_CLOUD_PREVIEW_PROVIDERS.has((provider || "").trim().toLowerCase());
+}
+
+function sameCatalogId(left: string | null | undefined, right: string | null | undefined): boolean {
+  return (left || "").trim() === (right || "").trim();
+}
+
+function googleServiceAccountMetadata(raw: string): { email: string; projectId: string } | null {
+  if (!raw.trim()) return null;
+  try {
+    const value = JSON.parse(raw) as Record<string, unknown>;
+    if (value.type !== "service_account") return null;
+    const email = typeof value.client_email === "string" ? value.client_email.trim() : "";
+    const projectId = typeof value.project_id === "string" ? value.project_id.trim() : "";
+    const privateKey = typeof value.private_key === "string" ? value.private_key : "";
+    if (!email || !projectId || !privateKey.includes("PRIVATE KEY")) return null;
+    return { email, projectId };
+  } catch {
+    return null;
+  }
+}
 
 function engineCatalogCategory(engine: TtsAiEngineOption): EngineCatalogCategory {
   if (engine.selectable) return "ready";
@@ -323,6 +415,10 @@ function blankForm(): FormState {
     languageCode: "",
     modelId: "",
     apiKeyInput: "",
+    credentialMode: "api_key",
+    googleServiceAccountJson: "",
+    googleServiceAccountFileName: "",
+    clearGoogleServiceAccount: false,
     baseUrl: "",
     timeoutSeconds: "",
     fallbackProvider: "",
@@ -331,10 +427,17 @@ function blankForm(): FormState {
     device: "",
     cliBinary: "",
     style: "",
+    expressiveMode: "best_effort",
+    synthesisStrategy: "segment",
+    maxWholeVideoSeconds: "180",
+    maxBlockSeconds: "45",
+    compactTriggerRatio: "0.88",
     installCommand: "",
     extraRequirement: "",
     packageName: "",
-    repoUrl: ""
+    repoUrl: "",
+    optionsJson: {},
+    httpConnector: defaultHttpConnector()
   };
 }
 
@@ -563,10 +666,20 @@ export function OpsTtsAiPage() {
   const { notify } = useNotice();
   const [form, setForm] = useState<FormState | null>(null);
   const [kind, setKind] = useState<TtsProviderKind>("system");
-  const [meta, setMeta] = useState<{ apiKeySet: boolean; apiKeyMasked: string; source: string }>({
+  const [meta, setMeta] = useState<{
+    apiKeySet: boolean;
+    apiKeyMasked: string;
+    source: string;
+    googleServiceAccountSet: boolean;
+    googleServiceAccountEmail: string;
+    googleServiceAccountProjectId: string;
+  }>({
     apiKeySet: false,
     apiKeyMasked: "",
-    source: "env"
+    source: "env",
+    googleServiceAccountSet: false,
+    googleServiceAccountEmail: "",
+    googleServiceAccountProjectId: ""
   });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -574,9 +687,15 @@ export function OpsTtsAiPage() {
   const [installing, setInstalling] = useState(false);
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [testResult, setTestResult] = useState<ConnectionTestResult | null>(null);
+  const [testResult, setTestResult] = useState<(ConnectionTestResult & {
+    checks?: TtsAiProbeCheck[];
+    config_fingerprint?: string;
+  }) | null>(null);
   const [catalog, setCatalog] = useState<TtsAiCatalog | null>(null);
+  const [catalogStale, setCatalogStale] = useState(false);
   const [catalogRefreshPhase, setCatalogRefreshPhase] = useState<CatalogRefreshPhase>("idle");
+  const [curlImportDraft, setCurlImportDraft] = useState("");
+  const [curlImportFeedback, setCurlImportFeedback] = useState<{ ok: boolean; message: string } | null>(null);
   const [engineCatalog, setEngineCatalog] = useState<TtsAiEngineOption[]>([]);
   const [engineCatalogLoading, setEngineCatalogLoading] = useState(false);
   const [engineCatalogError, setEngineCatalogError] = useState<string | null>(null);
@@ -597,9 +716,13 @@ export function OpsTtsAiPage() {
   const [previewing, setPreviewing] = useState(false);
   const [previewAudioUrl, setPreviewAudioUrl] = useState<string | null>(null);
   const [previewFeedback, setPreviewFeedback] = useState<string | null>(null);
-  const [previewMeta, setPreviewMeta] = useState<{ provider: string; duration: number; detail: string } | null>(
-    null
-  );
+  const [previewMeta, setPreviewMeta] = useState<{
+    provider: string;
+    duration: number;
+    detail: string;
+    requestedVoiceId: string;
+    resolvedVoiceId: string;
+  } | null>(null);
   const [profiles, setProfiles] = useState<TtsAiProfileSummary[]>([]);
   const [activeProfileId, setActiveProfileId] = useState("");
   const [profileBusy, setProfileBusy] = useState(false);
@@ -620,20 +743,30 @@ export function OpsTtsAiPage() {
 
   function applyCatalog(nextCatalog: TtsAiCatalog | null, base: FormState) {
     setCatalog(nextCatalog);
+    setCatalogStale(false);
     if (!nextCatalog) return base;
     const patch = { ...base };
     const voices = nextCatalog.voices || [];
     if (voices.length > 0) {
-      if (!patch.voiceId.trim() || !voices.some((v) => v.id === patch.voiceId)) {
-        // Keep operator-saved voice when catalog refresh still lists it; only fill when empty/unknown.
+      const preserveManual = ["cloud", "http"].includes(resolveTtsProviderKind(base.provider));
+      if (!patch.voiceId.trim() || (!preserveManual && !voices.some((v) => sameCatalogId(v.id, patch.voiceId)))) {
+        // Remote providers may expose vendor-specific ids that are not in a partial catalog.
+        // Keep those manual values instead of silently replacing a saved configuration.
         patch.voiceId = nextCatalog.default_voice_id || voices[0]?.id || patch.voiceId;
       }
     }
     if (nextCatalog.styles?.length > 0 && !nextCatalog.styles.includes(patch.style)) {
       patch.style = nextCatalog.styles[0] || patch.style;
     }
-    if (nextCatalog.models?.length > 0 && !nextCatalog.models.includes(patch.modelId)) {
-      patch.modelId = nextCatalog.models[0] || patch.modelId;
+    const models = ttsCatalogModelOptions(nextCatalog);
+    if (models.length > 0) {
+      const preserveManual = ["cloud", "http"].includes(resolveTtsProviderKind(base.provider));
+      if (!patch.modelId.trim() || (!preserveManual && !models.some((model) => sameCatalogId(model.id, patch.modelId)))) {
+        patch.modelId = nextCatalog.default_model_id || models[0]?.id || patch.modelId;
+      }
+    }
+    if (!patch.languageCode.trim() && nextCatalog.default_language_code) {
+      patch.languageCode = nextCatalog.default_language_code;
     }
     return patch;
   }
@@ -661,22 +794,31 @@ export function OpsTtsAiPage() {
     setRuntime(data.runtime || null);
     setLiveImportOk(data.live_import_ok ?? null);
     applyListResponse(data);
-    const hydrated = resolveTtsCatalogForProvider(next.provider, catalogFromRuntime(data.runtime || null));
+    const hydrated = resolveTtsCatalogForProvider(
+      next.provider,
+      catalogFromRuntime(data.runtime || null, next.provider)
+    );
     if (hydrated) {
       next = applyCatalog(hydrated, next);
     } else {
       setCatalog(null);
+      setCatalogStale(false);
     }
     // Banners are session action feedback only — durable status stays on runtime chips.
     setTestResult(null);
     setInstallResult(null);
     setPreviewFeedback(null);
     setForm(next);
+    setCurlImportDraft("");
+    setCurlImportFeedback(null);
     setKind(resolveTtsProviderKind(next.provider));
     setMeta({
       apiKeySet: data.api_key_set,
       apiKeyMasked: data.api_key_masked,
-      source: data.source
+      source: data.source,
+      googleServiceAccountSet: data.google_service_account_set,
+      googleServiceAccountEmail: data.google_service_account_email,
+      googleServiceAccountProjectId: data.google_service_account_project_id
     });
   }
 
@@ -801,13 +943,60 @@ export function OpsTtsAiPage() {
     }
     const timeout = Number(form.timeoutSeconds);
     const rate = Number(form.speakingRate);
-    const options_json: Record<string, unknown> = {};
+    // Keep provider-specific options we do not own (for example future
+    // adapter flags) while replacing only fields edited by this form.
+    const options_json: Record<string, unknown> = { ...form.optionsJson };
+    const existingExpressive =
+      options_json.expressive_tts && typeof options_json.expressive_tts === "object"
+        ? (options_json.expressive_tts as Record<string, unknown>)
+        : {};
+    options_json.expressive_tts = {
+      ...existingExpressive,
+      mode: ["off", "best_effort", "required"].includes(form.expressiveMode)
+        ? form.expressiveMode
+        : "best_effort",
+      ...(provider === "google_gemini"
+        ? {
+            synthesis_strategy: ["whole_video", "auto_blocks", "segment"].includes(
+              form.synthesisStrategy
+            )
+              ? form.synthesisStrategy
+              : "whole_video",
+            single_voice_mode:
+              form.synthesisStrategy === "segment" ? "off" : "required",
+            max_whole_video_seconds: Math.max(
+              30,
+              Math.min(600, Number(form.maxWholeVideoSeconds) || 180)
+            ),
+            max_block_seconds: Math.max(
+              15,
+              Math.min(120, Number(form.maxBlockSeconds) || 45)
+            ),
+            compact_trigger_ratio: Math.max(
+              0.65,
+              Math.min(1, Number(form.compactTriggerRatio) || 0.88)
+            ),
+            max_concurrency: 1,
+            regenerate_on_timing_mismatch: false,
+            regenerate_on_emotion_mismatch: false
+          }
+        : {})
+    };
     if (resolveTtsProviderKind(provider) === "local") {
+      delete options_json.install_command;
+      delete options_json.extra_requirement;
+      delete options_json.package_name;
+      delete options_json.repo_url;
       if (form.installCommand.trim()) options_json.install_command = form.installCommand.trim();
       if (form.extraRequirement.trim()) options_json.extra_requirement = form.extraRequirement.trim();
       if (form.packageName.trim()) options_json.package_name = form.packageName.trim();
       if (form.repoUrl.trim()) options_json.repo_url = form.repoUrl.trim();
+      if (provider !== "vieneu") delete options_json.style;
       if (provider === "vieneu") options_json.style = form.style || "tu_nhien";
+    }
+    if (["http", "cloud"].includes(resolveTtsProviderKind(provider)) && provider !== "google") {
+      delete options_json.http_connector;
+      Object.assign(options_json, httpConnectorToOptions(form.httpConnector));
     }
     const payload: Parameters<typeof saveTtsAiProfile>[1] = {
       enabled: form.enabled,
@@ -829,6 +1018,15 @@ export function OpsTtsAiPage() {
       payload.api_key = form.apiKeyInput.trim();
     } else {
       payload.api_key = null;
+    }
+    if (provider === "google" || provider === "google_gemini") {
+      payload.credential_mode = form.credentialMode || (provider === "google" ? "google_service_account" : "api_key");
+      if (form.googleServiceAccountJson.trim()) {
+        payload.google_service_account_json = form.googleServiceAccountJson;
+      }
+      if (form.clearGoogleServiceAccount) {
+        payload.clear_google_service_account = true;
+      }
     }
     return payload;
   }
@@ -872,6 +1070,11 @@ export function OpsTtsAiPage() {
         }
       }
       await saveTtsAiProfile(profileId, payload);
+      setForm((current) => current ? {
+        ...current,
+        googleServiceAccountJson: "",
+        googleServiceAccountFileName: ""
+      } : current);
       await loadList();
       notify({ id: "tts-settings-saved", message: t("opsTtsAi.saved"), tone: "success" });
     } catch (err) {
@@ -889,12 +1092,22 @@ export function OpsTtsAiPage() {
     setForm(blankForm());
     setKind("system");
     setCatalog(null);
+    setCatalogStale(false);
     setRuntime(null);
     setLiveImportOk(null);
     setTestResult(null);
     setInstallResult(null);
     setPreviewFeedback(null);
-    setMeta({ apiKeySet: false, apiKeyMasked: "", source: "env" });
+    setCurlImportDraft("");
+    setCurlImportFeedback(null);
+    setMeta({
+      apiKeySet: false,
+      apiKeyMasked: "",
+      source: "env",
+      googleServiceAccountSet: false,
+      googleServiceAccountEmail: "",
+      googleServiceAccountProjectId: ""
+    });
     setViewMode("editor");
   }
 
@@ -933,20 +1146,16 @@ export function OpsTtsAiPage() {
 
   async function onSetActive(profileId: string, nextOn: boolean) {
     if (!profileId) return;
-    // On/Off = Set active. On another row → switch active (+ enable). Off on active → disable override.
+    // The On flag is production authority. Enabling one row atomically disables
+    // all others; disabling is allowed for the visibly On row even when an old
+    // active pointer is stale.
     setProfileBusy(true);
     setError(null);
     try {
-      if (!nextOn) {
-        if (profileId === activeProfileId) {
-          applyListResponse(await setTtsAiProfileEnabled(profileId, false));
-        }
-        return;
-      }
-      if (profileId !== activeProfileId) {
-        await activateTtsAiProfile(profileId);
-      }
-      applyListResponse(await setTtsAiProfileEnabled(profileId, true));
+      // Backend switches the active profile and disables every other setup in
+      // this one request, so the worker can never observe an in-between state.
+      if (!nextOn && !profiles.some((profile) => profile.id === profileId && profile.enabled)) return;
+      applyListResponse(await setTtsAiProfileEnabled(profileId, nextOn));
     } catch (err) {
       setError(err instanceof Error ? err.message : t("opsTtsAi.profileError"));
     } finally {
@@ -1007,7 +1216,28 @@ export function OpsTtsAiPage() {
         });
         return;
       }
-      if (kind === "cloud") {
+      const universalConnectorEnabled = Boolean(
+        httpConnectorToOptions(form.httpConnector).http_connector
+      );
+      if (named === "google") {
+        const mode = form.credentialMode || "google_service_account";
+        const serviceAccountReady = Boolean(form.googleServiceAccountJson.trim()) ||
+          (meta.googleServiceAccountSet && !form.clearGoogleServiceAccount);
+        const oauthTokenReady = Boolean(form.apiKeyInput.trim()) || meta.apiKeySet;
+        if (mode === "google_service_account" && !serviceAccountReady) {
+          setError(null);
+          setTestResult({ ok: false, provider: named, detail: t("opsTtsAi.googleServiceAccountRequired") });
+          return;
+        }
+        if (mode === "google_oauth_token" && !oauthTokenReady) {
+          setError(null);
+          setTestResult({ ok: false, provider: named, detail: t("opsTtsAi.googleOauthTokenRequired") });
+          return;
+        }
+      } else if (
+        (kind === "cloud" && !universalConnectorEnabled) ||
+        (universalConnectorEnabled && form.httpConnector.authType !== "none")
+      ) {
         const hasKey = Boolean(form.apiKeyInput.trim()) || meta.apiKeySet;
         if (!hasKey) {
           setError(null);
@@ -1019,7 +1249,7 @@ export function OpsTtsAiPage() {
           return;
         }
       }
-      if (kind === "http") {
+      if (named !== "google" && (kind === "http" || (kind === "cloud" && universalConnectorEnabled))) {
         if (!form.baseUrl.trim()) {
           setError(null);
           setTestResult({
@@ -1038,7 +1268,13 @@ export function OpsTtsAiPage() {
     setTestResult(null);
     try {
       const result = await testTtsAi({ ...payload, profile_id: editingProfileId || undefined });
-      setTestResult({ ok: result.ok, provider: result.provider, detail: result.detail });
+      setTestResult({
+        ok: result.ok,
+        provider: result.provider,
+        detail: result.detail,
+        checks: result.checks,
+        config_fingerprint: result.config_fingerprint
+      });
       if (result.ok) {
         notify({
           id: "tts-settings-test",
@@ -1047,14 +1283,18 @@ export function OpsTtsAiPage() {
         });
       }
       if (result.runtime) setRuntime(result.runtime);
-      const nextCatalog = resolveTtsCatalogForProvider(
-        result.provider || effectiveProvider(form),
-        result.catalog && result.ok ? result.catalog : null
-      );
-      if (form) {
+      const nextCatalog = result.ok
+        ? resolveTtsCatalogForProvider(result.provider || effectiveProvider(form), result.catalog || null)
+        : catalog;
+      if (form && result.ok) {
         setForm(applyCatalog(nextCatalog, form));
+      } else if (!result.ok) {
+        // Keep the last known catalog visible as stale context after a transient
+        // probe failure; the operator can correct credentials and refresh again.
+        setCatalogStale(Boolean(catalog));
       } else {
         setCatalog(nextCatalog);
+        setCatalogStale(false);
       }
     } catch (err) {
       setTestResult({
@@ -1078,6 +1318,7 @@ export function OpsTtsAiPage() {
     setKind(nextKind);
     setTestResult(null);
     setCatalog(null);
+    setCatalogStale(false);
     setInstallResult(null);
     setPreviewFeedback(null);
     if (!editingProfileId && nextKind === "local") {
@@ -1114,11 +1355,34 @@ export function OpsTtsAiPage() {
         patch.voiceId = "";
       }
     }
+    if (next === "google") {
+      patch.credentialMode = GOOGLE_CREDENTIAL_MODES.includes(
+        patch.credentialMode as (typeof GOOGLE_CREDENTIAL_MODES)[number]
+      )
+        ? patch.credentialMode
+        : "google_service_account";
+      if (!patch.baseUrl.trim()) patch.baseUrl = "https://texttospeech.googleapis.com/v1";
+    } else if (next === "google_gemini") {
+      patch.credentialMode = "api_key";
+      if (!patch.baseUrl.trim()) patch.baseUrl = "https://generativelanguage.googleapis.com/v1beta";
+      if (!patch.modelId.trim()) patch.modelId = "gemini-2.5-flash-preview-tts";
+      patch.voiceId = canonicalizeGeminiVoiceId(patch.voiceId) || "Kore";
+      patch.expressiveMode = "required";
+      patch.synthesisStrategy = "whole_video";
+      patch.maxWholeVideoSeconds = "180";
+      patch.maxBlockSeconds = "45";
+      patch.compactTriggerRatio = "0.88";
+    } else if (base.provider === "google" || base.provider === "google_gemini") {
+      patch.googleServiceAccountJson = "";
+      patch.googleServiceAccountFileName = "";
+      patch.clearGoogleServiceAccount = false;
+    }
     patch.provider = effectiveProvider(patch);
     setForm(patch);
     setKind(isCustom || patch.providerChoice === "custom" ? "local" : resolveTtsProviderKind(patch.provider));
     setTestResult(null);
     setCatalog(null);
+    setCatalogStale(false);
     setInstallResult(null);
     setPreviewFeedback(null);
   }
@@ -1135,6 +1399,7 @@ export function OpsTtsAiPage() {
       setKind("local");
       setTestResult(null);
       setCatalog(null);
+      setCatalogStale(false);
       setInstallResult(null);
       setPreviewFeedback(null);
       return;
@@ -1153,7 +1418,163 @@ export function OpsTtsAiPage() {
     });
     setTestResult(null);
     setCatalog(null);
+    setCatalogStale(false);
     setInstallResult(null);
+    setPreviewFeedback(null);
+  }
+
+  function onRemoteCredentialChange(field: "baseUrl" | "apiKeyInput", value: string) {
+    if (!form) return;
+    setForm({ ...form, [field]: value });
+    // A catalog is tied to the exact endpoint/key pair. Keep it visible as context,
+    // but mark it stale until the operator refreshes with the new credentials.
+    if (isCloud || isHttp) {
+      setCatalogStale(Boolean(catalog || runtime?.last_probe));
+      setTestResult(null);
+      setPreviewAudioUrl(null);
+      setPreviewMeta(null);
+      setPreviewFeedback(null);
+    }
+  }
+
+  async function onGoogleServiceAccountFile(file: File | undefined) {
+    if (!file || !form) return;
+    setError(null);
+    if (file.size > GOOGLE_SERVICE_ACCOUNT_MAX_BYTES) {
+      setError(t("opsTtsAi.googleServiceAccountTooLarge"));
+      return;
+    }
+    try {
+      const raw = await file.text();
+      if (new TextEncoder().encode(raw).byteLength > GOOGLE_SERVICE_ACCOUNT_MAX_BYTES) {
+        setError(t("opsTtsAi.googleServiceAccountTooLarge"));
+        return;
+      }
+      if (!googleServiceAccountMetadata(raw)) {
+        setError(t("opsTtsAi.googleServiceAccountInvalid"));
+        return;
+      }
+      setForm({
+        ...form,
+        googleServiceAccountJson: raw,
+        googleServiceAccountFileName: file.name,
+        clearGoogleServiceAccount: false
+      });
+      setCatalogStale(Boolean(catalog || runtime?.last_probe));
+      setTestResult(null);
+    } catch {
+      setError(t("opsTtsAi.googleServiceAccountReadError"));
+    }
+  }
+
+  function onGoogleCredentialModeChange(credentialMode: string) {
+    if (!form) return;
+    setForm({ ...form, credentialMode, apiKeyInput: credentialMode === "google_oauth_token" ? form.apiKeyInput : "" });
+    setCatalogStale(Boolean(catalog || runtime?.last_probe));
+    setTestResult(null);
+    setPreviewAudioUrl(null);
+    setPreviewMeta(null);
+    setPreviewFeedback(null);
+  }
+
+  function clearGoogleServiceAccount() {
+    if (!form) return;
+    setForm({
+      ...form,
+      googleServiceAccountJson: "",
+      googleServiceAccountFileName: "",
+      clearGoogleServiceAccount: true
+    });
+    setCatalogStale(Boolean(catalog || runtime?.last_probe));
+    setTestResult(null);
+  }
+
+  function updateHttpConnector(patch: Partial<HttpConnectorFormState>) {
+    if (!form) return;
+    setForm({ ...form, httpConnector: { ...form.httpConnector, ...patch } });
+    if (isHttp || isCloud) {
+      setCatalogStale(Boolean(catalog || runtime?.last_probe));
+      setTestResult(null);
+      setPreviewAudioUrl(null);
+      setPreviewMeta(null);
+      setPreviewFeedback(null);
+    }
+  }
+
+  function updateHttpAuth(patch: Partial<Pick<
+    HttpConnectorFormState,
+    "authType" | "authHeader" | "authPrefix" | "authQueryName" | "authTestPath" | "authTestMethod"
+  >>) {
+    updateHttpConnector(patch);
+  }
+
+  function updateHttpCatalogEndpoint(
+    key: "models" | "voices" | "languages",
+    patch: Partial<HttpConnectorEndpoint>
+  ) {
+    if (!form) return;
+    updateHttpConnector({
+      catalog: {
+        ...form.httpConnector.catalog,
+        [key]: { ...form.httpConnector.catalog[key], ...patch }
+      }
+    });
+  }
+
+  function importHttpCurl() {
+    const imported = parseTtsCurl(curlImportDraft);
+    if (!imported) {
+      setCurlImportFeedback({ ok: false, message: t("opsTtsAi.httpCurlInvalid") });
+      return;
+    }
+    if (!form) return;
+    setForm({
+      ...form,
+      baseUrl: imported.baseUrl,
+      httpConnector: {
+        ...form.httpConnector,
+        mode: "custom",
+        authType: imported.authType,
+        authHeader: imported.authHeader,
+        authPrefix: imported.authPrefix,
+        authQueryName: imported.authQueryName,
+        synthesisPath: imported.synthesisPath,
+        synthesisMethod: imported.method,
+        synthesisContentType: imported.contentType,
+        synthesisBody: imported.body || form.httpConnector.synthesisBody
+      }
+    });
+    setCurlImportFeedback({
+      ok: true,
+      message: imported.keyDetected
+        ? t("opsTtsAi.httpCurlCredentialsRemoved")
+        : t("opsTtsAi.httpCurlImported")
+    });
+    setCurlImportDraft("");
+    setCatalogStale(Boolean(catalog || runtime?.last_probe));
+    setTestResult(null);
+    setPreviewAudioUrl(null);
+    setPreviewMeta(null);
+    setPreviewFeedback(null);
+  }
+
+  function applyLucylabPreset() {
+    if (!form) return;
+    setForm({
+      ...form,
+      baseUrl: "https://api.lucylab.io",
+      provider: "http_custom",
+      providerChoice: "http_custom",
+      customProviderSlug: "",
+      httpConnector: {
+        ...form.httpConnector,
+        ...lucylabJsonRpcPreset()
+      }
+    });
+    setCatalogStale(Boolean(catalog || runtime?.last_probe));
+    setTestResult(null);
+    setPreviewAudioUrl(null);
+    setPreviewMeta(null);
     setPreviewFeedback(null);
   }
 
@@ -1487,6 +1908,9 @@ export function OpsTtsAiPage() {
 
   function friendlyPreviewFailure(raw: string): string {
     const message = (raw || "").trim();
+    if (isLucylabJsonRpc && /missing_job_id/i.test(message)) {
+      return t("opsTtsAi.httpLucylabPreviewMissingJob");
+    }
     if (/cloud TTS adapter is not enabled|settings are saved, but the cloud TTS adapter/i.test(message)) {
       return t("opsTtsAi.previewCloudUnavailable");
     }
@@ -1516,10 +1940,53 @@ export function OpsTtsAiPage() {
     if (form.providerChoice === "custom" && !/^[a-z][a-z0-9_\-]{0,62}$/.test(provider)) {
       return t("opsTtsAi.customProviderInvalid");
     }
-    if (kind === "cloud" && !["edge", "vieneu"].includes(form.fallbackProvider || "")) {
+    const genericSynthesisConfigured =
+      form.httpConnector.mode !== "auto" && Boolean(form.httpConnector.synthesisPath.trim());
+    const googleCredentialMode =
+      form.credentialMode || (provider === "google" ? "google_service_account" : "api_key");
+    const usesGoogleCloudCredentials =
+      provider === "google" || (provider === "google_gemini" && googleCredentialMode !== "api_key");
+    if (usesGoogleCloudCredentials) {
+      const mode = googleCredentialMode;
+      if (
+        mode === "google_service_account" &&
+        !form.googleServiceAccountJson.trim() &&
+        (!meta.googleServiceAccountSet || form.clearGoogleServiceAccount)
+      ) {
+        return t("opsTtsAi.googleServiceAccountRequired");
+      }
+      if (mode === "google_oauth_token" && !form.apiKeyInput.trim() && !meta.apiKeySet) {
+        return t("opsTtsAi.googleOauthTokenRequired");
+      }
+    }
+    if (
+      provider === "google_gemini" &&
+      googleCredentialMode === "api_key" &&
+      !form.apiKeyInput.trim() &&
+      !meta.apiKeySet
+    ) {
+      return t("opsTtsAi.previewNeedApiKey");
+    }
+    if (
+      !usesGoogleCloudCredentials &&
+      genericSynthesisConfigured &&
+      form.httpConnector.authType !== "none" &&
+      !form.apiKeyInput.trim() &&
+      !meta.apiKeySet
+    ) {
+      return t("opsTtsAi.previewNeedApiKey");
+    }
+    if (
+      kind === "cloud" &&
+      !supportsDirectCloudPreview(provider) &&
+      !genericSynthesisConfigured &&
+      !["edge", "vieneu"].includes(form.fallbackProvider || "")
+    ) {
       return t("opsTtsAi.previewCloudUnavailable");
     }
-    if (kind === "http" && !form.baseUrl.trim()) return t("opsTtsAi.previewNeedBaseUrl");
+    if (provider !== "google" && (kind === "http" || genericSynthesisConfigured) && !form.baseUrl.trim()) {
+      return t("opsTtsAi.previewNeedBaseUrl");
+    }
     return "";
   }
 
@@ -1540,6 +2007,10 @@ export function OpsTtsAiPage() {
     setError(null);
     setPreviewFeedback(null);
     setPreviewMeta(null);
+    setPreviewAudioUrl((previous) => {
+      if (previous) URL.revokeObjectURL(previous);
+      return null;
+    });
     try {
       const started = await previewTtsAiSpeech({
         ...payload,
@@ -1551,7 +2022,9 @@ export function OpsTtsAiPage() {
         setPreviewMeta({
           provider: started.provider || payload.provider || "tts",
           duration: 0,
-          detail: started.detail || t("opsTtsAi.previewing")
+          detail: t("opsTtsAi.previewing"),
+          requestedVoiceId: started.requested_voice_id || payload.voice_id || "",
+          resolvedVoiceId: started.resolved_voice_id || ""
         });
         const maxAttempts = 300;
         for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
@@ -1568,7 +2041,9 @@ export function OpsTtsAiPage() {
             setPreviewMeta({
               provider: status.provider || payload.provider || "tts",
               duration: 0,
-              detail: status.detail || t("opsTtsAi.previewing")
+              detail: t("opsTtsAi.previewing"),
+              requestedVoiceId: status.requested_voice_id || payload.voice_id || "",
+              resolvedVoiceId: status.resolved_voice_id || ""
             });
             continue;
           }
@@ -1596,7 +2071,9 @@ export function OpsTtsAiPage() {
           setPreviewMeta({
             provider: status.provider,
             duration: status.duration_seconds,
-            detail: status.detail
+            detail: status.detail,
+            requestedVoiceId: status.requested_voice_id || payload.voice_id || "",
+            resolvedVoiceId: status.resolved_voice_id || ""
           });
           notify({ id: "tts-preview-finished", message: status.detail || t("opsTtsAi.preview"), tone: "success" });
           return;
@@ -1623,7 +2100,9 @@ export function OpsTtsAiPage() {
       setPreviewMeta({
         provider: started.provider,
         duration: started.duration_seconds,
-        detail: started.detail
+        detail: started.detail,
+        requestedVoiceId: started.requested_voice_id || payload.voice_id || "",
+        resolvedVoiceId: started.resolved_voice_id || ""
       });
       notify({ id: "tts-preview-finished", message: started.detail || t("opsTtsAi.preview"), tone: "success" });
     } catch (err) {
@@ -1688,10 +2167,7 @@ export function OpsTtsAiPage() {
   );
 
   if (viewMode === "list") {
-    const activeOnProfile = profiles.find(
-      (profile) =>
-        (Boolean(profile.is_active) || profile.id === activeProfileId) && Boolean(profile.enabled)
-    );
+    const activeOnProfile = profiles.find((profile) => Boolean(profile.enabled));
     return (
       <OpsConsoleShell
         actions={refreshAction}
@@ -1764,11 +2240,15 @@ export function OpsTtsAiPage() {
               </thead>
               <tbody>
                   {profiles.map((profile) => {
-                  const isActive = Boolean(profile.is_active) || profile.id === activeProfileId;
-                  const isOn = isActive && Boolean(profile.enabled);
+                  const isOn = Boolean(profile.enabled);
                   const hasFallback = Boolean(
                     profile.fallback_provider?.trim() && profile.fallback_provider.trim().toLowerCase() !== "none"
                   );
+                  const profileCredentialReady = profile.provider === "google"
+                    ? profile.credential_mode === "google_adc" ||
+                      (profile.credential_mode === "google_service_account" && profile.google_service_account_set) ||
+                      (profile.credential_mode === "google_oauth_token" && profile.api_key_set)
+                    : profile.api_key_set;
                   const rowReady = resolveTtsReadyState({
                     test: profile.runtime?.last_probe
                       ? {
@@ -1882,7 +2362,7 @@ export function OpsTtsAiPage() {
                           <span aria-hidden="true">·</span>
                           <span>{profile.voice_id?.trim() || "—"}</span>
                           {profile.model_id?.trim() ? <><span aria-hidden="true">·</span><span>{profile.model_id}</span></> : null}
-                          {showsTtsApiKey(profile.provider) ? <span className={profile.api_key_set ? "is-key-set" : "is-key-missing"}>· {profile.api_key_set ? t("opsTtsAi.profileKeySet") : t("opsTtsAi.profileKeyUnset")}</span> : null}
+                          {showsTtsApiKey(profile.provider) ? <span className={profileCredentialReady ? "is-key-set" : "is-key-missing"}>· {profileCredentialReady ? t("opsTtsAi.profileKeySet") : t("opsTtsAi.profileKeyUnset")}</span> : null}
                           {hasFallback ? <span className="is-muted">· FB: {profile.fallback_provider}{profile.fallback_voice_id?.trim() ? ` / ${profile.fallback_voice_id}` : ""}</span> : null}
                         </div>
                       </td>
@@ -1988,6 +2468,19 @@ export function OpsTtsAiPage() {
   const isLocal = kind === "local";
   const isCloud = kind === "cloud";
   const isHttp = kind === "http";
+  // Gemini can use either an AI Studio API key or billed Vertex OAuth.  Only
+  // the latter needs the Google Cloud credential editor/locked endpoint.
+  const isGoogle = activeProvider === "google" || (
+    activeProvider === "google_gemini" && form.credentialMode !== "api_key"
+  );
+  const googleDraftMetadata = googleServiceAccountMetadata(form.googleServiceAccountJson);
+  const googleServiceAccountReady = Boolean(googleDraftMetadata) ||
+    (meta.googleServiceAccountSet && !form.clearGoogleServiceAccount);
+  const isLucylabJsonRpc = Boolean(
+    isHttp &&
+    /^https:\/\/api\.lucylab\.io\/?$/i.test(form.baseUrl.trim()) &&
+    form.httpConnector.synthesisPath.trim() === "/json-rpc"
+  );
   const catalogRefreshBusy = catalogRefreshPhase !== "idle";
   const localDraftProvider = nameProviderForTest(form);
   const localDraftNeedsProvider = Boolean(
@@ -2015,9 +2508,61 @@ export function OpsTtsAiPage() {
   const readyChipClass =
     !editingProfileId && readyState === "ready" ? "is-ok" : ttsReadyChipClass(readyState);
   const hadInstall = Boolean(runtime?.last_install?.ok || installResult?.ok);
-  const catalogVoices = catalog?.voices?.length ? catalog.voices : null;
+  const isRemoteCatalogProvider = isCloud || isHttp;
+  const allCatalogVoices = catalog?.voices || [];
+  const allCatalogModels = ttsCatalogModelOptions(catalog);
+  const allCatalogLanguages = ttsCatalogLanguageOptions(catalog);
+  const remoteCatalogVoices = filterTtsCatalogVoices(catalog, {
+    languageCode: form.languageCode,
+    modelId: form.modelId
+  });
+  const remoteCatalogModels = filterTtsCatalogModels(catalog, {
+    languageCode: form.languageCode,
+    voiceId: form.voiceId
+  });
+  const remoteCatalogLanguages = filterTtsCatalogLanguages(catalog, {
+    modelId: form.modelId,
+    voiceId: form.voiceId
+  });
+  const catalogVoices = (isRemoteCatalogProvider ? remoteCatalogVoices : allCatalogVoices).length
+    ? isRemoteCatalogProvider
+      ? remoteCatalogVoices
+      : allCatalogVoices
+    : null;
   const catalogStyles = catalog?.styles?.length ? catalog.styles : null;
   const catalogModels = catalog?.models?.length ? catalog.models : null;
+  const selectedCatalogModel = allCatalogModels.find((model) => sameCatalogId(model.id, form.modelId));
+  const selectedCatalogVoice = allCatalogVoices.find((voice) => sameCatalogId(voice.id, form.voiceId));
+  const selectedCatalogVoiceCompatible =
+    !selectedCatalogVoice || remoteCatalogVoices.some((voice) => sameCatalogId(voice.id, selectedCatalogVoice.id));
+  const selectedCatalogModelCompatible =
+    !selectedCatalogModel || remoteCatalogModels.some((model) => sameCatalogId(model.id, selectedCatalogModel.id));
+  const remoteCatalogSelectionMismatch =
+    isRemoteCatalogProvider && (!selectedCatalogVoiceCompatible || !selectedCatalogModelCompatible);
+  const catalogDiscoveryStatus = (catalog?.discovery?.status || "").trim().toLowerCase();
+  const catalogWarnings = [catalog?.warning || "", ...(catalog?.discovery?.warnings || [])]
+    .map((warning) => warning.trim())
+    .filter((warning, index, rows) => Boolean(warning) && rows.indexOf(warning) === index);
+  if (isLucylabJsonRpc && catalogWarnings.some((warning) => /no mapped catalog items|empty catalog|endpoint could not be read/i.test(warning))) {
+    catalogWarnings.splice(0, catalogWarnings.length, t("opsTtsAi.httpLucylabNoVoices"));
+  }
+  const remoteVoiceSelectValue = allCatalogVoices.some((voice) => sameCatalogId(voice.id, form.voiceId))
+    ? form.voiceId
+    : TTS_CATALOG_MANUAL_VALUE;
+  const remoteModelSelectValue = allCatalogModels.some((model) => sameCatalogId(model.id, form.modelId))
+    ? form.modelId
+    : TTS_CATALOG_MANUAL_VALUE;
+  const remoteLanguageSelectValue = remoteCatalogLanguages.some((language) =>
+    sameCatalogId(language.code, form.languageCode)
+  )
+    ? form.languageCode
+    : TTS_CATALOG_MANUAL_VALUE;
+  const discoveryLabelKey =
+    catalogDiscoveryStatus === "complete"
+      ? "opsTtsAi.catalogDiscoveryComplete"
+      : catalogDiscoveryStatus === "partial"
+        ? "opsTtsAi.catalogDiscoveryPartial"
+        : "opsTtsAi.catalogDiscoveryUnavailable";
   const isOmniEngine = isOmnivoiceProvider(activeProvider);
   const engineModelOptions = isOmniEngine && engineCatalog.length ? engineCatalog : null;
   const engineGroups: Array<{
@@ -2040,6 +2585,103 @@ export function OpsTtsAiPage() {
     }));
   const activeEngineGroup =
     engineGroups.find((group) => group.id === engineGroupTab) || engineGroups[0];
+  const persistedProbeMatchesProvider =
+    Boolean(runtime?.last_probe?.provider) &&
+    runtime?.last_probe?.provider?.trim().toLowerCase() === activeProvider.trim().toLowerCase();
+  const httpProbeChecks =
+    (testResult?.checks?.length ? testResult.checks : undefined) ||
+    (!catalogStale && persistedProbeMatchesProvider && runtime?.last_probe?.checks?.length
+      ? runtime.last_probe.checks
+      : undefined) ||
+    (!catalogStale && catalog?.discovery?.checks?.length ? catalog.discovery.checks : undefined) ||
+    [];
+  const httpCheckFor = (...stages: string[]) => {
+    for (const stage of stages) {
+      const check = httpProbeChecks.find((candidate) => candidate.stage === stage);
+      if (check) return check;
+    }
+    return undefined;
+  };
+  const httpAuthCheck = httpCheckFor("authentication", "auth");
+  const httpCatalogCheck = httpCheckFor(
+    "aggregate catalog",
+    "catalog",
+    "catalog_models",
+    "catalog_voices",
+    "catalog_languages"
+  );
+  const httpSynthesisCheck = httpCheckFor("synthesis", "preview");
+  const httpCredentialConfigured =
+    form.httpConnector.authType === "none" || Boolean(form.apiKeyInput.trim()) || meta.apiKeySet;
+  const httpAuthRejected = Boolean(
+    testResult &&
+      !testResult.ok &&
+      /401|403|unauthori[sz]ed|forbidden|api key|token/i.test(testResult.detail || "")
+  );
+  const httpSynthesisConfigured =
+    form.httpConnector.mode !== "auto" && Boolean(form.httpConnector.synthesisPath.trim());
+  const httpConnectorSteps = [
+    {
+      id: "auth",
+      label: t("opsTtsAi.httpStepAuthentication"),
+      state: httpAuthCheck
+        ? httpAuthCheck.status === "failed"
+          ? "error"
+          : httpAuthCheck.status === "passed"
+            ? "ok"
+            : "warn"
+        : httpAuthRejected
+          ? "error"
+          : testResult?.ok
+            ? "ok"
+            : httpCredentialConfigured
+              ? "warn"
+              : "muted",
+      detail: httpAuthCheck?.detail || (httpAuthRejected
+        ? t("opsTtsAi.httpStatusRejected")
+        : testResult?.ok
+          ? t("opsTtsAi.httpStatusPassed")
+          : httpCredentialConfigured
+            ? t("opsTtsAi.httpStatusConfigured")
+            : t("opsTtsAi.httpStatusNeedsSetup"))
+    },
+    {
+      id: "catalog",
+      label: t("opsTtsAi.httpStepCatalog"),
+      state: catalogStale
+        ? "warn"
+        : httpCatalogCheck?.status === "failed"
+        ? "error"
+        : catalog
+        ? catalogDiscoveryStatus === "complete"
+          ? "ok"
+          : "warn"
+        : testResult?.ok
+          ? "warn"
+          : "muted",
+      detail: catalogStale
+        ? t("opsTtsAi.catalogStale")
+        : httpCatalogCheck?.detail || (catalog
+        ? catalogDiscoveryStatus === "complete"
+          ? t("opsTtsAi.httpStatusPassed")
+          : t("opsTtsAi.httpStatusManual")
+        : testResult?.ok
+          ? t("opsTtsAi.httpStatusManual")
+          : t("opsTtsAi.httpStatusNeedsSetup"))
+    },
+    {
+      id: "synthesis",
+      label: t("opsTtsAi.httpStepSynthesis"),
+      state: httpSynthesisCheck?.status === "failed" || previewFeedback ? "error" : httpSynthesisCheck?.status === "passed" || previewAudioUrl ? "ok" : httpSynthesisConfigured ? "warn" : "muted",
+      detail: httpSynthesisCheck?.detail || (previewAudioUrl
+        ? t("opsTtsAi.httpStatusPassed")
+        : previewFeedback
+          ? t("opsTtsAi.httpStatusRejected")
+          : httpSynthesisConfigured
+            ? t("opsTtsAi.httpStatusConfigured")
+            : t("opsTtsAi.httpStatusNeedsSetup"))
+    }
+  ] as Array<{ id: string; label: string; state: string; detail: string }>;
 
   return (
     <OpsConsoleShell
@@ -2298,6 +2940,128 @@ export function OpsTtsAiPage() {
             </select>
             <p className="ops-tts-field-hint">{t("opsTtsAi.providerHint")}</p>
           </div>
+          <div className="ops-form-field ops-tts-span-2">
+            <label htmlFor="tts-ai-expressive-mode">{t("opsTtsAi.expressiveMode")}</label>
+            <select
+              id="tts-ai-expressive-mode"
+              value={form?.expressiveMode || "best_effort"}
+              onChange={(event) =>
+                setForm((current) =>
+                  current ? { ...current, expressiveMode: event.target.value } : current
+                )
+              }
+              disabled={catalogRefreshBusy}
+            >
+              <option value="off">{t("opsTtsAi.expressiveOff")}</option>
+              <option value="best_effort">{t("opsTtsAi.expressiveBestEffort")}</option>
+              <option value="required">{t("opsTtsAi.expressiveRequired")}</option>
+            </select>
+            <p className="ops-tts-field-hint">{t("opsTtsAi.expressiveModeHint")}</p>
+          </div>
+          {activeProvider === "google_gemini" ? (
+            <>
+              <div className="ops-form-field ops-tts-span-2">
+                <label htmlFor="tts-ai-synthesis-strategy">
+                  {t("opsTtsAi.synthesisStrategy")}
+                </label>
+                <select
+                  id="tts-ai-synthesis-strategy"
+                  value={form.synthesisStrategy}
+                  onChange={(event) =>
+                    setForm((current) =>
+                      current
+                        ? { ...current, synthesisStrategy: event.target.value }
+                        : current
+                    )
+                  }
+                  disabled={catalogRefreshBusy}
+                >
+                  <option value="whole_video">{t("opsTtsAi.synthesisWholeVideo")}</option>
+                  <option value="auto_blocks">{t("opsTtsAi.synthesisAutoBlocks")}</option>
+                  <option value="segment">{t("opsTtsAi.synthesisLegacySegments")}</option>
+                </select>
+                <p className="ops-tts-field-hint">
+                  {t("opsTtsAi.synthesisStrategyHint")}
+                </p>
+              </div>
+              {form.synthesisStrategy !== "segment" ? (
+                <>
+                  <div className="ops-form-field">
+                    <label htmlFor="tts-ai-whole-max-seconds">
+                      {t("opsTtsAi.maxWholeVideoSeconds")}
+                    </label>
+                    <input
+                      id="tts-ai-whole-max-seconds"
+                      type="number"
+                      min="30"
+                      max="600"
+                      step="10"
+                      value={form.maxWholeVideoSeconds}
+                      onChange={(event) =>
+                        setForm((current) =>
+                          current
+                            ? { ...current, maxWholeVideoSeconds: event.target.value }
+                            : current
+                        )
+                      }
+                      disabled={catalogRefreshBusy}
+                    />
+                  </div>
+                  <div className="ops-form-field">
+                    <label htmlFor="tts-ai-block-max-seconds">
+                      {t("opsTtsAi.maxBlockSeconds")}
+                    </label>
+                    <input
+                      id="tts-ai-block-max-seconds"
+                      type="number"
+                      min="15"
+                      max="120"
+                      step="5"
+                      value={form.maxBlockSeconds}
+                      onChange={(event) =>
+                        setForm((current) =>
+                          current
+                            ? { ...current, maxBlockSeconds: event.target.value }
+                            : current
+                        )
+                      }
+                      disabled={catalogRefreshBusy}
+                    />
+                  </div>
+                  <div className="ops-form-field ops-tts-span-2">
+                    <label htmlFor="tts-ai-compact-trigger">
+                      {t("opsTtsAi.compactTriggerRatio")}
+                    </label>
+                    <input
+                      id="tts-ai-compact-trigger"
+                      type="number"
+                      min="0.65"
+                      max="1"
+                      step="0.01"
+                      value={form.compactTriggerRatio}
+                      onChange={(event) =>
+                        setForm((current) =>
+                          current
+                            ? { ...current, compactTriggerRatio: event.target.value }
+                            : current
+                        )
+                      }
+                      disabled={catalogRefreshBusy}
+                    />
+                    <p className="ops-tts-field-hint">
+                      {t("opsTtsAi.compactTriggerRatioHint")}
+                    </p>
+                  </div>
+                  <div className="ops-tts-provider-gate ops-tts-span-2" role="status">
+                    <div>
+                      <strong>{t("opsTtsAi.wholeVideoActiveTitle")}</strong>
+                      <p>{t("opsTtsAi.wholeVideoActiveHint")}</p>
+                    </div>
+                  </div>
+                </>
+              ) : null}
+            </>
+          ) : null}
           {showCustomSlug ? (
             <div className="ops-form-field ops-tts-span-2">
               <label htmlFor="tts-ai-custom-slug">{t("opsTtsAi.customProviderSlug")}</label>
@@ -2344,22 +3108,113 @@ export function OpsTtsAiPage() {
               <p>{t(isHttp ? "opsTtsAi.sectionHttpHint" : "opsTtsAi.sectionCredentialsHint")}</p>
             </header>
             <div className="ops-tts-grid">
-              {(isHttp || fieldCaps.base_url) ? (
+              {(isHttp || isCloud || fieldCaps.base_url) ? (
                 <div className="ops-form-field ops-tts-span-2">
                   <label htmlFor="tts-ai-base-url">{t("opsTtsAi.baseUrl")}</label>
                   <input
                     id="tts-ai-base-url"
                     value={form.baseUrl}
-                    onChange={(e) => setForm({ ...form, baseUrl: e.target.value })}
+                    onChange={(e) => onRemoteCredentialChange("baseUrl", e.target.value)}
                     placeholder={t("opsTtsAi.baseUrlPlaceholder")}
                     title={t("opsTtsAi.baseUrlHint")}
                     spellCheck={false}
                     autoComplete="off"
+                    disabled={isGoogle || testing || catalogRefreshBusy}
                   />
                   <p className="ops-tts-field-hint ops-tts-field-hint--quiet">{t("opsTtsAi.baseUrlHint")}</p>
                 </div>
               ) : null}
-              {(isCloud || isHttp || fieldCaps.api_key) ? (
+              {isGoogle ? (
+                <div className="ops-tts-google-credential ops-tts-span-2">
+                  <div className="ops-form-field">
+                    <label htmlFor="tts-google-credential-mode">{t("opsTtsAi.googleCredentialMode")}</label>
+                    <select
+                      id="tts-google-credential-mode"
+                      value={form.credentialMode}
+                      onChange={(event) => onGoogleCredentialModeChange(event.target.value)}
+                      disabled={testing || catalogRefreshBusy}
+                    >
+                      <option value="google_service_account">{t("opsTtsAi.googleServiceAccount")}</option>
+                      <option value="google_adc">{t("opsTtsAi.googleAdc")}</option>
+                      <option value="google_oauth_token">{t("opsTtsAi.googleOauthToken")}</option>
+                    </select>
+                    <p className="ops-tts-field-hint ops-tts-field-hint--quiet">
+                      {t(`opsTtsAi.${form.credentialMode === "google_adc" ? "googleAdcHint" : form.credentialMode === "google_oauth_token" ? "googleOauthTokenHint" : "googleServiceAccountHint"}`)}
+                    </p>
+                  </div>
+
+                  {form.credentialMode === "google_service_account" ? (
+                    <div className="ops-tts-google-upload">
+                      <div className="ops-tts-google-upload__status" data-ready={googleServiceAccountReady}>
+                        <strong>
+                          {form.clearGoogleServiceAccount
+                            ? t("opsTtsAi.googleServiceAccountWillRemove")
+                            : googleServiceAccountReady
+                              ? t("opsTtsAi.googleServiceAccountReady")
+                              : t("opsTtsAi.googleServiceAccountMissing")}
+                        </strong>
+                        {googleDraftMetadata || (meta.googleServiceAccountSet && !form.clearGoogleServiceAccount) ? (
+                          <small>
+                            {(googleDraftMetadata?.email || meta.googleServiceAccountEmail)} · {t("opsTtsAi.googleProject")} {googleDraftMetadata?.projectId || meta.googleServiceAccountProjectId}
+                          </small>
+                        ) : (
+                          <small>{t("opsTtsAi.googleServiceAccountPrivateHint")}</small>
+                        )}
+                        {form.googleServiceAccountFileName ? <small>{form.googleServiceAccountFileName}</small> : null}
+                      </div>
+                      <div className="ops-tts-google-upload__actions">
+                        <label className="ops-tts-action-btn" htmlFor="tts-google-service-account-file">
+                          {t(googleServiceAccountReady ? "opsTtsAi.googleServiceAccountReplace" : "opsTtsAi.googleServiceAccountUpload")}
+                        </label>
+                        <input
+                          id="tts-google-service-account-file"
+                          className="ops-tts-google-upload__input"
+                          type="file"
+                          accept=".json,application/json"
+                          disabled={testing || catalogRefreshBusy}
+                          onChange={(event) => {
+                            const file = event.currentTarget.files?.[0];
+                            event.currentTarget.value = "";
+                            void onGoogleServiceAccountFile(file);
+                          }}
+                        />
+                        {googleServiceAccountReady ? (
+                          <button
+                            type="button"
+                            className="ops-tts-action-btn"
+                            onClick={clearGoogleServiceAccount}
+                            disabled={testing || catalogRefreshBusy}
+                          >
+                            {t("opsTtsAi.googleServiceAccountRemove")}
+                          </button>
+                        ) : null}
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {form.credentialMode === "google_adc" ? (
+                    <div className="ops-tts-google-info" role="status">
+                      <strong>{t("opsTtsAi.googleAdcTitle")}</strong>
+                      <p>{t("opsTtsAi.googleAdcDescription")}</p>
+                    </div>
+                  ) : null}
+
+                  {form.credentialMode === "google_oauth_token" ? (
+                    <div className="ops-form-field">
+                      <label htmlFor="tts-ai-google-oauth-token">{t("opsTtsAi.googleOauthToken")}</label>
+                      <input
+                        id="tts-ai-google-oauth-token"
+                        type="password"
+                        autoComplete="off"
+                        placeholder={meta.apiKeySet ? t("opsTtsAi.apiKeyKeep") : t("opsTtsAi.googleOauthTokenPlaceholder")}
+                        value={form.apiKeyInput}
+                        onChange={(event) => onRemoteCredentialChange("apiKeyInput", event.target.value)}
+                        disabled={testing || catalogRefreshBusy}
+                      />
+                    </div>
+                  ) : null}
+                </div>
+              ) : (isCloud || isHttp || fieldCaps.api_key) ? (
                 <>
                   <div className="ops-form-field ops-tts-span-2">
                     <label htmlFor="tts-ai-api-key">{t("opsTtsAi.apiKey")}</label>
@@ -2370,13 +3225,548 @@ export function OpsTtsAiPage() {
                       placeholder={meta.apiKeySet ? t("opsTtsAi.apiKeyKeep") : t("opsTtsAi.apiKeyPlaceholder")}
                       title={t("opsTtsAi.apiKeyHint")}
                       value={form.apiKeyInput}
-                      onChange={(e) => setForm({ ...form, apiKeyInput: e.target.value })}
+                      onChange={(e) => onRemoteCredentialChange("apiKeyInput", e.target.value)}
+                      disabled={testing || catalogRefreshBusy}
                     />
                     <p className="ops-tts-field-hint ops-tts-field-hint--quiet">{t("opsTtsAi.apiKeyHint")}</p>
+                    {isHttp || (isCloud && form.httpConnector.mode !== "auto") ? (
+                      <p className="ops-tts-field-hint ops-tts-http-key-hint">
+                        {t("opsTtsAi.httpRawKeyHint").replace("{prefix}", form.httpConnector.authPrefix || t("opsTtsAi.httpNoKeyPrefix"))}
+                      </p>
+                    ) : null}
                   </div>
                 </>
               ) : null}
             </div>
+            {(isCloud || isHttp) && !isGoogle ? (
+              <div className="ops-tts-http-connector" aria-label={t("opsTtsAi.httpConnectorTitle")}>
+                <div className="ops-tts-http-connector__intro">
+                  <div>
+                    <strong>{t("opsTtsAi.httpConnectorTitle")}</strong>
+                    <p>{t("opsTtsAi.httpConnectorHint")}</p>
+                  </div>
+                  <div className="ops-tts-http-connector__intro-actions">
+                    <button
+                      type="button"
+                      className="ops-tts-action-btn"
+                      onClick={applyLucylabPreset}
+                      disabled={testing || catalogRefreshBusy}
+                      title={t("opsTtsAi.httpLucylabPresetHint")}
+                    >
+                      {t("opsTtsAi.httpLucylabPreset")}
+                    </button>
+                    <span className="ops-tts-http-connector__version">v1</span>
+                  </div>
+                </div>
+
+                <div className="ops-tts-http-connector__steps" role="list" aria-label={t("opsTtsAi.httpStepsLabel")}>
+                  {httpConnectorSteps.map((step, index) => (
+                    <div className={`ops-tts-http-step is-${step.state}`} role="listitem" key={step.id}>
+                      <span className="ops-tts-http-step__number" aria-hidden="true">{index + 1}</span>
+                      <span className="ops-tts-http-step__copy">
+                        <strong>{step.label}</strong>
+                        <small>{step.detail}</small>
+                      </span>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="ops-tts-http-mode-tabs" role="tablist" aria-label={t("opsTtsAi.httpModeLabel")}>
+                  {HTTP_CONNECTOR_MODES.map((mode) => (
+                    <button
+                      type="button"
+                      role="tab"
+                      key={mode}
+                      aria-selected={form.httpConnector.mode === mode}
+                      className={form.httpConnector.mode === mode ? "is-active" : ""}
+                      onClick={() => updateHttpConnector({ mode })}
+                      disabled={testing || catalogRefreshBusy}
+                    >
+                      {t(`opsTtsAi.httpMode${mode[0].toUpperCase()}${mode.slice(1)}`)}
+                    </button>
+                  ))}
+                </div>
+                <p className="ops-tts-field-hint ops-tts-field-hint--quiet ops-tts-http-connector__mode-hint">
+                  {form.httpConnector.mode === "auto"
+                    ? t("opsTtsAi.httpModeAutoHint")
+                    : form.httpConnector.mode === "openapi"
+                      ? t("opsTtsAi.httpModeOpenapiHint")
+                      : t("opsTtsAi.httpModeCustomHint")}
+                </p>
+
+                {form.httpConnector.mode === "openapi" ? (
+                  <div className="ops-tts-grid ops-tts-http-openapi">
+                    <div className="ops-form-field ops-tts-span-2">
+                      <label htmlFor="tts-http-openapi-url">{t("opsTtsAi.httpOpenapiUrl")}</label>
+                      <input
+                        id="tts-http-openapi-url"
+                        value={form.httpConnector.openapiUrl}
+                        onChange={(event) => updateHttpConnector({ openapiUrl: event.target.value })}
+                        placeholder={t("opsTtsAi.httpOpenapiUrlPlaceholder")}
+                        title={t("opsTtsAi.httpOpenapiUrlHint")}
+                        spellCheck={false}
+                        autoComplete="off"
+                      />
+                      <p className="ops-tts-field-hint ops-tts-field-hint--quiet">{t("opsTtsAi.httpOpenapiUrlHint")}</p>
+                    </div>
+                  </div>
+                ) : null}
+
+                <details className="ops-tts-http-mapping">
+                  <summary>
+                    <span>{t("opsTtsAi.httpAuthenticationTitle")}</span>
+                    <small>{t("opsTtsAi.httpAuthenticationHint")}</small>
+                  </summary>
+                  <div className="ops-tts-grid ops-tts-http-mapping__body">
+                    <div className="ops-form-field">
+                      <label htmlFor="tts-http-auth-type">{t("opsTtsAi.httpAuthType")}</label>
+                      <select
+                        id="tts-http-auth-type"
+                        value={form.httpConnector.authType}
+                        onChange={(event) => {
+                          const next = event.target.value as HttpConnectorAuthType;
+                          updateHttpAuth({
+                            authType: next,
+                            authHeader:
+                              next === "bearer"
+                                ? "Authorization"
+                                : next === "header"
+                                  ? "X-API-Key"
+                                  : form.httpConnector.authHeader,
+                            authPrefix: next === "bearer" ? "Bearer " : "",
+                            authQueryName:
+                              next === "query"
+                                ? form.httpConnector.authQueryName || "api_key"
+                                : form.httpConnector.authQueryName
+                          });
+                        }}
+                      >
+                        <option value="bearer">{t("opsTtsAi.httpAuthBearer")}</option>
+                        <option value="header">{t("opsTtsAi.httpAuthHeader")}</option>
+                        <option value="query">{t("opsTtsAi.httpAuthQuery")}</option>
+                        <option value="none">{t("opsTtsAi.httpAuthNone")}</option>
+                      </select>
+                    </div>
+                    {form.httpConnector.authType !== "none" ? (
+                      <div className="ops-form-field">
+                        <label htmlFor="tts-http-auth-header">
+                          {form.httpConnector.authType === "query" ? t("opsTtsAi.httpAuthQueryName") : t("opsTtsAi.httpAuthHeaderName")}
+                        </label>
+                        <input
+                          id="tts-http-auth-header"
+                          value={form.httpConnector.authType === "query" ? form.httpConnector.authQueryName : form.httpConnector.authHeader}
+                          onChange={(event) =>
+                            updateHttpAuth(
+                              form.httpConnector.authType === "query"
+                                ? { authQueryName: event.target.value }
+                                : { authHeader: event.target.value }
+                            )
+                          }
+                          placeholder={form.httpConnector.authType === "query" ? "api_key" : "Authorization"}
+                          spellCheck={false}
+                          autoComplete="off"
+                        />
+                        {form.httpConnector.authType === "query" ? (
+                          <p className="ops-tts-field-hint is-warn">{t("opsTtsAi.httpAuthQueryRisk")}</p>
+                        ) : null}
+                      </div>
+                    ) : null}
+                    {form.httpConnector.authType !== "none" && form.httpConnector.authType !== "query" ? (
+                      <div className="ops-form-field">
+                        <label htmlFor="tts-http-auth-prefix">{t("opsTtsAi.httpAuthPrefix")}</label>
+                        <input
+                          id="tts-http-auth-prefix"
+                          value={form.httpConnector.authPrefix}
+                          onChange={(event) => updateHttpAuth({ authPrefix: event.target.value })}
+                          placeholder="Bearer "
+                          spellCheck={false}
+                          autoComplete="off"
+                        />
+                      </div>
+                    ) : null}
+                    <div className="ops-form-field">
+                      <label htmlFor="tts-http-auth-test-method">{t("opsTtsAi.httpAuthTestMethod")}</label>
+                      <select
+                        id="tts-http-auth-test-method"
+                        value={form.httpConnector.authTestMethod}
+                        onChange={(event) => updateHttpAuth({ authTestMethod: event.target.value })}
+                      >
+                        <option value="GET">GET</option>
+                        <option value="HEAD">HEAD</option>
+                      </select>
+                    </div>
+                    <div className="ops-form-field ops-tts-span-2">
+                      <label htmlFor="tts-http-auth-test-path">{t("opsTtsAi.httpAuthTestPath")}</label>
+                      <input
+                        id="tts-http-auth-test-path"
+                        value={form.httpConnector.authTestPath}
+                        onChange={(event) => updateHttpAuth({ authTestPath: event.target.value })}
+                        placeholder={t("opsTtsAi.httpAuthTestPathPlaceholder")}
+                        spellCheck={false}
+                      />
+                      <p className="ops-tts-field-hint ops-tts-field-hint--quiet">{t("opsTtsAi.httpAuthTestPathHint")}</p>
+                    </div>
+                  </div>
+                </details>
+
+                {form.httpConnector.mode !== "auto" ? (
+                  <>
+                    <details className="ops-tts-http-mapping">
+                      <summary>
+                        <span>{t("opsTtsAi.httpCatalogMappingTitle")}</span>
+                        <small>{t("opsTtsAi.httpCatalogMappingHint")}</small>
+                      </summary>
+                      <div className="ops-tts-http-mapping__body">
+                        {HTTP_CATALOG_RESOURCES.map((resource) => {
+                          const endpoint = form.httpConnector.catalog[resource];
+                          return (
+                            <fieldset className="ops-tts-http-endpoint" key={resource}>
+                              <legend>{t(`opsTtsAi.httpCatalog${resource[0].toUpperCase()}${resource.slice(1)}`)}</legend>
+                              <div className="ops-tts-grid">
+                                <div className="ops-form-field ops-tts-span-2">
+                                  <label htmlFor={`tts-http-${resource}-path`}>{t("opsTtsAi.httpPath")}</label>
+                                  <input
+                                    id={`tts-http-${resource}-path`}
+                                    value={endpoint.path}
+                                    onChange={(event) => updateHttpCatalogEndpoint(resource, { path: event.target.value })}
+                                    placeholder={resource === "models" ? "/models" : `/${resource}`}
+                                    spellCheck={false}
+                                  />
+                                </div>
+                                <div className="ops-form-field">
+                                  <label htmlFor={`tts-http-${resource}-method`}>{t("opsTtsAi.httpCatalogMethod")}</label>
+                                  <select
+                                    id={`tts-http-${resource}-method`}
+                                    value={endpoint.method}
+                                    onChange={(event) => updateHttpCatalogEndpoint(resource, { method: event.target.value })}
+                                  >
+                                    <option value="GET">GET</option>
+                                    <option value="POST">POST</option>
+                                    <option value="PUT">PUT</option>
+                                  </select>
+                                </div>
+                                <div className="ops-form-field">
+                                  <label htmlFor={`tts-http-${resource}-content-type`}>{t("opsTtsAi.httpCatalogContentType")}</label>
+                                  <select
+                                    id={`tts-http-${resource}-content-type`}
+                                    value={endpoint.content_type}
+                                    onChange={(event) => updateHttpCatalogEndpoint(resource, { content_type: event.target.value })}
+                                  >
+                                    <option value="application/json">application/json</option>
+                                    <option value="application/x-www-form-urlencoded">application/x-www-form-urlencoded</option>
+                                  </select>
+                                </div>
+                                {endpoint.method !== "GET" ? (
+                                  <div className="ops-form-field ops-tts-span-2">
+                                    <label htmlFor={`tts-http-${resource}-body`}>{t("opsTtsAi.httpCatalogBody")}</label>
+                                    <textarea
+                                      id={`tts-http-${resource}-body`}
+                                      rows={4}
+                                      value={endpoint.body}
+                                      onChange={(event) => updateHttpCatalogEndpoint(resource, { body: event.target.value })}
+                                      spellCheck={false}
+                                    />
+                                    <p className="ops-tts-field-hint ops-tts-field-hint--quiet">{t("opsTtsAi.httpCatalogBodyHint")}</p>
+                                  </div>
+                                ) : null}
+                                <div className="ops-form-field">
+                                  <label htmlFor={`tts-http-${resource}-items`}>{t("opsTtsAi.httpItemsPath")}</label>
+                                  <input
+                                    id={`tts-http-${resource}-items`}
+                                    value={endpoint.items_path}
+                                    onChange={(event) => updateHttpCatalogEndpoint(resource, { items_path: event.target.value })}
+                                    placeholder="data.items"
+                                    spellCheck={false}
+                                  />
+                                </div>
+                                <div className="ops-form-field">
+                                  <label htmlFor={`tts-http-${resource}-id`}>{resource === "languages" ? t("opsTtsAi.httpCodePath") : t("opsTtsAi.httpIdPath")}</label>
+                                  <input
+                                    id={`tts-http-${resource}-id`}
+                                    value={endpoint.id_path}
+                                    onChange={(event) => updateHttpCatalogEndpoint(resource, { id_path: event.target.value })}
+                                    placeholder={resource === "languages" ? "code" : "id"}
+                                    spellCheck={false}
+                                  />
+                                </div>
+                                <div className="ops-form-field">
+                                  <label htmlFor={`tts-http-${resource}-label`}>{t("opsTtsAi.httpLabelPath")}</label>
+                                  <input
+                                    id={`tts-http-${resource}-label`}
+                                    value={endpoint.label_path}
+                                    onChange={(event) => updateHttpCatalogEndpoint(resource, { label_path: event.target.value })}
+                                    placeholder="name"
+                                    spellCheck={false}
+                                  />
+                                </div>
+                              </div>
+                              <details className="ops-tts-http-endpoint__optional">
+                                <summary>{t("opsTtsAi.httpOptionalMetadata")}</summary>
+                                <div className="ops-tts-grid">
+                                  {(["languages_path", "models_path", "voices_path", "gender_path", "description_path", "capabilities_path"] as const).map((field) => (
+                                    <div className="ops-form-field" key={field}>
+                                      <label htmlFor={`tts-http-${resource}-${field}`}>{t(`opsTtsAi.http${field.replace(/_path$/, "").replace(/(^|_)(.)/g, (_match, _prefix, letter) => String(letter).toUpperCase())}Path`)}</label>
+                                      <input
+                                        id={`tts-http-${resource}-${field}`}
+                                        value={endpoint[field]}
+                                        onChange={(event) => updateHttpCatalogEndpoint(resource, { [field]: event.target.value })}
+                                        placeholder={`data.${field.replace("_path", "")}`}
+                                        spellCheck={false}
+                                      />
+                                    </div>
+                                  ))}
+                                </div>
+                              </details>
+                            </fieldset>
+                          );
+                        })}
+                      </div>
+                    </details>
+
+                    <details className="ops-tts-http-mapping">
+                      <summary>
+                        <span>{t("opsTtsAi.httpSynthesisMappingTitle")}</span>
+                        <small>{t("opsTtsAi.httpSynthesisMappingHint")}</small>
+                      </summary>
+                      <div className="ops-tts-grid ops-tts-http-mapping__body">
+                        <div className="ops-form-field ops-tts-span-2">
+                          <label htmlFor="tts-http-synthesis-path">{t("opsTtsAi.httpSynthesisPath")}</label>
+                          <input
+                            id="tts-http-synthesis-path"
+                            value={form.httpConnector.synthesisPath}
+                            onChange={(event) => updateHttpConnector({ synthesisPath: event.target.value })}
+                            placeholder="/audio/speech"
+                            spellCheck={false}
+                          />
+                        </div>
+                        <div className="ops-form-field">
+                          <label htmlFor="tts-http-synthesis-method">{t("opsTtsAi.httpSynthesisMethod")}</label>
+                          <select
+                            id="tts-http-synthesis-method"
+                            value={form.httpConnector.synthesisMethod}
+                            onChange={(event) => updateHttpConnector({ synthesisMethod: event.target.value })}
+                          >
+                            <option value="POST">POST</option>
+                            <option value="PUT">PUT</option>
+                          </select>
+                        </div>
+                        <div className="ops-form-field">
+                          <label htmlFor="tts-http-content-type">{t("opsTtsAi.httpContentType")}</label>
+                          <select
+                            id="tts-http-content-type"
+                            value={form.httpConnector.synthesisContentType}
+                            onChange={(event) => updateHttpConnector({ synthesisContentType: event.target.value })}
+                          >
+                            <option value="application/json">application/json</option>
+                            <option value="application/x-www-form-urlencoded">application/x-www-form-urlencoded</option>
+                          </select>
+                        </div>
+                        <div className="ops-form-field ops-tts-span-2">
+                          <label htmlFor="tts-http-body">{t("opsTtsAi.httpRequestBody")}</label>
+                          <textarea
+                            id="tts-http-body"
+                            rows={6}
+                            value={form.httpConnector.synthesisBody}
+                            onChange={(event) => updateHttpConnector({ synthesisBody: event.target.value })}
+                            spellCheck={false}
+                          />
+                          <p className="ops-tts-field-hint ops-tts-field-hint--quiet">{t("opsTtsAi.httpRequestBodyHint")}</p>
+                        </div>
+                        <div className="ops-form-field">
+                          <label htmlFor="tts-http-response-type">{t("opsTtsAi.httpResponseType")}</label>
+                          <select
+                            id="tts-http-response-type"
+                            value={form.httpConnector.synthesisResponseType}
+                            onChange={(event) => updateHttpConnector({ synthesisResponseType: event.target.value as HttpConnectorResponseType })}
+                          >
+                            <option value="binary">{t("opsTtsAi.httpResponseBinary")}</option>
+                            <option value="json_base64">{t("opsTtsAi.httpResponseBase64")}</option>
+                            <option value="json_url">{t("opsTtsAi.httpResponseUrl")}</option>
+                            <option value="async_json">{t("opsTtsAi.httpResponseAsync")}</option>
+                          </select>
+                        </div>
+                        <div className="ops-form-field">
+                          <label htmlFor="tts-http-audio-path">{t("opsTtsAi.httpAudioPath")}</label>
+                          <input
+                            id="tts-http-audio-path"
+                            value={form.httpConnector.synthesisAudioPath}
+                            onChange={(event) => updateHttpConnector({ synthesisAudioPath: event.target.value })}
+                            placeholder={form.httpConnector.synthesisResponseType === "binary" ? "(response body)" : "data.audio"}
+                            spellCheck={false}
+                          />
+                        </div>
+                        <div className="ops-form-field">
+                          <label htmlFor="tts-http-mime-type">{t("opsTtsAi.httpMimeType")}</label>
+                          <input
+                            id="tts-http-mime-type"
+                            value={form.httpConnector.synthesisMimeType}
+                            onChange={(event) => updateHttpConnector({ synthesisMimeType: event.target.value })}
+                            placeholder="audio/mpeg"
+                            spellCheck={false}
+                          />
+                        </div>
+                        {form.httpConnector.synthesisResponseType !== "binary" ? (
+                          <>
+                            <div className="ops-form-field">
+                              <label htmlFor="tts-http-mime-path">{t("opsTtsAi.httpMimePath")}</label>
+                              <input
+                                id="tts-http-mime-path"
+                                value={form.httpConnector.synthesisMimeTypePath}
+                                onChange={(event) => updateHttpConnector({ synthesisMimeTypePath: event.target.value })}
+                                placeholder="data.mime_type"
+                                spellCheck={false}
+                              />
+                            </div>
+                            <div className="ops-form-field">
+                              <label htmlFor="tts-http-duration-path">{t("opsTtsAi.httpDurationPath")}</label>
+                              <input
+                                id="tts-http-duration-path"
+                                value={form.httpConnector.synthesisDurationPath}
+                                onChange={(event) => updateHttpConnector({ synthesisDurationPath: event.target.value })}
+                                placeholder="data.duration"
+                                spellCheck={false}
+                              />
+                            </div>
+                            <div className="ops-form-field">
+                              <label htmlFor="tts-http-file-extension">{t("opsTtsAi.httpFileExtension")}</label>
+                              <input
+                                id="tts-http-file-extension"
+                                value={form.httpConnector.synthesisFileExtension}
+                                onChange={(event) => updateHttpConnector({ synthesisFileExtension: event.target.value })}
+                                placeholder="mp3"
+                                spellCheck={false}
+                              />
+                            </div>
+                          </>
+                        ) : null}
+                        {form.httpConnector.synthesisResponseType === "async_json" ? (
+                          <div className="ops-tts-http-polling ops-tts-span-2">
+                            <strong>{t("opsTtsAi.httpPollingTitle")}</strong>
+                            <div className="ops-tts-grid">
+                              <div className="ops-form-field">
+                                <label htmlFor="tts-http-job-id-path">{t("opsTtsAi.httpJobIdPath")}</label>
+                                <input id="tts-http-job-id-path" value={form.httpConnector.pollingJobIdPath} onChange={(event) => updateHttpConnector({ pollingJobIdPath: event.target.value })} placeholder="job_id" spellCheck={false} />
+                              </div>
+                              <div className="ops-form-field">
+                                <label htmlFor="tts-http-poll-path">{t("opsTtsAi.httpPollPath")}</label>
+                                <input id="tts-http-poll-path" value={form.httpConnector.pollingPath} onChange={(event) => updateHttpConnector({ pollingPath: event.target.value })} placeholder="/jobs/{{job_id}}" spellCheck={false} />
+                              </div>
+                              <div className="ops-form-field">
+                                <label htmlFor="tts-http-poll-method">{t("opsTtsAi.httpPollMethod")}</label>
+                                <select
+                                  id="tts-http-poll-method"
+                                  value={form.httpConnector.pollingMethod}
+                                  onChange={(event) => updateHttpConnector({ pollingMethod: event.target.value })}
+                                >
+                                  <option value="GET">GET</option>
+                                  <option value="POST">POST</option>
+                                  <option value="PUT">PUT</option>
+                                </select>
+                              </div>
+                              <div className="ops-form-field">
+                                <label htmlFor="tts-http-poll-content-type">{t("opsTtsAi.httpPollContentType")}</label>
+                                <select
+                                  id="tts-http-poll-content-type"
+                                  value={form.httpConnector.pollingContentType}
+                                  onChange={(event) => updateHttpConnector({ pollingContentType: event.target.value })}
+                                >
+                                  <option value="application/json">application/json</option>
+                                  <option value="application/x-www-form-urlencoded">application/x-www-form-urlencoded</option>
+                                </select>
+                              </div>
+                              {form.httpConnector.pollingMethod !== "GET" ? (
+                                <div className="ops-form-field ops-tts-span-2">
+                                  <label htmlFor="tts-http-poll-body">{t("opsTtsAi.httpPollBody")}</label>
+                                  <textarea
+                                    id="tts-http-poll-body"
+                                    rows={5}
+                                    value={form.httpConnector.pollingBody}
+                                    onChange={(event) => updateHttpConnector({ pollingBody: event.target.value })}
+                                    placeholder={'{ "method": "getExportStatus", "input": { "projectExportId": "{{job_id}}" } }'}
+                                    spellCheck={false}
+                                  />
+                                  <p className="ops-tts-field-hint ops-tts-field-hint--quiet">{t("opsTtsAi.httpPollBodyHint")}</p>
+                                </div>
+                              ) : null}
+                              <div className="ops-form-field">
+                                <label htmlFor="tts-http-status-path">{t("opsTtsAi.httpStatusPath")}</label>
+                                <input id="tts-http-status-path" value={form.httpConnector.pollingStatusPath} onChange={(event) => updateHttpConnector({ pollingStatusPath: event.target.value })} placeholder="status" spellCheck={false} />
+                              </div>
+                              <div className="ops-form-field">
+                                <label htmlFor="tts-http-success-values">{t("opsTtsAi.httpSuccessValues")}</label>
+                                <input id="tts-http-success-values" value={form.httpConnector.pollingSuccessValues} onChange={(event) => updateHttpConnector({ pollingSuccessValues: event.target.value })} spellCheck={false} />
+                              </div>
+                              <div className="ops-form-field">
+                                <label htmlFor="tts-http-failure-values">{t("opsTtsAi.httpFailureValues")}</label>
+                                <input id="tts-http-failure-values" value={form.httpConnector.pollingFailureValues} onChange={(event) => updateHttpConnector({ pollingFailureValues: event.target.value })} spellCheck={false} />
+                              </div>
+                              <div className="ops-form-field">
+                                <label htmlFor="tts-http-poll-interval">{t("opsTtsAi.httpPollInterval")}</label>
+                                <input id="tts-http-poll-interval" inputMode="decimal" value={form.httpConnector.pollingIntervalSeconds} onChange={(event) => updateHttpConnector({ pollingIntervalSeconds: event.target.value })} placeholder="2" spellCheck={false} />
+                              </div>
+                              <div className="ops-form-field">
+                                <label htmlFor="tts-http-poll-attempts">{t("opsTtsAi.httpPollAttempts")}</label>
+                                <input id="tts-http-poll-attempts" inputMode="numeric" value={form.httpConnector.pollingMaxAttempts} onChange={(event) => updateHttpConnector({ pollingMaxAttempts: event.target.value })} placeholder="30" spellCheck={false} />
+                              </div>
+                              <div className="ops-form-field">
+                                <label htmlFor="tts-http-poll-response-type">{t("opsTtsAi.httpPollResponseType")}</label>
+                                <select
+                                  id="tts-http-poll-response-type"
+                                  value={form.httpConnector.pollingResponseType}
+                                  onChange={(event) => updateHttpConnector({ pollingResponseType: event.target.value as Exclude<HttpConnectorResponseType, "async_json"> })}
+                                >
+                                  <option value="json_url">{t("opsTtsAi.httpResponseUrl")}</option>
+                                  <option value="json_base64">{t("opsTtsAi.httpResponseBase64")}</option>
+                                  <option value="binary">{t("opsTtsAi.httpResponseBinary")}</option>
+                                </select>
+                              </div>
+                              <div className="ops-form-field">
+                                <label htmlFor="tts-http-poll-audio-path">{t("opsTtsAi.httpPollAudioPath")}</label>
+                                <input id="tts-http-poll-audio-path" value={form.httpConnector.pollingAudioPath} onChange={(event) => updateHttpConnector({ pollingAudioPath: event.target.value })} placeholder="data.audio_url" spellCheck={false} />
+                              </div>
+                              <div className="ops-form-field">
+                                <label htmlFor="tts-http-poll-mime-path">{t("opsTtsAi.httpPollMimePath")}</label>
+                                <input id="tts-http-poll-mime-path" value={form.httpConnector.pollingMimeTypePath} onChange={(event) => updateHttpConnector({ pollingMimeTypePath: event.target.value })} placeholder="data.mime_type" spellCheck={false} />
+                              </div>
+                              <div className="ops-form-field">
+                                <label htmlFor="tts-http-poll-duration-path">{t("opsTtsAi.httpPollDurationPath")}</label>
+                                <input id="tts-http-poll-duration-path" value={form.httpConnector.pollingDurationPath} onChange={(event) => updateHttpConnector({ pollingDurationPath: event.target.value })} placeholder="data.duration" spellCheck={false} />
+                              </div>
+                            </div>
+                          </div>
+                        ) : null}
+                      </div>
+                    </details>
+                  </>
+                ) : null}
+
+                <details className="ops-tts-http-curl">
+                  <summary>{t("opsTtsAi.httpCurlTitle")}</summary>
+                  <p>{t("opsTtsAi.httpCurlHint")}</p>
+                  <textarea
+                    rows={3}
+                    value={curlImportDraft}
+                    onChange={(event) => {
+                      setCurlImportDraft(event.target.value);
+                      setCurlImportFeedback(null);
+                    }}
+                    placeholder={t("opsTtsAi.httpCurlPlaceholder")}
+                    spellCheck={false}
+                    aria-label={t("opsTtsAi.httpCurlTitle")}
+                  />
+                  <div className="ops-tts-http-curl__actions">
+                    <button type="button" className="ops-tts-action-btn" onClick={importHttpCurl} disabled={!curlImportDraft.trim() || testing}>
+                      {t("opsTtsAi.httpCurlImport")}
+                    </button>
+                    {curlImportFeedback ? (
+                      <span className={`ops-tts-http-curl__feedback ${curlImportFeedback.ok ? "is-ok" : "is-error"}`} role={curlImportFeedback.ok ? "status" : "alert"}>
+                        {curlImportFeedback.message}
+                      </span>
+                    ) : null}
+                  </div>
+                </details>
+              </div>
+            ) : null}
           </section>
         ) : null}
 
@@ -2690,30 +4080,107 @@ export function OpsTtsAiPage() {
               </button>
             </header>
               {catalog ? (
-                <div className="ops-tts-status ops-tts-status--compact" aria-label={t("opsTtsAi.providerMetaLabel")}>
-                  <>
-                    <span className="ops-tts-chip is-ok">
-                      {t("opsTtsAi.catalogSource")}: {catalog.source}
-                      {catalogVoices ? ` · ${catalogVoices.length}` : ""}
+                <>
+                  <div className="ops-tts-status ops-tts-status--compact" aria-label={t("opsTtsAi.providerMetaLabel")}>
+                    <span className={`ops-tts-chip ${catalogDiscoveryStatus === "unavailable" ? "is-warn" : "is-ok"}`}>
+                      {t("opsTtsAi.catalogSource")}: {catalog.source || "—"}
                     </span>
+                    {catalog.discovery ? (
+                      <span className={`ops-tts-chip is-${catalogDiscoveryStatus === "complete" ? "ok" : "warn"}`}>
+                        {t(discoveryLabelKey)}
+                      </span>
+                    ) : null}
+                    {catalogStale ? <span className="ops-tts-chip is-warn">{t("opsTtsAi.catalogStale")}</span> : null}
+                    {allCatalogVoices.length ? (
+                      <span className="ops-tts-chip is-muted">
+                        {t("opsTtsAi.catalogVoicesCount")}: {allCatalogVoices.length}
+                      </span>
+                    ) : null}
+                    {allCatalogModels.length ? (
+                      <span className="ops-tts-chip is-muted">
+                        {t("opsTtsAi.catalogModelsCount")}: {allCatalogModels.length}
+                      </span>
+                    ) : null}
+                    {allCatalogLanguages.length ? (
+                      <span className="ops-tts-chip is-muted">
+                        {t("opsTtsAi.catalogLanguagesCount")}: {allCatalogLanguages.length}
+                      </span>
+                    ) : null}
                     {catalog.sample_rate ? (
                       <span className="ops-tts-chip is-muted">
                         {t("opsTtsAi.sampleRate")}: {catalog.sample_rate} Hz
                       </span>
                     ) : null}
-                    {catalog.models?.length ? (
-                      <span className="ops-tts-chip is-muted">
-                        {t("opsTtsAi.modelId")}: {form.modelId || catalog.models[0]}
+                    {catalog.discovery?.config_fingerprint ? (
+                      <span className="ops-tts-chip is-muted" title={t("opsTtsAi.httpFingerprintHint")}>
+                        {t("opsTtsAi.httpFingerprint")}: {catalog.discovery.config_fingerprint.slice(0, 8)}
                       </span>
                     ) : null}
-                  </>
+                  </div>
+                  {catalogWarnings.length ? (
+                    <div className="ops-tts-catalog-notice is-warn" role="status">
+                      <strong>{t("opsTtsAi.catalogWarningTitle")}</strong>
+                      <span>{catalogWarnings.join(" · ")}</span>
+                    </div>
+                  ) : null}
+                </>
+              ) : isRemoteCatalogProvider && testResult?.ok ? (
+                <div className="ops-tts-catalog-notice is-muted" role="status">
+                  <strong>{t("opsTtsAi.catalogUnavailableTitle")}</strong>
+                  <span>{t("opsTtsAi.catalogUnavailableHint")}</span>
+                </div>
+              ) : isRemoteCatalogProvider ? (
+                <div className="ops-tts-catalog-notice is-muted" role="status">
+                  <strong>{t("opsTtsAi.catalogNotLoadedTitle")}</strong>
+                  <span>{t("opsTtsAi.catalogNotLoadedHint")}</span>
                 </div>
               ) : null}
               <div className="ops-tts-grid">
                 {fieldCaps.voice ? (
                   <div className="ops-form-field ops-tts-span-2">
                     <label htmlFor="tts-ai-voice">{t("opsTtsAi.voiceId")}</label>
-                    {catalogVoices ? (
+                    {isRemoteCatalogProvider && allCatalogVoices.length ? (
+                      <>
+                        <select
+                          id="tts-ai-voice"
+                          value={remoteVoiceSelectValue}
+                          onChange={(e) =>
+                            setForm({
+                              ...form,
+                              voiceId: e.target.value === TTS_CATALOG_MANUAL_VALUE ? "" : e.target.value
+                            })
+                          }
+                        >
+                          <option value={TTS_CATALOG_MANUAL_VALUE}>{t("opsTtsAi.catalogManualOption")}</option>
+                          {allCatalogVoices.map((voice) => {
+                            const compatible = remoteCatalogVoices.some((candidate) =>
+                              sameCatalogId(candidate.id, voice.id)
+                            );
+                            return (
+                              <option key={voice.id} value={voice.id} title={voice.description || undefined}>
+                                {voice.label || voice.id}
+                                {voice.gender ? ` · ${voice.gender}` : ""}
+                                {compatible ? "" : ` — ${t("opsTtsAi.catalogMayNotMatch")}`}
+                              </option>
+                            );
+                          })}
+                        </select>
+                        <p className="ops-tts-field-hint ops-tts-field-hint--quiet">
+                          {t("opsTtsAi.catalogAllChoicesHint")
+                            .replace("{total}", String(allCatalogVoices.length))
+                            .replace("{compatible}", String(remoteCatalogVoices.length))}
+                        </p>
+                        {remoteVoiceSelectValue === TTS_CATALOG_MANUAL_VALUE ? (
+                          <input
+                            className="ops-tts-catalog-manual-input"
+                            value={form.voiceId}
+                            onChange={(e) => setForm({ ...form, voiceId: e.target.value })}
+                            placeholder={t("opsTtsAi.voiceOptionalPlaceholder")}
+                            spellCheck={false}
+                          />
+                        ) : null}
+                      </>
+                    ) : catalogVoices ? (
                       <select
                         id="tts-ai-voice"
                         value={
@@ -2750,7 +4217,9 @@ export function OpsTtsAiPage() {
                       />
                     )}
                     <p className="ops-tts-field-hint ops-tts-field-hint--quiet">
-                      {catalogVoices
+                      {isLucylabJsonRpc
+                        ? t("opsTtsAi.httpLucylabVoiceHint")
+                        : (isRemoteCatalogProvider && allCatalogVoices.length) || catalogVoices
                         ? t("opsTtsAi.voiceFromCatalog")
                         : activeProvider === "edge"
                           ? t("opsTtsAi.voicePresetHint")
@@ -2771,19 +4240,55 @@ export function OpsTtsAiPage() {
                 </div>
                 <div className="ops-form-field">
                   <label htmlFor="tts-ai-lang">{t("opsTtsAi.languageCode")}</label>
-                  <input
-                    id="tts-ai-lang"
-                    value={form.languageCode}
-                    onChange={(e) => setForm({ ...form, languageCode: e.target.value })}
-                    placeholder={t("opsTtsAi.languageCodePlaceholder")}
-                    title={t("opsTtsAi.languageCodeHint")}
-                  />
+                  {isRemoteCatalogProvider && remoteCatalogLanguages.length ? (
+                    <>
+                      <select
+                        id="tts-ai-lang"
+                        value={remoteLanguageSelectValue}
+                        onChange={(e) =>
+                          setForm({
+                            ...form,
+                            languageCode: e.target.value === TTS_CATALOG_MANUAL_VALUE ? "" : e.target.value
+                          })
+                        }
+                      >
+                        <option value={TTS_CATALOG_MANUAL_VALUE}>{t("opsTtsAi.catalogManualOption")}</option>
+                        {remoteCatalogLanguages.map((language) => (
+                          <option key={language.code} value={language.code}>
+                            {language.label || language.code} · {language.code}
+                          </option>
+                        ))}
+                      </select>
+                      {remoteLanguageSelectValue === TTS_CATALOG_MANUAL_VALUE ? (
+                        <input
+                          className="ops-tts-catalog-manual-input"
+                          value={form.languageCode}
+                          onChange={(e) => setForm({ ...form, languageCode: e.target.value })}
+                          placeholder={t("opsTtsAi.languageCodePlaceholder")}
+                          spellCheck={false}
+                        />
+                      ) : null}
+                    </>
+                  ) : (
+                    <input
+                      id="tts-ai-lang"
+                      value={form.languageCode}
+                      onChange={(e) => setForm({ ...form, languageCode: e.target.value })}
+                      placeholder={t("opsTtsAi.languageCodePlaceholder")}
+                      title={t("opsTtsAi.languageCodeHint")}
+                    />
+                  )}
                   <p className="ops-tts-field-hint ops-tts-field-hint--quiet">{t("opsTtsAi.languageCodeHint")}</p>
+                  {isRemoteCatalogProvider &&
+                  allCatalogLanguages.length > 0 &&
+                  remoteCatalogLanguages.length === 0 ? (
+                    <p className="ops-tts-field-hint is-warn">{t("opsTtsAi.catalogNoCompatibleChoices")}</p>
+                  ) : null}
                 </div>
-                {fieldCaps.model ? (
+                {fieldCaps.model && !isLucylabJsonRpc ? (
                   <div className="ops-form-field ops-tts-span-2">
                     <label htmlFor="tts-ai-model">{t("opsTtsAi.modelId")}</label>
-                    {engineModelOptions || catalogModels ? (
+                    {engineModelOptions || (isRemoteCatalogProvider ? allCatalogModels.length : catalogModels) ? (
                       <select
                         id="tts-ai-model"
                         value={
@@ -2791,11 +4296,18 @@ export function OpsTtsAiPage() {
                             ? engineModelOptions.some((engine) => engine.id === form.modelId)
                               ? form.modelId
                               : catalogModels?.[0] || ""
-                            : catalogModels?.includes(form.modelId)
-                              ? form.modelId
-                              : catalogModels?.[0] || ""
+                            : isRemoteCatalogProvider
+                              ? remoteModelSelectValue
+                              : catalogModels?.includes(form.modelId)
+                                ? form.modelId
+                                : catalogModels?.[0] || ""
                         }
-                        onChange={(e) => setForm({ ...form, modelId: e.target.value })}
+                        onChange={(e) =>
+                          setForm({
+                            ...form,
+                            modelId: e.target.value === TTS_CATALOG_MANUAL_VALUE ? "" : e.target.value
+                          })
+                        }
                       >
                         {engineModelOptions
                           ? engineModelOptions.map((engine) => (
@@ -2804,7 +4316,20 @@ export function OpsTtsAiPage() {
                                 {engine.selectable ? "" : ` — ${t("opsTtsAi.engineNotReadyShort")}`}
                               </option>
                             ))
-                          : catalogModels?.map((m) => (
+                          : isRemoteCatalogProvider
+                            ? [
+                                { id: TTS_CATALOG_MANUAL_VALUE, label: t("opsTtsAi.catalogManualOption") },
+                                ...allCatalogModels
+                              ].map((model) => (
+                                <option key={model.id} value={model.id} title={model.description || undefined}>
+                                  {model.label || model.id}
+                                  {model.id === TTS_CATALOG_MANUAL_VALUE ||
+                                  remoteCatalogModels.some((candidate) => sameCatalogId(candidate.id, model.id))
+                                    ? ""
+                                    : ` — ${t("opsTtsAi.catalogMayNotMatch")}`}
+                                </option>
+                              ))
+                            : catalogModels?.map((m) => (
                               <option key={m} value={m}>
                                 {m}
                               </option>
@@ -2821,6 +4346,47 @@ export function OpsTtsAiPage() {
                       />
                     )}
                     <p className="ops-tts-field-hint ops-tts-field-hint--quiet">{t("opsTtsAi.modelIdHint")}</p>
+                    {isRemoteCatalogProvider && allCatalogModels.length ? (
+                      <p className="ops-tts-field-hint ops-tts-field-hint--quiet">
+                        {t("opsTtsAi.catalogAllChoicesHint")
+                          .replace("{total}", String(allCatalogModels.length))
+                          .replace("{compatible}", String(remoteCatalogModels.length))}
+                      </p>
+                    ) : null}
+                    {remoteCatalogSelectionMismatch ? (
+                      <p className="ops-tts-field-hint is-warn">{t("opsTtsAi.catalogSelectionMismatch")}</p>
+                    ) : null}
+                    {isRemoteCatalogProvider &&
+                    allCatalogModels.length > 0 &&
+                    remoteModelSelectValue === TTS_CATALOG_MANUAL_VALUE ? (
+                      <input
+                        className="ops-tts-catalog-manual-input"
+                        value={form.modelId}
+                        onChange={(e) => setForm({ ...form, modelId: e.target.value })}
+                        placeholder={t("opsTtsAi.modelIdPlaceholder")}
+                        spellCheck={false}
+                      />
+                    ) : null}
+                    {isRemoteCatalogProvider && selectedCatalogModel ? (
+                      <div className="ops-tts-catalog-detail" role="note">
+                        <strong>{selectedCatalogModel.label || selectedCatalogModel.id}</strong>
+                        {selectedCatalogModel.description ? <span>{selectedCatalogModel.description}</span> : null}
+                        {selectedCatalogModel.languages?.length ? (
+                          <small>{t("opsTtsAi.catalogLanguagesLabel")}: {selectedCatalogModel.languages.join(", ")}</small>
+                        ) : null}
+                        {selectedCatalogModel.voices?.length ? (
+                          <small>{t("opsTtsAi.catalogVoicesLabel")}: {selectedCatalogModel.voices.join(", ")}</small>
+                        ) : null}
+                        {selectedCatalogModel.capabilities?.length ? (
+                          <small>{t("opsTtsAi.catalogCapabilitiesLabel")}: {selectedCatalogModel.capabilities.join(", ")}</small>
+                        ) : null}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : isLucylabJsonRpc ? (
+                  <div className="ops-tts-catalog-notice is-muted ops-tts-span-2" role="note">
+                    <strong>{t("opsTtsAi.httpLucylabNoModelTitle")}</strong>
+                    <span>{t("opsTtsAi.httpLucylabNoModelHint")}</span>
                   </div>
                 ) : null}
               </div>
@@ -3031,7 +4597,11 @@ export function OpsTtsAiPage() {
               </div>
               {previewMeta ? (
                 <span className="ops-tts-chip is-ok" title={previewMeta.detail || undefined}>
-                  {previewMeta.provider} · {previewMeta.duration.toFixed(1)}s
+                  {previewMeta.provider}
+                  {previewMeta.resolvedVoiceId || previewMeta.requestedVoiceId
+                    ? ` · ${previewMeta.resolvedVoiceId || previewMeta.requestedVoiceId}`
+                    : ""}
+                  {` · ${previewMeta.duration.toFixed(1)}s`}
                 </span>
               ) : null}
             </header>

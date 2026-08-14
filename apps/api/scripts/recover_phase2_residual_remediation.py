@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -29,6 +30,11 @@ class ResidualRemediationRecoveryError(RuntimeError):
 
 
 _OCR_RUNTIME_FIELDS = {"ocr_text", "ocr_source", "ocr_frame"}
+_OCR_SIGNATURE_RE = re.compile(r"[0-9\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
+
+
+def _ocr_signature(text: str) -> str:
+    return "".join(_OCR_SIGNATURE_RE.findall(str(text or "")))
 
 
 def _approved_content_by_text_id(
@@ -78,6 +84,7 @@ def reconstruct_remediation(
     *,
     root_dir: str | Path,
     phase2_timeline_path: str | Path,
+    allow_existing_stale_proposal: bool = False,
 ) -> dict[str, Any]:
     root = Path(root_dir).resolve()
     timeline_path = Path(phase2_timeline_path).resolve()
@@ -95,9 +102,19 @@ def reconstruct_remediation(
         )
     legacy = (root / str(original_ref.get("path") or "")).resolve()
     if legacy.is_file() and _sha256_file(legacy) == original_file_sha:
-        raise ResidualRemediationRecoveryError(
-            "Original remediation still exists; recovery is unnecessary"
+        original_payload = _load_object(legacy)
+        proposal_ref = dict(original_payload.get("proposal_ref") or {})
+        proposal_path = (root / str(proposal_ref.get("path") or "")).resolve()
+        proposal_current = (
+            proposal_path.is_relative_to(root)
+            and proposal_path.is_file()
+            and _sha256_file(proposal_path)
+            == str(proposal_ref.get("file_sha256") or "")
         )
+        if proposal_current or not allow_existing_stale_proposal:
+            raise ResidualRemediationRecoveryError(
+                "Original remediation still exists; recovery is unnecessary"
+            )
 
     content_by_text = _approved_content_by_text_id(contract)
     occurrences: list[dict[str, Any]] = []
@@ -133,6 +150,14 @@ def reconstruct_remediation(
                 "ocr_text_approved": ocr_text,
                 "vi_text_approved": vi_text,
                 "localization": dict(content.get("localization") or {}),
+                "accepted_candidate_signatures": [
+                    signature
+                    for signature in {
+                        _ocr_signature(str(content.get("ocr_text_candidate") or "")),
+                        _ocr_signature(ocr_text),
+                    }
+                    if signature
+                ],
                 "operator_review": review,
             }
         )

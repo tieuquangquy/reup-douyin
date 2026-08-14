@@ -25,7 +25,7 @@ assert.match(headerSource, /editor-command__primary/, "Header must promote a sin
 assert.match(headerSource, /editor-command__save/, "Save draft must remain available beside the pipeline");
 assert.match(headerSource, /editor-command__translate/, "Translate must remain wired");
 assert.match(headerSource, /editor-command__tts/, "Generate TTS must remain wired");
-assert.match(headerSource, /generateTtsConfirm/, "Generate TTS must confirm before enqueue");
+assert.match(headerSource, /durable, idempotent worker action/, "Generate TTS must use the durable worker path without a blocking native dialog");
 assert.match(headerSource, /onGenerateTts/, "Header must wire Generate TTS handler");
 assert.match(headerSource, /hasVietnamese|ttsRequiresVi|!guide\.hasVietnamese/, "Generate TTS must soft-gate when VI is empty");
 assert.match(headerSource, /isTranscriptPipelineActionUnlocked/, "Toolbar CTAs must gate on pipeline unlock");

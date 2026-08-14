@@ -44,6 +44,23 @@ class SpeechBudgetTests(unittest.TestCase):
         self.assertTrue(short.requires_operator_review)
         self.assertIn("slot_below_minimum_speech_time", short.flags)
 
+    def test_fit_status_uses_total_estimated_duration_including_pauses(self) -> None:
+        over = assess_speech_budget(
+            "môi trường sạch, không khí cũng rất trong lành",
+            slot_seconds=2.0,
+            units_per_second=4.5,
+            fit_tolerance=0.12,
+        )
+        fitted = assess_speech_budget(
+            "môi trường sạch, không khí trong lành",
+            slot_seconds=2.0,
+            units_per_second=4.5,
+            fit_tolerance=0.12,
+        )
+
+        self.assertEqual(over.status, "too_long")
+        self.assertEqual(fitted.status, "fits_budget")
+
     def test_voice_rate_calibration_uses_median_only_after_enough_samples(self) -> None:
         samples = [
             SpeechRateSample(spoken_units=20, duration_seconds=5.0),
@@ -53,7 +70,7 @@ class SpeechBudgetTests(unittest.TestCase):
         ]
         calibrated = calibrate_units_per_second(samples, default_units_per_second=4.5)
         self.assertAlmostEqual(calibrated.units_per_second, 4.4)
-        self.assertEqual(calibrated.source, "calibrated_median")
+        self.assertEqual(calibrated.source, "calibrated_robust_median")
 
         fallback = calibrate_units_per_second(samples[:2], default_units_per_second=5.0)
         self.assertEqual(fallback.units_per_second, 5.0)

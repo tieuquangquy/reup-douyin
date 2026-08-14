@@ -15,6 +15,7 @@ from src.enums import (
     ReupQueueStatus,
 )
 from src.services.job_runner import JobRunner, StepHandlerRegistry
+from src.services.frontend_core_runtime import bind_job_to_frontend_runtime
 from src.services.reup_queue_download_sync import (
     DOWNLOAD_JOB_COMPLETED_METADATA_KEY,
     sync_reup_queue_from_download_job,
@@ -153,7 +154,7 @@ def build_download_job(*, attempts: int = 3):
         ),
         SimpleNamespace(step_key="finalize_manifest", status=JobStepStatus.PENDING, progress_percent=0),
     ]
-    return SimpleNamespace(
+    job = SimpleNamespace(
         id=job_id,
         job_type=JobType.DOWNLOAD_VIDEO,
         status=JobStatus.RUNNING,
@@ -167,7 +168,10 @@ def build_download_job(*, attempts: int = 3):
         locked_at=datetime.now(UTC),
         error_code=None,
         error_message=None,
+        metadata_json={},
     )
+    bind_job_to_frontend_runtime(job)
+    return job
 
 
 class JobRunnerDownloadReupQueueSyncTests(unittest.TestCase):

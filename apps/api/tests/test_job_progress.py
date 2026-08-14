@@ -78,7 +78,22 @@ class JobProgressTests(unittest.TestCase):
         apply_job_progress(job)
         self.assertEqual(job.progress_percent, 0)
 
+    def test_running_job_progress_does_not_regress_after_stale_step_refresh(self) -> None:
+        job = FakeJob(
+            status=JobStatus.RUNNING,
+            progress_percent=30,
+            steps=[
+                FakeStep("prepare", 0, JobStepStatus.COMPLETED, 100),
+                FakeStep("render", 1, JobStepStatus.RUNNING, 0),
+                FakeStep("finalize", 2, JobStepStatus.PENDING, 0),
+                FakeStep("handoff", 3, JobStepStatus.PENDING, 0),
+            ],
+        )
+
+        apply_job_progress(job)
+
+        self.assertEqual(job.progress_percent, 30)
+
 
 if __name__ == "__main__":
     unittest.main()
-

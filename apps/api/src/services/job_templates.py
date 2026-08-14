@@ -37,13 +37,11 @@ STEP_TEMPLATES: dict[JobType, tuple[StepTemplate, ...]] = {
         StepTemplate("finalize", "Finalize", 3),
     ),
     JobType.DOWNLOAD_VIDEO: (
-        StepTemplate("validate_input", "Validate input", 0),
-        StepTemplate("resolve_storage", "Resolve storage", 1),
-        StepTemplate("fetch_primary_video", "Fetch primary video", 2),
-        StepTemplate("fetch_thumbnail", "Fetch thumbnail", 3),
-        StepTemplate("persist_metadata_mirror", "Persist metadata mirror", 4),
-        StepTemplate("register_assets", "Register assets", 5),
-        StepTemplate("finalize_manifest", "Finalize manifest", 6),
+        # The transfer is one resumable, ffprobe-gated boundary. Its internal
+        # subphases are emitted as heartbeat metadata; no zero-work placeholder
+        # rows should make the UI appear frozen at 71%.
+        StepTemplate("register_assets", "Download, validate and register assets", 0),
+        StepTemplate("finalize_manifest", "Finalize manifest", 1),
     ),
     JobType.ANALYZE_AUDIO: (
         StepTemplate("validate_input", "Validate input", 0),
@@ -66,21 +64,21 @@ STEP_TEMPLATES: dict[JobType, tuple[StepTemplate, ...]] = {
     ),
     JobType.BUILD_TRANSLATION_DRAFT: (
         StepTemplate("load_transcript", "Load approved transcript beats", 0),
-        StepTemplate("translate_segments", "Literal translate per beat", 1),
+        StepTemplate("translate_segments", "Translate contextual candidate blocks", 1),
         StepTemplate("prepare_review", "Prepare Checkpoint #1 review", 2),
         StepTemplate("finalize", "Finalize", 3),
     ),
     JobType.SYNTHESIZE_TTS: (
-        StepTemplate("validate_input", "Validate input", 0),
-        StepTemplate("resolve_translation_segments", "Resolve translation segments", 1),
-        StepTemplate("synthesize_segment_clips", "Synthesize segment clips", 2),
-        StepTemplate("evaluate_timing_fit", "Evaluate timing fit", 3),
-        StepTemplate("assemble_narration_track", "Assemble narration track", 4),
-        StepTemplate("build_subtitle_segments", "Build subtitle segments", 5),
-        StepTemplate("export_subtitle_assets", "Export subtitle assets", 6),
-        StepTemplate("build_render_prep_manifest", "Build render-prep manifest", 7),
-        StepTemplate("persist_outputs", "Persist outputs", 8),
-        StepTemplate("finalize", "Finalize", 9),
+        StepTemplate("validate_input", "Validate approved Vietnamese timeline", 0),
+        StepTemplate("resolve_translation_segments", "Repair dialogue boundaries", 1),
+        StepTemplate("synthesize_segment_clips", "Probe voice and synthesize candidates", 2),
+        StepTemplate("evaluate_timing_fit", "Apply selective timeline correction", 3),
+        StepTemplate("assemble_narration_track", "Assemble full-duration narration", 4),
+        StepTemplate("build_subtitle_segments", "Bind subtitles to final TTS timing", 5),
+        StepTemplate("export_subtitle_assets", "Export subtitles and temporal QA", 6),
+        StepTemplate("build_render_prep_manifest", "Preserve background and prepare render", 7),
+        StepTemplate("persist_outputs", "Persist Temporal V3 outputs", 8),
+        StepTemplate("finalize", "Finalize TTS Temporal V3", 9),
     ),
     JobType.RENDER_PREVIEW: (
         StepTemplate("prepare_timeline", "Apply translation review", 0),

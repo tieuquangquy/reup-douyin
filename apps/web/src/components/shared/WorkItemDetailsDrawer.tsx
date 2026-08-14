@@ -12,6 +12,10 @@ type Props = {
   title: string;
   children: ReactNode;
   footer?: ReactNode;
+  /** Optional controls under the title (legacy peer mode switch). */
+  headerExtra?: ReactNode;
+  /** Optional leading control before the title (e.g. back to Overview). */
+  headerLeading?: ReactNode;
 };
 
 export function WorkItemDetailsDrawer({
@@ -21,7 +25,9 @@ export function WorkItemDetailsDrawer({
   eyebrow,
   title,
   children,
-  footer
+  footer,
+  headerExtra,
+  headerLeading,
 }: Props) {
   useEffect(() => {
     if (!open) return;
@@ -44,9 +50,11 @@ export function WorkItemDetailsDrawer({
         onClick={(event) => event.stopPropagation()}
       >
         <header className="work-item-details-drawer-header">
+          {headerLeading ? <div className="work-item-details-drawer-header__leading">{headerLeading}</div> : null}
           <div className="work-item-details-drawer-identity">
             <p className="work-item-details-drawer-eyebrow">{eyebrow}</p>
             <h2 id={titleId}>{title}</h2>
+            {headerExtra ? <div className="work-item-details-drawer-header__extra">{headerExtra}</div> : null}
           </div>
           <button
             aria-label="Close details"

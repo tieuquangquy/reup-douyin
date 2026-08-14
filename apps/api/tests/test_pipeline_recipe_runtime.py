@@ -44,6 +44,8 @@ class PipelineRecipeRuntimeTests(unittest.TestCase):
         with patch(
             "src.services.pipeline_recipe_runtime.load_bound_recipe_authority",
             return_value=authority(),
+        ), patch(
+            "src.services.analyze_ocr_recipe.assert_job_analyze_ocr_recipe",
         ), self.assertRaises(RuntimeRecipeError):
             assert_job_recipe_workflow_contract(job)
 
@@ -62,6 +64,8 @@ class PipelineRecipeRuntimeTests(unittest.TestCase):
         with patch(
             "src.services.pipeline_recipe_runtime.load_bound_recipe_authority",
             return_value=authority(),
+        ), patch(
+            "src.services.analyze_ocr_recipe.assert_job_analyze_ocr_recipe",
         ):
             assert_job_recipe_workflow_contract(job)
 

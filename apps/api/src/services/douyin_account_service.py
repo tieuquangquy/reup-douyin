@@ -3084,11 +3084,15 @@ class DouyinAccountService:
 
     def _encode_session_cookie(self, value: str) -> str:
         settings = get_settings()
-        return DouyinSessionSecretEnvelope(key_ref=settings.douyin_secret_encryption_key_ref).encrypt(value)
+        return DouyinSessionSecretEnvelope(
+            key_ref=getattr(settings, "douyin_secret_encryption_key_ref", None)
+        ).encrypt(value)
 
     def _decode_session_cookie(self, value: str | None) -> str | None:
         settings = get_settings()
-        return DouyinSessionSecretEnvelope(key_ref=settings.douyin_secret_encryption_key_ref).decrypt(value)
+        return DouyinSessionSecretEnvelope(
+            key_ref=getattr(settings, "douyin_secret_encryption_key_ref", None)
+        ).decrypt(value)
 
     def _preview_secret(self, value: str | None) -> str | None:
         if not value:

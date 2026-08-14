@@ -642,6 +642,10 @@ class DouyinBrowserConnectServiceTests(unittest.TestCase):
                 browser_profile_path="C:/profiles/profile-1",
                 user_agent="saved-agent",
                 proxy_url=None,
+                # This case verifies terminal classification. Orphan-release
+                # retry behavior is covered separately and would double these
+                # deliberately exact recovery call assertions.
+                allow_orphan_release=False,
             )
 
         self.assertEqual(summary.status, "invalid")
@@ -735,6 +739,9 @@ class DouyinBrowserConnectServiceTests(unittest.TestCase):
                 browser_profile_path="C:/profiles/profile-1",
                 user_agent="saved-agent",
                 proxy_url=None,
+                # Keep this test scoped to conflict classification; the
+                # production default still performs one orphan-release retry.
+                allow_orphan_release=False,
             )
 
         policy.assert_called_once()

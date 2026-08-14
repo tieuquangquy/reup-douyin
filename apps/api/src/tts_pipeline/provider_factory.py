@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import importlib.util
 import logging
+import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from src.tts_pipeline.catalog import discover_tts_catalog
@@ -10,10 +12,23 @@ from src.tts_pipeline.edge_tts_provider import EdgeTtsProvider
 from src.tts_pipeline.errors import TtsPipelineError, TtsPipelineErrorCode
 from src.tts_pipeline.omnivoice_tts_provider import OmniVoiceTtsProvider
 from src.tts_pipeline.providers import PlaceholderToneTtsProvider, TtsProvider
+from src.tts_pipeline.remote_catalog import (
+    REMOTE_TTS_DEFAULT_BASE_URLS,
+    discover_remote_tts_catalog,
+)
 from src.tts_pipeline.types import TtsProviderInput, TtsProviderOutput, VoiceConfig
 from src.tts_pipeline.vieneu_tts_provider import VieNeuTtsProvider
 
 logger = logging.getLogger(__name__)
+
+
+def _module_importable(module_name: str) -> bool:
+    """Check package availability without executing heavyweight native imports."""
+
+    try:
+        return importlib.util.find_spec(module_name) is not None
+    except (ImportError, ModuleNotFoundError, ValueError):
+        return False
 
 
 @dataclass
@@ -22,45 +37,20 @@ class TtsProbeResult:
     provider: str
     detail: str
     catalog: dict[str, Any] | None = None
+    checks: list[dict[str, Any]] = field(default_factory=list)
 
 
 def light_tts_import_ready(provider: str) -> bool | None:
     """Cheap import check for GET hydrate (no catalog / no model download)."""
     name = (provider or "").strip().lower()
     if name == "edge":
-        try:
-            import edge_tts  # noqa: F401
-
-            return True
-        except ImportError:
-            return False
+        return _module_importable("edge_tts")
     if name == "vieneu":
-        try:
-            import vieneu  # noqa: F401
-
-            return True
-        except ImportError:
-            return False
+        return _module_importable("vieneu")
     if name in {"omnivoice", "omnivoice_studio", "omnivoice-studio"}:
-        try:
-            import omnivoice  # noqa: F401
-
-            return True
-        except ImportError:
-            return False
+        return _module_importable("omnivoice")
     if name == "auto":
-        try:
-            import vieneu  # noqa: F401
-
-            return True
-        except ImportError:
-            pass
-        try:
-            import edge_tts  # noqa: F401
-
-            return True
-        except ImportError:
-            return False
+        return _module_importable("vieneu") or _module_importable("edge_tts")
     return None
 
 
@@ -73,10 +63,12 @@ class FallbackTtsProvider:
         fallback: TtsProvider | None = None,
         *,
         fallback_voice_id: str | None = None,
+        degrade_expressive_fallback: bool = False,
     ):
         self.primary = primary
         self.fallback = fallback
         self.fallback_voice_id = (fallback_voice_id or "").strip() or None
+        self.degrade_expressive_fallback = bool(degrade_expressive_fallback)
         self.provider_name = getattr(primary, "provider_name", primary.__class__.__name__)
 
     def synthesize(self, request: TtsProviderInput) -> TtsProviderOutput:
@@ -94,9 +86,21 @@ class FallbackTtsProvider:
                 },
             )
             fallback_request = request
-            if self.fallback_voice_id:
+            if self.fallback_voice_id or self.degrade_expressive_fallback:
+                fallback_text = request.text
+                fallback_audio_tags = request.audio_tags
+                fallback_ssml = request.ssml_text
+                fallback_mode = request.expressive_mode
+                if self.degrade_expressive_fallback:
+                    fallback_text = re.sub(r"(?m)^\s*\[[^\]\r\n]+\]\s*$", "", fallback_text)
+                    fallback_text = "\n".join(
+                        line for line in fallback_text.splitlines() if line.strip()
+                    ).strip()
+                    fallback_audio_tags = ()
+                    fallback_ssml = None
+                    fallback_mode = "best_effort"
                 fallback_request = TtsProviderInput(
-                    text=request.text,
+                    text=fallback_text,
                     language_code=request.language_code,
                     voice_config=VoiceConfig(
                         voice_id=self.fallback_voice_id,
@@ -104,13 +108,25 @@ class FallbackTtsProvider:
                         speaking_rate=request.voice_config.speaking_rate,
                     ),
                     target_duration_seconds=request.target_duration_seconds,
+                    voice_direction=request.voice_direction,
+                    sample_context=request.sample_context,
+                    audio_tags=fallback_audio_tags,
+                    prosody_state=request.prosody_state,
+                    performance_chunk_id=request.performance_chunk_id,
+                    ssml_text=fallback_ssml,
+                    expressive_mode=fallback_mode,
+                    requested_features=request.requested_features,
                 )
             output = self.fallback.synthesize(fallback_request)
             warnings = list(output.warnings or [])
             warnings.append("tts_used_fallback_provider")
+            if self.degrade_expressive_fallback and request.requested_features:
+                warnings.append("tts_expressive_fallback_degraded")
             meta = dict(output.provider_metadata or {})
             meta["fallback_used"] = True
             meta["primary_error"] = str(primary_exc)[:200]
+            if self.degrade_expressive_fallback:
+                meta["fallback_degraded_features"] = list(request.requested_features)
             return TtsProviderOutput(
                 audio_bytes=output.audio_bytes,
                 duration_seconds=output.duration_seconds,
@@ -139,16 +155,17 @@ def build_default_tts_provider(
     edge_provider_factory: Callable[[], TtsProvider] | None = None,
     vieneu_provider_factory: Callable[[], TtsProvider] | None = None,
     omnivoice_provider_factory: Callable[[], TtsProvider] | None = None,
+    allow_fallback: bool = True,
 ) -> TtsProvider:
     """
     Resolve TTS provider from workspace TTS AI settings (active Ops profile) or env.
 
-    When ``workspace_tts`` is provided (Generate TTS / Preview), the active Ops profile
-    is authority regardless of ``enabled`` — Preview parity. Env is used only when
-    ``workspace_tts`` is omitted.
+    This is a transport factory. Preview may pass a draft or disabled setup.
+    Durable production callers validate the one active On setup first and pass
+    ``allow_fallback=False``. Env is used only when ``workspace_tts`` is omitted.
 
-    Providers: auto | edge | vieneu | omnivoice | google | azure | elevenlabs | openai |
-    openai_compatible | http_custom | cli | placeholder
+    Providers: auto | edge | vieneu | omnivoice | google | google_gemini | azure |
+    elevenlabs | openai | openai_compatible | http_custom | cli | placeholder
     """
     from src.core.settings import get_settings
 
@@ -160,6 +177,7 @@ def build_default_tts_provider(
             edge_provider_factory=edge_provider_factory,
             vieneu_provider_factory=vieneu_provider_factory,
             omnivoice_provider_factory=omnivoice_provider_factory,
+            allow_fallback=allow_fallback,
         )
 
     name = (provider_name or settings.audio_tts_provider or "auto").strip().lower()
@@ -179,7 +197,11 @@ def build_default_tts_provider(
         edge_provider_factory=edge_provider_factory,
         vieneu_provider_factory=vieneu_provider_factory,
         omnivoice_provider_factory=omnivoice_provider_factory,
-        fallback_name=(getattr(settings, "audio_tts_fallback_provider", None) or "none").strip().lower(),
+        fallback_name=(
+            (getattr(settings, "audio_tts_fallback_provider", None) or "none").strip().lower()
+            if allow_fallback
+            else "none"
+        ),
         fallback_voice_id=(getattr(settings, "audio_tts_fallback_voice_id", None) or "").strip(),
     )
 
@@ -191,25 +213,167 @@ def _build_from_workspace_tts(
     edge_provider_factory: Callable[[], TtsProvider] | None,
     vieneu_provider_factory: Callable[[], TtsProvider] | None,
     omnivoice_provider_factory: Callable[[], TtsProvider] | None,
+    allow_fallback: bool,
 ) -> TtsProvider:
     name = str(getattr(workspace_tts, "provider", "auto") or "auto").strip().lower()
+    api_key = (getattr(workspace_tts, "api_key", None) or "").strip() or None
+    base_url = str(getattr(workspace_tts, "base_url", "") or "").strip()
+    options = dict(getattr(workspace_tts, "options_json", None) or {})
+    if name == "google":
+        from src.tts_pipeline.google_cloud_credentials import GOOGLE_CLOUD_TTS_BASE_URL
+
+        base_url = GOOGLE_CLOUD_TTS_BASE_URL
+        try:
+            api_key, options = _resolve_google_runtime_auth(
+                workspace_tts,
+                api_key=api_key,
+                options=options,
+                timeout_seconds=float(getattr(workspace_tts, "timeout_seconds", 120.0) or 120.0),
+            )
+        except ValueError as exc:
+            return ConfiguredButUnavailableTtsProvider(
+                "google",
+                f"Google Cloud credential is not ready ({str(exc)[:160]}).",
+            )
+    elif name == "google_gemini" and str(getattr(workspace_tts, "credential_mode", "") or "").strip().lower() in {
+        "google_service_account",
+        "google_adc",
+    }:
+        # Vertex AI uses the same Cloud OAuth scope as Google Cloud TTS, but
+        # must charge the request to the service-account project/region rather
+        # than the AI Studio API-key quota bucket.
+        from src.tts_pipeline.google_cloud_credentials import (
+            resolve_google_access_token,
+        )
+        from src.tts_pipeline.gemini_tts_provider import (
+            VERTEX_GEMINI_DEFAULT_LOCATION,
+            default_vertex_gemini_http_connector_options,
+            vertex_gemini_base_url,
+        )
+
+        try:
+            token = resolve_google_access_token(
+                credential_mode=str(getattr(workspace_tts, "credential_mode", "") or ""),
+                service_account_json=getattr(workspace_tts, "google_service_account_json", None),
+                timeout_seconds=float(getattr(workspace_tts, "timeout_seconds", 120.0) or 120.0),
+            )
+            project_id = str(
+                getattr(workspace_tts, "google_service_account_project_id", "") or ""
+            ).strip()
+            vertex_options = dict(options)
+            vertex_options["vertex_ai"] = {
+                "project_id": project_id,
+                "location": str(
+                    dict(vertex_options.get("vertex_ai") or {}).get(
+                        "location", VERTEX_GEMINI_DEFAULT_LOCATION
+                    )
+                ),
+            }
+            options = default_vertex_gemini_http_connector_options(vertex_options)
+            base_url = vertex_gemini_base_url(
+                project_id=project_id,
+                location=str(vertex_options["vertex_ai"]["location"]),
+            )
+            api_key = token
+        except ValueError as exc:
+            return ConfiguredButUnavailableTtsProvider(
+                "google_gemini",
+                f"Vertex Gemini credential is not ready ({str(exc)[:160]}).",
+            )
+    configured_fallback = (
+        str(getattr(workspace_tts, "fallback_provider", "none") or "none").strip().lower()
+        if allow_fallback
+        else "none"
+    )
+    # A Vertex Gemini primary and Google Classic fallback need different
+    # endpoint/auth manifests.  The generic fallback path intentionally
+    # shares options for lightweight providers, so construct this pair with
+    # their own OAuth-bound transports instead of accidentally sending a
+    # Vertex manifest to the Cloud TTS endpoint.
+    if name == "google_gemini" and configured_fallback == "google" and str(
+        getattr(workspace_tts, "credential_mode", "") or ""
+    ).strip().lower() in {"google_service_account", "google_adc"}:
+        primary = _build_named_provider(
+            name,
+            env_settings=env_settings,
+            voice_id=str(getattr(workspace_tts, "voice_id", "") or ""),
+            speaking_rate=float(getattr(workspace_tts, "speaking_rate", 1.0) or 1.0),
+            api_key=api_key,
+            base_url=base_url,
+            model_id=str(getattr(workspace_tts, "model_id", "") or "").strip(),
+            local_backend=str(getattr(workspace_tts, "local_backend", "auto") or "auto").strip().lower(),
+            device=str(getattr(workspace_tts, "device", "auto") or "auto").strip().lower(),
+            cli_binary=str(getattr(workspace_tts, "cli_binary", "") or "").strip(),
+            timeout_seconds=float(getattr(workspace_tts, "timeout_seconds", 120.0) or 120.0),
+            options=options,
+            edge_provider_factory=edge_provider_factory,
+            vieneu_provider_factory=vieneu_provider_factory,
+            omnivoice_provider_factory=omnivoice_provider_factory,
+            fallback_name="none",
+            fallback_voice_id="",
+        )
+        try:
+            fallback_token, fallback_options = _resolve_google_runtime_auth(
+                workspace_tts,
+                api_key=None,
+                options={},
+                timeout_seconds=float(getattr(workspace_tts, "timeout_seconds", 120.0) or 120.0),
+            )
+            fallback_connector = dict(fallback_options.get("http_connector") or {})
+            fallback_synthesis = dict(fallback_connector.get("synthesis") or {})
+            fallback_body = dict(fallback_synthesis.get("body") or {})
+            fallback_body["input"] = {"text": "{{text}}"}
+            fallback_audio_config = dict(fallback_body.get("audioConfig") or {})
+            fallback_audio_config["speakingRate"] = "{{speaking_rate}}"
+            fallback_body["audioConfig"] = fallback_audio_config
+            fallback_synthesis["body"] = fallback_body
+            fallback_connector["synthesis"] = fallback_synthesis
+            fallback_options["http_connector"] = fallback_connector
+            fallback = _make_provider(
+                "google",
+                env_settings=env_settings,
+                voice_id=str(getattr(workspace_tts, "fallback_voice_id", "") or ""),
+                api_key=fallback_token,
+                base_url="",
+                model_id="",
+                local_backend="auto",
+                device="auto",
+                cli_binary="",
+                timeout_seconds=float(getattr(workspace_tts, "timeout_seconds", 120.0) or 120.0),
+                options=fallback_options,
+                edge_provider_factory=edge_provider_factory,
+                vieneu_provider_factory=vieneu_provider_factory,
+                omnivoice_provider_factory=omnivoice_provider_factory,
+            )
+        except ValueError as exc:
+            return ConfiguredButUnavailableTtsProvider(
+                "google_gemini",
+                f"Vertex fallback credential is not ready ({str(exc)[:160]}).",
+            )
+        return FallbackTtsProvider(
+            primary,
+            fallback,
+            fallback_voice_id=str(getattr(workspace_tts, "fallback_voice_id", "") or "").strip() or None,
+            degrade_expressive_fallback=True,
+        )
+
     return _build_named_provider(
         name,
         env_settings=env_settings,
         voice_id=str(getattr(workspace_tts, "voice_id", "") or ""),
         speaking_rate=float(getattr(workspace_tts, "speaking_rate", 1.0) or 1.0),
-        api_key=(getattr(workspace_tts, "api_key", None) or "").strip() or None,
-        base_url=str(getattr(workspace_tts, "base_url", "") or "").strip(),
+        api_key=api_key,
+        base_url=base_url,
         model_id=str(getattr(workspace_tts, "model_id", "") or "").strip(),
         local_backend=str(getattr(workspace_tts, "local_backend", "auto") or "auto").strip().lower(),
         device=str(getattr(workspace_tts, "device", "auto") or "auto").strip().lower(),
         cli_binary=str(getattr(workspace_tts, "cli_binary", "") or "").strip(),
         timeout_seconds=float(getattr(workspace_tts, "timeout_seconds", 120.0) or 120.0),
-        options=dict(getattr(workspace_tts, "options_json", None) or {}),
+        options=options,
         edge_provider_factory=edge_provider_factory,
         vieneu_provider_factory=vieneu_provider_factory,
         omnivoice_provider_factory=omnivoice_provider_factory,
-        fallback_name=str(getattr(workspace_tts, "fallback_provider", "none") or "none").strip().lower(),
+        fallback_name=configured_fallback,
         fallback_voice_id=str(getattr(workspace_tts, "fallback_voice_id", "") or "").strip(),
     )
 
@@ -326,6 +490,52 @@ def _make_provider(
             "Use provider=edge or vieneu, or set fallback_provider=edge.",
         )
 
+    if name == "google_gemini":
+        try:
+            from src.tts_pipeline.gemini_tts_provider import (
+                GEMINI_DEFAULT_BASE_URL,
+                GeminiTtsProvider,
+            )
+
+            return GeminiTtsProvider(
+                base_url=base_url or GEMINI_DEFAULT_BASE_URL,
+                api_key=api_key,
+                model_id=model_id,
+                options=options,
+                timeout_seconds=timeout_seconds,
+            )
+        except ValueError as exc:
+            return ConfiguredButUnavailableTtsProvider(
+                "google_gemini",
+                f"Invalid Gemini expressive connector configuration: {str(exc)[:300]}",
+            )
+
+    if name in {
+        "openai",
+        "openai_compatible",
+        "http_custom",
+        "google",
+        "google_gemini",
+        "azure",
+        "elevenlabs",
+    } and isinstance(options.get("http_connector"), dict):
+        try:
+            from src.tts_pipeline.http_connector import GenericHttpTtsProvider
+
+            return GenericHttpTtsProvider(
+                provider_name=name,
+                base_url=base_url or REMOTE_TTS_DEFAULT_BASE_URLS.get(name, ""),
+                api_key=api_key,
+                model_id=model_id,
+                options=options,
+                timeout_seconds=timeout_seconds,
+            )
+        except ValueError as exc:
+            return ConfiguredButUnavailableTtsProvider(
+                name,
+                f"Invalid HTTP connector configuration: {str(exc)[:300]}",
+            )
+
     if name in {"openai", "openai_compatible", "http_custom"}:
         if not base_url and name != "openai":
             return ConfiguredButUnavailableTtsProvider(
@@ -335,7 +545,7 @@ def _make_provider(
         return ConfiguredButUnavailableTtsProvider(
             name,
             f"{name} settings are saved, but the HTTP TTS adapter is not enabled yet. "
-            "Use provider=edge or vieneu for synthesis now, or set fallback_provider=edge.",
+            "Configure options_json.http_connector or set fallback_provider=edge.",
         )
 
     if name in {"google", "azure", "elevenlabs"}:
@@ -398,13 +608,19 @@ def _make_provider(
         return PlaceholderToneTtsProvider()
 
 
-def probe_tts_ai_client(workspace_tts: Any, *, settings: Any | None = None) -> TtsProbeResult:
+def probe_tts_ai_client(
+    workspace_tts: Any,
+    *,
+    settings: Any | None = None,
+    discover_remote: bool = False,
+) -> TtsProbeResult:
     """Lightweight readiness check for Ops Test Connection (no long synthesis).
 
     Always probes the draft ``workspace_tts`` provider/fields when a config object is
     provided — ``enabled`` does not switch the probe to ENV (Enabled only gates jobs).
     When ``workspace_tts`` is None, falls back to ENV defaults.
-    When ok for edge/vieneu/auto, attaches a voices/styles/models catalog (sdk or curated).
+    Local providers attach SDK/curated catalogs. Remote providers are queried only
+    when ``discover_remote`` is explicitly enabled by the Ops Test endpoint.
     """
     from src.core.settings import get_settings
 
@@ -413,28 +629,229 @@ def probe_tts_ai_client(workspace_tts: Any, *, settings: Any | None = None) -> T
     if cfg is None:
         name = str(getattr(env, "audio_tts_provider", "auto") or "auto").strip().lower()
         language = str(getattr(env, "audio_tts_language_code", "vi") or "vi")
+        api_key = getattr(env, "audio_tts_api_key", None)
+        base_url = getattr(env, "audio_tts_base_url", "")
         result = _probe_named(
             name,
-            api_key=getattr(env, "audio_tts_api_key", None),
-            base_url=getattr(env, "audio_tts_base_url", ""),
+            api_key=api_key,
+            base_url=base_url,
             cli_binary=getattr(env, "audio_tts_cli_binary", "") or "",
         )
-        return _attach_catalog(result, language_code=language)
+        return _attach_catalog(
+            result,
+            language_code=language,
+            api_key=api_key,
+            base_url=base_url,
+            timeout_seconds=float(getattr(env, "audio_tts_timeout_seconds", 120.0) or 120.0),
+            discover_remote=discover_remote,
+            options={},
+        )
 
     name = str(getattr(cfg, "provider", "auto") or "auto").strip().lower()
     language = str(getattr(cfg, "language_code", "vi") or "vi")
+    api_key = getattr(cfg, "api_key", None)
+    base_url = getattr(cfg, "base_url", "")
+    options = dict(getattr(cfg, "options_json", None) or {})
+    if name == "google":
+        from src.tts_pipeline.google_cloud_credentials import GOOGLE_CLOUD_TTS_BASE_URL
+
+        base_url = GOOGLE_CLOUD_TTS_BASE_URL
+        try:
+            api_key, options = _resolve_google_runtime_auth(
+                cfg,
+                api_key=(api_key or "").strip() or None,
+                options=options,
+                timeout_seconds=float(getattr(cfg, "timeout_seconds", 120.0) or 120.0),
+            )
+        except ValueError as exc:
+            return TtsProbeResult(
+                False,
+                "google",
+                f"Google Cloud credential is not ready ({str(exc)[:160]}).",
+                checks=[
+                    {
+                        "stage": "authentication",
+                        "status": "failed",
+                        "detail": f"Google OAuth setup failed ({str(exc)[:160]}).",
+                    }
+                ],
+            )
+    elif name == "google_gemini" and str(getattr(cfg, "credential_mode", "") or "").strip().lower() in {
+        "google_service_account",
+        "google_adc",
+    }:
+        from src.tts_pipeline.google_cloud_credentials import resolve_google_access_token
+        from src.tts_pipeline.gemini_tts_provider import (
+            VERTEX_GEMINI_DEFAULT_LOCATION,
+            default_vertex_gemini_http_connector_options,
+            vertex_gemini_base_url,
+        )
+
+        try:
+            api_key = resolve_google_access_token(
+                credential_mode=str(getattr(cfg, "credential_mode", "") or ""),
+                service_account_json=getattr(cfg, "google_service_account_json", None),
+                timeout_seconds=float(getattr(cfg, "timeout_seconds", 120.0) or 120.0),
+            )
+            vertex = dict(options.get("vertex_ai") or {})
+            location = str(vertex.get("location") or VERTEX_GEMINI_DEFAULT_LOCATION)
+            base_url = vertex_gemini_base_url(
+                project_id=str(getattr(cfg, "google_service_account_project_id", "") or ""),
+                location=location,
+            )
+            options = default_vertex_gemini_http_connector_options(options)
+        except ValueError as exc:
+            return TtsProbeResult(
+                False,
+                "google_gemini",
+                f"Vertex Gemini credential is not ready ({str(exc)[:160]}).",
+                checks=[
+                    {
+                        "stage": "authentication",
+                        "status": "failed",
+                        "detail": f"Vertex OAuth setup failed ({str(exc)[:160]}).",
+                    }
+                ],
+            )
     result = _probe_named(
         name,
-        api_key=getattr(cfg, "api_key", None),
-        base_url=getattr(cfg, "base_url", ""),
+        api_key=api_key,
+        base_url=base_url,
         cli_binary=getattr(cfg, "cli_binary", "") or "",
     )
-    return _attach_catalog(result, language_code=language)
+    return _attach_catalog(
+        result,
+        language_code=language,
+        api_key=api_key,
+        base_url=base_url,
+        timeout_seconds=float(getattr(cfg, "timeout_seconds", 120.0) or 120.0),
+        discover_remote=discover_remote,
+        options=options,
+    )
 
 
-def _attach_catalog(result: TtsProbeResult, *, language_code: str) -> TtsProbeResult:
-    catalog_providers = {"edge", "vieneu", "auto", "omnivoice", "omnivoice_studio", "omnivoice-studio"}
-    if not result.ok or result.provider not in catalog_providers:
+def _resolve_google_runtime_auth(
+    workspace_tts: Any,
+    *,
+    api_key: str | None,
+    options: dict[str, Any],
+    timeout_seconds: float,
+) -> tuple[str, dict[str, Any]]:
+    from src.tts_pipeline.google_cloud_credentials import (
+        GOOGLE_CREDENTIAL_MODE_OAUTH_TOKEN,
+        default_google_http_connector_options,
+        normalize_google_credential_mode,
+        resolve_google_access_token,
+    )
+
+    mode = normalize_google_credential_mode(
+        getattr(workspace_tts, "credential_mode", ""),
+        provider="google",
+    )
+    if mode == GOOGLE_CREDENTIAL_MODE_OAUTH_TOKEN:
+        token = str(api_key or "").strip()
+        if not token:
+            raise ValueError("google_oauth_token_required")
+    else:
+        token = resolve_google_access_token(
+            credential_mode=mode,
+            service_account_json=getattr(workspace_tts, "google_service_account_json", None),
+            timeout_seconds=timeout_seconds,
+        )
+    return token, default_google_http_connector_options(
+        options,
+        language_code=str(getattr(workspace_tts, "language_code", "") or ""),
+    )
+
+
+def _attach_catalog(
+    result: TtsProbeResult,
+    *,
+    language_code: str,
+    api_key: str | None = None,
+    base_url: str = "",
+    timeout_seconds: float = 120.0,
+    discover_remote: bool = False,
+    options: dict[str, Any] | None = None,
+) -> TtsProbeResult:
+    if not result.ok:
+        return result
+
+    # Remote discovery is intentionally opt-in for the explicit Ops Test request.
+    # Worker/install probes keep the default so they never make surprise network calls.
+    if discover_remote:
+        discovery_kwargs: dict[str, Any] = {
+            "base_url": (base_url or "").strip(),
+            "api_key": (api_key or "").strip(),
+            "language_code": language_code,
+            "timeout_seconds": timeout_seconds,
+        }
+        connector = (options or {}).get("http_connector")
+        if connector:
+            discovery_kwargs["connector"] = connector
+        remote_catalog = discover_remote_tts_catalog(result.provider, **discovery_kwargs)
+        if remote_catalog is not None:
+            result.catalog = remote_catalog.to_dict()
+            discovery_error = (
+                remote_catalog.discovery.error_code if remote_catalog.discovery is not None else ""
+            )
+            result.checks = (
+                [dict(item) for item in remote_catalog.discovery.checks]
+                if remote_catalog.discovery is not None
+                else []
+            )
+            failed_connection_check = any(
+                check.get("stage") in {"configuration", "authentication"}
+                and check.get("status") == "failed"
+                for check in result.checks
+            )
+            catalog_auth_rejected = any(
+                str(check.get("stage") or "").startswith("catalog")
+                and check.get("status") == "failed"
+                and check.get("http_status") in {401, 403}
+                for check in result.checks
+            )
+            if failed_connection_check or catalog_auth_rejected or discovery_error in {
+                "authentication_failed",
+                "connection_error",
+                "cross_origin_endpoint",
+                "cross_origin_redirect",
+                "deadline_exceeded",
+                "dns_failed",
+                "insecure_credentials",
+                "invalid_api_key",
+                "invalid_connector_config",
+                "invalid_base_url",
+                "ssrf_blocked",
+                "timeout",
+            }:
+                result.ok = False
+                result.detail = remote_catalog.warning or "Remote TTS catalog connection was rejected."
+            elif (options or {}).get("http_connector"):
+                result.detail = "Universal HTTP connector check completed."
+                if remote_catalog.warning:
+                    result.detail = f"{result.detail} · {remote_catalog.warning}"
+            elif remote_catalog.warning:
+                result.detail = f"{result.detail} · {remote_catalog.warning}"
+            if result.ok and result.provider == "google_gemini":
+                # Gemini does not expose its prebuilt narrator list through the
+                # generic catalog endpoints. Preserve transport/auth checks,
+                # but never reuse Google Cloud Chirp ids as Gemini voice names.
+                curated = discover_tts_catalog("google_gemini", language_code=language_code)
+                curated.discovery = remote_catalog.discovery
+                result.catalog = curated.to_dict()
+            return result
+
+    catalog_providers = {
+        "edge",
+        "vieneu",
+        "auto",
+        "omnivoice",
+        "omnivoice_studio",
+        "omnivoice-studio",
+        "google_gemini",
+    }
+    if result.provider not in catalog_providers:
         return result
     # Curated catalog key is omnivoice for all OmniVoice Studio slugs
     catalog_key = "omnivoice" if result.provider.startswith("omnivoice") else result.provider
@@ -470,9 +887,7 @@ def _probe_named(
         return TtsProbeResult(True, "vieneu", "vieneu import ready")
 
     if name in {"omnivoice", "omnivoice_studio", "omnivoice-studio"}:
-        try:
-            import omnivoice  # noqa: F401
-        except ImportError:
+        if not _module_importable("omnivoice"):
             return TtsProbeResult(
                 False,
                 "omnivoice",
@@ -492,7 +907,7 @@ def _probe_named(
             True, name, f"{name} settings look valid (HTTP adapter pending for synthesis)."
         )
 
-    if name in {"google", "azure", "elevenlabs", "openai"}:
+    if name in {"google", "google_gemini", "azure", "elevenlabs", "openai"}:
         if not (api_key or "").strip():
             return TtsProbeResult(False, name, f"{name} requires api_key")
         return TtsProbeResult(

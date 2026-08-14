@@ -25,6 +25,44 @@ def normalize_wav_bytes(content: bytes) -> tuple[bytes, float]:
     return output.getvalue(), len(pcm) / float(AUTHORITY_SAMPLE_RATE)
 
 
+def trim_wav_silence(
+    content: bytes,
+    *,
+    threshold_ratio: float = 0.015,
+    minimum_threshold: int = 180,
+    preserve_edge_ms: int = 45,
+) -> tuple[bytes, float, dict]:
+    """Trim provider padding without touching audible speech or internal pauses."""
+
+    pcm = _normalize_wav_pcm(content)
+    if len(pcm) <= 1:
+        normalized, duration = normalize_wav_bytes(content)
+        return normalized, duration, {"trimmed": False, "trimmed_ms": 0}
+    peak = int(np.max(np.abs(pcm.astype(np.int32))))
+    threshold = max(int(minimum_threshold), int(round(peak * max(0.0, threshold_ratio))))
+    audible = np.flatnonzero(np.abs(pcm.astype(np.int32)) >= threshold)
+    if len(audible) == 0:
+        normalized, duration = normalize_wav_bytes(content)
+        return normalized, duration, {"trimmed": False, "trimmed_ms": 0, "silence_only": True}
+    padding = int(round(AUTHORITY_SAMPLE_RATE * max(0, preserve_edge_ms) / 1000.0))
+    start = max(0, int(audible[0]) - padding)
+    end = min(len(pcm), int(audible[-1]) + 1 + padding)
+    trimmed = pcm[start:end]
+    output = BytesIO()
+    with wave.open(output, "wb") as handle:
+        handle.setnchannels(AUTHORITY_CHANNELS)
+        handle.setsampwidth(AUTHORITY_SAMPLE_WIDTH)
+        handle.setframerate(AUTHORITY_SAMPLE_RATE)
+        handle.writeframes(trimmed.astype("<i2").tobytes())
+    trimmed_ms = int(round((len(pcm) - len(trimmed)) * 1000.0 / AUTHORITY_SAMPLE_RATE))
+    return output.getvalue(), len(trimmed) / float(AUTHORITY_SAMPLE_RATE), {
+        "trimmed": trimmed_ms > 0,
+        "trimmed_ms": max(0, trimmed_ms),
+        "threshold": threshold,
+        "preserve_edge_ms": preserve_edge_ms,
+    }
+
+
 class NarrationAssembler:
     def assemble(
         self,
@@ -78,6 +116,10 @@ class NarrationAssembler:
             timing_map.append(
                 {
                     "translation_segment_id": str(source.translation_segment_id),
+                    "translation_segment_ids": [
+                        str(value) for value in source.member_translation_segment_ids
+                    ],
+                    "member_segment_indices": list(source.member_segment_indices),
                     "segment_index": source.segment_index,
                     "source_start_seconds": round(source.start_ms / 1000.0, 6),
                     "source_end_seconds": round(source.end_ms / 1000.0, 6),

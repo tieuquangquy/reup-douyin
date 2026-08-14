@@ -35,6 +35,7 @@ export type RenderCreateResponse = {
   job_id: string;
   status: string;
   source_video_id: string;
+  runtime_version: string;
 };
 
 export type MediaAssetManifestEntry = {

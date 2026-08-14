@@ -2,18 +2,34 @@ from __future__ import annotations
 
 import json
 import logging
+import queue
+import re
 import shutil
 import subprocess
 import tempfile
+import threading
+import time
+from collections import deque
+from collections.abc import Callable
 from pathlib import Path
 
 from src.core.settings import get_settings
-from src.downloaders.douyin_video_resolver import DouyinVideoResolveRequest, ResolvedDouyinVideo
-from src.downloaders.errors import DownloadError, DownloadErrorCode
+from src.downloaders.download_staging import staging_directory
+from src.downloaders.download_quality_policy import DownloadQualityProfile, WatermarkAuthority
+from src.downloaders.douyin_video_resolver import (
+    DouyinVideoResolveRequest,
+    ResolvedDouyinVideo,
+    media_quality_sort_key,
+)
+from src.downloaders.errors import DownloadError, DownloadErrorCode, DownloadFailureReason
 
 logger = logging.getLogger(__name__)
 
 _NETSCAPE_COOKIE_EXPIRY = "2147483647"
+_PROGRESS_PREFIX = "reup_douyin_progress:"
+_PROGRESS_PATTERN = re.compile(
+    rf"{_PROGRESS_PREFIX}(?P<done>[^:]+):(?P<total>[^:]+):(?P<estimate>[^\s]+)"
+)
 
 
 def yt_dlp_no_logo_format_selector(format_selector: str, *, strict: bool) -> str:
@@ -26,8 +42,27 @@ def yt_dlp_no_logo_format_selector(format_selector: str, *, strict: bool) -> str
     return "/".join(play_parts) if play_parts else "bestvideo*+bestaudio/best"
 
 
+def yt_dlp_format_selector_for_profile(
+    format_selector: str,
+    *,
+    strict: bool,
+    quality_profile: str,
+) -> str:
+    """Apply the bounded processing selector or preserve source-master quality."""
+
+    selector = (format_selector or "").strip() or "bestvideo*+bestaudio/best"
+    if str(quality_profile).strip().lower() == DownloadQualityProfile.SOURCE_MASTER.value:
+        # Preserve the operator's resolver preference but remove the processing
+        # ceiling/codec exclusions. Provenance is still checked from info.json
+        # after yt-dlp finishes; this is not a watermark bypass.
+        selector = re.sub(r"\[height<=\d+\]", "", selector, flags=re.IGNORECASE)
+        selector = re.sub(r"\[vcodec!\*=\s*(?:hevc|av01)\]", "", selector, flags=re.IGNORECASE)
+        return yt_dlp_no_logo_format_selector(selector, strict=strict)
+    return yt_dlp_no_logo_format_selector(selector, strict=strict)
+
+
 def is_yt_dlp_no_logo_format(format_id: str | None, *, info: dict | None = None) -> bool:
-    """True when the selected yt-dlp format is not a Douyin download/* (logo) family."""
+    """True only with affirmative clean-playback provenance from yt-dlp info."""
     tokens: list[str] = []
     if format_id:
         tokens.append(str(format_id).lower())
@@ -42,9 +77,12 @@ def is_yt_dlp_no_logo_format(format_id: str | None, *, info: dict | None = None)
     meaningful = [token for token in tokens if token]
     if not meaningful:
         return False
-    if any("download" in token for token in meaningful):
+    if any(any(marker in token for marker in ("download", "playwm", "watermark", "logo")) for token in meaningful):
         return False
-    return True
+    if info and info.get("watermark_free") is True:
+        return True
+    clean_markers = ("play", "bit_rate", "bitrate", "no_logo", "nologo")
+    return any(any(marker in token for marker in clean_markers) for token in meaningful)
 
 
 def cookie_header_to_netscape_lines(cookie_header: str) -> list[str]:
@@ -90,7 +128,7 @@ def playwright_cookies_to_netscape_lines(cookies: list[dict]) -> list[str]:
         domain = str(cookie.get("domain", "")).strip()
         name = str(cookie.get("name", "")).strip()
         value = str(cookie.get("value", "")).strip()
-        if not domain or not name or "douyin.com" not in domain.lower():
+        if not domain or not name or not _is_douyin_cookie_domain(domain):
             continue
         path = str(cookie.get("path", "/") or "/")
         secure = "TRUE" if cookie.get("secure") else "FALSE"
@@ -108,6 +146,21 @@ def write_netscape_cookie_file_from_playwright(cookies: list[dict], path: Path) 
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _is_douyin_cookie_domain(domain: str) -> bool:
+    normalized = domain.lower().lstrip(".")
+    return any(
+        normalized == suffix or normalized.endswith(f".{suffix}")
+        for suffix in (
+            "douyin.com",
+            "iesdouyin.com",
+            "douyinvod.com",
+            "amemv.com",
+            "snssdk.com",
+            "bytecdn.cn",
+        )
+    )
+
+
 def _load_yt_dlp_info_json(output_path: Path) -> dict | None:
     info_path = output_path.with_name(f"{output_path.stem}.info.json")
     if not info_path.is_file():
@@ -119,6 +172,64 @@ def _load_yt_dlp_info_json(output_path: Path) -> dict | None:
     return payload if isinstance(payload, dict) else None
 
 
+def _positive_int(value: object) -> int | None:
+    try:
+        parsed = int(value) if value is not None else 0
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _positive_float(value: object) -> float | None:
+    try:
+        parsed = float(value) if value is not None else 0.0
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _video_quality_from_info(info: dict | None) -> dict[str, object]:
+    """Extract the actual merged video stream metadata from yt-dlp info.json."""
+    if not isinstance(info, dict):
+        return {}
+    nodes: list[dict] = []
+    requested = info.get("requested_formats")
+    if isinstance(requested, list):
+        nodes.extend(node for node in requested if isinstance(node, dict) and str(node.get("vcodec") or "none") != "none")
+    nodes.append(info)
+    video_nodes = [node for node in nodes if str(node.get("vcodec") or "none") != "none"]
+    if not video_nodes:
+        return {}
+    node = max(
+        video_nodes,
+        key=lambda item: (
+            (_positive_int(item.get("width")) or 0) * (_positive_int(item.get("height")) or 0),
+            _positive_float(item.get("vbr") or item.get("tbr") or item.get("bit_rate")) or 0.0,
+        ),
+    )
+    codec = str(node.get("vcodec") or "").strip() or None
+    raw_bitrate = _positive_float(node.get("vbr") or node.get("tbr") or node.get("bit_rate"))
+    # yt-dlp vbr/tbr are kbit/s; Douyin payload bit_rate is bit/s.
+    bitrate = int(raw_bitrate * 1000) if raw_bitrate is not None and raw_bitrate < 100_000 else (
+        int(raw_bitrate) if raw_bitrate is not None else None
+    )
+    dynamic_range = str(node.get("dynamic_range") or node.get("color_range") or "").strip().lower()
+    hdr_value = node.get("hdr")
+    hdr = (
+        bool(hdr_value)
+        if isinstance(hdr_value, bool)
+        else bool(dynamic_range and dynamic_range not in {"sdr", "none", "unknown", "limited", "full"})
+    )
+    return {
+        "width": _positive_int(node.get("width")),
+        "height": _positive_int(node.get("height")),
+        "codec": codec,
+        "fps": _positive_float(node.get("fps")),
+        "hdr": hdr,
+        "bitrate": bitrate,
+    }
+
+
 class YtDlpDouyinVideoResolver:
     def __init__(
         self,
@@ -126,14 +237,149 @@ class YtDlpDouyinVideoResolver:
         binary: str | None = None,
         format_selector: str | None = None,
         timeout_seconds: int | None = None,
+        max_bytes: int | None = None,
     ):
         settings = get_settings()
         self.binary = binary or settings.douyin_yt_dlp_binary
         self.format_selector = format_selector or settings.douyin_yt_dlp_format
         self.timeout_seconds = timeout_seconds or settings.douyin_yt_dlp_timeout_seconds
+        raw_max_bytes = (
+            max_bytes
+            if max_bytes is not None
+            else getattr(settings, "douyin_download_max_bytes", 2_000_000_000)
+        )
+        try:
+            parsed_max_bytes = (
+                int(raw_max_bytes)
+                if not isinstance(raw_max_bytes, bool)
+                and isinstance(raw_max_bytes, (int, float, str))
+                else 0
+            )
+        except (TypeError, ValueError):
+            parsed_max_bytes = 0
+        self.max_bytes = parsed_max_bytes if parsed_max_bytes > 0 else 2_000_000_000
 
     def is_available(self) -> bool:
         return shutil.which(self.binary) is not None
+
+    def discover(self, request: DouyinVideoResolveRequest) -> list[ResolvedDouyinVideo]:
+        """Discover format metadata without downloading media bytes.
+
+        The returned objects are ephemeral selection candidates. Their format
+        ids are safe to pass back to ``resolve``; no signed URLs or cookies are
+        returned to the caller or persisted in asset metadata.
+        """
+        if not self.is_available():
+            raise DownloadError(
+                DownloadErrorCode.RESOLVE_FAILED,
+                f"yt-dlp binary is not available on PATH: {self.binary}",
+            )
+        settings = get_settings()
+        strict_nologo = not bool(getattr(settings, "douyin_download_allow_watermarked_fallback", False))
+        page_url = request.page_url or f"https://www.douyin.com/video/{request.aweme_id}"
+        selector = yt_dlp_format_selector_for_profile(
+            self.format_selector,
+            strict=strict_nologo,
+            quality_profile=request.quality_profile,
+        )
+        command = [
+            self.binary,
+            "--no-playlist",
+            "--dump-single-json",
+            "--skip-download",
+            "--no-warnings",
+            "--no-progress",
+            page_url,
+        ]
+        with tempfile.TemporaryDirectory(prefix="reup-douyin-yt-dlp-discover-") as tmp_dir:
+            cookie_file = Path(tmp_dir) / "cookies.txt"
+            if request.playwright_cookies:
+                write_netscape_cookie_file_from_playwright(list(request.playwright_cookies), cookie_file)
+                command[1:1] = ["--cookies", str(cookie_file)]
+            elif request.session_cookie:
+                write_netscape_cookie_file(request.session_cookie, cookie_file)
+                command[1:1] = ["--cookies", str(cookie_file)]
+            if request.user_agent:
+                command[1:1] = ["--user-agent", request.user_agent]
+            if request.proxy_url:
+                command[1:1] = ["--proxy", request.proxy_url]
+            try:
+                completed = subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    timeout=max(1, int(request.timeout_seconds or self.timeout_seconds)),
+                    check=False,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise DownloadError(
+                    DownloadErrorCode.DOWNLOAD_FAILED,
+                    "yt-dlp metadata discovery timed out",
+                    reason=DownloadFailureReason.NETWORK_TRANSIENT,
+                ) from exc
+            except OSError as exc:
+                raise DownloadError(DownloadErrorCode.RESOLVE_FAILED, f"Could not start yt-dlp: {exc}") from exc
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout or "yt-dlp metadata discovery failed").strip()
+            raise DownloadError(DownloadErrorCode.DOWNLOAD_FAILED, detail[:500])
+        try:
+            info = json.loads(completed.stdout or "{}")
+        except json.JSONDecodeError as exc:
+            raise DownloadError(DownloadErrorCode.RESOLVE_FAILED, "yt-dlp discovery returned invalid JSON") from exc
+        if not isinstance(info, dict):
+            return []
+        candidates: list[ResolvedDouyinVideo] = []
+        formats = info.get("formats") if isinstance(info.get("formats"), list) else []
+        for item in formats:
+            if not isinstance(item, dict):
+                continue
+            format_id = str(item.get("format_id") or "").strip()
+            if not format_id or str(item.get("vcodec") or "none") == "none":
+                continue
+            width = _positive_int(item.get("width"))
+            height = _positive_int(item.get("height"))
+            codec = str(item.get("vcodec") or "").strip() or None
+            bitrate_raw = _positive_float(item.get("vbr") or item.get("tbr") or item.get("bit_rate"))
+            bitrate = int(bitrate_raw * 1000) if bitrate_raw and bitrate_raw < 100_000 else int(bitrate_raw or 0) or None
+            watermark_free = is_yt_dlp_no_logo_format(format_id, info={"format_id": format_id, "format": item.get("format_note")})
+            if strict_nologo and not watermark_free:
+                continue
+            selected_format = f"{format_id}+bestaudio/best"
+            candidates.append(
+                ResolvedDouyinVideo(
+                    content=None,
+                    mime_type="video/mp4",
+                    filename=None,
+                    resolver_name="yt_dlp_discovery",
+                    format_id=selected_format,
+                    height=height,
+                    width=width,
+                    bitrate=bitrate,
+                    codec=codec,
+                    fps=_positive_float(item.get("fps")),
+                    hdr=bool(item.get("hdr")) if isinstance(item.get("hdr"), bool) else None,
+                    watermark_free=watermark_free,
+                    watermark_authority=(
+                        WatermarkAuthority.VERIFIED_YTDLP_PROVENANCE.value
+                        if watermark_free
+                        else WatermarkAuthority.EXPLICIT_WATERMARKED.value
+                    ),
+                )
+            )
+        candidates.sort(
+            key=lambda item: media_quality_sort_key(
+                watermark_free=item.watermark_free,
+                width=item.width,
+                height=item.height,
+                codec=item.codec,
+                bitrate=item.bitrate,
+                hdr=item.hdr,
+                target_long_edge=request.target_long_edge,
+                source_master=request.quality_profile == DownloadQualityProfile.SOURCE_MASTER.value,
+            ),
+            reverse=True,
+        )
+        return candidates
 
     def resolve(self, request: DouyinVideoResolveRequest) -> ResolvedDouyinVideo:
         if not self.is_available():
@@ -143,28 +389,61 @@ class YtDlpDouyinVideoResolver:
             )
 
         settings = get_settings()
+        effective_timeout_seconds = (
+            max(1, int(request.timeout_seconds))
+            if request.timeout_seconds is not None
+            else self.timeout_seconds
+        )
         strict_nologo = not bool(getattr(settings, "douyin_download_allow_watermarked_fallback", False))
-        format_selector = yt_dlp_no_logo_format_selector(self.format_selector, strict=strict_nologo)
+        format_selector = request.preferred_format_id or yt_dlp_format_selector_for_profile(
+            self.format_selector,
+            strict=strict_nologo,
+            quality_profile=request.quality_profile,
+        )
 
         page_url = request.page_url or f"https://www.douyin.com/video/{request.aweme_id}"
-        with tempfile.TemporaryDirectory(prefix="reup-douyin-yt-dlp-") as tmp_dir:
-            tmp_path = Path(tmp_dir)
-            output_template = str(tmp_path / "video.%(ext)s")
+        with tempfile.TemporaryDirectory(prefix="reup-douyin-yt-dlp-auth-") as tmp_dir:
+            auth_temp = Path(tmp_dir)
+            output_dir = staging_directory(
+                aweme_id=request.aweme_id,
+                workspace_id=request.workspace_id,
+                account_connection_id=request.account_connection_id,
+                transfer_id=request.transfer_id,
+            )
+            output_dir.mkdir(parents=True, exist_ok=True)
+            output_template = str(output_dir / "video.%(ext)s")
             command = [
                 self.binary,
                 "--no-playlist",
-                "--no-progress",
+                "--continue",
+                "--part",
                 "--write-info-json",
+                "--max-filesize",
+                str(self.max_bytes),
+                "--merge-output-format",
+                "mp4",
                 "-f",
                 format_selector,
                 "-o",
                 output_template,
                 page_url,
             ]
+            if request.on_progress is not None:
+                command[2:2] = [
+                    "--newline",
+                    "--progress-template",
+                    (
+                        "download:"
+                        f"{_PROGRESS_PREFIX}%(progress.downloaded_bytes)s:"
+                        "%(progress.total_bytes)s:%(progress.total_bytes_estimate)s"
+                    ),
+                ]
+            else:
+                command.insert(2, "--no-progress")
             if request.user_agent:
                 command.extend(["--add-header", f"User-Agent: {request.user_agent}"])
             command.extend(["--add-header", "Referer:https://www.douyin.com/"])
-            cookie_file = tmp_path / "cookies.txt"
+            cookie_file = auth_temp / "cookies.txt"
             if request.playwright_cookies:
                 write_netscape_cookie_file_from_playwright(list(request.playwright_cookies), cookie_file)
                 command.extend(["--cookies", str(cookie_file)])
@@ -185,17 +464,43 @@ class YtDlpDouyinVideoResolver:
                 },
             )
             try:
-                completed = subprocess.run(
-                    command,
-                    capture_output=True,
-                    text=True,
-                    timeout=self.timeout_seconds,
-                    check=False,
+                completed = (
+                    _run_yt_dlp_progress_process(
+                        command,
+                        timeout_seconds=effective_timeout_seconds,
+                        on_progress=request.on_progress,
+                        first_byte_timeout_seconds=_positive_int_setting(
+                            settings,
+                            "douyin_yt_dlp_first_byte_timeout_seconds",
+                            45,
+                        ),
+                        stall_timeout_seconds=_positive_int_setting(
+                            settings,
+                            "douyin_yt_dlp_stall_timeout_seconds",
+                            90,
+                        ),
+                    )
+                    if request.on_progress is not None
+                    else subprocess.run(
+                        command,
+                        capture_output=True,
+                        text=True,
+                        timeout=effective_timeout_seconds,
+                        check=False,
+                    )
                 )
             except subprocess.TimeoutExpired as exc:
+                timeout_value = exc.timeout if exc.timeout is not None else effective_timeout_seconds
+                detail = str(exc.output or "").strip()
+                suffix = f" ({detail[:160]})" if detail else ""
                 raise DownloadError(
                     DownloadErrorCode.DOWNLOAD_FAILED,
-                    f"yt-dlp timed out after {self.timeout_seconds}s",
+                    f"yt-dlp timed out after {float(timeout_value):.0f}s{suffix}",
+                ) from exc
+            except OSError as exc:
+                raise DownloadError(
+                    DownloadErrorCode.RESOLVE_FAILED,
+                    f"Could not start yt-dlp: {exc}",
                 ) from exc
 
             if completed.returncode != 0:
@@ -205,20 +510,31 @@ class YtDlpDouyinVideoResolver:
                     stderr[:500],
                 )
 
-            output_files = sorted(tmp_path.glob("video.*"))
-            output_files = [path for path in output_files if path.suffix.lower() != ".json"]
+            output_files = [
+                path
+                for path in output_dir.glob("video.*")
+                if path.suffix.lower() not in {".json", ".part"} and path.is_file()
+            ]
             if not output_files:
                 raise DownloadError(
                     DownloadErrorCode.VALIDATION_FAILED,
                     "yt-dlp completed without producing a video file",
                 )
 
-            output_path = output_files[0]
-            content = output_path.read_bytes()
-            if not content:
+            # A retry can leave an older extension beside the current artifact;
+            # yt-dlp's most recently touched completed file is authoritative.
+            output_path = max(output_files, key=lambda path: path.stat().st_mtime_ns)
+            size_bytes = output_path.stat().st_size
+            if size_bytes <= 0:
                 raise DownloadError(
                     DownloadErrorCode.VALIDATION_FAILED,
                     "yt-dlp produced an empty video file",
+                )
+            if size_bytes > self.max_bytes:
+                _cleanup_yt_dlp_artifacts(output_dir)
+                raise DownloadError(
+                    DownloadErrorCode.VALIDATION_FAILED,
+                    f"yt-dlp media exceeds configured limit ({self.max_bytes} bytes)",
                 )
 
             info = _load_yt_dlp_info_json(output_path)
@@ -229,6 +545,9 @@ class YtDlpDouyinVideoResolver:
                 actual_format_id = str(info.get("format_id") or "") or None
                 height = info.get("height") if isinstance(info.get("height"), int) else None
                 width = info.get("width") if isinstance(info.get("width"), int) else None
+            quality = _video_quality_from_info(info)
+            width = quality.get("width") if isinstance(quality.get("width"), int) else width
+            height = quality.get("height") if isinstance(quality.get("height"), int) else height
 
             # Strict: require info.json evidence of the actual format (do not trust the -f selector string).
             watermark_free = is_yt_dlp_no_logo_format(actual_format_id, info=info)
@@ -237,29 +556,46 @@ class YtDlpDouyinVideoResolver:
                     DownloadErrorCode.DOWNLOAD_FAILED,
                     "yt-dlp selected a watermarked format; strict no-logo rejects it. "
                     f"format_id={actual_format_id or 'unknown'}",
+                    reason=DownloadFailureReason.NO_CLEAN_STREAM,
                 )
 
             logger.info(
                 "yt_dlp_download_completed",
                 extra={
                     "aweme_id": request.aweme_id,
-                    "bytes": len(content),
-                    "filename": output_path.name,
+                    "bytes": size_bytes,
+                    # ``filename`` is a reserved LogRecord attribute and raises
+                    # KeyError when INFO logging is enabled in production.
+                    "output_filename": output_path.name,
                     "format_id": actual_format_id or format_selector,
                     "watermark_free": watermark_free,
                     "height": height,
+                    "width": width,
+                    "codec": quality.get("codec"),
                 },
             )
             resolver_name = "yt_dlp_browser" if request.playwright_cookies else "yt_dlp"
             return ResolvedDouyinVideo(
-                content=content,
+                content=None,
                 mime_type=_guess_mime_type(output_path.suffix),
                 filename=output_path.name,
                 resolver_name=resolver_name,
                 format_id=actual_format_id or format_selector,
                 watermark_free=watermark_free,
+                watermark_authority=(
+                    WatermarkAuthority.VERIFIED_YTDLP_PROVENANCE.value
+                    if watermark_free
+                    else WatermarkAuthority.EXPLICIT_WATERMARKED.value
+                ),
                 height=height,
                 width=width,
+                bitrate=quality.get("bitrate") if isinstance(quality.get("bitrate"), int) else None,
+                codec=quality.get("codec") if isinstance(quality.get("codec"), str) else None,
+                fps=quality.get("fps") if isinstance(quality.get("fps"), float) else None,
+                hdr=quality.get("hdr") if isinstance(quality.get("hdr"), bool) else None,
+                local_path=str(output_path.resolve()),
+                size_bytes=size_bytes,
+                cleanup_local_path=True,
             )
 
 
@@ -270,3 +606,180 @@ def _guess_mime_type(suffix: str) -> str:
     if normalized == "webm":
         return "video/webm"
     return "application/octet-stream"
+
+
+def _cleanup_yt_dlp_artifacts(output_dir: Path) -> None:
+    """Remove only artifacts owned by this resolver's managed output namespace."""
+    for path in output_dir.glob("video.*"):
+        try:
+            if path.is_file():
+                path.unlink(missing_ok=True)
+        except OSError:
+            continue
+
+
+def _run_yt_dlp_progress_process(
+    command: list[str],
+    *,
+    timeout_seconds: int,
+    on_progress: Callable[[int, int | None], None],
+    first_byte_timeout_seconds: int | float | None = None,
+    stall_timeout_seconds: int | float | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run yt-dlp with cancellable heartbeat and bounded output buffering.
+
+    ``yt-dlp`` can remain alive while a signed CDN request is dead or a
+    challenge page never yields media.  A total timeout alone makes the queue
+    wait the full budget.  Optional first-byte/stall budgets cut only those
+    unproductive phases; once yt-dlp reports the expected byte total, the stall
+    watchdog is disabled so a slow local ffmpeg merge is not killed.
+    """
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    output_queue: queue.Queue[str | None] = queue.Queue()
+    tail: deque[str] = deque(maxlen=80)
+
+    def read_output() -> None:
+        stream = process.stdout
+        if stream is not None:
+            try:
+                for line in stream:
+                    output_queue.put(line)
+            finally:
+                try:
+                    stream.close()
+                except Exception:
+                    pass
+        output_queue.put(None)
+
+    reader = threading.Thread(target=read_output, name="yt-dlp-progress-reader", daemon=True)
+    reader.start()
+    deadline = time.monotonic() + max(1, int(timeout_seconds))
+    first_byte_budget = _positive_float(first_byte_timeout_seconds)
+    stall_budget = _positive_float(stall_timeout_seconds)
+    started_at = time.monotonic()
+    last_progress_at = started_at
+    saw_progress = False
+    download_complete = False
+    reader_done = False
+    last_done = 0
+    last_total: int | None = None
+    last_heartbeat = 0.0
+    try:
+        while True:
+            now = time.monotonic()
+            if now >= deadline:
+                _terminate_process(process)
+                raise subprocess.TimeoutExpired(command, timeout_seconds)
+            try:
+                item = output_queue.get(timeout=min(0.25, max(0.01, deadline - now)))
+            except queue.Empty:
+                item = ""
+            if item is None:
+                reader_done = True
+            elif item:
+                line = item.rstrip()
+                if line:
+                    tail.append(line[:2_000])
+                parsed = _parse_yt_dlp_progress(line)
+                if parsed is not None:
+                    parsed_done, parsed_total = parsed
+                    made_progress = parsed_done > last_done
+                    last_done = max(last_done, parsed_done)
+                    last_total = parsed_total or last_total
+                    if made_progress:
+                        saw_progress = True
+                    if last_total is not None and last_done >= last_total:
+                        download_complete = True
+                    on_progress(last_done, last_total)
+                    callback_finished_at = time.monotonic()
+                    if made_progress:
+                        # Repeated 0-byte/unchanged progress lines must not keep
+                        # a dead CDN attempt alive indefinitely.
+                        last_progress_at = callback_finished_at
+                    last_heartbeat = callback_finished_at
+            now = time.monotonic()
+            if not download_complete:
+                watchdog_budget = stall_budget if saw_progress else first_byte_budget
+                if watchdog_budget is not None and now - last_progress_at >= watchdog_budget:
+                    _terminate_process(process)
+                    phase = "transfer stalled" if saw_progress else "no media bytes received"
+                    raise subprocess.TimeoutExpired(
+                        command,
+                        watchdog_budget,
+                        output=f"yt-dlp {phase} for {watchdog_budget:.0f}s",
+                    )
+            if now - last_heartbeat >= 2.0:
+                # This callback is also the worker cancellation checkpoint while
+                # yt-dlp is resolving/merging and has not emitted byte progress.
+                on_progress(last_done, last_total)
+                last_heartbeat = now
+            return_code = process.poll()
+            if return_code is not None and reader_done and output_queue.empty():
+                break
+    except Exception:
+        _terminate_process(process)
+        raise
+    reader.join(timeout=1.0)
+    return subprocess.CompletedProcess(
+        command,
+        int(process.returncode or 0),
+        stdout="\n".join(tail),
+        stderr="",
+    )
+
+
+def _parse_yt_dlp_progress(line: str) -> tuple[int, int | None] | None:
+    match = _PROGRESS_PATTERN.search(line or "")
+    if match is None:
+        return None
+    done = _progress_number(match.group("done")) or 0
+    total = _progress_number(match.group("total")) or _progress_number(match.group("estimate"))
+    return max(0, done), total if total is not None and total > 0 else None
+
+
+def _progress_number(raw: str) -> int | None:
+    try:
+        value = int(float(str(raw).strip()))
+    except (TypeError, ValueError):
+        return None
+    return value if value >= 0 else None
+
+
+def _positive_float(value: object | None) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _positive_int_setting(settings: object, name: str, fallback: int) -> int:
+    raw = getattr(settings, name, fallback)
+    if isinstance(raw, bool):
+        return fallback
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return fallback
+    return value if value > 0 else fallback
+
+
+def _terminate_process(process) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        process.terminate()
+        process.wait(timeout=3)
+    except Exception:
+        try:
+            process.kill()
+        except Exception:
+            pass

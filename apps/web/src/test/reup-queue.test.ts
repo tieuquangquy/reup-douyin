@@ -11,6 +11,7 @@ const pageSource = readFileSync(resolve(webRoot, "components/reup-queue/ReupQueu
 const studioSource = readFileSync(resolve(webRoot, "lib/reupQueueStudioState.ts"), "utf8");
 const globalCssSource = readFileSync(resolve(webRoot, "app/globals.css"), "utf8");
 const routeSource = readFileSync(resolve(webRoot, "app/selection/reup-queue/page.tsx"), "utf8");
+const downloadsRouteSource = readFileSync(resolve(webRoot, "app/production/downloads/page.tsx"), "utf8");
 const apiSource = readFileSync(resolve(webRoot, "lib/api.ts"), "utf8");
 const typeSource = readFileSync(resolve(webRoot, "types/reup-queue.ts"), "utf8");
 const exportHandoffTypeSource = readFileSync(resolve(webRoot, "types/export-handoff.ts"), "utf8");
@@ -20,12 +21,24 @@ const publishHandoffsIndexSource = readFileSync(resolve(webRoot, "components/ope
 const publishHandoffDetailSource = readFileSync(resolve(webRoot, "components/operator-routes/PublishHandoffByIdPage.tsx"), "utf8");
 
 assert.match(routeSource, /ReupQueuePage/, "Reup Queue route must render the queue page");
+assert.match(downloadsRouteSource, /ReupQueuePage initialFilter="download"/, "Downloads route must open the canonical live download queue");
+assert.doesNotMatch(downloadsRouteSource, /OperatorPlaceholderPage/, "Downloads route must not remain a placeholder");
 assert.match(apiSource, /fetchReupQueueItems/, "API client must expose Reup Queue list fetch");
 assert.match(apiSource, /params\.set\("sort"/, "fetchReupQueueItems must send sort for server-side active-first paging");
 assert.match(pageSource, /sort:\s*sortMode/, "Reup Queue loads must pass current sortMode to the API");
 assert.match(apiSource, /runReupQueueAction/, "API client must expose lifecycle action execution");
 assert.match(apiSource, /enqueueReupCandidates/, "API client must expose approved candidate enqueue");
 assert.match(apiSource, /runReupQueueBatchAction/, "API client must expose Reup Queue batch action execution");
+assert.match(
+  apiSource,
+  /expected_stage_versions:\s*CORE_STAGE_RUNTIME/,
+  "Download/auto pipeline commands must carry all seven expected runtime versions"
+);
+assert.match(
+  apiSource,
+  /expected_stage_versions:\s*CORE_STAGE_RUNTIME/,
+  "Download/auto pipeline commands must carry all seven expected runtime versions"
+);
 assert.match(typeSource, /ReupQueueAction/, "Reup Queue types must model operator lifecycle actions");
 assert.match(typeSource, /EXPORT_PACKAGE_CREATED/, "Reup Queue types must include Export Package state");
 assert.match(typeSource, /job_status/, "Reup Queue types must include job status");
@@ -342,7 +355,7 @@ assert.match(globalCssSource, /\.reup-queue-hero-panel/, "Reup Queue hero panel 
 assert.match(globalCssSource, /\.reup-queue-studio-workspace/, "Reup Queue studio must have dedicated CSS hooks");
 assert.match(globalCssSource, /\.capture-inbox-status-pill[\s\S]*border-radius: 999px/, "Status strip must inherit Capture Inbox pill styling");
 
-assert.match(exportPackagesIndexSource, /ops-export-page|opsExportPackages/, "Export Package index page must exist");
+assert.match(exportPackagesIndexSource, /export-packages-page is-v4|opsExportPackages/, "Export Package index page must exist");
 assert.match(publishHandoffsIndexSource, /ops-handoffs-page|opsPublishHandoffs/, "Publish Handoff index page must exist");
 assert.match(exportPackageDetailSource, /OpsDetailPanel/, "Export Package detail must use shared detail panel");
 assert.match(publishHandoffDetailSource, /do(?:es)? not call platform APIs or auto-publish/, "Publish Handoff detail must preserve manual publishing boundary");

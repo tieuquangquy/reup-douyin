@@ -1,7 +1,8 @@
 # Frontend quality localization workflow V24.1
 
-Final Review now uses the same operator-gated workflow that was validated by the
-regression corpus. `POST /ocr` is a durable `ANALYZE_OCR` job bound to the current
+Final Review keeps the operator-gated workflow validated by the regression corpus,
+while Reup Queue `auto_to_render` may promote deterministic checkpoints through
+`quality_auto_to_render_v1`. `POST /ocr` is a durable `ANALYZE_OCR` job bound to the current
 immutable recipe and always runs Phase 1 v58 (STEP=1, local Phase 2 OCR). It no
 longer invokes the legacy `media_e2e_v1` clean-and-render path.
 
@@ -21,11 +22,17 @@ It contains the hash-bound Phase 1/2/3 authorities and Phase 4 preview/final art
    below**. Starting another OCR run is available only through the explicit
    Advanced/break-glass action because it supersedes the current artifact run and
    makes its decisions stale.
-3. **Visual translation review** submits every Phase 3 object and creates a durable
+3. If dialogue hard-sub geometry is ready before the Vietnamese dialogue draft is
+   approved, the summary exposes `WAITING_DIALOGUE_TRANSLATION_APPROVAL` plus the
+   exact blocker count. Final Review offers **Approve translation & resume**; approval
+   creates a cache-first `resume_dialogue_translation` job that reuses Phase 1 and
+   rebuilds only the semantic Phase-2 handoff. Repeated Analyze OCR requests are not
+   a recovery mechanism for this checkpoint.
+4. **Visual translation review** submits every Phase 3 object and creates a durable
    `RENDER_PREVIEW` job for the adaptive visual preview.
-4. **Approve visual** records the hash-bound Phase 4 visual authority and stages a
+5. **Approve visual** records the hash-bound Phase 4 visual authority and stages a
    listenable narration + original-background preview. Final Render remains disabled.
-5. Existing approved OmniVoice narration (`instruct:vi_female_north`) and the approved
+6. Existing approved OmniVoice narration (`instruct:vi_female_north`) and the approved
    background stem are attached to the same Phase 4 root. If an older audio-analysis
    run produced hash-valid Demucs files without DB rows, final preparation recovers and
    upserts the stem rows, stages a gain-1.0 mix preview, and writes the bounded audio-mix
@@ -47,6 +54,13 @@ It contains the hash-bound Phase 1/2/3 authorities and Phase 4 preview/final art
 - A preflight residual-CJK failure is exposed in Final Review with its source frame.
   Corrected OCR and Vietnamese replacement produce a hash-bound delta remediation;
   only Phase 2/3 and the affected Phase 4 preview are resumed. Phase 1 is not rerun.
+- Encoded residual evidence remains frame-granular for mask/boundary repair, but the
+  frontend review and translation boundary uses temporal content objects. Adjacent
+  detections are grouped by time, geometry and OCR consensus; source-intrinsic Phase-2
+  tracks are excluded before translation. Residual translation runs in bounded batches,
+  caches each completed text by model/prompt identity, and resumes only missing objects.
+  The Jobs API exposes `workflow_action`, so this work is labelled **Residual Translation**
+  instead of the multiplexed durable type `RENDER_PREVIEW`.
 - Retrying the same run reuses the existing `media_assets.storage_key` row. It does not
   insert a duplicate version that violates the workspace storage-key constraint.
 - A final artifact is not reusable unless `narration_complete=true`; even a sub-1%
@@ -59,3 +73,13 @@ It contains the hash-bound Phase 1/2/3 authorities and Phase 4 preview/final art
 
 The API artifact route only serves files beneath the active quality workspace and
 rejects traversal. Manual export/publish remains outside this workflow by design.
+
+## Reup Queue full-auto authority
+
+The ordinary Final Review buttons remain manual. A queue item explicitly running in
+`auto_to_render` passes `auto_advance=true` to its OCR job. The worker records a
+`quality_auto_decision_authority.json` artifact and can only approve unambiguous local
+provenance. Its subsequent preview job carries `auto_approve=true`; visual and audio
+approval still call the same hash/QA validators used by the frontend. If any validator
+or deterministic policy cannot decide, the queue item stops as needs-attention rather
+than silently rendering a lower-confidence product.

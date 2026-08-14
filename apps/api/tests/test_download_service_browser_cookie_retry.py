@@ -26,6 +26,7 @@ class DownloadServiceBrowserCookieRetryTests(unittest.TestCase):
             caption=None,
             metadata_json={},
             raw_payload_json=None,
+            source_profile=None,
             status="QUEUED",
         )
         env_session = DouyinDownloadSession(

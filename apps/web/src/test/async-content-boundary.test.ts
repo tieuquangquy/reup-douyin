@@ -18,6 +18,7 @@ assert.match(
   "Shared skeletons must cover Ops table and dashboard shapes"
 );
 assert.match(boundarySource, /role="status"/, "Loading and refresh feedback must be announced accessibly");
+assert.match(boundarySource, /PageLoadError/, "Error branch must default to the shared PageLoadError card");
 assert.match(boundarySource, /async-skeleton__status/, "Initial loading must show a compact visible status chip");
 assert.match(boundarySource, /async-skeleton__spinner/, "Loading status chip must include a spinner icon");
 assert.match(boundarySource, /async-skeleton__label/, "Loading status chip must show regular-weight label text");

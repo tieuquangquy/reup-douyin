@@ -101,6 +101,10 @@ assert.match(css, /Publishing Accounts v52|grid-template-columns: minmax\(270px,
 assert.match(css, /Publishing Accounts v53|grid-template-columns: minmax\(250px, 0\.62fr\) minmax\(0, 1\.38fr\)/, "Operator hold must use the Safety Override Capsule layout");
 assert.match(css, /Publishing Accounts v54|grid-template-areas: "hold cooldown reason" "actions actions actions"/, "Operator hold must align cooldown and reason in one command row with a single action rail");
 assert.match(css, /Publishing Accounts v55|border-color: #4d9a7a;[\s\S]*box-shadow: 0 0 0 3px rgba\(55, 143, 109, 0\.12\)/, "Safety fields must use the project-aligned teal focus state");
+assert.match(css, /Publishing Accounts v63|ops-accounts-spectrum__donut|Chart Deck/, "Readiness Board must use the Chart Deck layout with a donut chart");
+assert.match(page, /ops-accounts-spectrum__donut|ops-accounts-spectrum__legend|ops-accounts-spectrum__gauge/, "Readiness Board must render donut, legend and gauge charts");
+assert.doesNotMatch(page, /ops-accounts-spectrum__stub|ops-accounts-spectrum__perforation|is-studio-ticket/, "Readiness Board must not retain the Studio Ticket composition");
+assert.match(page, /ops-accounts-spectrum__insights/, "Accounts page must keep operational insights on the readiness board");
 assert.match(page, /ops-accounts-operations-card|ops-accounts-operations-controls|ops-accounts-operations-notes/, "Account operations must use the compact control-surface layout");
 assert.match(page, /ops-accounts-operations-actions[\s\S]*className="primary"[\s\S]*opsAccounts\.saveAndCheck/, "Account operations must present the save action in the polished primary footer");
 assert.match(page, /ops-accounts-operations-deck|ops-accounts-operations-avatar|activeAccountAvatarUrl/, "Account operations must lead with the Facebook profile command deck");

@@ -73,6 +73,9 @@ export type ReupQueueItem = {
   job_type?: string | null;
   job_status?: string | null;
   job_progress_percent?: number | null;
+  job_phase?: string | null;
+  job_phase_current?: number | null;
+  job_phase_total?: number | null;
   job_error_code?: string | null;
   job_error_message?: string | null;
   render_output_id: string | null;
@@ -101,8 +104,9 @@ export type ReupQueueActionRequest = {
   blocked_reason?: string | null;
   media_prep_notes?: string | null;
   media_prep_status?: ReupQueueMediaPrepStatus | null;
-  /** START_AUTO_PIPELINE: auto_to_tts (default) | auto_to_render */
+  /** START_AUTO_PIPELINE: stop after TTS, or continue through OCR and final render. */
   pipeline_mode?: string | null;
+  expected_stage_versions?: Record<string, string> | null;
 };
 
 export type ReupQueueActionResponse = {

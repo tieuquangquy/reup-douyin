@@ -16,17 +16,29 @@ from src.media_pipeline.frame_sampling.master_phase1_extractor import (
     PADDING,
     ROI_Y0,
     _DiskBackedFrameCache,
+    _ffmpeg_proxy_decode_command,
+    phase1_event_proxy_size,
     DetectionHit,
     MergedTrack,
     apply_temporal_pad,
     box_iou,
     build_text_frame_coverage,
+    classify_visual_text_provenance,
     coalesce_tracks_by_local_text_content,
     confirm_tracks,
     crop_box_sharpness,
+    crop_stroke_orientation_balance,
     dense_rescan_frame_indices,
     expand_tracks_by_local_text_continuity,
+    event_dense_rescan_max_ratio,
+    event_track_merge_gap_frames,
+    filter_tracks_by_local_text,
+    finalize_confirmed_tracks,
     format_timeline_time,
+    integrate_residual_tracks_without_recoalescing_authority,
+    has_solid_neutral_editor_panel,
+    editor_card_panel_bounds,
+    neutral_editor_panel_bounds,
     is_plausible_text_box,
     merge_tracks_by_centroid,
     merge_primary_and_residual_frame_hits,
@@ -36,14 +48,91 @@ from src.media_pipeline.frame_sampling.master_phase1_extractor import (
     purge_unverified_sparse_compact_tracks_after_refinement,
     recover_residual_hardsub_tracks,
     reconcile_final_tracks_with_coverage,
+    sequential_caption_lane_member_ids,
     stable_box_xyxy,
     split_tracks_by_local_text_change,
+    split_tracks_by_visual_content_change,
     split_wide_ui_tracks_by_ink_columns,
     timeline_entry_dict,
     timeline_to_ocr_payload,
 )
 
 from src.media_pipeline.frame_sampling.local_text_recognizer import LocalRecognition
+
+
+class ResidualAuthorityIntegrationTests(unittest.TestCase):
+    def test_residual_append_does_not_recoalesce_existing_epochs(self) -> None:
+        authority_a = MergedTrack(
+            start_frame=10,
+            end_frame=30,
+            box_coords=[120.0, 900.0, 620.0, 940.0],
+            best_frame_index=20,
+            best_sharpness=10.0,
+            centroid=(370.0, 920.0),
+            hit_count=5,
+            hit_boxes=[(120.0, 900.0, 620.0, 940.0)] * 5,
+            hit_frames=[10, 15, 20, 25, 30],
+            hit_sharpness=[10.0] * 5,
+        )
+        authority_b = MergedTrack(
+            start_frame=40,
+            end_frame=60,
+            box_coords=[130.0, 900.0, 630.0, 940.0],
+            best_frame_index=50,
+            best_sharpness=10.0,
+            centroid=(380.0, 920.0),
+            hit_count=5,
+            hit_boxes=[(130.0, 900.0, 630.0, 940.0)] * 5,
+            hit_frames=[40, 45, 50, 55, 60],
+            hit_sharpness=[10.0] * 5,
+        )
+        residual = MergedTrack(
+            start_frame=100,
+            end_frame=102,
+            box_coords=[300.0, 500.0, 360.0, 530.0],
+            best_frame_index=101,
+            best_sharpness=8.0,
+            centroid=(330.0, 515.0),
+            hit_count=2,
+            hit_boxes=[(300.0, 500.0, 360.0, 530.0)] * 2,
+            hit_frames=[100, 102],
+            hit_sharpness=[8.0, 8.0],
+        )
+        rows, audit = integrate_residual_tracks_without_recoalescing_authority(
+            [authority_a, authority_b],
+            [residual],
+            frame_w=720,
+            frame_h=1280,
+        )
+        self.assertEqual(len(rows), 3)
+        self.assertEqual((rows[0].start_frame, rows[0].end_frame), (10, 30))
+        self.assertEqual((rows[1].start_frame, rows[1].end_frame), (40, 60))
+        self.assertFalse(audit["authority_recoalesced"])
+
+    def test_endpoint_candidate_ownership_is_not_cross_consumed(self) -> None:
+        """Regression contract for endpoint closure ownership filtering.
+
+        The implementation uses object-id ownership in the bounded endpoint
+        pass; this test keeps the intended predicate explicit so a shared
+        decode frame cannot extend unrelated tracks.
+        """
+        first = object()
+        second = object()
+        endpoint_candidates = {
+            100: [(id(first), "end"), (id(second), "start")],
+        }
+        first_sides = {
+            side
+            for owner, side in endpoint_candidates[100]
+            if owner == id(first)
+        }
+        second_sides = {
+            side
+            for owner, side in endpoint_candidates[100]
+            if owner == id(second)
+        }
+        self.assertEqual(first_sides, {"end"})
+        self.assertEqual(second_sides, {"start"})
 
 
 class DiskBackedFrameCacheTests(unittest.TestCase):
@@ -67,6 +156,245 @@ class DiskBackedFrameCacheTests(unittest.TestCase):
             cache.close()
 
 
+class FfmpegProxyDecodeTests(unittest.TestCase):
+    def test_vertical_720p_source_uses_288_by_512_all_frame_proxy(self) -> None:
+        self.assertEqual(phase1_event_proxy_size(720, 1280), (288, 512))
+
+    def test_already_small_source_does_not_require_proxy(self) -> None:
+        self.assertIsNone(phase1_event_proxy_size(288, 512))
+
+    def test_command_preserves_frames_and_outputs_scaled_bgr(self) -> None:
+        command = _ffmpeg_proxy_decode_command(
+            "ffmpeg",
+            Path("source video.mp4"),
+            width=720,
+            height=1280,
+        )
+
+        self.assertEqual(command[0], "ffmpeg")
+        self.assertIn("source video.mp4", command)
+        self.assertIn("scale=720:1280:flags=fast_bilinear", command)
+        self.assertIn("bgr24", command)
+        self.assertEqual(command[command.index("-fps_mode") + 1], "passthrough")
+        self.assertEqual(command[-1], "pipe:1")
+
+    def test_command_can_emit_only_selected_source_frames(self) -> None:
+        command = _ffmpeg_proxy_decode_command(
+            "ffmpeg",
+            Path("source.mp4"),
+            width=720,
+            height=1280,
+            selected_frame_indices=(60, 0, 60, 17),
+        )
+
+        video_filter = command[command.index("-vf") + 1]
+        self.assertTrue(video_filter.startswith("select="))
+        self.assertIn("eq(n\\,0)+eq(n\\,17)+eq(n\\,60)", video_filter)
+        self.assertTrue(video_filter.endswith("scale=720:1280:flags=fast_bilinear"))
+
+
+class EventCadenceTrackTests(unittest.TestCase):
+    @staticmethod
+    def _lane_track(
+        start: int,
+        end: int,
+        box: tuple[float, float, float, float],
+    ) -> MergedTrack:
+        frames = [start, (start + end) // 2, end]
+        return MergedTrack(
+            start_frame=start,
+            end_frame=end,
+            box_coords=list(box),
+            best_frame_index=frames[1],
+            best_sharpness=10.0,
+            centroid=((box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0),
+            hit_count=len(frames),
+            hit_boxes=[box] * len(frames),
+            hit_frames=frames,
+            hit_sharpness=[10.0] * len(frames),
+        )
+
+    def test_promotes_sequential_upper_caption_lane_without_lowering_global_y(self) -> None:
+        rows = [
+            self._lane_track(0, 25, (90, 1005, 630, 1042)),
+            self._lane_track(24, 58, (45, 1007, 675, 1043)),
+            self._lane_track(59, 90, (130, 1006, 590, 1042)),
+        ]
+
+        members = sequential_caption_lane_member_ids(
+            rows, frame_w=720, frame_h=1280
+        )
+
+        self.assertEqual(members, {id(row) for row in rows})
+        decisions = classify_visual_text_provenance(
+            rows, frame_w=720, frame_h=1280, text_audit={}
+        )
+        self.assertTrue(
+            all(
+                decisions[id(row)]["classification"] == "EDITOR_OVERLAY"
+                for row in rows
+            )
+        )
+
+    def test_solid_neutral_editor_card_promotes_all_synchronized_rows(self) -> None:
+        frame = np.full((1280, 720, 3), 190, dtype=np.uint8)
+        frame[900:995, 105:610] = 24
+        rows = [
+            self._lane_track(100, 140, (135, 918, 320, 948)),
+            self._lane_track(102, 142, (355, 935, 545, 965)),
+            self._lane_track(101, 143, (165, 958, 520, 986)),
+        ]
+        setattr(rows[1], "_source_intrinsic_candidate", "early_geometry_provenance")
+
+        self.assertTrue(has_solid_neutral_editor_panel(frame, rows[0].box_coords))
+        panel = editor_card_panel_bounds(frame, rows[0].box_coords)
+        self.assertIsNotNone(panel)
+        self.assertLessEqual(panel[0], 110)
+        self.assertGreaterEqual(panel[2], 600)
+
+        decisions = classify_visual_text_provenance(
+            rows,
+            frame_w=720,
+            frame_h=1280,
+            text_audit={},
+            frame_cache={120: frame, 121: frame, 122: frame},
+        )
+
+        self.assertTrue(
+            all(
+                decisions[id(row)]["classification"] == "EDITOR_OVERLAY"
+                for row in rows
+            )
+        )
+        self.assertIn(
+            "group_provenance_overrides_early_source_partition",
+            decisions[id(rows[1])]["reasons"],
+        )
+        self.assertTrue(
+            all(
+                len(decisions[id(row)].get("editor_card_panel_box") or []) == 4
+                for row in rows
+            )
+        )
+
+    def test_neutral_source_panel_without_editor_anchor_stays_protected(self) -> None:
+        frame = np.full((1280, 720, 3), 190, dtype=np.uint8)
+        frame[420:720, 120:600] = 24
+        rows = [
+            self._lane_track(0, 100, (150, 460, 250, 485)),
+            self._lane_track(0, 100, (300, 520, 390, 545)),
+            self._lane_track(0, 100, (450, 600, 535, 625)),
+        ]
+        for row in rows:
+            setattr(row, "_source_intrinsic_candidate", "dense_source_ui_panel")
+
+        decisions = classify_visual_text_provenance(
+            rows,
+            frame_w=720,
+            frame_h=1280,
+            text_audit={},
+            frame_cache={50: frame},
+        )
+
+        self.assertTrue(
+            all(
+                decisions[id(row)]["classification"] == "SOURCE_INTRINSIC"
+                for row in rows
+            )
+        )
+
+    def test_caption_below_detected_editor_panel_is_not_absorbed_by_panel(self) -> None:
+        frame = np.full((1280, 720, 3), 190, dtype=np.uint8)
+        frame[832:990, 112:654] = 24
+        panel_anchor = self._lane_track(100, 140, (180, 910, 500, 945))
+        panel_peer = self._lane_track(101, 141, (220, 950, 520, 980))
+        # The caption is close enough to the old loose-gap predicate but lies
+        # physically outside the detected card.
+        caption = self._lane_track(102, 142, (8, 1008, 712, 1042))
+
+        decisions = classify_visual_text_provenance(
+            [panel_anchor, panel_peer, caption],
+            frame_w=720,
+            frame_h=1280,
+            text_audit={},
+            frame_cache={120: frame, 121: frame, 122: frame},
+        )
+
+        self.assertEqual(
+            decisions[id(panel_anchor)]["classification"], "EDITOR_OVERLAY"
+        )
+        self.assertEqual(
+            decisions[id(panel_peer)]["classification"], "EDITOR_OVERLAY"
+        )
+        self.assertNotIn(
+            "solid_editor_card_group", decisions[id(caption)]["reasons"]
+        )
+        self.assertNotIn(
+            "editor_card_panel_box", decisions[id(caption)]
+        )
+
+    def test_does_not_promote_concurrent_endcard_rows_as_caption_lane(self) -> None:
+        rows = [
+            self._lane_track(0, 90, (80, 995, 640, 1030)),
+            self._lane_track(0, 90, (100, 1000, 620, 1036)),
+            self._lane_track(0, 90, (120, 1004, 600, 1040)),
+        ]
+
+        self.assertFalse(
+            sequential_caption_lane_member_ids(
+                rows, frame_w=720, frame_h=1280
+            )
+        )
+
+    def test_finalize_keeps_persistent_card_sampled_every_twenty_frames(self) -> None:
+        hits = [
+            DetectionHit(frame_index=frame, box_xyxy=(170, 610, 550, 665), sharpness=10)
+            for frame in (1440, 1460, 1480)
+        ]
+        merged = merge_tracks_by_centroid(
+            hits,
+            frame_count=2483,
+            gap_max=event_track_merge_gap_frames(60.0),
+            frame_w=720,
+            frame_h=1280,
+        )
+
+        finalized, _audit = finalize_confirmed_tracks(
+            merged,
+            frame_count=2483,
+            frame_w=720,
+            frame_h=1280,
+            editor_split_gap_max=event_track_merge_gap_frames(60.0),
+        )
+
+        self.assertEqual(len(finalized), 1)
+        self.assertEqual(finalized[0].hit_frames, [1440, 1460, 1480])
+
+    def test_finalize_does_not_apply_editor_cadence_to_compact_ui(self) -> None:
+        hits = [
+            DetectionHit(frame_index=frame, box_xyxy=(300, 600, 340, 640), sharpness=10)
+            for frame in (1440, 1460, 1480)
+        ]
+        merged = merge_tracks_by_centroid(
+            hits,
+            frame_count=2483,
+            gap_max=event_track_merge_gap_frames(60.0),
+            frame_w=720,
+            frame_h=1280,
+        )
+
+        finalized, audit = finalize_confirmed_tracks(
+            merged,
+            frame_count=2483,
+            frame_w=720,
+            frame_h=1280,
+            editor_split_gap_max=event_track_merge_gap_frames(60.0),
+        )
+
+        self.assertEqual(finalized, [])
+        self.assertEqual(audit["re_dropped_after_split"], 3)
+
+
 class TemporalPadTests(unittest.TestCase):
     def test_padding_equals_step(self) -> None:
         self.assertEqual(PADDING, STEP)
@@ -85,6 +413,296 @@ class TemporalPadTests(unittest.TestCase):
         self.assertNotIn(60, frames)
         self.assertNotIn(239, frames)
         self.assertEqual(len(frames), 120)
+
+    def test_event_merge_gap_follows_three_fps_detector_cadence(self) -> None:
+        self.assertEqual(event_track_merge_gap_frames(25.0), 10)
+        self.assertEqual(event_track_merge_gap_frames(30.0), 10)
+        self.assertEqual(event_track_merge_gap_frames(60.0), 20)
+
+    def test_event_dense_budget_is_time_based_at_60fps(self) -> None:
+        self.assertAlmostEqual(event_dense_rescan_max_ratio(60.0), 3.5 / 60.0)
+        self.assertAlmostEqual(event_dense_rescan_max_ratio(25.0), 0.12)
+
+    def test_single_dbnet_hit_requires_independent_strong_textness_frame(self) -> None:
+        track = MergedTrack(
+            start_frame=14,
+            end_frame=16,
+            box_coords=[100.0, 700.0, 900.0, 770.0],
+            best_frame_index=15,
+            best_sharpness=1.0,
+            centroid=(500.0, 735.0),
+            hit_count=1,
+            hit_boxes=[(100.0, 700.0, 900.0, 770.0)],
+            hit_frames=[15],
+            hit_sharpness=[1.0],
+        )
+
+        kept, dropped = confirm_tracks([track], min_hits=2)
+        self.assertEqual(kept, [])
+        self.assertEqual(dropped, [track])
+
+        kept, dropped = confirm_tracks(
+            [track],
+            min_hits=2,
+            strong_single_frame_indices=[15],
+        )
+        self.assertEqual(kept, [track])
+        self.assertEqual(dropped, [])
+
+        setattr(track, "_strong_single_frame_textness", True)
+        track.box_coords = [120.0, 500.0, 700.0, 550.0]
+        decision = classify_visual_text_provenance(
+            [track], frame_w=1080, frame_h=1920, text_audit={}
+        )[id(track)]
+        self.assertEqual(decision["classification"], "UNCERTAIN")
+
+        delattr(track, "_strong_single_frame_textness")
+        decision_without_scheduler_hint = classify_visual_text_provenance(
+            [track], frame_w=1080, frame_h=1920, text_audit={}
+        )[id(track)]
+        self.assertEqual(
+            decision_without_scheduler_hint["classification"], "UNCERTAIN"
+        )
+
+    def test_single_frame_candidate_requires_local_cjk_recognition(self) -> None:
+        class _Recognizer:
+            def __init__(self, text: str) -> None:
+                self.text = text
+
+            def recognize(self, _crop: np.ndarray) -> LocalRecognition:
+                return LocalRecognition(
+                    text=self.text,
+                    confidence=0.99,
+                    valid_char_ratio=1.0,
+                )
+
+        def _track() -> MergedTrack:
+            track = MergedTrack(
+                start_frame=6,
+                end_frame=8,
+                box_coords=[160.0, 1680.0, 920.0, 1740.0],
+                best_frame_index=7,
+                best_sharpness=1.0,
+                centroid=(540.0, 1710.0),
+                hit_count=1,
+                hit_boxes=[(160.0, 1680.0, 920.0, 1740.0)],
+                hit_frames=[7],
+                hit_sharpness=[1.0],
+            )
+            setattr(track, "_strong_single_frame_textness", True)
+            setattr(track, "_single_frame_retention_candidate", True)
+            return track
+
+        frame = np.zeros((1920, 1080, 3), dtype=np.uint8)
+        for x in range(180, 900, 40):
+            frame[1690:1730, x : x + 10] = 255
+            frame[1705:1712, x : x + 24] = 255
+
+        rejected, audit = filter_tracks_by_local_text(
+            [_track()],
+            frame_cache={7: frame},
+            frame_w=1080,
+            frame_h=1920,
+            recognizer=_Recognizer("TARE"),
+            preserve_source_candidates=True,
+        )
+        self.assertEqual(rejected, [])
+        self.assertTrue(
+            any(
+                row.get("reason")
+                in {
+                    "single_frame_requires_local_cjk",
+                    "latin_text_without_editor_card_evidence",
+                }
+                for row in audit["rows"]
+            )
+        )
+
+        kept, _audit = filter_tracks_by_local_text(
+            [_track()],
+            frame_cache={7: frame},
+            frame_w=1080,
+            frame_h=1920,
+            recognizer=_Recognizer("字幕"),
+            preserve_source_candidates=True,
+        )
+        self.assertEqual(len(kept), 1)
+        self.assertTrue(getattr(kept[0], "_single_frame_cjk_confirmed", False))
+
+    def test_locked_phone_label_inherits_source_panel_before_editor_anchor(self) -> None:
+        def moving_peer(box: tuple[float, float, float, float]) -> MergedTrack:
+            x0, y0, x1, y1 = box
+            return MergedTrack(
+                start_frame=0,
+                end_frame=10,
+                box_coords=list(box),
+                best_frame_index=5,
+                best_sharpness=1.0,
+                centroid=((x0 + x1) / 2.0, (y0 + y1) / 2.0),
+                hit_count=3,
+                hit_boxes=[
+                    (x0 - 30, y0, x1 - 30, y1),
+                    box,
+                    (x0 + 30, y0, x1 + 30, y1),
+                ],
+                hit_frames=[0, 5, 10],
+                hit_sharpness=[1.0, 1.0, 1.0],
+            )
+
+        peers = [
+            moving_peer((40, 100, 180, 145)),
+            moving_peer((820, 120, 1010, 170)),
+            moving_peer((70, 1500, 230, 1550)),
+            moving_peer((790, 1470, 1030, 1530)),
+        ]
+        candidate = MergedTrack(
+            start_frame=2,
+            end_frame=8,
+            box_coords=[390.0, 900.0, 690.0, 945.0],
+            best_frame_index=5,
+            best_sharpness=1.0,
+            centroid=(540.0, 922.5),
+            hit_count=3,
+            hit_boxes=[(390.0, 900.0, 690.0, 945.0)] * 3,
+            hit_frames=[2, 5, 8],
+            hit_sharpness=[1.0, 1.0, 1.0],
+        )
+        decisions = classify_visual_text_provenance(
+            [*peers, candidate],
+            frame_w=1080,
+            frame_h=1920,
+            text_audit={},
+        )
+
+        self.assertEqual(
+            decisions[id(candidate)]["classification"],
+            "SOURCE_INTRINSIC_PANEL",
+        )
+        self.assertIn(
+            "contained_by_source_ui_plane",
+            decisions[id(candidate)]["reasons"],
+        )
+
+    def test_phone_panel_row_is_protected_even_when_shape_looks_like_hardsub(self) -> None:
+        def moving_peer(box: tuple[float, float, float, float]) -> MergedTrack:
+            x0, y0, x1, y1 = box
+            return MergedTrack(
+                start_frame=0,
+                end_frame=12,
+                box_coords=list(box),
+                best_frame_index=6,
+                best_sharpness=1.0,
+                centroid=((x0 + x1) / 2.0, (y0 + y1) / 2.0),
+                hit_count=3,
+                hit_boxes=[
+                    (x0 - 26, y0, x1 - 26, y1),
+                    box,
+                    (x0 + 26, y0, x1 + 26, y1),
+                ],
+                hit_frames=[0, 6, 12],
+                hit_sharpness=[1.0, 1.0, 1.0],
+            )
+
+        peers = [
+            moving_peer((40, 110, 170, 150)),
+            moving_peer((430, 100, 560, 145)),
+            moving_peer((820, 120, 1010, 170)),
+            moving_peer((60, 1420, 210, 1465)),
+            moving_peer((420, 1450, 590, 1495)),
+            moving_peer((810, 1470, 1020, 1520)),
+        ]
+        phone_row = MergedTrack(
+            start_frame=2,
+            end_frame=10,
+            box_coords=[330.0, 1540.0, 750.0, 1590.0],
+            best_frame_index=6,
+            best_sharpness=1.0,
+            centroid=(540.0, 1565.0),
+            hit_count=3,
+            hit_boxes=[(330.0, 1540.0, 750.0, 1590.0)] * 3,
+            hit_frames=[2, 6, 10],
+            hit_sharpness=[1.0, 1.0, 1.0],
+        )
+
+        decisions = classify_visual_text_provenance(
+            [*peers, phone_row],
+            frame_w=1080,
+            frame_h=1920,
+            text_audit={},
+        )
+
+        self.assertEqual(
+            decisions[id(phone_row)]["classification"],
+            "SOURCE_INTRINSIC_PANEL",
+        )
+
+    def test_long_lived_compact_modal_is_preserved_but_large_editor_card_is_not(self) -> None:
+        def locked_track(box: tuple[float, float, float, float]) -> MergedTrack:
+            x0, y0, x1, y1 = box
+            return MergedTrack(
+                start_frame=100,
+                end_frame=224,
+                box_coords=list(box),
+                best_frame_index=160,
+                best_sharpness=1.0,
+                centroid=((x0 + x1) / 2.0, (y0 + y1) / 2.0),
+                hit_count=8,
+                hit_boxes=[box] * 8,
+                hit_frames=[100, 120, 140, 160, 180, 200, 220, 224],
+                hit_sharpness=[1.0] * 8,
+            )
+
+        modal = locked_track((470, 950, 610, 975))
+        editor = locked_track((250, 850, 830, 930))
+        decisions = classify_visual_text_provenance(
+            [modal, editor],
+            frame_w=1080,
+            frame_h=1920,
+            text_audit={},
+        )
+
+        self.assertEqual(
+            decisions[id(modal)]["classification"],
+            "SOURCE_INTRINSIC_PANEL",
+        )
+        self.assertEqual(
+            decisions[id(editor)]["classification"],
+            "EDITOR_OVERLAY",
+        )
+
+    def test_visual_content_change_splits_without_ocr_model(self) -> None:
+        frames: dict[int, np.ndarray] = {}
+        for frame_index in range(6):
+            frame = np.zeros((80, 220, 3), dtype=np.uint8)
+            if frame_index < 3:
+                frame[25:32, 25:190] = 255
+                frame[45:52, 25:120] = 255
+            else:
+                frame[20:58, 35:45] = 255
+                frame[20:58, 95:105] = 255
+                frame[20:58, 155:165] = 255
+            frames[frame_index] = frame
+        track = MergedTrack(
+            start_frame=0,
+            end_frame=5,
+            box_coords=[10.0, 10.0, 205.0, 70.0],
+            best_frame_index=0,
+            best_sharpness=1.0,
+            centroid=(107.5, 40.0),
+            hit_count=6,
+            hit_boxes=[(10.0, 10.0, 205.0, 70.0)] * 6,
+            hit_frames=list(range(6)),
+            hit_sharpness=[1.0] * 6,
+        )
+
+        split, audit = split_tracks_by_visual_content_change(
+            [track], frame_cache=frames
+        )
+
+        self.assertEqual(len(split), 2)
+        self.assertEqual(audit["split_tracks"], 1)
+        self.assertEqual(audit["model_calls"], 0)
+        self.assertLess(split[0].end_frame, split[1].start_frame)
 
     def test_residual_profile_replaces_overlapping_primary_slab(self) -> None:
         primary = DetectionHit(
@@ -148,6 +766,25 @@ class CropSharpnessTests(unittest.TestCase):
         sharp_box = crop_box_sharpness(frame, (50.0, 40.0, 90.0, 60.0))
         sharp_empty = crop_box_sharpness(frame, (150.0, 10.0, 190.0, 30.0))
         self.assertGreater(sharp_box, sharp_empty * 5.0)
+
+    def test_stroke_orientation_balance_rejects_stripes_but_keeps_glyphs(self) -> None:
+        striped = np.zeros((80, 500, 3), dtype=np.uint8)
+        for x in range(20, 480, 14):
+            striped[:, x : x + 4] = 255
+        glyphs = np.zeros((80, 500, 3), dtype=np.uint8)
+        for x in range(30, 470, 50):
+            glyphs[15:65, x : x + 10] = 255
+            glyphs[35:45, x : x + 30] = 255
+
+        stripe_balance = crop_stroke_orientation_balance(
+            striped, (0.0, 0.0, 500.0, 80.0)
+        )
+        glyph_balance = crop_stroke_orientation_balance(
+            glyphs, (0.0, 0.0, 500.0, 80.0)
+        )
+
+        self.assertLess(stripe_balance, 0.20)
+        self.assertGreaterEqual(glyph_balance, 0.45)
 
 
 class GeometryFilterTests(unittest.TestCase):

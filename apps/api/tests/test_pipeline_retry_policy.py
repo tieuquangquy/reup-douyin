@@ -19,6 +19,22 @@ from src.services.pipeline_retry_policy import (
 
 
 class ClassifyTests(unittest.TestCase):
+    def test_residual_authority_conflicts_are_terminal(self) -> None:
+        for message in (
+            "Residual matches existing Phase-1 geometry: sub_01,sub_02",
+            "Residual 教程 requires a translation suggestion",
+            "Residual OCR authority changed after translation was queued",
+            "Residual OCR candidate drift detected for p2r_01",
+            "Residual visual override authority is stale for p2r_01",
+            "Residual Phase 2 rerun is blocked before Phase 3: unapproved_content:ocr_content_013",
+            "Residual 正饰分享 source confirmation failed: Residual anchor is not confirmed in source OCR",
+        ):
+            with self.subTest(message=message):
+                self.assertEqual(
+                    classify_pipeline_failure("QUALITY_LOCALIZATION_FAILED", message),
+                    PipelineFailureClass.TERMINAL,
+                )
+
     def test_network_and_timeout_are_transient(self) -> None:
         for message in (
             "TimeoutError: request timed out",
@@ -70,6 +86,13 @@ class ClassifyTests(unittest.TestCase):
             classify_pipeline_failure(
                 "timing_fit_blocked",
                 "TTS segment cannot fit safely: ratio=1.860",
+            ),
+            PipelineFailureClass.TERMINAL,
+        )
+        self.assertEqual(
+            classify_pipeline_failure(
+                "tts_provider_failed",
+                "HTTP connector synthesis failed (expressive_feature_not_applied). Missing provider bindings: pause_not_applied.",
             ),
             PipelineFailureClass.TERMINAL,
         )

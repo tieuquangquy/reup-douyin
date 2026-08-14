@@ -545,6 +545,13 @@ class ReupQueueService:
         operator_note: str | None,
         now: datetime,
     ) -> None:
+        prior_job_id = item.job_id
+        if prior_job_id is not None:
+            # Reactivation creates a fresh durable stage job under the queue item's
+            # stable logical key.  Free the prior terminal job's unique slot before
+            # dropping the link, otherwise the next Start action can collide with
+            # ``uq_jobs_workspace_idempotency_key``.
+            self._release_download_job_idempotency_slot(prior_job_id)
         item.status = ReupQueueStatus.READY_FOR_PROCESSING
         item.media_prep_status = ReupQueueMediaPrepStatus.NOT_STARTED
         item.priority = priority
@@ -608,10 +615,9 @@ class ReupQueueService:
                 item.media_prep_status = ReupQueueMediaPrepStatus.WAITING_FOR_MEDIA
         elif action == ReupQueueAction.START_AUTO_PIPELINE:
             from src.services.reup_pipeline_meta import (
-                PIPELINE_STEP_DOWNLOAD,
                 normalize_pipeline_mode,
-                set_pipeline_meta,
             )
+            from src.services.reup_pipeline_orchestrator import ReupPipelineOrchestrator
             from src.services.pipeline_recipe_runtime import (
                 RuntimeRecipeError,
                 bind_item_to_current_recipe,
@@ -647,19 +653,12 @@ class ReupQueueService:
                 item.last_action_note = note or f"Auto pipeline queued ({mode}) — waiting for a free slot."
             elif recipe_valid:
                 item.started_at = item.started_at or now
-                set_pipeline_meta(item, mode=mode, hold=False, step=PIPELINE_STEP_DOWNLOAD)
-                try:
-                    item.job_id = self._ensure_download_job_id(item)
-                except DownloadError as exc:
-                    item.status = ReupQueueStatus.FAILED_NEEDS_ATTENTION
-                    item.media_prep_status = ReupQueueMediaPrepStatus.BLOCKED
-                    item.failed_at = now
-                    item.last_error_code = str(exc.code)
-                    item.last_error_message = exc.message
-                else:
-                    item.status = ReupQueueStatus.WAITING_FOR_MEDIA
-                    item.media_prep_status = ReupQueueMediaPrepStatus.WAITING_FOR_MEDIA
-                    item.last_action_note = note or f"Auto pipeline started ({mode})."
+                started = ReupPipelineOrchestrator(self.db).set_automation(item, mode=mode)
+                if item.status != ReupQueueStatus.FAILED_NEEDS_ATTENTION:
+                    item.last_action_note = note or (
+                        f"Auto pipeline started ({mode})"
+                        + (f" at {started}." if started else ".")
+                    )
         elif action == ReupQueueAction.SET_AUTOMATION:
             from src.services.reup_pipeline_meta import parse_automation_mode
             from src.services.reup_pipeline_orchestrator import ReupPipelineOrchestrator
@@ -671,9 +670,10 @@ class ReupQueueService:
                     "Automation mode must be manual, auto_to_tts, or auto_to_render.",
                 )
             started = ReupPipelineOrchestrator(self.db).set_automation(item, mode=mode)
-            item.last_action_note = note or (
-                f"Automation set to {mode}" + (f" — continuing at {started}." if started else ".")
-            )
+            if item.status != ReupQueueStatus.FAILED_NEEDS_ATTENTION:
+                item.last_action_note = note or (
+                    f"Automation set to {mode}" + (f" — continuing at {started}." if started else ".")
+                )
         elif action == ReupQueueAction.MARK_MEDIA_READY:
             from src.audio_pipeline.errors import AudioAnalysisError
 
@@ -802,6 +802,12 @@ class ReupQueueService:
                     if item.media_prep_status == ReupQueueMediaPrepStatus.BLOCKED:
                         item.media_prep_status = ReupQueueMediaPrepStatus.NOT_STARTED
         elif action == ReupQueueAction.RETRY:
+            prior_job_id = item.job_id
+            if prior_job_id is not None:
+                # RETRY intentionally starts a new durable attempt.  Keep the old
+                # row for audit, but retire its logical idempotency key so the next
+                # Start/Resume can claim that key without a database conflict.
+                self._release_download_job_idempotency_slot(prior_job_id)
             item.status = ReupQueueStatus.READY_FOR_PROCESSING
             item.media_prep_status = ReupQueueMediaPrepStatus.NOT_STARTED
             item.job_id = None
@@ -920,7 +926,7 @@ class ReupQueueService:
         return count_in_flight(others) >= limit
 
     def _ensure_download_job_id(self, item: ReupQueueItem) -> UUID:
-        from src.enums import JobStatus
+        from src.enums import JobStatus, JobType
         from src.models.jobs import Job
         from src.services.download_service import DownloadRequest
 
@@ -929,6 +935,10 @@ class ReupQueueService:
         if item.job_id is not None:
             job = self.db.get(Job, item.job_id)
             if job is None:
+                item.job_id = None
+            elif _job_type_value(job) != JobType.DOWNLOAD_VIDEO.value:
+                # item.job_id follows the currently displayed stage. Never
+                # mistake a completed Analyze/TTS/etc. job for a Download job.
                 item.job_id = None
             else:
                 status_obj = getattr(job, "status", None)
@@ -949,9 +959,13 @@ class ReupQueueService:
             DownloadRequest(
                 source_video_id=item.source_video_id,
                 candidate_id=item.video_candidate_id,
-                force_refresh=True,
+                # Start/Resume should reuse an intact current source asset.  A
+                # destructive refresh remains an explicit assets/refresh action.
+                force_refresh=False,
+                account_connection_id=_queue_account_connection_id(item),
             ),
             idempotency_key=f"reup-queue:{item.id}:download",
+            commit=False,
         )
         job_id = UUID(result.job_id)
         # DownloadService has already committed the durable row.  Bind it when the
@@ -972,7 +986,7 @@ class ReupQueueService:
 
         if item.job_id is not None:
             job = self.db.get(Job, item.job_id)
-            if job is not None and str(job.job_type) == JobType.ANALYZE_AUDIO:
+            if job is not None and _job_type_value(job) == JobType.ANALYZE_AUDIO.value:
                 status_obj = getattr(job, "status", None)
                 if status_obj is None:
                     return item.job_id
@@ -990,6 +1004,7 @@ class ReupQueueService:
                 skip_translation=True,
             ),
             idempotency_key=f"reup-queue:{item.id}:analyze-audio",
+            commit=False,
         )
         return job.id
 
@@ -1095,6 +1110,21 @@ def _waiting_for_media_download_idle(item: ReupQueueItem) -> bool:
         "PROCESSING",
     }
     return status_value.upper() not in {value.upper() for value in active}
+
+
+def _queue_account_connection_id(item: ReupQueueItem) -> UUID | None:
+    metadata = dict(getattr(item, "metadata_json", None) or {})
+    raw = (
+        metadata.get("resolved_douyin_account_connection_id")
+        or metadata.get("selected_douyin_account_connection_id")
+        or metadata.get("douyin_account_connection_id")
+    )
+    if raw is None:
+        return None
+    try:
+        return UUID(str(raw))
+    except (TypeError, ValueError):
+        return None
 
 
 def _linked_analyze_audio_failed(item: ReupQueueItem) -> bool:

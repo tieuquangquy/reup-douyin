@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import unittest
+from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
 from src.main import app
+from src.core.auth import AuthenticatedPrincipal, get_current_principal
 from src.schemas.douyin_extension import DouyinProfileVideoCandidate
 from src.db.session import get_db_session
 from src.services.douyin_profile_classification_service import classify_douyin_profile_candidates
@@ -28,6 +30,18 @@ class EmptyReadOnlyDb:
 
 
 class DouyinProfileVideoClassificationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        principal = AuthenticatedPrincipal(
+            subject="operator@local.test",
+            workspace_id=uuid4(),
+            roles=("operator",),
+            audience="reup-douyin-operator",
+        )
+        app.dependency_overrides[get_current_principal] = lambda: principal
+        # Route-contract tests are read-only and must not depend on whichever
+        # process-global database URL another test module configured.
+        app.dependency_overrides[get_db_session] = lambda: EmptyReadOnlyDb()
+
     def tearDown(self) -> None:
         app.dependency_overrides.clear()
 

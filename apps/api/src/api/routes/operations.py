@@ -939,6 +939,12 @@ def _tts_ai_response(public: dict, *, updated: bool = False, focus_profile_id: s
         model_id=str(public.get("model_id") or ""),
         api_key_set=bool(public.get("api_key_set")),
         api_key_masked=str(public.get("api_key_masked") or ""),
+        credential_mode=str(public.get("credential_mode") or "api_key"),
+        google_service_account_set=bool(public.get("google_service_account_set")),
+        google_service_account_email=str(public.get("google_service_account_email") or ""),
+        google_service_account_project_id=str(
+            public.get("google_service_account_project_id") or ""
+        ),
         base_url=str(public.get("base_url") or ""),
         timeout_seconds=float(public.get("timeout_seconds") or 120.0),
         fallback_provider=str(public.get("fallback_provider") or "none"),
@@ -1148,6 +1154,12 @@ def test_tts_ai(
         elif body.api_key is not None:
             cleaned = body.api_key.strip()
             api_key = cleaned or None
+        service_account_json = saved.google_service_account_json
+        if body.clear_google_service_account:
+            service_account_json = None
+        elif body.google_service_account_json is not None:
+            cleaned_service_account = body.google_service_account_json.strip()
+            service_account_json = cleaned_service_account or None
         cfg = TtsAiConfig(
             enabled=bool(body.enabled if body.enabled is not None else saved.enabled or True),
             provider=str(body.provider if body.provider is not None else saved.provider),
@@ -1160,6 +1172,12 @@ def test_tts_ai(
             ),
             model_id=str(body.model_id if body.model_id is not None else saved.model_id),
             api_key=api_key,
+            credential_mode=str(
+                body.credential_mode if body.credential_mode is not None else saved.credential_mode
+            ),
+            google_service_account_json=service_account_json,
+            google_service_account_email=saved.google_service_account_email,
+            google_service_account_project_id=saved.google_service_account_project_id,
             base_url=str(body.base_url if body.base_url is not None else saved.base_url),
             timeout_seconds=float(
                 body.timeout_seconds if body.timeout_seconds is not None else saved.timeout_seconds
@@ -1179,7 +1197,7 @@ def test_tts_ai(
                 body.options_json if body.options_json is not None else (saved.options_json or {})
             ),
         )
-    result = probe_tts_ai_client(cfg)
+    result = probe_tts_ai_client(cfg, discover_remote=True)
     catalog = None
     if result.catalog:
         catalog = TtsAiCatalog.model_validate(result.catalog)
@@ -1191,7 +1209,14 @@ def test_tts_ai(
             provider=result.provider,
             detail=result.detail,
             catalog=result.catalog,
+            checks=result.checks,
+            config_fingerprint=str(
+                ((result.catalog or {}).get("discovery") or {}).get("config_fingerprint") or ""
+            ),
         ),
+    )
+    config_fingerprint = str(
+        ((result.catalog or {}).get("discovery") or {}).get("config_fingerprint") or ""
     )
     return TtsAiTestResponse(
         ok=result.ok,
@@ -1199,6 +1224,8 @@ def test_tts_ai(
         detail=result.detail,
         catalog=catalog,
         runtime=TtsAiRuntime.model_validate(runtime),
+        checks=result.checks,
+        config_fingerprint=config_fingerprint,
     )
 
 
@@ -1369,6 +1396,8 @@ def _tts_preview_response_from_job(job) -> TtsAiPreviewResponse:
         audio_base64=job.audio_base64 or "",
         warnings=list(job.warnings or []),
         text=job.text or "",
+        requested_voice_id=job.requested_voice_id or "",
+        resolved_voice_id=job.resolved_voice_id or "",
     )
 
 
@@ -1384,13 +1413,28 @@ def preview_tts_ai_speech(
     Next.js /api rewrite open that long previously returned an opaque HTTP 500.
     """
     service = WorkspaceSettingsService(db)
-    saved = service.get_tts_ai(workspace_id)
+    profile_id = (body.profile_id or "").strip() or None
+    if profile_id:
+        raw = (service._resolve_workspace(workspace_id).settings_json or {}).get("tts_ai")
+        _active_id, profiles = service._normalize_tts_profiles(raw)
+        target = service._find_tts_profile(profiles, profile_id)
+        if target is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="profile_not_found")
+        saved = service._parse_tts_ai(target)
+    else:
+        saved = service.get_tts_ai(workspace_id)
     api_key = saved.api_key
     if body.clear_api_key:
         api_key = None
     elif body.api_key is not None:
         cleaned = body.api_key.strip()
         api_key = cleaned or None
+    service_account_json = saved.google_service_account_json
+    if body.clear_google_service_account:
+        service_account_json = None
+    elif body.google_service_account_json is not None:
+        cleaned_service_account = body.google_service_account_json.strip()
+        service_account_json = cleaned_service_account or None
     cfg = TtsAiConfig(
         enabled=True,
         provider=str(body.provider if body.provider is not None else saved.provider),
@@ -1403,6 +1447,12 @@ def preview_tts_ai_speech(
         ),
         model_id=str(body.model_id if body.model_id is not None else saved.model_id),
         api_key=api_key,
+        credential_mode=str(
+            body.credential_mode if body.credential_mode is not None else saved.credential_mode
+        ),
+        google_service_account_json=service_account_json,
+        google_service_account_email=saved.google_service_account_email,
+        google_service_account_project_id=saved.google_service_account_project_id,
         base_url=str(body.base_url if body.base_url is not None else saved.base_url),
         timeout_seconds=float(
             body.timeout_seconds if body.timeout_seconds is not None else saved.timeout_seconds

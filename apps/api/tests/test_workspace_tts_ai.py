@@ -14,6 +14,45 @@ from src.tts_pipeline.providers import PlaceholderToneTtsProvider
 
 
 class WorkspaceTtsAiTests(unittest.TestCase):
+    def test_public_options_fail_closed_when_connector_redaction_raises(self) -> None:
+        workspace = SimpleNamespace(
+            id=uuid4(),
+            settings_json={
+                TTS_AI_KEY: {
+                    "active_profile_id": "p1",
+                    "profiles": [
+                        {
+                            "id": "p1",
+                            "name": "Provider",
+                            "enabled": True,
+                            "provider": "http_custom",
+                            "api_key": "server-secret",
+                            "base_url": "https://api.example.com",
+                            "options_json": {
+                                "http_connector": {
+                                    "synthesis": {
+                                        "headers": {"X-Token": "secret"}
+                                    }
+                                }
+                            },
+                        }
+                    ],
+                }
+            },
+        )
+        db = MagicMock()
+        db.get.return_value = workspace
+        service = WorkspaceSettingsService(db)
+        with patch(
+            "src.tts_pipeline.http_connector.redact_http_connector_options",
+            side_effect=RuntimeError("redactor regression"),
+        ):
+            public = service.get_tts_ai_public(workspace.id)
+            profile_public = service.get_tts_ai_profile_public(workspace.id, "p1")
+        self.assertEqual(public["options_json"], {})
+        self.assertEqual(profile_public["options_json"], {})
+        self.assertNotIn("server-secret", str(public["options_json"]))
+
     def test_get_returns_disabled_when_unset(self) -> None:
         workspace = SimpleNamespace(id=uuid4(), settings_json=None)
         db = MagicMock()
@@ -33,7 +72,7 @@ class WorkspaceTtsAiTests(unittest.TestCase):
             workspace.id,
             {
                 "enabled": True,
-                "provider": "google",
+                "provider": "azure",
                 "voice_id": "vi-VN-Neural2-A",
                 "speaking_rate": 1.0,
                 "language_code": "vi",
@@ -391,6 +430,34 @@ class WorkspaceTtsAiTests(unittest.TestCase):
         public = service.get_tts_ai_public(workspace.id)
         self.assertEqual(public["runtime"]["last_install"]["command"], "pip install vieneu")
 
+    def test_parse_gemini_drops_google_catalog_and_normalizes_voice(self) -> None:
+        service = WorkspaceSettingsService(MagicMock())
+        cfg = service._parse_tts_ai(
+            {
+                "id": "gemini-profile",
+                "enabled": True,
+                "provider": "google_gemini",
+                "voice_id": "vi-VN-Chirp3-HD-Aoede",
+                "speaking_rate": 1.0,
+                "language_code": "vi-VN",
+                "model_id": "gemini-2.5-flash-tts",
+                "credential_mode": "google_adc",
+                "runtime": {
+                    "last_install": None,
+                    "last_probe": {
+                        "ok": True,
+                        "provider": "google",
+                        "catalog": {
+                            "source": "provider",
+                            "voices": [{"id": "vi-VN-Chirp3-HD-Aoede", "label": "Aoede"}],
+                        },
+                    },
+                },
+            }
+        )
+        self.assertEqual(cfg.voice_id, "Aoede")
+        self.assertIsNone(cfg.runtime["last_probe"])
+
     def test_patch_tts_ai_runtime_merges(self) -> None:
         workspace = SimpleNamespace(id=uuid4(), settings_json={})
         db = MagicMock()
@@ -433,6 +500,27 @@ class WorkspaceTtsAiTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertIsNone(result.catalog)
 
+    def test_gemini_probe_attaches_provider_native_catalog(self) -> None:
+        cfg = SimpleNamespace(
+            enabled=True,
+            provider="google_gemini",
+            language_code="vi-VN",
+            api_key="test-key",
+            credential_mode="api_key",
+            base_url="https://generativelanguage.googleapis.com/v1beta",
+            timeout_seconds=30.0,
+            cli_binary="",
+            options_json={},
+        )
+        result = probe_tts_ai_client(cfg, discover_remote=False)
+        self.assertTrue(result.ok)
+        self.assertIsNotNone(result.catalog)
+        assert result.catalog is not None
+        self.assertEqual(result.catalog["default_voice_id"], "Kore")
+        ids = [voice["id"] for voice in result.catalog["voices"]]
+        self.assertIn("Aoede", ids)
+        self.assertFalse(any("Chirp3-HD" in voice_id for voice_id in ids))
+
     def test_probe_unknown_slug_fails(self) -> None:
         cfg = SimpleNamespace(
             enabled=True,
@@ -448,7 +536,7 @@ class WorkspaceTtsAiTests(unittest.TestCase):
         self.assertIn("unknown", result.detail.lower())
 
     def test_probe_cloud_requires_api_key(self) -> None:
-        for name in ("google", "openai", "azure", "elevenlabs"):
+        for name in ("openai", "azure", "elevenlabs"):
             cfg = SimpleNamespace(
                 enabled=True,
                 provider=name,
@@ -463,7 +551,7 @@ class WorkspaceTtsAiTests(unittest.TestCase):
 
         cfg_ok = SimpleNamespace(
             enabled=True,
-            provider="google",
+            provider="openai",
             api_key="sk-test",
             base_url="",
             language_code="vi",
@@ -471,7 +559,31 @@ class WorkspaceTtsAiTests(unittest.TestCase):
         )
         result_ok = probe_tts_ai_client(cfg_ok)
         self.assertTrue(result_ok.ok)
-        self.assertEqual(result_ok.provider, "google")
+        self.assertEqual(result_ok.provider, "openai")
+
+    def test_probe_google_requires_oauth_credential(self) -> None:
+        cfg_missing = SimpleNamespace(
+            enabled=True,
+            provider="google",
+            credential_mode="google_service_account",
+            google_service_account_json=None,
+            api_key=None,
+            base_url="",
+            language_code="vi",
+            cli_binary="",
+            options_json={},
+            timeout_seconds=120,
+        )
+        result_missing = probe_tts_ai_client(cfg_missing)
+        self.assertFalse(result_missing.ok)
+        self.assertIn("google_service_account_required", result_missing.detail)
+
+        cfg_token = SimpleNamespace(
+            **{**vars(cfg_missing), "credential_mode": "google_oauth_token", "api_key": "oauth-test"}
+        )
+        result_token = probe_tts_ai_client(cfg_token)
+        self.assertTrue(result_token.ok)
+        self.assertEqual(result_token.provider, "google")
 
     def test_probe_http_requires_base_url(self) -> None:
         cfg_missing = SimpleNamespace(
@@ -752,7 +864,7 @@ class WorkspaceTtsAiTests(unittest.TestCase):
         self.assertEqual(saved_blank["voice_id"], "vi-VN-HoaiMyNeural")
         self.assertEqual(service.get_tts_ai(workspace.id).provider, "vieneu")
 
-    def test_set_profile_enabled_does_not_change_active(self) -> None:
+    def test_turning_profile_on_makes_it_exclusive_active_authority(self) -> None:
         workspace = SimpleNamespace(id=uuid4(), settings_json={})
         db = MagicMock()
         db.get.return_value = workspace
@@ -780,10 +892,12 @@ class WorkspaceTtsAiTests(unittest.TestCase):
         created = service.create_tts_ai_profile(workspace.id, name="Other")
         service.set_tts_ai_profile_enabled(workspace.id, created["id"], enabled=True)
         store = workspace.settings_json[TTS_AI_KEY]
-        self.assertEqual(store["active_profile_id"], active_id)
+        self.assertEqual(store["active_profile_id"], created["id"])
         other = next(p for p in store["profiles"] if p["id"] == created["id"])
         self.assertTrue(other["enabled"])
-        self.assertFalse(service.get_tts_ai(workspace.id).enabled)
+        previous = next(p for p in store["profiles"] if p["id"] == active_id)
+        self.assertFalse(previous["enabled"])
+        self.assertTrue(service.get_tts_ai(workspace.id).enabled)
 
     def test_get_profile_public_returns_named_setup(self) -> None:
         workspace = SimpleNamespace(id=uuid4(), settings_json={})

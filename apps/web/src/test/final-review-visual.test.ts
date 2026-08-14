@@ -36,7 +36,7 @@ assert.match(apiSource, /export async function createOcrJob/, "API must expose c
 assert.match(apiSource, /export async function fetchOcrSummary/, "API must expose fetchOcrSummary");
 assert.match(apiSource, /export async function approveOcrVisual/, "API must expose approveOcrVisual");
 assert.match(pageSource, /FinalReviewVisualCheckpoint/, "Final Review must mount visual checkpoint");
-assert.match(pageSource, /maxAttempts:\s*900/, "OCR poll must allow ~30 minutes on CPU Paddle");
+assert.match(pageSource, /maxAttempts:\s*1800/, "OCR poll must allow a long CPU Paddle budget");
 assert.match(apiSource, /sample_fps:\s*1\.0/, "OCR create should default to 1 fps for hard-sub pilot");
 assert.match(pageSource, /handleApproveVisual/, "Final Review must run visual approve");
 assert.match(
@@ -51,9 +51,19 @@ assert.match(
 );
 assert.match(
   visualSource,
-  /canRetryQualityPreview[\s\S]*retryPreview/,
-  "Failed quality previews must be retryable without rerunning OCR"
+  /canRegenerateQualityPreview[\s\S]*retryPreview/,
+  "Quality previews must be regeneratable without rerunning OCR"
 );
+assert.match(
+  visualSource,
+  /defaultOcrReviewChoice[\s\S]{0,300}ocr_text_candidate\?\.trim\(\)[\s\S]{0,120}:\s*""/,
+  "An empty OCR candidate must require an explicit decision instead of invalid APPROVE"
+);
+assert.match(visualSource, /option value="REJECT_UI"/, "OCR review must expose false-detection rejection");
+assert.match(visualSource, /!value\.decision/, "OCR review submit must stay disabled while a decision is unresolved");
+assert.match(apiSource, /"REJECT_UI"/, "OCR review API type must accept REJECT_UI");
+assert.ok(en.finalReviewVisual.reviewRejectUi.length > 0);
+assert.ok(vi.finalReviewVisual.reviewRejectUi.length > 0);
 {
   assert.match(
     pageSource,

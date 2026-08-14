@@ -250,3 +250,20 @@ class ContentAiTestRequest(BaseModel):
         if not self.external_network_authorized or self.operator_confirmation != "CONTENT_CLASSIFICATION_AI_APPROVED":
             raise ValueError("AI provider test requires explicit operator confirmation")
         return self
+
+
+class ContentAiModelsRequest(BaseModel):
+    """Draft connection fields used to list models without requiring Save first."""
+
+    provider: Literal["auto", "gemini", "openai_compatible", "ollama", "placeholder"] | None = None
+    api_key: str | None = Field(default=None, max_length=2000)
+    clear_api_key: bool = False
+    base_url: str | None = Field(default=None, max_length=1000)
+    timeout_seconds: float | None = Field(default=None, ge=5, le=300)
+
+
+class ContentAiModelsResponse(BaseModel):
+    ok: bool
+    provider: str = ""
+    models: list[str] = Field(default_factory=list)
+    detail: str = ""

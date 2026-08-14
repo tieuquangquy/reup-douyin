@@ -40,6 +40,14 @@ class DownloadErrorPolicyTests(unittest.TestCase):
             classify_download_failure("validation_failed", "Asset content is empty: SOURCE_VIDEO_RAW"),
             DownloadFailureClass.TERMINAL,
         )
+        self.assertEqual(
+            classify_download_failure("validation_failed", "HTTP asset exceeds configured limit (100 bytes)"),
+            DownloadFailureClass.TERMINAL,
+        )
+        self.assertEqual(
+            classify_download_failure("download_failed", "Download failed: HTTP 404"),
+            DownloadFailureClass.TERMINAL,
+        )
 
     def test_auto_retry_respects_class_and_attempt_caps(self) -> None:
         self.assertTrue(

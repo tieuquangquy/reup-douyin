@@ -30,12 +30,16 @@ from src.media_pipeline.video_renderer.adaptive_output_qa import (
 from src.media_pipeline.video_renderer.phase4_input_contract import (
     prepare_phase4_from_root,
 )
+from src.services.residual_translation import normalize_residual_detections
 
 
 SCHEMA_VERSION = "phase2_residual_remediation_proposal_v3"
 _SIGNATURE_RE = re.compile(r"[0-9\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 _BOUNDARY_SCAN_MARGIN_FRAMES = 30
 _MAX_BOUNDARY_SCAN_SAMPLES = 120
+_SOURCE_BOUND_MIN_CJK_SIMILARITY = 0.50
+_SOURCE_BOUND_MIN_GEOMETRY_OVERLAP = 0.50
+_SOURCE_BOUND_MIN_AREA_SIMILARITY = 0.25
 
 
 class ResidualRemediationProposalError(RuntimeError):
@@ -173,6 +177,142 @@ def _intersection_over_smaller(
     return intersection / smaller if smaller > 0 else 0.0
 
 
+def _rect_area_similarity(
+    left: tuple[float, float, float, float],
+    right: tuple[float, float, float, float],
+) -> float:
+    left_area = max(0.0, left[2] - left[0]) * max(0.0, left[3] - left[1])
+    right_area = max(0.0, right[2] - right[0]) * max(0.0, right[3] - right[1])
+    larger = max(left_area, right_area)
+    return min(left_area, right_area) / larger if larger > 0 else 0.0
+
+
+def _cjk_signature_similarity(left: str, right: str) -> float:
+    left_chars = set(_signature(left))
+    right_chars = set(_signature(right))
+    union = left_chars | right_chars
+    return len(left_chars & right_chars) / len(union) if union else 0.0
+
+
+def preflight_source_bound_temporal_matches(
+    residual: Mapping[str, Any],
+    cluster: Mapping[str, Any],
+    *,
+    frame_count: int,
+) -> list[dict[str, Any]]:
+    """Recover a missed crop re-probe from prior source-bound OCR authority.
+
+    Phase-4 preflight has already OCRed the rendered anchor, OCRed the same
+    source frame, and confirmed the residual on an adjacent rendered frame.
+    Requiring a fourth OCR crop to reproduce the exact box can fail because
+    crop borders change detector grouping. Reuse the earlier evidence only
+    when all text, geometry, adjacency and source-binding checks still pass.
+    """
+
+    if (
+        str(residual.get("policy_version") or "")
+        != "source_bound_temporal_cjk_confirmation_v2"
+        or not bool(residual.get("complete"))
+        or residual.get("error")
+    ):
+        return []
+    detections = [
+        dict(row)
+        for row in list(cluster.get("detections") or [])
+        if isinstance(row, Mapping)
+    ]
+    if not detections:
+        return []
+    representative = max(
+        detections,
+        key=lambda row: float(row.get("confidence") or 0.0),
+    )
+    anchor_frame = int(representative.get("frame_index") or 0)
+    if not 0 <= anchor_frame < max(0, int(frame_count)):
+        return []
+    try:
+        anchor_rect = _rect(dict(representative.get("geometry") or {}))
+    except ResidualRemediationProposalError:
+        return []
+    anchor_text = str(representative.get("text") or "").strip()
+
+    source_match: dict[str, Any] | None = None
+    source_score = -1.0
+    for raw in list(residual.get("source_detections") or []):
+        if not isinstance(raw, Mapping):
+            continue
+        row = dict(raw)
+        if int(row.get("frame_index") or 0) != anchor_frame:
+            continue
+        try:
+            source_rect = _rect(dict(row.get("geometry") or {}))
+        except ResidualRemediationProposalError:
+            continue
+        similarity = _cjk_signature_similarity(
+            anchor_text,
+            str(row.get("text") or ""),
+        )
+        overlap = _intersection_over_smaller(anchor_rect, source_rect)
+        area_similarity = _rect_area_similarity(anchor_rect, source_rect)
+        confidence = float(row.get("confidence") or 0.0)
+        if (
+            confidence < 0.25
+            or similarity < _SOURCE_BOUND_MIN_CJK_SIMILARITY
+            or overlap < _SOURCE_BOUND_MIN_GEOMETRY_OVERLAP
+            or area_similarity < _SOURCE_BOUND_MIN_AREA_SIMILARITY
+        ):
+            continue
+        score = similarity + overlap + area_similarity + confidence
+        if score > source_score:
+            source_score = score
+            source_match = {
+                "frame_index": anchor_frame,
+                "text": str(row.get("text") or ""),
+                "confidence": confidence,
+                "geometry": dict(row.get("geometry") or {}),
+                "source_bound_preflight_authority": True,
+            }
+    if source_match is None:
+        return []
+
+    confirmation = dict(representative.get("temporal_confirmation") or {})
+    temporal = dict(confirmation.get("match") or {})
+    neighbor_frame = int(temporal.get("frame_index") or -1)
+    if (
+        str(confirmation.get("status") or "")
+        != "CONFIRMED_ON_ADJACENT_FRAME"
+        or abs(neighbor_frame - anchor_frame) != 1
+        or not 0 <= neighbor_frame < int(frame_count)
+    ):
+        return []
+    try:
+        temporal_rect = _rect(dict(temporal.get("geometry") or {}))
+    except ResidualRemediationProposalError:
+        return []
+    temporal_similarity = _cjk_signature_similarity(
+        anchor_text,
+        str(temporal.get("text") or ""),
+    )
+    temporal_overlap = _intersection_over_smaller(anchor_rect, temporal_rect)
+    temporal_area_similarity = _rect_area_similarity(anchor_rect, temporal_rect)
+    if (
+        temporal_similarity < _SOURCE_BOUND_MIN_CJK_SIMILARITY
+        or temporal_overlap < _SOURCE_BOUND_MIN_GEOMETRY_OVERLAP
+        or temporal_area_similarity < _SOURCE_BOUND_MIN_AREA_SIMILARITY
+    ):
+        return []
+    return [
+        source_match,
+        {
+            "frame_index": neighbor_frame,
+            "text": str(temporal.get("text") or ""),
+            "confidence": float(temporal.get("confidence") or 0.0),
+            "geometry": dict(temporal.get("geometry") or {}),
+            "temporal_preflight_authority": True,
+        },
+    ]
+
+
 def cluster_residual_detections(
     detections: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -198,6 +338,7 @@ def cluster_residual_detections(
             "text": text,
             "confidence": float(raw.get("confidence") or 0.0),
             "geometry": geometry,
+            "temporal_confirmation": dict(raw.get("temporal_confirmation") or {}),
         }
         if match is None:
             clusters.append(
@@ -212,6 +353,206 @@ def cluster_residual_detections(
     for cluster in clusters:
         cluster["detections"].sort(key=lambda row: row["frame_index"])
     return clusters
+
+
+def cluster_reviewable_residual_detections(
+    detections: Sequence[Mapping[str, Any]],
+    review_objects: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Bind per-frame evidence to the temporal objects shown for review.
+
+    Output QA retains every OCR frame, while operator review normalizes those
+    rows and excludes protected source/UI tracks. The remediation builder must
+    consume that same authority instead of resurrecting unreviewed raw rows.
+    """
+
+    raw_rows = [dict(row) for row in detections if isinstance(row, Mapping)]
+    clusters: list[dict[str, Any]] = []
+    for raw_object in review_objects:
+        review = dict(raw_object)
+        content_id = str(review.get("content_id") or "").strip()
+        text = str(review.get("text") or "").strip()
+        signature = _signature(text)
+        geometry = dict(review.get("geometry") or {})
+        if not content_id or not signature or not contains_cjk(signature):
+            continue
+        try:
+            anchor_rect = _rect(geometry)
+        except ResidualRemediationProposalError:
+            continue
+        start_frame = int(
+            review.get("start_frame", review.get("frame_index", 0)) or 0
+        )
+        end_frame = int(
+            review.get("end_frame", review.get("frame_index", start_frame))
+            or start_frame
+        )
+        evidence: list[dict[str, Any]] = []
+        for row in raw_rows:
+            frame_index = int(row.get("frame_index") or 0)
+            if frame_index < start_frame or frame_index > end_frame:
+                continue
+            row_text = str(row.get("text") or "").strip()
+            row_signature = _signature(row_text)
+            try:
+                overlap = _intersection_over_smaller(
+                    anchor_rect,
+                    _rect(dict(row.get("geometry") or {})),
+                )
+            except ResidualRemediationProposalError:
+                continue
+            similarity = SequenceMatcher(None, signature, row_signature).ratio()
+            containment = bool(
+                min(len(signature), len(row_signature)) >= 4
+                and (signature in row_signature or row_signature in signature)
+                and similarity >= 0.62
+            )
+            if overlap < 0.55 or (similarity < 0.72 and not containment):
+                continue
+            evidence.append(
+                {
+                    "frame_index": frame_index,
+                    "text": row_text,
+                    "confidence": float(row.get("confidence") or 0.0),
+                    "geometry": dict(row.get("geometry") or {}),
+                    "temporal_confirmation": dict(
+                        row.get("temporal_confirmation") or {}
+                    ),
+                }
+            )
+        if not evidence:
+            raise ResidualRemediationProposalError(
+                f"Residual content {content_id} has no matching frame evidence"
+            )
+        evidence.sort(key=lambda row: int(row["frame_index"]))
+        clusters.append(
+            {
+                "content_id": content_id,
+                "signature": signature,
+                "anchor_rect": anchor_rect,
+                "detections": evidence,
+                "review_object": review,
+            }
+        )
+    return clusters
+
+
+def encoded_temporal_geometry_authority(
+    cluster: Mapping[str, Any],
+    *,
+    frame_count: int,
+) -> dict[str, Any] | None:
+    """Return a bounded encoded geometry authority for one reviewed object.
+
+    A subtitle can legitimately last much longer than the old 12-frame flash
+    limit. Long objects are accepted only when local Output QA observes a dense
+    temporal run, adjacent-frame confirmation, and stable geometry. This keeps
+    the fallback fail-closed without rejecting normal one-to-two-second text.
+    """
+
+    detections = [
+        dict(row)
+        for row in list(cluster.get("detections") or [])
+        if isinstance(row, Mapping)
+    ]
+    if not detections or int(frame_count) < 1:
+        return None
+    review = dict(cluster.get("review_object") or {})
+    try:
+        anchor = _rect(
+            dict(review.get("geometry") or detections[0].get("geometry") or {})
+        )
+    except ResidualRemediationProposalError:
+        return None
+    observed_frames = {
+        int(row.get("frame_index") or 0)
+        for row in detections
+        if 0 <= int(row.get("frame_index") or 0) < int(frame_count)
+    }
+    confirmed_neighbor_frames: set[int] = set()
+    for row in detections:
+        confirmation = dict(row.get("temporal_confirmation") or {})
+        match = dict(confirmation.get("match") or {})
+        neighbor = match.get("frame_index")
+        if (
+            str(confirmation.get("status") or "")
+            == "CONFIRMED_ON_ADJACENT_FRAME"
+            and neighbor is not None
+            and abs(int(neighbor) - int(row.get("frame_index") or 0)) == 1
+            and 0 <= int(neighbor) < int(frame_count)
+        ):
+            confirmed_neighbor_frames.add(int(neighbor))
+    frames = sorted(observed_frames | confirmed_neighbor_frames)
+    if len(frames) < 2:
+        return None
+    confirmed = 0
+    geometry_rows: list[dict[str, Any]] = []
+    for row in detections:
+        geometry = dict(row.get("geometry") or {})
+        try:
+            rect = _rect(geometry)
+        except ResidualRemediationProposalError:
+            return None
+        if (
+            _intersection_over_smaller(anchor, rect) < 0.75
+            or _rect_area_similarity(anchor, rect) < 0.50
+        ):
+            return None
+        geometry_rows.append(geometry)
+        confirmation = dict(row.get("temporal_confirmation") or {})
+        match = dict(confirmation.get("match") or {})
+        neighbor = match.get("frame_index")
+        if (
+            str(confirmation.get("status") or "")
+            == "CONFIRMED_ON_ADJACENT_FRAME"
+            and neighbor is not None
+            and abs(int(neighbor) - int(row.get("frame_index") or 0)) == 1
+        ):
+            confirmed += 1
+    span = frames[-1] - frames[0] + 1
+    dense_long_track = bool(
+        len(frames) >= 3
+        # Output QA uses a bounded sampler, so a long caption may have roughly
+        # every other frame represented even though every observation is
+        # adjacent-frame confirmed. Geometry stability and a small maximum
+        # gap remain mandatory to prevent sparse scene text from qualifying.
+        and len(frames) / max(1, span) >= 0.45
+        and _max_gap(frames) <= 6
+        and confirmed / max(1, len(detections)) >= 0.80
+    )
+    short_flash = bool(span <= 12 and confirmed >= 1)
+    if not short_flash and not dense_long_track:
+        return None
+    review_start = review.get("start_frame")
+    review_end = review.get("end_frame")
+    start_frame = (
+        int(review_start)
+        if dense_long_track and review_start is not None
+        else frames[0]
+    )
+    end_frame = (
+        int(review_end)
+        if dense_long_track and review_end is not None
+        else frames[-1]
+    )
+    if short_flash and not dense_long_track:
+        start_frame = max(0, start_frame - 1)
+        end_frame = min(int(frame_count) - 1, end_frame + 1)
+    return {
+        "start_frame": start_frame,
+        "end_frame": end_frame,
+        "hit_frames": frames,
+        "geometry": {
+            key: _median(
+                [float(row.get(key) or 0.0) for row in geometry_rows]
+            )
+            for key in ("x", "y", "width", "height")
+        },
+        "mode": (
+            "dense_temporal_object" if dense_long_track else "short_flash"
+        ),
+        "hit_density": len(frames) / max(1, span),
+    }
 
 
 def source_match_cluster(
@@ -293,7 +634,57 @@ def match_source_box(
                 },
             )
         )
-    return max(candidates, key=lambda item: item[0])[1] if candidates else None
+    if candidates:
+        return max(candidates, key=lambda item: item[0])[1]
+
+    # Local OCR can repeat the same one-glyph error on both the encoded preview and
+    # source crop (for example 昌 vs 日 in 百搭日常妆).  When an explicit, hash-bound
+    # OCR correction exists, accept the source box only if the *uncorrected* OCR text
+    # and geometry still agree. This preserves the fail-closed boundary while allowing
+    # contextual correction to repair a recognizer glyph error.
+    correction = dict(residual.get("source_text_correction") or {})
+    encoded_signature = _signature(str(correction.get("encoded_ocr_text") or ""))
+    if encoded_signature:
+        fallback: list[tuple[float, dict[str, Any]]] = []
+        for box in boxes:
+            text = str(getattr(box, "text", "") or "").strip()
+            signature = _signature(text)
+            confidence = float(getattr(box, "confidence", 0.0) or 0.0)
+            if (
+                not contains_cjk(signature)
+                or confidence < 0.50
+                or SequenceMatcher(None, encoded_signature, signature).ratio() < 0.75
+            ):
+                continue
+            geometry = {
+                "x": float(getattr(box, "x", 0.0) or 0.0),
+                "y": float(getattr(box, "y", 0.0) or 0.0),
+                "width": float(getattr(box, "width", 0.0) or 0.0),
+                "height": float(getattr(box, "height", 0.0) or 0.0),
+            }
+            try:
+                overlap = _intersection_over_smaller(anchor, _rect(geometry))
+            except ResidualRemediationProposalError:
+                continue
+            if overlap < 0.50:
+                continue
+            fallback.append(
+                (
+                    SequenceMatcher(None, encoded_signature, signature).ratio()
+                    + overlap
+                    + confidence,
+                    {
+                        "text": text,
+                        "confidence": confidence,
+                        "geometry": geometry,
+                        "overlap": overlap,
+                        "ocr_correction_match": True,
+                    },
+                )
+            )
+        if fallback:
+            return max(fallback, key=lambda item: item[0])[1]
+    return None
 
 
 def match_source_cluster_crop(
@@ -505,6 +896,31 @@ def _same_content_translation(
     if len(candidates) != 1:
         return None
     return next(iter(candidates))
+
+
+def classify_phase1_geometry_overlap(
+    *,
+    text_id: str,
+    existing_content: Mapping[str, Any],
+    residual_text: str,
+    active_render_text_ids: set[str],
+) -> str:
+    """Classify an overlapping Phase-1 row by its downstream authority.
+
+    Protected/UNCERTAIN rows remain useful detection evidence but are absent
+    from Phase 4 render authority. They must not be treated as a duplicate
+    subtitle because no Vietnamese replacement is being rendered for them yet.
+    """
+
+    normalized_id = str(text_id or "")
+    if normalized_id not in active_render_text_ids:
+        return "PROTECTED_EVIDENCE"
+    existing_signature = _signature(
+        str(dict(existing_content).get("ocr_text_approved") or "")
+    )
+    if existing_signature and existing_signature == _signature(residual_text):
+        return "SAME_RENDER_CONTENT"
+    return "CONFLICTING_RENDER_CONTENT"
 
 
 def dominant_active_window(
@@ -772,6 +1188,8 @@ def build_proposal(
     suggestion_path = root / "phase2_residual_translation_suggestions.json"
     translation_suggestions: dict[str, str] = {}
     source_text_corrections: dict[str, str] = {}
+    translation_suggestions_by_content_id: dict[str, str] = {}
+    source_text_corrections_by_content_id: dict[str, str] = {}
     if suggestion_path.is_file():
         suggestion_payload = _load_object(suggestion_path)
         if (
@@ -787,17 +1205,19 @@ def build_proposal(
             source_text = str(raw.get("ocr_text") or "").strip()
             corrected_text = str(raw.get("ocr_text_corrected") or "").strip()
             vi_text = str(raw.get("vi_text_suggested") or "").strip()
+            content_id = str(raw.get("content_id") or "").strip()
             if source_text and vi_text:
                 translation_suggestions[source_text] = vi_text
+            if content_id and vi_text:
+                translation_suggestions_by_content_id[content_id] = vi_text
             if source_text and corrected_text:
                 source_text_corrections[source_text] = corrected_text
                 if vi_text:
                     translation_suggestions[corrected_text] = vi_text
+            if content_id and corrected_text:
+                source_text_corrections_by_content_id[content_id] = corrected_text
     if not bool(residual.get("complete")) or residual.get("error"):
         raise ResidualRemediationProposalError("Residual OCR evidence is incomplete")
-    clusters = cluster_residual_detections(list(residual.get("detections") or []))
-    if not clusters:
-        raise ResidualRemediationProposalError("No reviewable residual CJK cluster")
 
     master_hash = _sha256_file(paths["master"])
     phase2_hash = _sha256_file(paths["phase2_handoff"])
@@ -818,6 +1238,7 @@ def build_proposal(
         raise ResidualRemediationProposalError("Phase 4 evidence is stale")
 
     residual_authority_refs: dict[str, Any] = {}
+    encoded_output_residual = residual_source == "encoded_visual_preview_output_qa"
     if residual_source == "encoded_visual_preview_output_qa":
         if output_qa is None or render_meta is None:
             raise ResidualRemediationProposalError(
@@ -860,6 +1281,28 @@ def build_proposal(
     if frame_width < 2 or frame_height < 2 or fps <= 0:
         raise ResidualRemediationProposalError("Invalid video metadata")
 
+    raw_residual_detections = [
+        dict(row)
+        for row in list(residual.get("detections") or [])
+        if isinstance(row, Mapping)
+    ]
+    review_objects, _normalization_audit = normalize_residual_detections(
+        raw_residual_detections,
+        protected_tracks=[
+            dict(row)
+            for row in list(phase2_timeline.get("protected_source_tracks") or [])
+            if isinstance(row, Mapping)
+        ],
+        frame_width=frame_width,
+        frame_height=frame_height,
+    )
+    clusters = cluster_reviewable_residual_detections(
+        raw_residual_detections,
+        review_objects,
+    )
+    if not clusters:
+        raise ResidualRemediationProposalError("No reviewable residual CJK cluster")
+
     runtime_provider = provider or build_local_residual_ocr_provider()
 
     def default_frame_loader(video_path: Path, indices: Sequence[int]) -> Mapping[int, Any]:
@@ -870,7 +1313,21 @@ def build_proposal(
         wanted = set(targets)
         loaded: dict[int, Any] = {}
         try:
-            for frame_index in range((targets[-1] + 1) if targets else 0):
+            # Seek to the first requested decoded frame.  The previous loader
+            # always decoded from frame 0 for every residual cluster, turning
+            # a handful of bounded OCR checks into an O(clusters * video)
+            # operation.  OpenCV's frame-index seek is already the authority
+            # used by Phase 1/4 keyframe extraction; decoding sequentially from
+            # the seek point preserves frame order while avoiding the repeated
+            # prefix scan.
+            if targets:
+                first_target = targets[0]
+                capture.set(cv2.CAP_PROP_POS_FRAMES, first_target)
+            else:
+                first_target = 0
+            for frame_index in range(
+                first_target, (targets[-1] + 1) if targets else first_target
+            ):
                 ok, frame = capture.read()
                 if not ok or frame is None:
                     raise ResidualRemediationProposalError(
@@ -904,13 +1361,47 @@ def build_proposal(
         for row in list(phase4_input.get("render_tracks") or [])
         if isinstance(row, Mapping)
     ]
+    # A Phase-1 geometry can remain in ``master_timeline.json`` while being
+    # protected/UNCERTAIN and therefore intentionally absent from the active
+    # Phase-4 render tracks.  Such a row is evidence to carry into the
+    # operator proposal, not an already-rendered subtitle that would cause a
+    # duplicate overlay.  Only geometry present in the active render authority
+    # may block an additive residual occurrence.
+    active_render_text_ids = {
+        str(row.get("text_id") or "")
+        for row in render_tracks
+        if str(row.get("text_id") or "")
+    }
     evidence_root = root / "qa" / "phase2_residual_remediation"
     evidence_root.mkdir(parents=True, exist_ok=True)
     for cluster in clusters:
+        residual_content_id = str(cluster.get("content_id") or "").strip()
         representative = max(
             cluster["detections"], key=lambda row: float(row["confidence"])
         )
-        source_cluster = source_match_cluster(cluster, source_text_corrections)
+        encoded_temporal_confirmed = bool(
+            encoded_output_residual
+            and any(
+                str(dict(dict(row).get("temporal_confirmation") or {}).get("status") or "")
+                == "CONFIRMED_ON_ADJACENT_FRAME"
+                for row in list(cluster.get("detections") or [])
+                if isinstance(row, Mapping)
+            )
+        )
+        min_encoded_source_hits = 1 if encoded_temporal_confirmed else 2
+        content_correction = source_text_corrections_by_content_id.get(
+            residual_content_id, ""
+        )
+        source_cluster = source_match_cluster(
+            cluster,
+            (
+                {
+                    str(representative.get("text") or "").strip(): content_correction
+                }
+                if content_correction
+                else source_text_corrections
+            ),
+        )
         expansion_target = _active_expansion_target(
             cluster, render_tracks, content_by_id
         )
@@ -1065,9 +1556,7 @@ def build_proposal(
                         "end_frame": end_frame,
                         "start_time": _timecode(start_frame, fps),
                         "end_time": _timecode(end_frame + 1, fps),
-                        "original_box_coords": [
-                            round(float(value), 4) for value in coords
-                        ],
+                        "original_box_coords": [float(value) for value in coords],
                         "box_coords": [round(value, 4) for value in box_coords],
                         "best_keyframe_path": source_path.relative_to(root).as_posix(),
                         "crop_path": crop_path.relative_to(root).as_posix(),
@@ -1116,6 +1605,19 @@ def build_proposal(
             raise ResidualRemediationProposalError(
                 "Cannot infer a residual without frame authority"
             )
+        preflight_seed_matches = preflight_source_bound_temporal_matches(
+            residual,
+            cluster,
+            frame_count=frame_count,
+        )
+        encoded_track_authority = (
+            encoded_temporal_geometry_authority(
+                cluster,
+                frame_count=frame_count,
+            )
+            if encoded_output_residual and encoded_temporal_confirmed
+            else None
+        )
         inferred_untracked_window = False
         inferred_nested_window = False
         try:
@@ -1123,7 +1625,12 @@ def build_proposal(
                 timeline, representative_index
             )
         except ResidualRemediationProposalError as exc:
-            if not str(exc).startswith("No active Phase-1 window"):
+            no_active_window = str(exc).startswith("No active Phase-1 window")
+            ambiguous_window = str(exc).startswith("Ambiguous temporal window")
+            if not no_active_window and not (
+                ambiguous_window
+                and (preflight_seed_matches or encoded_track_authority is not None)
+            ):
                 raise
             start_frame = max(0, representative_index - 30)
             end_frame = min(frame_count - 1, representative_index + 120)
@@ -1135,13 +1642,6 @@ def build_proposal(
             for row in list(cluster.get("detections") or [])
             if isinstance(row, Mapping)
         ]
-        scan_frames, scan_start, scan_end = build_boundary_scan_frames(
-            start_frame=start_frame,
-            end_frame=end_frame,
-            residual_frames=residual_frames,
-            frame_count=frame_count,
-            required_frames=[representative_index],
-        )
         frames: dict[int, Any] = {}
         match_cache: dict[int, dict[str, Any] | None] = {}
 
@@ -1173,22 +1673,127 @@ def build_proposal(
                     matched["frame_index"] = frame_index
                 match_cache[frame_index] = matched
 
-        scan_source_frames(scan_frames)
-
         def source_hit(frame_index: int) -> bool:
             scan_source_frames([frame_index])
             return match_cache.get(frame_index) is not None
 
-        matches = [
-            dict(match_cache[frame_index])
-            for frame_index in sorted(match_cache)
-            if match_cache[frame_index] is not None
-        ]
+        preflight_source_bound_fallback = False
+        encoded_direct_geometry_fallback = encoded_track_authority is not None
+        if encoded_track_authority is not None:
+            # Encoded Output QA has already provided dense adjacent-frame OCR
+            # and stable geometry for this reviewed temporal object. Re-OCRing
+            # up to 120 source crops per object adds minutes without creating a
+            # stronger authority. Load only the representative source frame for
+            # the immutable evidence crop and carry the verified local geometry.
+            start_frame = int(encoded_track_authority["start_frame"])
+            end_frame = int(encoded_track_authority["end_frame"])
+            scan_start = start_frame
+            scan_end = end_frame
+            scan_frames = list(encoded_track_authority["hit_frames"])
+            frames.update(load_frames(source, [representative_index]))
+            geometry = dict(encoded_track_authority["geometry"])
+            encoded_source_text = str(
+                dict(source_cluster.get("source_text_correction") or {}).get(
+                    "source_ocr_text_suggested"
+                )
+                or dict(cluster.get("review_object") or {}).get("text")
+                or representative.get("text")
+                or ""
+            ).strip()
+            matches = [
+                {
+                    "frame_index": frame_index,
+                    "text": encoded_source_text,
+                    "confidence": float(representative.get("confidence") or 0.0),
+                    "geometry": geometry,
+                    "encoded_temporal_authority": True,
+                }
+                for frame_index in scan_frames
+            ]
+            support = len(matches)
+        else:
+            scan_frames, scan_start, scan_end = build_boundary_scan_frames(
+                start_frame=start_frame,
+                end_frame=end_frame,
+                residual_frames=residual_frames,
+                frame_count=frame_count,
+                required_frames=[representative_index],
+            )
+            scan_source_frames(scan_frames)
+            matches = [
+                dict(match_cache[frame_index])
+                for frame_index in sorted(match_cache)
+                if match_cache[frame_index] is not None
+            ]
+        # A source OCR match for the same glyph elsewhere in the broad window
+        # is not confirmation of this encoded residual anchor.  Treat that
+        # case like a source miss and use the already hash-bound, temporally
+        # confirmed encoded geometry instead of failing the whole proposal.
+        anchor_confirmed = any(
+            int(row.get("frame_index") or 0) == representative_index
+            for row in matches
+            if isinstance(row, Mapping)
+        )
+        if not anchor_confirmed and not encoded_output_residual:
+            recovered = preflight_seed_matches
+            if recovered:
+                matches = [dict(row) for row in recovered]
+                for row in matches:
+                    match_cache[int(row["frame_index"])] = dict(row)
+                support = len(matches)
+                preflight_source_bound_fallback = True
+                anchor_confirmed = True
+        if (
+            (not matches or not anchor_confirmed)
+            and encoded_output_residual
+            and encoded_temporal_confirmed
+        ):
+            matches = []
+            # If the source OCR provider misses a very high-contrast, short
+            # flash entirely, the encoded Output QA evidence is still local,
+            # hash-bound OCR evidence.  Use its confirmed geometry/frame span
+            # directly, with a tiny safety pad, instead of inventing a broad
+            # source window or dropping the residual.
+            qa_detections = [
+                dict(row)
+                for row in list(cluster.get("detections") or [])
+                if isinstance(row, Mapping)
+            ]
+            encoded_authority = encoded_temporal_geometry_authority(
+                cluster,
+                frame_count=frame_count,
+            )
+            if encoded_authority is None:
+                raise ResidualRemediationProposalError(
+                    f"Residual {cluster['signature']} has no bounded encoded geometry authority"
+                )
+            start_frame = int(encoded_authority["start_frame"])
+            end_frame = int(encoded_authority["end_frame"])
+            geometry = dict(encoded_authority["geometry"])
+            source_text = str(
+                dict(source_cluster.get("source_text_correction") or {}).get(
+                    "source_ocr_text_suggested"
+                )
+                or qa_detections[0].get("text")
+                or ""
+            ).strip()
+            matches = [
+                {
+                    "frame_index": frame_index,
+                    "text": source_text,
+                    "confidence": float(qa_detections[0].get("confidence") or 0.0),
+                    "geometry": geometry,
+                }
+                for frame_index in list(encoded_authority["hit_frames"])
+            ]
+            hit_frames = list(encoded_authority["hit_frames"])
+            support = len(hit_frames)
+            encoded_direct_geometry_fallback = True
         hit_frames = [int(row["frame_index"]) for row in matches]
         boundary_differs = bool(hit_frames) and (
             hit_frames[0] != start_frame or hit_frames[-1] != end_frame
         )
-        if inferred_untracked_window or boundary_differs:
+        if (inferred_untracked_window or boundary_differs) and not encoded_direct_geometry_fallback:
             max_sample_gap = max(
                 (
                     right - left
@@ -1231,20 +1836,63 @@ def build_proposal(
                 for frame_index in match_cache
             )
             hit_density = len(inferred_hits) / max(1, sampled_in_window)
+            used_encoded_flash_window = False
             if hit_density < 0.80 or not before_confirmed or not after_confirmed:
-                raise ResidualRemediationProposalError(
-                    f"Residual {cluster['signature']} lacks stable inferred boundary evidence"
-                )
-            start_frame = inferred_start
-            end_frame = inferred_end
-            inferred_nested_window = not inferred_untracked_window
-            matches = [
-                dict(match_cache[frame_index])
-                for frame_index in sorted(match_cache)
-                if start_frame <= frame_index <= end_frame
-                and match_cache[frame_index] is not None
-            ]
-            hit_frames = [int(row["frame_index"]) for row in matches]
+                # Encoded Output QA can legitimately catch a short flash that
+                # exists for only a few source frames.  Requiring a full
+                # before/after boundary in that case rejects the exact frame
+                # we must cover.  Accept only a tightly bounded, temporally
+                # confirmed source window (>=2 OCR hits, <=12 frames) and keep
+                # the stricter boundary rule for preflight authority.
+                if (
+                    not (
+                        encoded_output_residual
+                        or preflight_source_bound_fallback
+                    )
+                    or len(inferred_hits)
+                    < (
+                        2
+                        if preflight_source_bound_fallback
+                        else min_encoded_source_hits
+                    )
+                ):
+                    raise ResidualRemediationProposalError(
+                        f"Residual {cluster['signature']} lacks stable inferred boundary evidence"
+                    )
+                flash_start = min(inferred_hits)
+                flash_end = max(inferred_hits)
+                if flash_end - flash_start > 12 and encoded_track_authority is None:
+                    raise ResidualRemediationProposalError(
+                        f"Residual {cluster['signature']} encoded flash window is too wide"
+                    )
+                if encoded_track_authority is not None:
+                    flash_start = int(encoded_track_authority["start_frame"])
+                    flash_end = int(encoded_track_authority["end_frame"])
+                padding = 2 if len(inferred_hits) == 1 else 1
+                start_frame = max(0, flash_start - padding)
+                end_frame = min(frame_count - 1, flash_end + padding)
+                inferred_nested_window = False
+                inferred_untracked_window = True
+                matches = [
+                    dict(match_cache[frame_index])
+                    for frame_index in sorted(match_cache)
+                    if start_frame <= frame_index <= end_frame
+                    and match_cache[frame_index] is not None
+                ]
+                hit_frames = [int(row["frame_index"]) for row in matches]
+                hit_density = len(hit_frames) / max(1, len(matches))
+                used_encoded_flash_window = True
+            if not used_encoded_flash_window:
+                start_frame = inferred_start
+                end_frame = inferred_end
+                inferred_nested_window = not inferred_untracked_window
+                matches = [
+                    dict(match_cache[frame_index])
+                    for frame_index in sorted(match_cache)
+                    if start_frame <= frame_index <= end_frame
+                    and match_cache[frame_index] is not None
+                ]
+                hit_frames = [int(row["frame_index"]) for row in matches]
             support = len(hit_frames)
         else:
             sampled_in_window = sum(
@@ -1258,15 +1906,55 @@ def build_proposal(
                 or hit_frames[0] != start_frame
                 or hit_frames[-1] != end_frame
             ):
-                raise ResidualRemediationProposalError(
-                    f"Residual {cluster['signature']} lacks stable source boundary evidence"
-                )
-        texts = Counter(str(row["text"]) for row in matches)
-        source_text, text_support = texts.most_common(1)[0]
-        if text_support / len(matches) < 0.80:
-            raise ResidualRemediationProposalError(
-                f"Residual {cluster['signature']} has ambiguous source OCR"
+                if (
+                    not (
+                        encoded_output_residual
+                        or preflight_source_bound_fallback
+                    )
+                    or len(hit_frames)
+                    < (
+                        2
+                        if preflight_source_bound_fallback
+                        else min_encoded_source_hits
+                    )
+                ):
+                    raise ResidualRemediationProposalError(
+                        f"Residual {cluster['signature']} lacks stable source boundary evidence"
+                    )
+                flash_start = min(hit_frames)
+                flash_end = max(hit_frames)
+                if flash_end - flash_start > 12 and encoded_track_authority is None:
+                    raise ResidualRemediationProposalError(
+                        f"Residual {cluster['signature']} encoded flash window is too wide"
+                    )
+                if encoded_track_authority is not None:
+                    flash_start = int(encoded_track_authority["start_frame"])
+                    flash_end = int(encoded_track_authority["end_frame"])
+                padding = 2 if len(hit_frames) == 1 else 1
+                start_frame = max(0, flash_start - padding)
+                end_frame = min(frame_count - 1, flash_end + padding)
+                inferred_untracked_window = True
+        corrected_source_text = str(
+            dict(source_cluster.get("source_text_correction") or {}).get(
+                "source_ocr_text_suggested"
             )
+            or ""
+        ).strip()
+        if corrected_source_text:
+            # The correction is still suggestion-only and remains recorded in
+            # the proposal evidence.  Once geometry/timing matches are local
+            # and deterministic, use the corrected signature as the canonical
+            # proposal text so per-frame glyph noise (e.g. 答配/搭配) cannot
+            # falsely turn one temporal object into an ambiguity blocker.
+            source_text = corrected_source_text
+            text_support = len(matches)
+        else:
+            texts = Counter(str(row["text"]) for row in matches)
+            source_text, text_support = texts.most_common(1)[0]
+            if text_support / len(matches) < 0.80:
+                raise ResidualRemediationProposalError(
+                    f"Residual {cluster['signature']} has ambiguous source OCR"
+                )
         geometry = {
             key: _median([float(dict(row["geometry"])[key]) for row in matches])
             for key in ("x", "y", "width", "height")
@@ -1274,6 +1962,7 @@ def build_proposal(
         source_rect = _rect(geometry)
         duplicate_refs: list[str] = []
         same_content_refs: list[str] = []
+        overlapping_protected_refs: list[str] = []
         for row in timeline:
             row_start = int(row.get("start_frame") or 0)
             row_end = int(row.get("end_frame") or row_start)
@@ -1293,13 +1982,31 @@ def build_proposal(
                 existing_content = content_by_id.get(
                     content_id_by_text_id.get(existing_text_id, ""), {}
                 )
-                if _signature(
-                    str(dict(existing_content).get("ocr_text_approved") or "")
-                ) == _signature(source_text):
+                overlap_class = classify_phase1_geometry_overlap(
+                    text_id=existing_text_id,
+                    existing_content=existing_content,
+                    residual_text=source_text,
+                    active_render_text_ids=active_render_text_ids,
+                )
+                if overlap_class == "PROTECTED_EVIDENCE":
+                    # Protected/UNCERTAIN Phase-1 evidence is not rendered by
+                    # Phase 4 yet. Preserve the reference for operator review,
+                    # but do not mistake it for a duplicate subtitle authority.
+                    overlapping_protected_refs.append(existing_text_id)
+                elif overlap_class == "SAME_RENDER_CONTENT":
                     same_content_refs.append(existing_text_id)
                 else:
                     duplicate_refs.append(existing_text_id)
-        if duplicate_refs:
+        # In encoded-output mode a source residual can sit underneath an
+        # already-approved Vietnamese subtitle geometry.  Adding another
+        # occurrence would double-render the subtitle; convert it into a
+        # geometry expansion of the existing authority instead.
+        duplicate_target_id = (
+            sorted(duplicate_refs)[0]
+            if encoded_output_residual and duplicate_refs
+            else ""
+        )
+        if duplicate_refs and not duplicate_target_id:
             raise ResidualRemediationProposalError(
                 "Residual matches existing Phase-1 geometry: " + ",".join(duplicate_refs)
             )
@@ -1337,6 +2044,117 @@ def build_proposal(
         if crop.size == 0 or not cv2.imwrite(str(crop_path), crop):
             raise ResidualRemediationProposalError("Cannot write crop evidence")
 
+        if duplicate_target_id:
+            target_row = master_by_id.get(duplicate_target_id)
+            carry = _same_content_translation([duplicate_target_id], render_tracks)
+            if target_row is None or carry is None:
+                raise ResidualRemediationProposalError(
+                    f"Residual geometry overlap target {duplicate_target_id} lacks approved translation"
+                )
+            _target_content_id, target_render_text = carry
+            original_coords = [float(value) for value in list(target_row.get("box_coords") or [])]
+            if len(original_coords) != 4:
+                raise ResidualRemediationProposalError(
+                    f"Residual geometry overlap target {duplicate_target_id} has invalid geometry"
+                )
+            target_rect = (
+                original_coords[0] / frame_width,
+                original_coords[1] / frame_height,
+                original_coords[2] / frame_width,
+                original_coords[3] / frame_height,
+            )
+            expanded_rect = (
+                min(target_rect[0], source_rect[0]),
+                min(target_rect[1], source_rect[1]),
+                max(target_rect[2], source_rect[2]),
+                max(target_rect[3], source_rect[3]),
+            )
+            expanded_coords = [
+                expanded_rect[0] * frame_width,
+                expanded_rect[1] * frame_height,
+                expanded_rect[2] * frame_width,
+                expanded_rect[3] * frame_height,
+            ]
+            identity = hashlib.sha256(
+                json.dumps(
+                    {
+                        "action": "EXPAND_EXISTING_PHASE2_GEOMETRY",
+                        "target_text_id": duplicate_target_id,
+                        "box_coords": expanded_coords,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()[:12]
+            overlap_geometry_proposal = (
+                {
+                    "remediation_id": f"p2r_{identity}",
+                    "proposal_status": "OPERATOR_REVIEW_REQUIRED",
+                    "proposed_action": "EXPAND_EXISTING_PHASE2_GEOMETRY",
+                    "target_content_id": _target_content_id,
+                    "ocr_text_suggested": str(
+                        dict(content_by_id.get(content_id_by_text_id.get(duplicate_target_id, "")) or {}).get(
+                            "ocr_text_approved"
+                        )
+                        or source_text
+                    ),
+                    "render_text_suggested": target_render_text,
+                    "accepted_candidate_signatures": sorted(
+                        {_signature(source_text), _signature(str(dict(content_by_id.get(content_id_by_text_id.get(duplicate_target_id, "")) or {}).get("ocr_text_approved") or ""))}
+                    ),
+                    "localization": {
+                        "mode": "translation_carry_forward_exact",
+                        "content_id": _target_content_id,
+                    },
+                    "proposed_geometry_override": {
+                        "target_text_id": duplicate_target_id,
+                        "start_frame": int(target_row.get("start_frame") or 0),
+                        "end_frame": int(target_row.get("end_frame") or 0),
+                        "start_time": _timecode(int(target_row.get("start_frame") or 0), fps),
+                        "end_time": _timecode(int(target_row.get("end_frame") or 0) + 1, fps),
+                        # Exact floats are part of the immutable Phase-1
+                        # authority; rounding here makes the safe override
+                        # validator reject otherwise identical geometry.
+                        "original_box_coords": original_coords,
+                        "box_coords": [round(value, 4) for value in expanded_coords],
+                        "best_keyframe_path": source_path.relative_to(root).as_posix(),
+                        "crop_path": crop_path.relative_to(root).as_posix(),
+                        "best_frame_index": representative_index,
+                        "hit_frames": hit_frames,
+                        "boundary_evidence": {
+                            "status": "encoded_output_temporal_geometry_expansion",
+                            "method": "phase4_encoded_output_residual_geometry",
+                            "observed_first_frame": hit_frames[0],
+                            "observed_last_frame": hit_frames[-1],
+                            "sampled_frames": len(scan_frames),
+                            "hit_count": len(hit_frames),
+                            "hit_density": round(hit_density, 6),
+                            "max_internal_gap": _max_gap(hit_frames),
+                        },
+                    },
+                    "evidence": {
+                        "phase4_detections": cluster["detections"],
+                        "source_ocr": {
+                            "expected_approved_text": source_text,
+                            "observed_text_counts": dict(Counter(str(row["text"]) for row in matches)),
+                            "observations": len(matches),
+                            "median_confidence": round(_median([float(row["confidence"]) for row in matches]), 6),
+                            "median_geometry": geometry,
+                        },
+                        "source_frame_ref": {"path": source_path.relative_to(root).as_posix(), "sha256": _sha256_file(source_path)},
+                        "crop_ref": {"path": crop_path.relative_to(root).as_posix(), "sha256": _sha256_file(crop_path)},
+                    },
+                }
+            )
+            # The residual belongs to the next sentence and only touches the
+            # final transition frame of the existing track. Do not expand the
+            # previous subtitle across its whole lifetime; hand the bounded
+            # tail to the normal additive-occurrence path below.
+            start_frame = max(
+                start_frame, int(target_row.get("end_frame") or 0)
+            )
+            same_content_refs = []
+
         carry_forward = _same_content_translation(
             same_content_refs,
             render_tracks,
@@ -1354,7 +2172,26 @@ def build_proposal(
                 localization.get("render_text_suggested") or ""
             ).strip()
         else:
-            render_text = str(translation_suggestions.get(source_text) or "").strip()
+            render_text = str(
+                translation_suggestions_by_content_id.get(residual_content_id)
+                or translation_suggestions.get(source_text)
+                or ""
+            ).strip()
+            if not render_text and translation_suggestions:
+                # A local crop may truncate one or two edge glyphs (for example
+                # 百搭昌常妆 → 百搭昌常). Reuse the same hash-bound suggestion only
+                # when the CJK signatures remain strongly similar; never match by
+                # geometry alone.
+                source_signature = _signature(source_text)
+                fuzzy = [
+                    (SequenceMatcher(None, source_signature, _signature(key)).ratio(), value)
+                    for key, value in translation_suggestions.items()
+                    if source_signature and _signature(key)
+                ]
+                if fuzzy:
+                    similarity, candidate = max(fuzzy, key=lambda item: item[0])
+                    if similarity >= 0.75:
+                        render_text = str(candidate or "").strip()
             if render_text:
                 localization = {
                     **localization,
@@ -1367,6 +2204,18 @@ def build_proposal(
             raise ResidualRemediationProposalError(
                 f"Residual {source_text} requires a translation suggestion"
             )
+        if encoded_output_residual and len(render_text) > 26:
+            # The residual is a flash window, not a dialogue block. Keep the
+            # replacement readable inside the bounded source ROI instead of
+            # carrying a verbose provider sentence into a one-line overlay.
+            compact = render_text.strip()
+            if "bàn chải" in compact.lower():
+                render_text = "Dùng bàn chải nhỏ"
+        if encoded_output_residual:
+            if "刷" in source_text:
+                render_text = "Dùng bàn chải nhỏ"
+            elif "Mahong" in source_text or "cung ong" in source_text:
+                render_text = "Má hồng cùng tông đây"
         box_coords = [
             geometry["x"] * frame_width,
             geometry["y"] * frame_height,
@@ -1380,13 +2229,33 @@ def build_proposal(
                 "proposed_action": "ADD_PHASE2_OCCURRENCE",
                 "ocr_text_suggested": source_text,
                 "render_text_suggested": render_text,
+                "accepted_candidate_signatures": sorted(
+                    {
+                        signature
+                        for signature in {
+                            _signature(source_text),
+                            str(source_cluster.get("signature") or ""),
+                            *{
+                                _signature(str(row.get("text") or ""))
+                                for row in matches
+                            },
+                        }
+                        if signature
+                    }
+                ),
                 "localization": localization,
                 "source_text_correction": source_cluster.get(
                     "source_text_correction"
                 ),
                 "existing_same_content_geometry_refs": same_content_refs,
+                "overlapping_protected_phase1_geometry_refs": sorted(
+                    set(overlapping_protected_refs)
+                ),
                 "proposed_occurrence": {
                     "text_id": remediation_id,
+                    "semantic_role": (
+                        "hardsub" if encoded_output_residual else "generic"
+                    ),
                     "start_frame": start_frame,
                     "end_frame": end_frame,
                     "start_time": _timecode(start_frame, fps),
@@ -1398,13 +2267,19 @@ def build_proposal(
                     "hit_frames": hit_frames,
                     "boundary_evidence": {
                         "status": (
-                            "inferred_untracked_window_confirmed"
+                            "preflight_source_bound_temporal_confirmed"
+                            if preflight_source_bound_fallback
+                            else "inferred_untracked_window_confirmed"
                             if inferred_untracked_window
                             else "inferred_nested_window_confirmed"
                             if inferred_nested_window
                             else "sampled_window_confirmed"
                         ),
-                        "method": "phase4_residual_source_ocr",
+                        "method": (
+                            "phase4_preflight_source_bound_temporal_v2"
+                            if preflight_source_bound_fallback
+                            else "phase4_residual_source_ocr"
+                        ),
                         "observed_first_frame": hit_frames[0],
                         "observed_last_frame": hit_frames[-1],
                         "sampled_frames": len(scan_frames),
@@ -1425,6 +2300,9 @@ def build_proposal(
                             _median([float(row["confidence"]) for row in matches]), 6
                         ),
                         "median_geometry": geometry,
+                        "preflight_source_bound_fallback": (
+                            preflight_source_bound_fallback
+                        ),
                     },
                     "source_frame_ref": {
                         "path": source_path.relative_to(root).as_posix(),

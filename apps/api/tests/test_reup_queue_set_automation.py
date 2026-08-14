@@ -211,6 +211,32 @@ class SetAutomationApplyTests(unittest.TestCase):
         ensure_ocr.assert_called_once()
         self.assertEqual(updated.metadata_json.get("pipeline_step"), "ocr")
 
+    def test_uncertain_dialogue_stops_with_an_actionable_quality_error(self) -> None:
+        item = queue_item(
+            source_video=SimpleNamespace(
+                metadata_json={"has_speech": True, "dialogue_phase": "dialogue_uncertain"}
+            ),
+            metadata_json={
+                "pipeline_mode": "manual",
+                "pipeline_step": "download",
+                "pipeline_last_completed_step": "analyze_audio",
+            },
+        )
+        db = FakeActionDb(item)
+
+        with patch.object(ReupPipelineOrchestrator, "_ensure_translation") as translate:
+            updated = ReupQueueService(db).apply_action(
+                item.id,
+                action=ReupQueueAction.SET_AUTOMATION,
+                pipeline_mode="auto_to_render",
+            )
+
+        translate.assert_not_called()
+        self.assertEqual(updated.status, ReupQueueStatus.FAILED_NEEDS_ATTENTION)
+        self.assertEqual(updated.last_error_code, "DIALOGUE_DETECTION_UNCERTAIN")
+        self.assertEqual(updated.metadata_json.get("pipeline_step"), "needs_attention")
+        self.assertIn("Analyze Audio", updated.last_error_message)
+
     def test_unknown_mode_is_rejected(self) -> None:
         item = queue_item(metadata_json={"pipeline_mode": "manual"})
         db = FakeActionDb(item)

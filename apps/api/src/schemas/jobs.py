@@ -44,6 +44,7 @@ class JobResponse(BaseModel):
     id: UUID
     workspace_id: UUID
     job_type: JobType
+    workflow_action: str | None = None
     status: JobStatus
     source_video_id: UUID | None
     crawl_session_id: UUID | None

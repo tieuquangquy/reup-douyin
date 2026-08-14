@@ -163,6 +163,7 @@ export type AffiliateProductMatchQueueResponse = {
     needs_review_count: number;
     approved_count: number;
     rejected_count: number;
+    overridden_count: number;
     stale_count: number;
   };
 };

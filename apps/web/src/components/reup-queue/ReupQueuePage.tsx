@@ -136,13 +136,19 @@ type WorklistDragSession = {
   started: boolean;
 };
 
-export function ReupQueuePage() {
+export function ReupQueuePage({
+  initialFilter
+}: {
+  initialFilter?: ReupQueueOperatorFilter;
+} = {}) {
   const asyncActions = useAsyncAction();
   const { notify } = useNotice();
   const [items, setItems] = useState<ReupQueueItem[]>([]);
   const [totalCount, setTotalCount] = useState(0);
   const [statusCounts, setStatusCounts] = useState<Record<string, number>>({});
-  const [operatorFilter, setOperatorFilter] = useState<ReupQueueOperatorFilter>("all");
+  const [operatorFilter, setOperatorFilter] = useState<ReupQueueOperatorFilter>(
+    initialFilter ?? "all"
+  );
   const [pendingFilter, setPendingFilter] = useState<ReupQueueOperatorFilter | null>(null);
   const [isFilterPending, startFilterTransition] = useTransition();
   const [searchQuery, setSearchQuery] = useState("");
@@ -163,7 +169,7 @@ export function ReupQueuePage() {
   const [batchResult, setBatchResult] = useState<BatchOperationResponse | null>(null);
   const [mutatingAction, setMutatingAction] = useState<ReupQueueAction | null>(null);
   const [batchWorkingAction, setBatchWorkingAction] = useState<ReupQueueBatchAction | null>(null);
-  const initialFilterApplied = useRef(false);
+  const initialFilterApplied = useRef(Boolean(initialFilter));
   const loadedCountRef = useRef(0);
   const loadMoreInFlightRef = useRef(false);
   const loadMoreRef = useRef<HTMLDivElement | null>(null);
@@ -722,7 +728,7 @@ export function ReupQueuePage() {
       openItemDetails(item.id);
       return;
     }
-    if (action === "CREATE_EXPORT_PACKAGE" || action === "CREATE_PUBLISH_HANDOFF") {
+    if (action === "CREATE_EXPORT_PACKAGE" || action === "CREATE_PUBLISH_HANDOFF" || action === "PURGE") {
       await applyBatchAction(action, [item.id], queueItemActionKey(item, action));
       return;
     }
@@ -1821,7 +1827,7 @@ function ReupQueueMediaTile({
         <p className="capture-inbox-tile-meta-line" aria-label="Duration and posted">
           <span className="capture-inbox-tile-meta-stat" title={`Duration: ${queueTileDurationLabel(item)}`}>
             <span aria-hidden="true" className="capture-inbox-tile-perf-stat-icon">
-              <CaptureInboxFilterChipIcon className="capture-inbox-tile-perf-stat-icon__glyph" kind="stat-duration" />
+                <CaptureInboxFilterChipIcon className="capture-inbox-tile-perf-stat-icon__glyph" kind="meta-duration" />
             </span>
             <span className="capture-inbox-tile-meta-copy">
               <span className="capture-inbox-tile-meta-label">Duration</span>
@@ -1830,7 +1836,7 @@ function ReupQueueMediaTile({
           </span>
           <span className="capture-inbox-tile-meta-stat" title={`Posted: ${queueTilePostedLabel(item)}`}>
             <span aria-hidden="true" className="capture-inbox-tile-perf-stat-icon">
-              <CaptureInboxFilterChipIcon className="capture-inbox-tile-perf-stat-icon__glyph" kind="stat-posted" />
+                <CaptureInboxFilterChipIcon className="capture-inbox-tile-perf-stat-icon__glyph" kind="meta-posted" />
             </span>
             <span className="capture-inbox-tile-meta-copy">
               <span className="capture-inbox-tile-meta-label">Posted</span>
@@ -2272,7 +2278,7 @@ function ReupQueueInspectorActions({
       return;
     }
     if (!primaryAction || primaryAction === "inspect") return;
-    if (primaryAction === "CREATE_EXPORT_PACKAGE" || primaryAction === "CREATE_PUBLISH_HANDOFF") {
+    if (primaryAction === "CREATE_EXPORT_PACKAGE" || primaryAction === "CREATE_PUBLISH_HANDOFF" || primaryAction === "PURGE") {
       onBatchAction(primaryAction);
       return;
     }
@@ -2532,7 +2538,7 @@ function defaultActionNote(action: ReupQueueAction): string | null {
   if (action === "HOLD") return "Operator paused download progress from Reup Queue.";
   if (action === "CANCEL") return "Operator cancelled downstream queue work.";
   if (action === "MARK_MEDIA_READY") return "Operator confirmed media; start audio analysis.";
-  if (action === "START_AUTO_PIPELINE") return "Operator started auto pipeline (download through TTS).";
+  if (action === "START_AUTO_PIPELINE") return "Operator started the configured auto pipeline (Download through TTS or Final Render).";
   return null;
 }
 
@@ -2540,7 +2546,7 @@ function defaultBatchActionNote(action: ReupQueueBatchAction): string | null {
   if (action === "HOLD") return "Operator batch-paused download progress from Reup Queue.";
   if (action === "CANCEL") return "Operator batch-cancelled downstream queue work.";
   if (action === "MARK_MEDIA_READY") return "Operator batch-confirmed media; start audio analysis.";
-  if (action === "START_AUTO_PIPELINE") return "Operator batch-started auto pipeline (download through TTS).";
+  if (action === "START_AUTO_PIPELINE") return "Operator batch-started the configured auto pipeline (Download through TTS or Final Render).";
   if (action === "CREATE_EXPORT_PACKAGE") return "Operator created an Export Package from selected Reup Queue items.";
   if (action === "CREATE_PUBLISH_HANDOFF") return "Operator created a Publish Handoff payload from selected Reup Queue items.";
   if (action === "DISMISS") return "Operator cleared queue items from the active Reup Queue view.";

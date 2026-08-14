@@ -11,6 +11,18 @@ does not read a newly changed current pointer: it verifies the content-addressed
 versioned artifact selected by the item. Missing, stale or tampered recipe evidence
 fails closed to `FAILED_NEEDS_ATTENTION` with `PIPELINE_RECIPE_INVALID`.
 
+`ANALYZE_OCR` jobs additionally bind the independent official `OCR-V34` recipe
+from `docs/pipeline-recipes/analyze_ocr_recipe_current.json`. Its immutable
+reference is stored as `analyze_ocr_recipe_lock` beside the V24.1 whole-pipeline
+reference. The OCR lock pins
+`audio_visual_temporal_v1` /
+`audio_visual_temporal_policy_v12_epoch_complete_cover`,
+Master Phase 1, source-raster Phase 2 geometry, and zero network calls. Existing
+jobs already bound to an older whole-pipeline hash remain auditable; new OCR jobs
+cannot silently fall back to a legacy scheduler. Detector candidate frames are
+not retention authority; a single-frame track requires local CJK confirmation
+and remains `UNCERTAIN` until provenance review.
+
 ## Operator flow
 
 1. Open `/selection/reup-queue` and choose `Start auto` / `Full auto`.
@@ -18,17 +30,21 @@ fails closed to `FAILED_NEEDS_ATTENTION` with `PIPELINE_RECIPE_INVALID`.
    displays `V24.1 locked · <first 8 hash characters>` after the binding is persisted.
 3. Existing durable jobs advance Download → Audio → Translate → TTS → OCR → Render,
    with the existing bounded lane, retry policy, pause/resume and Final Review gate.
-   Auto-queue TTS uses the provider/model/voice from the bound recipe even if the
-   Ops profile changes after queue admission; manual Preview/Generate TTS remains
-   controlled by the active Ops profile.
+   Auto-queue and manual Generate TTS both bind the single Ops TTS setup visibly
+   `On`. The worker verifies the same setup/fingerprint before synthesis; switching,
+   disabling or editing it while queued fails closed instead of using recipe, ENV,
+   fallback or an Off setup. Provider Preview remains non-authoritative.
    Auto OCR explicitly sets `workflow_version=QUALITY_LOCALIZATION_V24_1`. A V24.1
    recipe paired with a legacy or missing quality workflow fails closed as
    `PIPELINE_RECIPE_WORKFLOW_MISMATCH`; it never falls back to legacy OCR. When the
    quality workflow needs operator input, the item parks at `quality_review`, frees
    its WIP slot, and resumes final render only after the separate visual and
    `AUDIO_MIX_APPROVED` checkpoints.
-4. Continue through Final Review and Manual Export. External publishing remains
-   disabled; this change does not create a publish attempt or mark an upload complete.
+4. Continue through Final Review, then use the new **Export** rail for
+   `FINAL_APPROVED` → metadata approval → source-rights/music attestation →
+   `MANUAL_EXPORT_READY`. The final action persists the corresponding
+   `ExportPackage` and `PublishHandoff` rows and exposes a hash-verified ZIP.
+   External publishing remains disabled; no upload is marked complete.
 
 `PIPELINE_RECIPE_LOCK_PATH` may override the current-pointer path for a controlled
 local deployment. The default resolves to

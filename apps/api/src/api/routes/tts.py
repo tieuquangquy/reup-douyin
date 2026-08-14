@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from src.db.session import get_db_session
+from src.enums import JobType
 from src.schemas.tts import (
     SubtitleListResponse,
     SubtitleSegmentResponse,
@@ -16,6 +17,10 @@ from src.schemas.tts import (
 from src.tts_pipeline.errors import TtsPipelineError, TtsPipelineErrorCode
 from src.tts_pipeline.services.tts_service import TtsPipelineService
 from src.tts_pipeline.types import TtsRequest, VoiceConfig
+from src.services.frontend_core_runtime import (
+    FrontendCoreRuntimeError,
+    assert_expected_stage_version,
+)
 
 router = APIRouter(tags=["tts"])
 
@@ -30,6 +35,12 @@ def create_tts_job(
     service: TtsPipelineService = Depends(get_tts_service),
 ) -> TtsCreateResponse:
     try:
+        runtime_version = assert_expected_stage_version(
+            JobType.SYNTHESIZE_TTS, request.expected_stage_version
+        )
+    except FrontendCoreRuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    try:
         job = service.create_tts_job(
             TtsRequest(
                 source_video_id=request.source_video_id,
@@ -41,9 +52,16 @@ def create_tts_job(
                 force_refresh=request.force_refresh,
             )
         )
+    except FrontendCoreRuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except TtsPipelineError as exc:
         raise _tts_http_error(exc) from exc
-    return TtsCreateResponse(job_id=job.id, status=job.status, source_video_id=request.source_video_id)
+    return TtsCreateResponse(
+        job_id=job.id,
+        status=job.status,
+        source_video_id=request.source_video_id,
+        runtime_version=runtime_version,
+    )
 
 
 @router.get("/source-videos/{source_video_id}/subtitle", response_model=SubtitleListResponse)
@@ -72,6 +90,8 @@ def get_source_video_tts_summary(
         warnings=summary["warnings"],
         clips=summary.get("clips") or [],
         timing_fit_summary=summary.get("timing_fit_summary") or {},
+        temporal=summary.get("temporal"),
+        temporal_artifacts=summary.get("temporal_artifacts") or [],
         assets=summary["assets"],
     )
 

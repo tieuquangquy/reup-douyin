@@ -1,6 +1,6 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, status
 from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from src.core.settings import get_settings
 from src.db.session import get_db_session
 from src.downloaders.errors import DownloadError, DownloadErrorCode
-from src.enums import MediaAssetType
+from src.enums import JobType, MediaAssetType
 from src.models.media import MediaAsset
 from src.schemas.downloads import (
     DownloadCreateRequest,
@@ -18,6 +18,10 @@ from src.schemas.downloads import (
     SourceVideoAssetsResponse,
 )
 from src.services.download_service import DownloadRequest, DownloadService
+from src.services.frontend_core_runtime import (
+    FrontendCoreRuntimeError,
+    assert_expected_stage_version,
+)
 from src.services.local_asset_reveal import LocalAssetRevealError, reveal_source_video_local_asset
 from src.storage.local import LocalStorageBackend
 
@@ -31,16 +35,37 @@ def get_download_service(db: Session = Depends(get_db_session)) -> DownloadServi
 @router.post("/downloads", response_model=DownloadCreateResponse, status_code=status.HTTP_201_CREATED)
 def create_download(
     request: DownloadCreateRequest,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     service: DownloadService = Depends(get_download_service),
 ) -> DownloadCreateResponse:
+    try:
+        runtime_version = assert_expected_stage_version(
+            JobType.DOWNLOAD_VIDEO, request.expected_stage_version
+        )
+    except FrontendCoreRuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    supplied_key = (idempotency_key or "").strip()
+    if supplied_key and len(supplied_key) > 240:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Idempotency-Key is too long")
+    # The service derives the default key from the canonical SourceVideo and
+    # the concrete account bound at enqueue time.  Deriving it here from the
+    # caller's candidate/source selector made the same video produce two jobs
+    # (candidate_id vs source_video_id) and allowed a changed default account to
+    # reuse an old command.  Explicit keys remain supported for intentional
+    # refresh/single-flight commands.
+    command_key = supplied_key or None
     try:
         result = service.create_download_job(
             DownloadRequest(
                 source_video_id=request.source_video_id,
                 candidate_id=request.candidate_id,
                 force_refresh=request.force_refresh,
-            )
+                account_connection_id=request.account_connection_id,
+            ),
+            idempotency_key=command_key,
         )
+    except FrontendCoreRuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except DownloadError as exc:
         raise _download_http_error(exc) from exc
     return DownloadCreateResponse(
@@ -49,6 +74,7 @@ def create_download(
         source_video_id=UUID(result.source_video_id),
         asset_count=result.asset_count,
         manifest=result.manifest,
+        runtime_version=runtime_version,
     )
 
 
@@ -128,6 +154,7 @@ def refresh_source_video_assets(
     source_video_id: UUID,
     service: DownloadService = Depends(get_download_service),
 ) -> DownloadCreateResponse:
+    runtime_version = assert_expected_stage_version(JobType.DOWNLOAD_VIDEO, None)
     try:
         result = service.create_download_job(DownloadRequest(source_video_id=source_video_id, force_refresh=True))
     except DownloadError as exc:
@@ -138,6 +165,7 @@ def refresh_source_video_assets(
         source_video_id=UUID(result.source_video_id),
         asset_count=result.asset_count,
         manifest=result.manifest,
+        runtime_version=runtime_version,
     )
 
 

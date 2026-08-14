@@ -401,6 +401,19 @@ export function OpsAccountsPage() {
   const successRate7d = attempts7d > 0 ? Math.round((succeeded7d / attempts7d) * 100) : null;
   const queueWorkload = (queue?.assigned_total ?? queue?.assigned_drafts.length ?? 0)
     + (queue?.scheduled_total ?? queue?.scheduled_drafts.length ?? 0);
+  const accountTotal = Math.max(accounts.length, 1);
+  const attentionShare = attentionRows.length / accountTotal;
+  const readyShare = readyRows.length / accountTotal;
+  const standbyShare = standbyRows.length / accountTotal;
+  const readyPercent = accounts.length === 0 ? 0 : Math.round(readyShare * 100);
+  const attentionDeg = accounts.length === 0 ? 120 : attentionShare * 360;
+  const readyDeg = accounts.length === 0 ? 120 : readyShare * 360;
+  const donutGradient = accounts.length === 0
+    ? "conic-gradient(#d5e0db 0deg 120deg, #c5d4ce 120deg 240deg, #b7c7c0 240deg 360deg)"
+    : `conic-gradient(#d99a2c 0deg ${attentionDeg}deg, #2f8f6f ${attentionDeg}deg ${attentionDeg + readyDeg}deg, #8fa59b ${attentionDeg + readyDeg}deg 360deg)`;
+  const successGradient = successRate7d == null
+    ? "conic-gradient(#e5eee9 0deg 360deg)"
+    : `conic-gradient(#2f8f6f 0deg ${(successRate7d / 100) * 360}deg, #e5eee9 ${(successRate7d / 100) * 360}deg 360deg)`;
   const readinessLanes: Array<{ key: ReadinessLaneKey; label: string; hint: string; icon: AccountIconKind; items: AccountRow[] }> = [
     { key: "attention", label: t("opsAccounts.laneAttention"), hint: t("opsAccounts.laneAttentionHint"), icon: "attention", items: attentionRows },
     { key: "ready", label: t("opsAccounts.laneReady"), hint: t("opsAccounts.laneReadyHint"), icon: "check", items: readyRows },
@@ -659,10 +672,52 @@ export function OpsAccountsPage() {
     <OperatorStudioShell actions={refreshAction} description={t("opsAccounts.description")} title={t("opsAccounts.title")}>
       <AsyncContentBoundary refreshing={request.refreshing} skeletonVariant="table" status="success">
         <main className="ops-page ops-accounts-page">
-          <section className="ops-accounts-spectrum" aria-label={t("opsAccounts.title")}>
-            <div className="ops-accounts-spectrum__intro"><span><AccountIcon kind="shield" />{t("opsAccounts.readinessBoard")}</span><strong>{accounts.length} <small>{t("opsAccounts.platformAccounts")}</small></strong><p><AccountIcon kind="clock" /><span className="visually-hidden">{t("opsAccounts.loadedAt")}</span><time dateTime={loadedAt ?? undefined}>{formatDateTime(loadedAt)}</time></p></div>
-            <div className="ops-accounts-spectrum__segments"><div className="is-attention"><span><AccountIcon kind="attention" /></span><strong>{attentionRows.length}</strong><small>{t("opsAccounts.laneAttention")}</small></div><div className="is-ready"><span><AccountIcon kind="check" /></span><strong>{readyRows.length}</strong><small>{t("opsAccounts.laneReady")}</small></div><div className="is-standby"><span><AccountIcon kind="clock" /></span><strong>{standbyRows.length}</strong><small>{t("opsAccounts.laneStandby")}</small></div></div>
-            <div className="ops-accounts-spectrum__insights"><div><span><AccountIcon kind="success" />{t("opsAccounts.success7d")}</span><strong>{successRate7d == null ? "—" : `${successRate7d}%`}</strong><small>{t("opsAccounts.success7dDetail").replace("{success}", String(succeeded7d)).replace("{attempts}", String(attempts7d))}</small></div><div><span><AccountIcon kind="queue" />{t("opsAccounts.queueWorkload")}</span><strong>{queueWorkload}</strong><small>{t("opsAccounts.assignedScheduledWork")}</small></div></div>
+          <section className="ops-accounts-spectrum is-chart-deck" aria-label={t("opsAccounts.title")}>
+            <header className="ops-accounts-spectrum__title">
+              <span className="ops-accounts-spectrum__eyebrow"><AccountIcon kind="shield" />{t("opsAccounts.readinessBoard")}</span>
+              <strong><b>{accounts.length}</b><small>{t("opsAccounts.platformAccounts")}</small></strong>
+              <p><AccountIcon kind="clock" /><span className="visually-hidden">{t("opsAccounts.loadedAt")}</span><time dateTime={loadedAt ?? undefined}>{formatDateTime(loadedAt)}</time></p>
+            </header>
+            <div className="ops-accounts-spectrum__chart-body">
+              <div aria-hidden="true" className="ops-accounts-spectrum__donut" style={{ background: donutGradient }}>
+                <div className="ops-accounts-spectrum__donut-core">
+                  <b>{accounts.length === 0 ? "—" : `${readyPercent}%`}</b>
+                  <small>{t("opsAccounts.laneReady")}</small>
+                </div>
+              </div>
+              <ul className="ops-accounts-spectrum__legend">
+                <li className={`is-attention${attentionRows.length === 0 ? " is-empty" : ""}`}>
+                  <i /><span>{t("opsAccounts.laneAttention")}</span><strong>{attentionRows.length}</strong>
+                  <b className="ops-accounts-spectrum__bar"><em style={{ width: `${Math.round(attentionShare * 100)}%` }} /></b>
+                </li>
+                <li className={`is-ready${readyRows.length === 0 ? " is-empty" : ""}`}>
+                  <i /><span>{t("opsAccounts.laneReady")}</span><strong>{readyRows.length}</strong>
+                  <b className="ops-accounts-spectrum__bar"><em style={{ width: `${Math.round(readyShare * 100)}%` }} /></b>
+                </li>
+                <li className={`is-standby${standbyRows.length === 0 ? " is-empty" : ""}`}>
+                  <i /><span>{t("opsAccounts.laneStandby")}</span><strong>{standbyRows.length}</strong>
+                  <b className="ops-accounts-spectrum__bar"><em style={{ width: `${Math.round(standbyShare * 100)}%` }} /></b>
+                </li>
+              </ul>
+              <div className="ops-accounts-spectrum__insights ops-accounts-spectrum__gauges">
+                <div className={`ops-accounts-spectrum__gauge${successRate7d == null ? " is-empty" : ""}`}>
+                  <div aria-hidden="true" className="ops-accounts-spectrum__gauge-ring" style={{ background: successGradient }}>
+                    <span>{successRate7d == null ? "—" : `${successRate7d}%`}</span>
+                  </div>
+                  <div>
+                    <strong>{t("opsAccounts.success7d")}</strong>
+                    <small>{t("opsAccounts.success7dDetail").replace("{success}", String(succeeded7d)).replace("{attempts}", String(attempts7d))}</small>
+                  </div>
+                </div>
+                <div className={`ops-accounts-spectrum__gauge is-queue${queueWorkload === 0 ? " is-empty" : ""}`}>
+                  <div aria-hidden="true" className="ops-accounts-spectrum__queue-mark"><AccountIcon kind="queue" /><b>{queueWorkload}</b></div>
+                  <div>
+                    <strong>{t("opsAccounts.queueWorkload")}</strong>
+                    <small>{t("opsAccounts.assignedScheduledWork")}</small>
+                  </div>
+                </div>
+              </div>
+            </div>
           </section>
 
           {setupOpen ? (

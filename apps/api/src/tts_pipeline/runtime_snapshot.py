@@ -54,14 +54,33 @@ def build_last_probe(
     provider: str,
     detail: str,
     catalog: dict[str, Any] | None,
+    checks: list[dict[str, Any]] | None = None,
+    config_fingerprint: str = "",
 ) -> dict[str, Any]:
-    return {
+    row = {
         "at": utc_now_iso(),
         "ok": bool(ok),
         "provider": (provider or "").strip(),
         "detail": (detail or "").strip()[:800],
         "catalog": dict(catalog) if isinstance(catalog, dict) else None,
     }
+    if checks:
+        row["checks"] = [dict(item) for item in checks if isinstance(item, dict)]
+    if config_fingerprint:
+        row["config_fingerprint"] = str(config_fingerprint)[:64]
+    return row
+
+
+def scope_runtime_to_provider(raw: Any, provider: str) -> dict[str, Any]:
+    """Drop probe/catalog state that belongs to a different provider."""
+
+    runtime = normalize_runtime(raw)
+    probe = runtime.get("last_probe")
+    expected = str(provider or "").strip().lower()
+    observed = str((probe or {}).get("provider") or "").strip().lower()
+    if probe is not None and expected and observed != expected:
+        runtime["last_probe"] = None
+    return runtime
 
 
 def merge_runtime(

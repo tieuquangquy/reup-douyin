@@ -64,6 +64,12 @@ class OcrRequest:
     workflow_action: str = "analyze"
     review_decisions: list[dict] = field(default_factory=list)
     operator_id: str = "frontend_operator"
+    # Quality workflow callers opt into the local audio-visual temporal engine.
+    # Legacy media-E2E callers keep V58 unless explicitly migrated.
+    analysis_engine: str = "v58_candidate"
+    # Full-auto queue jobs may promote only deterministic local review decisions.
+    # Manual/frontend OCR requests keep the operator checkpoints by default.
+    auto_advance: bool = False
 
 
 @dataclass(frozen=True)

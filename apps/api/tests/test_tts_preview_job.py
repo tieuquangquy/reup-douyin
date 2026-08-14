@@ -37,10 +37,16 @@ class TtsPreviewJobTests(unittest.TestCase):
                 "duration_seconds": 0.5,
                 "audio_base64": "UklGRg==",
                 "warnings": [],
+                "requested_voice_id": "vi-VN-Chirp3-HD-Aoede",
+                "resolved_voice_id": "Aoede",
                 "text": "Xin chào",
             }
 
-        cfg = SimpleNamespace(provider="omnivoice", enabled=True)
+        cfg = SimpleNamespace(
+            provider="omnivoice",
+            enabled=True,
+            voice_id="vi-VN-Chirp3-HD-Aoede",
+        )
         with patch("src.tts_pipeline.preview.preview_tts_speech", side_effect=slow_preview):
             job = start_tts_preview_job(
                 workspace_id=workspace_id,
@@ -49,6 +55,8 @@ class TtsPreviewJobTests(unittest.TestCase):
             )
             self.assertLess(time.time() - started, 0.4)
             self.assertEqual(job.status, "running")
+            self.assertEqual(job.provider, "omnivoice")
+            self.assertNotIn("first OmniVoice", job.detail)
             self.assertFalse(job.ok)
 
             with self.assertRaises(RuntimeError):
@@ -69,6 +77,8 @@ class TtsPreviewJobTests(unittest.TestCase):
             self.assertEqual(final.status, "succeeded")
             self.assertTrue(final.ok)
             self.assertEqual(final.provider, "omnivoice")
+            self.assertEqual(final.requested_voice_id, "vi-VN-Chirp3-HD-Aoede")
+            self.assertEqual(final.resolved_voice_id, "Aoede")
             self.assertTrue(final.audio_base64)
 
     def test_route_source_starts_background_preview(self) -> None:

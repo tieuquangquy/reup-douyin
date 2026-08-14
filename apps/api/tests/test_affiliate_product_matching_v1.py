@@ -8,12 +8,14 @@ from pydantic import ValidationError
 
 from src.affiliate_intelligence.services.affiliate_product_service import (
     AffiliateProductMatchingService,
+    build_affiliate_match_queue_kpis,
     product_identity_fingerprint,
 )
 from src.enums import JobType
 from src.schemas.affiliate import (
     AffiliateProductCreateRequest,
     AffiliateProductMatchDecisionRequest,
+    AffiliateProductMatchQueueKpis,
 )
 from src.services.job_templates import get_step_templates
 
@@ -121,6 +123,30 @@ class AffiliateProductMatchingV1Tests(unittest.TestCase):
             [step.key for step in get_step_templates(JobType.MATCH_AFFILIATE_PRODUCTS)],
             ["validate_classification", "load_catalog", "match_and_persist", "finalize"],
         )
+
+    def test_queue_kpis_expose_overridden_and_partition_eligible(self) -> None:
+        """Eligible must equal unmatched + decision statuses; stale stays orthogonal."""
+        kpis = build_affiliate_match_queue_kpis(
+            eligible_count=6,
+            status_counts={"APPROVED": 3, "REJECTED": 2, "OVERRIDDEN": 1},
+            stale_count=6,
+        )
+        self.assertEqual(kpis["eligible_publications"], 6)
+        self.assertEqual(kpis["unmatched_count"], 0)
+        self.assertEqual(kpis["approved_count"], 3)
+        self.assertEqual(kpis["rejected_count"], 2)
+        self.assertEqual(kpis["overridden_count"], 1)
+        self.assertEqual(kpis["needs_review_count"], 0)
+        self.assertEqual(kpis["stale_count"], 6)
+        partitioned = (
+            kpis["unmatched_count"]
+            + kpis["needs_review_count"]
+            + kpis["approved_count"]
+            + kpis["rejected_count"]
+            + kpis["overridden_count"]
+        )
+        self.assertEqual(partitioned, kpis["eligible_publications"])
+        self.assertIn("overridden_count", AffiliateProductMatchQueueKpis.model_fields)
 
 
 if __name__ == "__main__":

@@ -36,10 +36,32 @@ const testDir = dirname(fileURLToPath(import.meta.url));
 const headerSource = readFileSync(resolve(testDir, "../components/transcript-editor/TranscriptEditorHeader.tsx"), "utf8");
 const pageSource = readFileSync(resolve(testDir, "../components/transcript-editor/TranscriptEditorPage.tsx"), "utf8");
 const focusSource = readFileSync(resolve(testDir, "../components/transcript-editor/TranscriptFocusEditor.tsx"), "utf8");
+const apiSource = readFileSync(resolve(testDir, "../lib/api.ts"), "utf8");
 
 assert.match(headerSource, /onReanalyze/, "Transcript header must expose Re-analyze audio CTA");
 assert.match(headerSource, /reanalyzeAudio/, "Transcript header must label Re-analyze audio");
 assert.match(headerSource, /onTranslateLiteral/, "Transcript header must expose Translate CTA");
+assert.match(headerSource, /audioRecipeVersion/, "Transcript header must expose the active Analyze Audio recipe");
+assert.match(headerSource, /editor-command__meta/, "Transcript header must render a compact recipe/quality meta strip");
+{
+  const leadChunk = headerSource.match(
+    /className="transcript-header__lead"[\s\S]*?(?=className="editor-command")/
+  )?.[0];
+  assert.ok(leadChunk, "Transcript header must keep a command lead before the toolbar");
+  assert.doesNotMatch(leadChunk, /editor-command__meta/, "Meta rail must not sit beside the pipeline inside the lead");
+}
+assert.match(
+  headerSource,
+  /role="toolbar"[\s\S]*editor-command__meta/,
+  "Meta rail must render after the command toolbar (second row)"
+);
+assert.match(headerSource, /editor-command__meta-item/, "Meta rail must use quiet status items, not competing pipeline chips");
+assert.doesNotMatch(headerSource, /editor-command__meta-chip|editor-command__meta-tag/, "Meta must not use chip/tag chrome beside the pipeline");
+assert.doesNotMatch(headerSource, /Audio Â·/, "Audio recipe label must not use mojibake separator");
+assert.match(headerSource, /shortAudioRecipe|audioRecipeVersion\.replace|split\("-"\)\.slice/, "Audio recipe display must shorten the long version id");
+assert.match(pageSource, /audioRecipeVersion=\{summary\?\.audio_recipe_version\}/, "Transcript page must bind Audio recipe telemetry from the API");
+assert.match(headerSource, /sourceReviewRequired/, "Header must expose the current source review gate");
+assert.match(headerSource, /!guide\.sourceTranscriptApproved/, "Translate must stay disabled until source approval");
 assert.match(headerSource, /literal_safe/, "Translate must enqueue literal_safe preset");
 assert.doesNotMatch(headerSource, /natural_viral|translateNatural/, "Natural translate option must be removed");
 assert.doesNotMatch(headerSource, /\/ops\/translation-ai/, "Transcript header must not deep-link Ops Translation settings");
@@ -58,7 +80,18 @@ assert.doesNotMatch(focusSource, /aiTools/, "AI job menu must not duplicate on t
 assert.match(pageSource, /createAudioAnalysis/, "Transcript page must enqueue ANALYZE_AUDIO via createAudioAnalysis");
 assert.match(pageSource, /skipTranslation|true,\s*true/, "Re-analyze must request ASR-only (skip translation)");
 assert.match(pageSource, /rerunTranslationDraft/, "Transcript page must enqueue Phase B translation job");
+assert.match(
+  apiSource,
+  /Idempotency-Key[`"']?:\s*`translation:\$\{sourceVideoId\}:\$\{translationPreset\}:\$\{CORE_STAGE_RUNTIME\.BUILD_TRANSLATION_DRAFT\}`/,
+  "Translation rerun must be single-flight across double-clicks and reconnects"
+);
+assert.match(apiSource, /expected_stage_version:\s*CORE_STAGE_RUNTIME\.ANALYZE_AUDIO/);
+assert.match(apiSource, /expected_stage_version:\s*CORE_STAGE_RUNTIME\.BUILD_TRANSLATION_DRAFT/);
 assert.match(pageSource, /fetchJob/, "Transcript page must poll job status after re-analyze/translate");
+assert.match(pageSource, /clearDownstreamAuthorityUi/, "Successful Re-ASR must clear local Translation\/TTS authority");
+assert.match(pageSource, /sessionStorage\.removeItem/, "Re-ASR must clear the old TTS fingerprint");
+assert.match(pageSource, /isSourceTranscriptReadyForTranslation/, "Translate must be gated by current transcript authority");
+assert.match(pageSource, /translationMatchesCurrentTranscript/, "Stale translations must not bind to a new transcript run");
 assert.match(pageSource, /onTranslateLiteral/, "Transcript page must wire translate-literal handler");
 assert.match(pageSource, /translateEmptyAfterJob/, "Translate literal must surface empty-VI after a completed job");
 assert.match(pageSource, /translatePartialAfterJob/, "Translate literal must surface partial-VI when some beats stay empty");

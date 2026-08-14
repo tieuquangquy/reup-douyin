@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from uuid import uuid4
 
-from src.enums import JobStatus, ReupQueueAction, ReupQueueMediaPrepStatus, ReupQueueStatus
+from src.enums import JobStatus, JobType, ReupQueueAction, ReupQueueMediaPrepStatus, ReupQueueStatus
 from src.services.download_service import DownloadJobResult
 from src.services.reup_queue_service import ReupQueueService
 
@@ -34,13 +34,14 @@ class FakeDownloadService:
     def __init__(self):
         self.calls: list[dict] = []
 
-    def create_download_job(self, request, *, idempotency_key: str | None = None):
+    def create_download_job(self, request, *, idempotency_key: str | None = None, commit: bool = True):
         self.calls.append(
             {
                 "source_video_id": request.source_video_id,
                 "candidate_id": request.candidate_id,
                 "force_refresh": getattr(request, "force_refresh", False),
                 "idempotency_key": idempotency_key,
+                "commit": commit,
             }
         )
         return DownloadJobResult(
@@ -94,7 +95,10 @@ class ReupQueueStartProcessingDownloadTests(unittest.TestCase):
 
         self.assertEqual(len(download_service.calls), 1)
         self.assertEqual(download_service.calls[0]["idempotency_key"], f"reup-queue:{item.id}:download")
-        self.assertTrue(download_service.calls[0]["force_refresh"])
+        self.assertFalse(
+            download_service.calls[0]["force_refresh"],
+            "Start processing should reuse an intact current source asset; explicit refresh owns force_refresh",
+        )
         self.assertEqual(updated.status, ReupQueueStatus.WAITING_FOR_MEDIA)
         self.assertEqual(updated.media_prep_status, ReupQueueMediaPrepStatus.WAITING_FOR_MEDIA)
         self.assertIsNotNone(updated.job_id)
@@ -103,7 +107,11 @@ class ReupQueueStartProcessingDownloadTests(unittest.TestCase):
     def test_start_processing_reuses_existing_job_id(self) -> None:
         existing_job_id = uuid4()
         item = queue_item(status=ReupQueueStatus.READY_FOR_PROCESSING, job_id=existing_job_id)
-        live_job = SimpleNamespace(id=existing_job_id, status=JobStatus.RUNNING)
+        live_job = SimpleNamespace(
+            id=existing_job_id,
+            job_type=JobType.DOWNLOAD_VIDEO,
+            status=JobStatus.RUNNING,
+        )
         download_service = FakeDownloadService()
         updated = ReupQueueService(FakeActionDb(item, job=live_job), download_service=download_service).apply_action(
             item.id,
@@ -113,6 +121,24 @@ class ReupQueueStartProcessingDownloadTests(unittest.TestCase):
         self.assertEqual(download_service.calls, [])
         self.assertEqual(updated.job_id, existing_job_id)
         self.assertEqual(updated.status, ReupQueueStatus.WAITING_FOR_MEDIA)
+
+    def test_start_processing_does_not_reuse_wrong_stage_job_id(self) -> None:
+        existing_job_id = uuid4()
+        item = queue_item(status=ReupQueueStatus.READY_FOR_PROCESSING, job_id=existing_job_id)
+        analyze_job = SimpleNamespace(
+            id=existing_job_id,
+            job_type=JobType.ANALYZE_AUDIO,
+            status=JobStatus.COMPLETED,
+        )
+        download_service = FakeDownloadService()
+
+        updated = ReupQueueService(
+            FakeActionDb(item, job=analyze_job),
+            download_service=download_service,
+        ).apply_action(item.id, action=ReupQueueAction.START_PROCESSING)
+
+        self.assertEqual(len(download_service.calls), 1)
+        self.assertNotEqual(updated.job_id, existing_job_id)
 
     def test_retry_clears_job_id_for_fresh_download(self) -> None:
         item = queue_item(status=ReupQueueStatus.FAILED_NEEDS_ATTENTION, job_id=uuid4())

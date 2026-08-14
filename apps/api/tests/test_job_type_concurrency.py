@@ -42,6 +42,15 @@ class JobTypeConcurrencyLimitTests(unittest.TestCase):
 
         self.assertEqual(job_type_concurrency_limits(Zeroed())[JobType.RENDER_FINAL.value], 1)
 
+    def test_download_fallback_uses_two_network_slots(self) -> None:
+        class MissingDownloadSetting:
+            pass
+
+        self.assertEqual(
+            job_type_concurrency_limits(MissingDownloadSetting())[JobType.DOWNLOAD_VIDEO.value],
+            2,
+        )
+
     def test_unlisted_type_is_unlimited(self) -> None:
         self.assertNotIn(JobType.CRAWL_PROFILE.value, job_type_concurrency_limits(FakeSettings()))
 

@@ -40,8 +40,17 @@ def build_default_stt_provider(*, settings: Any | None = None, storage_root: str
     mode = str(getattr(cfg, "audio_stt_provider", "funasr") or "funasr").strip().lower()
     if mode in {"caption", "caption_fallback"}:
         return CaptionFallbackSttProvider()
-    timeout_seconds = float(getattr(cfg, "audio_funasr_timeout_seconds", 900.0) or 900.0)
-    return FunasrSttProvider(resolve_audio_path=resolve_audio_path, timeout_seconds=timeout_seconds)
+    timeout_seconds = float(getattr(cfg, "audio_funasr_timeout_seconds", 180.0) or 180.0)
+    checkpoint_root = str(Path(root) / ".cache" / "funasr")
+    return FunasrSttProvider(
+        resolve_audio_path=resolve_audio_path,
+        timeout_seconds=timeout_seconds,
+        warmup_timeout_seconds=float(getattr(cfg, "audio_funasr_warmup_timeout_seconds", 900.0) or 900.0),
+        chunk_seconds=float(getattr(cfg, "audio_funasr_chunk_seconds", 60.0) or 60.0),
+        chunk_overlap_seconds=float(getattr(cfg, "audio_funasr_chunk_overlap_seconds", 1.5) or 1.5),
+        device=str(getattr(cfg, "audio_funasr_device", "auto") or "auto"),
+        checkpoint_root=checkpoint_root,
+    )
 
 
 def build_default_translation_provider(

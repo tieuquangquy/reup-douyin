@@ -360,7 +360,7 @@ const breadcrumbRules: Array<{ patterns: string[]; crumbs: BreadcrumbItem[] }> =
     patterns: ["/publishing/settings/content-intelligence"],
     crumbs: [
       { label: "nav.home", href: "/" },
-      { label: "nav.sectionPublishingSettings", href: "/publishing/settings/content-intelligence" },
+      { label: "nav.sectionPublishing", href: "/publishing/drafts" },
       { label: "nav.contentIntelligenceSettings" }
     ]
   },
@@ -368,7 +368,7 @@ const breadcrumbRules: Array<{ patterns: string[]; crumbs: BreadcrumbItem[] }> =
     patterns: ["/publishing/settings/affiliate-catalog"],
     crumbs: [
       { label: "nav.home", href: "/" },
-      { label: "nav.sectionPublishingSettings", href: "/publishing/settings/content-intelligence" },
+      { label: "nav.sectionPublishing", href: "/publishing/drafts" },
       { label: "nav.affiliateCatalog" }
     ]
   },
@@ -376,7 +376,7 @@ const breadcrumbRules: Array<{ patterns: string[]; crumbs: BreadcrumbItem[] }> =
     patterns: ["/publishing/settings/affiliate-comments"],
     crumbs: [
       { label: "nav.home", href: "/" },
-      { label: "nav.sectionPublishingSettings", href: "/publishing/settings/content-intelligence" },
+      { label: "nav.sectionPublishing", href: "/publishing/drafts" },
       { label: "nav.affiliateComments" }
     ]
   },

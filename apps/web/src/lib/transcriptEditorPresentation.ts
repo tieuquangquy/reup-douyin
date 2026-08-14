@@ -5,7 +5,7 @@ import type { AssetManifest } from "../types/transcript-editor";
 export type FlagTone = "danger" | "warn" | "good" | "neutral";
 
 const PIPELINE_FLAG_RE =
-  /^(funasr|duration_fit|sentence_split|workspace_translation_prompt|duration_rewrite_applied|caption_agreed|auto_approved|machine_translate|cjk_|translation_fallback|prompt_)/i;
+  /^(funasr|duration_fit|sentence_split|workspace_translation_prompt|duration_rewrite_applied|caption_agreed|auto_approved|machine_translate|cjk_|translation_fallback|translation_v3|prompt_)/i;
 
 /** Flags that are pipeline telemetry — not “ZH matches video” signals. */
 export function isPipelineFlag(flag: string): boolean {

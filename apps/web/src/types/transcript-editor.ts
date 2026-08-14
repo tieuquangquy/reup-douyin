@@ -54,6 +54,19 @@ export type TranslationDraftListResponse = {
   source_video_id: string;
   translation_preset: string | null;
   segments: TranslationSegment[];
+  recipe_version?: string | null;
+  quality_contract?: {
+    schema_version?: string;
+    recipe_version?: string;
+    total_count?: number;
+    filled_count?: number;
+    review_required_count?: number;
+    blocked_count?: number;
+    complete?: boolean;
+    tts_ready?: boolean;
+    provider_mix?: string[];
+    cache_hit?: boolean;
+  } | null;
 };
 
 export type AudioAnalysisSummaryResponse = {
@@ -65,6 +78,13 @@ export type AudioAnalysisSummaryResponse = {
   manifest: AssetManifest;
   has_speech?: boolean | null;
   dialogue_phase?: string | null;
+  audio_recipe_version?: string | null;
+  analysis_metrics?: Record<string, unknown>;
+  target_speech_authority?: Record<string, unknown>;
+  dialogue_quality_contract?: Record<string, unknown>;
+  semantic_dialogue_segmentation?: Record<string, unknown>;
+  translation_recipe_version?: string | null;
+  downstream_authority_invalidations?: Array<Record<string, unknown>>;
 };
 
 export type AssetManifest = {

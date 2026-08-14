@@ -460,13 +460,31 @@ export type PipelineStage = {
   state: PipelineStageState;
 };
 
+const CORE_PIPELINE_STAGE_RANK: Record<string, number> = {
+  download: 0,
+  analyze_audio: 1,
+  translate: 2,
+  translation_review: 2,
+  tts: 3,
+  ocr: 4,
+  quality_review: 5,
+  render: 6,
+  ready_final: 7
+};
+
 export function buildPipelineStages(item: ReupQueueItem): PipelineStage[] {
   const exportPackageId = metadataString(item.metadata_json, "export_package_id");
   const failed = item.status === "FAILED_NEEDS_ATTENTION" || isAnalyzeAudioFailed(item);
   return [
     pipelineStage("download", "Download", downloadStageState(item, failed)),
-    pipelineStage("transcript", "Transcript", transcriptStageState(item, failed)),
-    pipelineStage("render", "Render", renderStageState(item, failed)),
+    // Preserve the historical transcript/render keys for existing callers while
+    // exposing the canonical seven production stages in the stepper.
+    pipelineStage("transcript", "Analyze Audio", transcriptStageState(item, failed)),
+    pipelineStage("translation_draft", "Build Translation Draft", corePipelineStageState(item, 2, "BUILD_TRANSLATION_DRAFT")),
+    pipelineStage("synthesize_tts", "Synthesize TTS", corePipelineStageState(item, 3, "SYNTHESIZE_TTS")),
+    pipelineStage("analyze_ocr", "Analyze OCR", corePipelineStageState(item, 4, "ANALYZE_OCR")),
+    pipelineStage("render_preview", "Render Preview", corePipelineStageState(item, 5, "RENDER_PREVIEW")),
+    pipelineStage("render", "Render Final", renderStageState(item, failed)),
     pipelineStage("export", "Export", exportStageState(item, exportPackageId, failed))
   ];
 }
@@ -504,21 +522,22 @@ export function pipelineStageInteraction(item: ReupQueueItem, stage: PipelineSta
     return { kind: "disabled", title: "Download is not ready yet" };
   }
 
-  if (stage.key === "transcript") {
+  if (["transcript", "translation_draft", "synthesize_tts"].includes(stage.key)) {
     const href = worklistTranscriptHref(item);
     if (href) return { kind: "href", href, title: "Open transcript editor" };
     return { kind: "disabled", title: transcriptStageDisabledTitle(item) };
   }
 
-  if (stage.key === "render") {
-    if (canOpenFinalReview(item)) {
+  if (["analyze_ocr", "render_preview", "render"].includes(stage.key)) {
+    const ttsReady = corePipelineStageState(item, 3, "SYNTHESIZE_TTS") === "done";
+    if (canOpenFinalReview(item) || ttsReady || stage.state !== "pending") {
       return {
         kind: "href",
         href: `/production/final-review/${item.source_video_id}`,
-        title: "Open final review"
+        title: stage.key === "analyze_ocr" ? "Open OCR analysis and review" : "Open final review"
       };
     }
-    return { kind: "disabled", title: "Render output is not ready yet" };
+    return { kind: "disabled", title: "TTS must be ready before OCR and rendering" };
   }
 
   if (stage.key === "export") {
@@ -622,12 +641,70 @@ export function isMissingSourceAssetAnalyzeFailure(item: ReupQueueItem): boolean
 export function activePipelineStepLabel(item: ReupQueueItem): string | null {
   const type = (item.job_type ?? "").toUpperCase();
   if (!isActiveAnalyzeJobStatus(item.job_status)) return null;
-  if (type === "BUILD_TRANSLATION_DRAFT") return "Translating";
-  if (type === "SYNTHESIZE_TTS") return "Voicing";
-  if (type === "ANALYZE_OCR") return "Scanning OCR";
-  if (type === "RENDER_PREVIEW") return "Previewing";
-  if (type === "RENDER_FINAL") return "Rendering";
+  const phase = pipelineSubphaseLabel(item);
+  if (type === "DOWNLOAD_VIDEO") return phase ?? "Downloading";
+  if (type === "BUILD_TRANSLATION_DRAFT") return phase ?? "Translating";
+  if (type === "SYNTHESIZE_TTS") return phase ?? "Voicing";
+  if (type === "ANALYZE_OCR") return phase ?? "Scanning OCR";
+  if (type === "RENDER_PREVIEW") return phase ?? "Previewing";
+  if (type === "RENDER_FINAL") return phase ?? "Rendering";
   return null;
+}
+
+export function pipelineSubphaseLabel(item: ReupQueueItem): string | null {
+  const phase = (item.job_phase ?? "").trim();
+  if (!phase) return null;
+  const labels: Record<string, string> = {
+    cache_validate: "Download Â· Checking local cache",
+    cache_hit: "Download Â· Reusing verified source",
+    resolve_session: "Download Â· Resolving Douyin session",
+    resolve_candidates: "Download Â· Selecting clean stream",
+    transfer_primary: "Download Â· Transferring source",
+    validate_primary: "Download Â· Validating media",
+    atomic_promote: "Download Â· Saving verified source",
+    thumbnail_optional: "Download Â· Fetching thumbnail",
+    persist_sidecars: "Download Â· Saving metadata",
+    finalize_manifest: "Download Â· Finalizing manifest",
+    phase1_candidate_discovery: "OCR · Finding text windows",
+    phase1_scan: "OCR · Detecting text",
+    phase1_event_scan: "OCR · Detecting text events",
+    phase1_resume_decode: "OCR · Resuming frame scan",
+    phase1_dense_rescan: "OCR · Recovering brief text",
+    phase1_coverage_closure: "OCR · Closing every-frame text coverage",
+    phase1_complete: "OCR · Geometry complete",
+    phase1_reused: "OCR · Reusing geometry cache",
+    phase2_local_ocr: "OCR · Reading Chinese text",
+    phase2_decisions_applied: "OCR · Applying review decisions",
+    phase2_reused: "OCR · Reusing text cache",
+    phase2_persist: "OCR · Saving temporal tracks",
+    auto_ocr_decisions: "OCR · Validating local decisions",
+    synthesize_segment: "Voice · Generating clips",
+    synthesize_narration_block: "Voice · Generating whole-video narration",
+    evaluate_timing_fit: "Voice · Checking timing",
+    assemble_narration: "Voice · Assembling narration",
+    translate_segments: "Translation · Building Vietnamese draft",
+    translate_block: "Translation · Translating context block",
+    build_context_blocks: "Translation · Building dialogue context",
+    validate_candidates: "Translation · Ranking Vietnamese candidates",
+    persist_translation_v3: "Translation · Saving V3 draft",
+    translation_cache_hit: "Translation · Reusing verified draft",
+    render_preview: "Render · Building preview",
+    render_final: "Render · Encoding final video"
+  };
+  const base = labels[phase]
+    ?? (phase.startsWith("translate_block_")
+      ? "Translation · Translating context block"
+      : phase.split("_").join(" "));
+  const current = item.job_phase_current;
+  const total = item.job_phase_total;
+  if (typeof current === "number" && typeof total === "number" && total > 0) {
+    if (phase === "transfer_primary") {
+      const formatMb = (value: number) => `${(Math.max(0, value) / 1_048_576).toFixed(1)} MB`;
+      return `${base} (${formatMb(current)}/${formatMb(total)})`;
+    }
+    return `${base} (${Math.max(0, current)}/${total})`;
+  }
+  return base;
 }
 
 /** Any worker job the queue is waiting on — drives the worklist label and auto-refresh. */
@@ -653,6 +730,9 @@ export function isDialogueUncertain(item: ReupQueueItem): boolean {
 
 export function dialogueUncertainHint(item: ReupQueueItem): string | null {
   if (!isDialogueUncertain(item)) return null;
+  if (typeof item.transcript_count === "number" && item.transcript_count > 0) {
+    return "Speech detected but transcript confidence is low — open Transcript and review uncertain lines";
+  }
   return "Speech detected but no transcript — review the clip, then re-run analyze or mark no dialogue";
 }
 
@@ -686,7 +766,10 @@ export function transcriptStageDisabledTitle(item: ReupQueueItem): string {
 /** Worklist deep-link to Checkpoint #1 only when analyze produced spoken beats. */
 export function worklistTranscriptHref(item: ReupQueueItem): string | null {
   if (!item.source_video_id || !isAudioAnalysisCompleted(item)) return null;
-  if (isNoDialogueAnalyzeResult(item) || isDialogueUncertain(item)) return null;
+  if (isNoDialogueAnalyzeResult(item)) return null;
+  if (isDialogueUncertain(item) && !(typeof item.transcript_count === "number" && item.transcript_count > 0)) {
+    return null;
+  }
   return `/production/transcript-editor/${item.source_video_id}`;
 }
 
@@ -704,6 +787,8 @@ export type QueueTileFailureAlert = {
 };
 
 export function queueTileFailureAlert(item: ReupQueueItem): QueueTileFailureAlert | null {
+  const pipelineStall = queuePipelineStallAlert(item);
+  if (pipelineStall) return pipelineStall;
   if (isMissingSourceAssetAnalyzeFailure(item)) {
     return {
       message: "Raw video missing",
@@ -717,6 +802,14 @@ export function queueTileFailureAlert(item: ReupQueueItem): QueueTileFailureAler
       || "Open Details for context, then Retry analyze.";
     return { message: "Analyze failed", detail };
   }
+  if (isAutoPipelineNeedsAttention(item)) {
+    const detail =
+      item.last_error_message?.trim()
+      || item.blocked_reason?.trim()
+      || item.last_action_note?.trim()
+      || "Open Details to review the stage that stopped automatic processing.";
+    return { message: "Auto pipeline needs attention", detail };
+  }
   const downloadError = downloadJobErrorLine(item);
   if (downloadError) {
     return {
@@ -725,6 +818,32 @@ export function queueTileFailureAlert(item: ReupQueueItem): QueueTileFailureAler
     };
   }
   return null;
+}
+
+/** Detect persisted progress that is ahead of the stage pointer instead of failing silently. */
+export function queuePipelineStallAlert(item: ReupQueueItem): QueueTileFailureAlert | null {
+  if (!isAutoPipeline(item)) return null;
+  const currentStep = getPipelineStep(item);
+  const lastCompleted = metadataString(item.metadata_json, "pipeline_last_completed_step");
+  if (!currentStep || !lastCompleted) return null;
+  const currentRank = CORE_PIPELINE_STAGE_RANK[currentStep];
+  const completedRank = CORE_PIPELINE_STAGE_RANK[lastCompleted];
+  if (typeof currentRank !== "number" || typeof completedRank !== "number") return null;
+  if (completedRank <= currentRank) return null;
+  const jobStatus = (item.job_status ?? "").toUpperCase();
+  if (!["COMPLETED", "FAILED", "CANCELLED"].includes(jobStatus)) return null;
+  const labels: Record<string, string> = {
+    download: "Download",
+    analyze_audio: "Analyze Audio",
+    translate: "Build Translation Draft",
+    tts: "Synthesize TTS",
+    ocr: "Analyze OCR",
+    render: "Render Final"
+  };
+  return {
+    message: "Auto pipeline stalled",
+    detail: `${labels[lastCompleted] ?? lastCompleted} completed but the pipeline still points to ${labels[currentStep] ?? currentStep}. Use Resume/Start auto after backend recovery, or open Details.`
+  };
 }
 
 /** Thumbnail bottom strip — skip when message duplicates the stage chip. */
@@ -899,6 +1018,8 @@ function downloadStageState(item: ReupQueueItem, failed: boolean): PipelineStage
 }
 
 function transcriptStageState(item: ReupQueueItem, failed: boolean): PipelineStageState {
+  const canonical = corePipelineStageState(item, 1, "ANALYZE_AUDIO");
+  if (canonical !== "pending") return canonical;
   if (isAnalyzeAudioFailed(item)) return "failed";
   if (failed && item.status === "WAITING_FOR_METADATA") return "failed";
   if (item.media_prep_status === "READY_FOR_EXPORT" || isPastProduction(item.status)) return "done";
@@ -907,16 +1028,70 @@ function transcriptStageState(item: ReupQueueItem, failed: boolean): PipelineSta
 }
 
 function renderStageState(item: ReupQueueItem, failed: boolean): PipelineStageState {
+  const canonical = corePipelineStageState(item, 6, "RENDER_FINAL");
+  if (canonical !== "pending") return canonical;
   if (item.render_output_id || item.status === "READY_TO_EXPORT" || isPastExport(item.status)) return "done";
   if (item.status === "PROCESSING" && item.media_prep_status === "READY_FOR_EXPORT") return "active";
-  if (failed && item.status === "PROCESSING") return "failed";
+  const jobType = (item.job_type ?? "").toUpperCase();
+  const jobStatus = (item.job_status ?? "").toUpperCase();
+  if (
+    failed
+    && (jobType === "RENDER_PREVIEW" || jobType === "RENDER_FINAL")
+    && (jobStatus === "FAILED" || jobStatus === "RETRYABLE")
+  ) return "failed";
+  return "pending";
+}
+
+function corePipelineStageState(
+  item: ReupQueueItem,
+  stageRank: number,
+  jobType: string
+): PipelineStageState {
+  if (item.render_output_id || item.status === "READY_TO_EXPORT" || isPastExport(item.status)) {
+    return "done";
+  }
+
+  const currentStep = metadataString(item.metadata_json, "pipeline_step");
+  const lastCompletedStep = metadataString(item.metadata_json, "pipeline_last_completed_step");
+  const currentRank = currentStep ? CORE_PIPELINE_STAGE_RANK[currentStep] : undefined;
+  const lastCompletedRank = lastCompletedStep ? CORE_PIPELINE_STAGE_RANK[lastCompletedStep] : undefined;
+  const normalizedJobType = (item.job_type ?? "").toUpperCase();
+  const normalizedJobStatus = (item.job_status ?? "").toUpperCase();
+  const jobFailed = normalizedJobStatus === "FAILED" || normalizedJobStatus === "RETRYABLE";
+
+  if (typeof lastCompletedRank === "number" && lastCompletedRank >= stageRank) return "done";
+  if (currentStep === "ready_final" || (typeof currentRank === "number" && currentRank > stageRank)) return "done";
+  if (normalizedJobType === jobType && jobFailed) return "failed";
+  if (currentStep === "needs_attention" && normalizedJobType === jobType) return "failed";
+  if (normalizedJobType === jobType && isActiveAnalyzeJobStatus(normalizedJobStatus)) return "active";
+  if (typeof currentRank === "number" && currentRank === stageRank) return "active";
+
+  const jobRank: Record<string, number> = {
+    DOWNLOAD_VIDEO: 0,
+    ANALYZE_AUDIO: 1,
+    BUILD_TRANSLATION_DRAFT: 2,
+    SYNTHESIZE_TTS: 3,
+    ANALYZE_OCR: 4,
+    RENDER_PREVIEW: 5,
+    RENDER_FINAL: 6
+  };
+  const linkedRank = jobRank[normalizedJobType];
+  if (normalizedJobStatus === "COMPLETED" && typeof linkedRank === "number" && linkedRank >= stageRank) {
+    return "done";
+  }
   return "pending";
 }
 
 function exportStageState(item: ReupQueueItem, exportPackageId: string | null, failed: boolean): PipelineStageState {
+  const errorBlob = [
+    item.last_error_code,
+    item.job_error_code
+  ].filter((value): value is string => typeof value === "string").join(" ").toUpperCase();
+  // A production/OCR/TTS failure must not make an export that never existed
+  // look failed. Export owns failure only after its own boundary was attempted.
+  if (failed && Boolean(exportPackageId) && errorBlob.includes("EXPORT")) return "failed";
   if (exportPackageId || item.status === "EXPORT_PACKAGE_CREATED" || isPastHandoff(item.status)) return "done";
   if (item.status === "READY_TO_EXPORT") return "active";
-  if (failed && item.status === "READY_TO_EXPORT") return "failed";
   return "pending";
 }
 
@@ -1265,6 +1440,10 @@ export function primaryQueueAction(item: ReupQueueItem): ReupQueueAction | ReupQ
   if (item.available_actions.some((entry) => entry.action === "START_PROCESSING")) return "START_PROCESSING";
   if (item.status === "READY_TO_EXPORT" && item.media_prep_status === "READY_FOR_EXPORT") return "CREATE_EXPORT_PACKAGE";
   if (item.status === "READY_TO_PUBLISH") return "CREATE_PUBLISH_HANDOFF";
+  if (
+    isAutoPipelineNeedsAttention(item)
+    && item.available_actions.some((entry) => entry.action === "RESUME")
+  ) return "RESUME";
   if (item.available_actions.some((entry) => entry.action === "RETRY")) return "RETRY";
   if (item.status === "FAILED_NEEDS_ATTENTION") return "inspect";
   // Resume when paused OR idle download restart (API offers RESUME without Pause first).
@@ -1340,8 +1519,10 @@ export type ReupPipelineStep =
   | "download"
   | "analyze_audio"
   | "translate"
+  | "translation_review"
   | "tts"
   | "ocr"
+  | "quality_review"
   | "render"
   | "ready_final"
   | "needs_attention";
@@ -1467,7 +1648,14 @@ export function primaryQueueActionLabel(item: ReupQueueItem): string {
       : "Retry";
   }
   if (action === "HOLD") return "Pause";
-  if (action === "RESUME") return isProgressPaused(item) ? "Resume" : "Restart download";
+  if (action === "RESUME") {
+    if (isAutoPipelineNeedsAttention(item)) {
+      return item.last_error_code === "DIALOGUE_DETECTION_UNCERTAIN" && isDialogueUncertain(item)
+        ? "Retry Analyze Audio"
+        : "Resume auto";
+    }
+    return isProgressPaused(item) ? "Resume" : "Restart download";
+  }
   if (action === "DISMISS") return "Dismiss";
   return action ? actionLabel(action) : "Details";
 }

@@ -48,3 +48,41 @@ def test_operator_approved_machine_translation_can_enter_tts() -> None:
 
     assert len(segments) == 1
     assert segments[0].translated_text == row.text
+
+
+def test_v3_ranked_candidates_are_available_for_selective_tts_correction() -> None:
+    row = _translation(TranscriptSegmentStatus.APPROVED)
+    row.quality_flags_json = {"flags": []}
+    row.metadata_json = {
+        "translation_v3": {
+            "candidate_evaluations": [
+                {"text": row.text, "hard_valid": True, "tts_eligible": True},
+                {
+                    "text": "Bản ngắn hơn để vừa nhịp",
+                    "hard_valid": True,
+                    "tts_eligible": True,
+                },
+                {"text": "残留中文", "hard_valid": False, "tts_eligible": False},
+            ]
+        }
+    }
+    db = MagicMock()
+    db.scalars.return_value = [row]
+
+    segments = TranslationInputResolver(db).resolve(row.source_video_id)
+
+    assert "Bản ngắn hơn để vừa nhịp" in segments[0].candidate_texts
+    assert "残留中文" not in segments[0].candidate_texts
+
+
+def test_tts_rebinds_stale_translation_budget_to_current_transcript_slot() -> None:
+    row = _translation(TranscriptSegmentStatus.APPROVED)
+    row.duration_budget_ms = 9_000
+    row.quality_flags_json = {"flags": []}
+    db = MagicMock()
+    db.scalars.return_value = [row]
+
+    segment = TranslationInputResolver(db).resolve(row.source_video_id)[0]
+
+    assert segment.duration_budget_ms == 4_000
+    assert "duration_budget_rebound_to_current_timeline" in segment.quality_flags

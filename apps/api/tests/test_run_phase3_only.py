@@ -160,6 +160,170 @@ class RunPhase3OnlyTests(unittest.TestCase):
                 "Cho cà chua vào",
             )
 
+    def test_rebinds_shifted_content_id_through_exact_translation_fossil(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            handoff = {
+                "status": "READY_FOR_PHASE3",
+                "translate_items": [
+                    {
+                        "content_id": "ocr_content_018",
+                        "geometry_refs": ["sub_shifted"],
+                        "roles": ["hardsub"],
+                        "zh_approved": "target approved text",
+                        "translation_input": "target approved text",
+                        "protected_values": [],
+                        "unit_tokens": [],
+                    }
+                ],
+            }
+            remediation = {
+                "status": "OCR_RESIDUAL_REMEDIATION_APPROVED",
+                "translation_carry_forward": {
+                    "rows": [
+                        {
+                            "content_id": "ocr_content_018",
+                            "zh_approved": "previous content at this projection id",
+                            "vi_text_candidate": "Previous translation",
+                            "vi_text_approved": "Previous translation",
+                        },
+                        {
+                            "content_id": "ocr_content_011",
+                            "zh_approved": "target approved text",
+                            "vi_text_candidate": "Stable translation",
+                            "vi_text_approved": "Stable translation",
+                        },
+                    ]
+                },
+                "approved_occurrences": [],
+                "approved_geometry_overrides": [],
+            }
+            remediation["remediation_sha256"] = run_phase3_only._sha256_json(
+                remediation
+            )
+            (root / "phase2_residual_remediation.json").write_text(
+                json.dumps(remediation), encoding="utf-8"
+            )
+
+            fossils = run_phase3_only._load_remediation_review_fossils(
+                root,
+                handoff=handoff,
+                phase2_handoff_sha256="a" * 64,
+            )
+
+            self.assertEqual(
+                fossils["ocr_content_018"]["vi_text_candidate"],
+                "Stable translation",
+            )
+
+    def test_uses_additive_fossil_when_new_object_reuses_old_projection_id(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            handoff = {
+                "status": "READY_FOR_PHASE3",
+                "translate_items": [
+                    {
+                        "content_id": "ocr_content_084",
+                        "geometry_refs": ["residual_01"],
+                        "roles": ["ui"],
+                        "zh_approved": "new residual text",
+                        "translation_input": "new residual text",
+                        "protected_values": [],
+                        "unit_tokens": [],
+                    }
+                ],
+            }
+            remediation = {
+                "status": "OCR_RESIDUAL_REMEDIATION_APPROVED",
+                "translation_carry_forward": {
+                    "rows": [
+                        {
+                            "content_id": "ocr_content_084",
+                            "zh_approved": "old text at projection id",
+                            "vi_text_candidate": "Old translation",
+                            "vi_text_approved": "Old translation",
+                        }
+                    ]
+                },
+                "approved_occurrences": [
+                    {
+                        "ocr_text_approved": "new residual text",
+                        "vi_text_approved": "New translation",
+                        "localization": {"mode": "translation_review_required"},
+                    }
+                ],
+                "approved_geometry_overrides": [],
+            }
+            remediation["remediation_sha256"] = run_phase3_only._sha256_json(
+                remediation
+            )
+            (root / "phase2_residual_remediation.json").write_text(
+                json.dumps(remediation), encoding="utf-8"
+            )
+
+            fossils = run_phase3_only._load_remediation_review_fossils(
+                root,
+                handoff=handoff,
+                phase2_handoff_sha256="a" * 64,
+            )
+
+            self.assertEqual(
+                fossils["ocr_content_084"]["vi_text_candidate"],
+                "New translation",
+            )
+
+    def test_semantic_dialogue_authority_consumes_matching_additive_geometry(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            handoff = {
+                "status": "READY_FOR_PHASE3",
+                "translate_items": [],
+                "deterministic_items": [
+                    {
+                        "content_id": "ocr_content_dialogue",
+                        "geometry_refs": ["p2r_dialogue"],
+                        "zh_approved": "partial asr text",
+                        "render_text": "Bản dịch lời thoại đã duyệt",
+                        "semantic_hardsub": {
+                            "classification": "DIALOGUE_HARDSUB",
+                            "translation_ready": True,
+                            "vi_text_authority": "Bản dịch lời thoại đã duyệt",
+                            "translation_authority": {
+                                "translation_status": "APPROVED"
+                            },
+                        },
+                    }
+                ],
+            }
+            remediation = {
+                "status": "OCR_RESIDUAL_REMEDIATION_APPROVED",
+                "translation_carry_forward": {"rows": []},
+                "approved_occurrences": [
+                    {
+                        "occurrence": {"text_id": "p2r_dialogue"},
+                        "ocr_text_approved": "full OCR sentence",
+                        "vi_text_approved": "Visual suggestion",
+                        "localization": {
+                            "mode": "translation_review_required"
+                        },
+                    }
+                ],
+            }
+            remediation["remediation_sha256"] = run_phase3_only._sha256_json(
+                remediation
+            )
+            (root / "phase2_residual_remediation.json").write_text(
+                json.dumps(remediation), encoding="utf-8"
+            )
+
+            fossils = run_phase3_only._load_remediation_review_fossils(
+                root,
+                handoff=handoff,
+                phase2_handoff_sha256="a" * 64,
+            )
+
+            self.assertEqual(fossils, {})
+
     def test_lock_current_candidates_records_explicit_operator_approval(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)

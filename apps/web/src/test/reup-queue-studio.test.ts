@@ -66,13 +66,27 @@ import {
   worklistNoDialogueHint,
   isNoDialogueAnalyzeResult,
   buildQueueInspectorEngagementStats,
-  pipelineRecipeChipLabel
+  pipelineRecipeChipLabel,
+  pipelineSubphaseLabel
 } from "../lib/reupQueueStudioState";
 import type { ReupQueueItem } from "../types/reup-queue";
 
 const ready = makeItem("r1", "READY_FOR_PROCESSING");
 const media = makeItem("m1", "WAITING_FOR_MEDIA");
 const failed = makeItem("f1", "FAILED_NEEDS_ATTENTION");
+
+{
+  const wholeVideoTts = makeItem("tts-whole", "WAITING_FOR_METADATA");
+  wholeVideoTts.job_type = "SYNTHESIZE_TTS";
+  wholeVideoTts.job_status = "RUNNING";
+  wholeVideoTts.job_phase = "synthesize_narration_block";
+  wholeVideoTts.job_phase_current = 1;
+  wholeVideoTts.job_phase_total = 1;
+  assert.equal(
+    pipelineSubphaseLabel(wholeVideoTts),
+    "Voice · Generating whole-video narration (1/1)"
+  );
+}
 
 assert.equal(matchesReupQueueFilter(ready, "download"), true);
 assert.equal(matchesReupQueueFilter(media, "download"), true);
@@ -407,6 +421,41 @@ assert.equal(primaryQueueActionLabel(ready), "Start auto");
   );
 }
 {
+  const stalled = makeItem("auto-stalled", "WAITING_FOR_MEDIA");
+  stalled.job_id = "analyze-completed";
+  stalled.job_type = "ANALYZE_AUDIO";
+  stalled.job_status = "COMPLETED";
+  stalled.metadata_json = {
+    pipeline_mode: "auto_to_render",
+    pipeline_step: "download",
+    pipeline_last_completed_step: "analyze_audio"
+  };
+  assert.equal(queueTileFailureAlert(stalled)?.message, "Auto pipeline stalled");
+  assert.match(queueTileFailureAlert(stalled)?.detail ?? "", /Analyze Audio.*Download/i);
+  assert.equal(queueTileNextStepHint(stalled), null, "A stalled auto lane must show an alert, not a wait hint");
+}
+{
+  const needsAttention = makeItem("auto-dialogue-review", "FAILED_NEEDS_ATTENTION");
+  needsAttention.dialogue_phase = "dialogue_uncertain";
+  needsAttention.last_error_code = "DIALOGUE_DETECTION_UNCERTAIN";
+  needsAttention.last_error_message = "Review or re-run Analyze Audio before translation.";
+  needsAttention.metadata_json = {
+    pipeline_mode: "auto_to_render",
+    pipeline_step: "needs_attention",
+    pipeline_last_completed_step: "analyze_audio"
+  };
+  needsAttention.available_actions = [
+    { action: "RETRY", label: "Retry", description: "Retry", requires_note: false },
+    { action: "RESUME", label: "Resume", description: "Resume", requires_note: false }
+  ];
+  assert.equal(queueTileFailureAlert(needsAttention)?.message, "Auto pipeline needs attention");
+  assert.match(queueTileFailureAlert(needsAttention)?.detail ?? "", /Analyze Audio/i);
+  assert.equal(primaryQueueAction(needsAttention), "RESUME");
+  assert.equal(primaryQueueActionLabel(needsAttention), "Retry Analyze Audio");
+  needsAttention.dialogue_phase = "source_approved";
+  assert.equal(primaryQueueActionLabel(needsAttention), "Resume auto");
+}
+{
   // VAD measured speech but ASR produced nothing: never claim "No dialogue".
   const uncertain = makeItem("dlg-uncertain", "FAILED_NEEDS_ATTENTION");
   uncertain.job_type = "ANALYZE_AUDIO";
@@ -429,6 +478,14 @@ assert.equal(primaryQueueActionLabel(ready), "Start auto");
   stillWaiting.transcript_count = 0;
   assert.equal(worklistStageLabel(stillWaiting), "Check dialogue");
   assert.equal(worklistTranscriptHref(stillWaiting), null, "Empty transcript must not be opened as ready");
+
+  const uncertainWithRows = { ...uncertain, transcript_count: 7 };
+  assert.equal(
+    worklistTranscriptHref(uncertainWithRows),
+    `/production/transcript-editor/${uncertainWithRows.source_video_id}`,
+    "Uncertain detected dialogue must open Transcript when reviewable rows exist"
+  );
+  assert.match(dialogueUncertainHint(uncertainWithRows) ?? "", /open Transcript|review/i);
 }
 {
   // Auto pipeline continues past analyze: worklist must show the step that is running.
@@ -461,11 +518,14 @@ assert.equal(primaryQueueActionLabel(ready), "Start auto");
   ocr.job_type = "ANALYZE_OCR";
   ocr.job_status = "RUNNING";
   ocr.job_progress_percent = 67;
+  ocr.job_phase = "phase2_local_ocr";
+  ocr.job_phase_current = 8;
+  ocr.job_phase_total = 15;
   ocr.metadata_json = { pipeline_mode: "auto_to_render", pipeline_step: "ocr" };
-  assert.equal(worklistStageLabel(ocr), "Scanning OCR");
+  assert.equal(worklistStageLabel(ocr), "OCR · Reading Chinese text (8/15)");
   assert.equal(worklistStageTone(ocr), "active");
   assert.equal(hasActivePipelineJob(ocr), true, "Active OCR must keep the queue polling");
-  assert.match(queueTileNextStepHint(ocr) ?? "", /Scanning OCR.*67%/i);
+  assert.match(queueTileNextStepHint(ocr) ?? "", /Reading Chinese text.*67%/i);
 
   const rendering = makeItem("auto-render", "WAITING_FOR_METADATA");
   rendering.job_id = "923325ba-7a01-40da-a06b-9d53bfdc1dd4";
@@ -752,6 +812,43 @@ assert.equal(resolveInitialReupQueueFilter(buildReupQueueSummary([makeItem("h1",
 
 const pipeline = buildPipelineStages(ready);
 assert.equal(pipeline.find((stage) => stage.key === "download")?.state, "pending");
+assert.deepEqual(
+  pipeline.slice(0, 7).map((stage) => stage.label),
+  [
+    "Download",
+    "Analyze Audio",
+    "Build Translation Draft",
+    "Synthesize TTS",
+    "Analyze OCR",
+    "Render Preview",
+    "Render Final"
+  ],
+  "Queue stepper must expose all seven canonical production stages in order"
+);
+
+{
+  const ocrGateBlocked = makeItem("ocr-blocked", "FAILED_NEEDS_ATTENTION");
+  ocrGateBlocked.media_ready_at = "2026-08-09T05:07:17Z";
+  ocrGateBlocked.job_type = "ANALYZE_OCR";
+  ocrGateBlocked.job_status = "COMPLETED";
+  ocrGateBlocked.last_error_code = "AUTO_OCR_DECISION_BLOCKED";
+  ocrGateBlocked.metadata_json = { pipeline_mode: "auto_to_render", pipeline_step: "needs_attention" };
+  const blockedStages = buildPipelineStages(ocrGateBlocked);
+  assert.equal(blockedStages.find((stage) => stage.key === "render")?.state, "pending");
+  assert.equal(
+    blockedStages.find((stage) => stage.key === "export")?.state,
+    "pending",
+    "OCR gate failure must not label a never-created export as failed"
+  );
+
+  const renderFailed = makeItem("render-failed", "FAILED_NEEDS_ATTENTION");
+  renderFailed.media_ready_at = "2026-08-09T05:07:17Z";
+  renderFailed.job_type = "RENDER_FINAL";
+  renderFailed.job_status = "FAILED";
+  const renderStages = buildPipelineStages(renderFailed);
+  assert.equal(renderStages.find((stage) => stage.key === "render")?.state, "failed");
+  assert.equal(renderStages.find((stage) => stage.key === "export")?.state, "pending");
+}
 
 {
   const needsStartWithMedia = makeItem("ns-media", "READY_FOR_PROCESSING");

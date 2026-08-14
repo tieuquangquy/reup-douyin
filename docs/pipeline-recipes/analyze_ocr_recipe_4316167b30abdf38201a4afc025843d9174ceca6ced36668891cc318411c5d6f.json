@@ -1,0 +1,94 @@
+{
+  "schema_version": "analyze_ocr_recipe_lock_v1",
+  "status": "LOCKED_AS_OFFICIAL_DEFAULT",
+  "locked_at": "2026-08-07T15:39:11.508063+00:00",
+  "operator_id": "frontend_operator_policy_promotion",
+  "release_label": "OCR-V25",
+  "phase1": {
+    "analysis_engine": "audio_visual_temporal_v1",
+    "analysis_policy_version": "audio_visual_temporal_policy_v7_source_modal",
+    "decode_backend": "ffmpeg_two_pass_selected_rawvideo",
+    "detector_budget_policy": "time_based_capped",
+    "source_geometry_required": true,
+    "authority_artifact": "master_timeline.json",
+    "authority_v3_6_full_duration": false,
+    "provenance_fail_closed": true,
+    "protected_classes": [
+      "SOURCE_INTRINSIC",
+      "SOURCE_INTRINSIC_PANEL",
+      "PLATFORM_UI"
+    ]
+  },
+  "phase2": {
+    "provider": "local",
+    "network_calls_allowed": 0,
+    "geometry_authority": "phase1_meta_source_raster",
+    "output_artifact": "phase2_ocr_timeline.json",
+    "overwrite_master_timeline": false,
+    "approval_policy": "exact_operator_review"
+  },
+  "frontend_contract": {
+    "button": "Advanced -> Re-analyze OCR",
+    "durable_job_type": "ANALYZE_OCR",
+    "required_analysis_engine": "audio_visual_temporal_v1",
+    "worker_execution": true,
+    "inline_http_processing": false
+  },
+  "evidence": {
+    "promotion_basis": "OPERATOR_ACCEPTED_SINGLE_FRONTEND_VALIDATION",
+    "source_video_id": "3b6599c2-9beb-4fe3-8370-4c6329da429d",
+    "job_id": "47b85826-aa7f-4f16-afc6-83cfe0260cd6",
+    "artifacts": {
+      "phase1_meta": {
+        "path": "data/storage/quality-localization/00f25893-c1c2-4f13-abdd-79e809ae5fc9/3b6599c2-9beb-4fe3-8370-4c6329da429d/47b85826-aa7f-4f16-afc6-83cfe0260cd6/phase1_meta.json",
+        "file_sha256": "e948d2da6496258d51daca88aac1fd484ac05d3b2ed7d4e19549f56dba87818b"
+      },
+      "master_timeline": {
+        "path": "data/storage/quality-localization/00f25893-c1c2-4f13-abdd-79e809ae5fc9/3b6599c2-9beb-4fe3-8370-4c6329da429d/47b85826-aa7f-4f16-afc6-83cfe0260cd6/master_timeline.json",
+        "file_sha256": "b6a7c6478cded649845f4b27c603b6ed5911b68677c8736e58bda9b2ccf7febe"
+      },
+      "phase1_provenance": {
+        "path": "data/storage/quality-localization/00f25893-c1c2-4f13-abdd-79e809ae5fc9/3b6599c2-9beb-4fe3-8370-4c6329da429d/47b85826-aa7f-4f16-afc6-83cfe0260cd6/phase1_provenance_v3.json",
+        "file_sha256": "9a70c4268c073302ead7d0a2fa7be9b2a49417902fa2d0897e1019fa61bbe5bf"
+      },
+      "phase2_timeline": {
+        "path": "data/storage/quality-localization/00f25893-c1c2-4f13-abdd-79e809ae5fc9/3b6599c2-9beb-4fe3-8370-4c6329da429d/47b85826-aa7f-4f16-afc6-83cfe0260cd6/phase2_ocr_timeline.json",
+        "file_sha256": "28b46e78eda570dcb7a514c979558f5132db18ed9fa43061093b255a39634203"
+      },
+      "phase2_payload": {
+        "path": "data/storage/quality-localization/00f25893-c1c2-4f13-abdd-79e809ae5fc9/3b6599c2-9beb-4fe3-8370-4c6329da429d/47b85826-aa7f-4f16-afc6-83cfe0260cd6/phase2_ocr_payload_preview.json",
+        "file_sha256": "f2232d49ee75b1681e5bdf71aacb577ad2b9e9ace5657644b488d8cf8b1aec10"
+      }
+    },
+    "metrics": {
+      "elapsed_s": 59.835,
+      "frame_count": 2483,
+      "detector_frames": 144,
+      "detector_frame_ratio": 0.057994,
+      "network_calls": 0,
+      "source_frame_size": [
+        2160,
+        3840
+      ],
+      "analysis_frame_size": [
+        720,
+        1280
+      ],
+      "protected_source_tracks": 15,
+      "review_objects": 5
+    },
+    "operator_decision": {
+      "batch_regression": "SKIPPED_BY_OPERATOR",
+      "accepted_as_official_default": true
+    }
+  },
+  "claims": {
+    "official_frontend_default": true,
+    "network_calls_allowed": 0,
+    "local_only_ocr": true,
+    "source_editor_provenance_enabled": true,
+    "universal_video_support": false,
+    "batch_regression_completed": false
+  },
+  "recipe_sha256": "4316167b30abdf38201a4afc025843d9174ceca6ced36668891cc318411c5d6f"
+}

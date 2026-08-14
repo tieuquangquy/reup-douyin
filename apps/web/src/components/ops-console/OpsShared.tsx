@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { StatusBadge } from "../app-shell/StatusBadge";
+import { PageLoadError } from "../shared/PageLoadError";
 
 export type OpsTone = "good" | "warn" | "danger" | "muted";
 export type OpsActionTone = "primary" | "secondary" | "danger" | "link";
@@ -90,35 +91,24 @@ export function OpsPanel({
 }
 
 export function OpsState({ title, detail, retry }: { title: string; detail: string; retry?: () => void }) {
-  const isLoading = !retry;
+  if (retry) {
+    return <PageLoadError detail={detail} onRetry={retry} title={title} />;
+  }
+
   return (
     <main className="ops-page">
-      <div className={`state-panel${isLoading ? " is-loading" : ""}`} role={isLoading ? "status" : undefined} aria-live={isLoading ? "polite" : undefined}>
-        {isLoading ? (
-          <>
-            <div className="state-panel__boot" aria-hidden="true">
-              <span className="state-panel__spinner" />
-              <div className="state-panel__skeleton">
-                <i />
-                <i />
-                <i />
-                <i />
-              </div>
-            </div>
-            <h1 className="state-panel__title">{title}</h1>
-            <p>{detail}</p>
-          </>
-        ) : (
-          <>
-            <h1>{title}</h1>
-            <p>{detail}</p>
-            {retry ? (
-              <button type="button" onClick={retry}>
-                Retry
-              </button>
-            ) : null}
-          </>
-        )}
+      <div aria-live="polite" className="state-panel is-loading" role="status">
+        <div className="state-panel__boot" aria-hidden="true">
+          <span className="state-panel__spinner" />
+          <div className="state-panel__skeleton">
+            <i />
+            <i />
+            <i />
+            <i />
+          </div>
+        </div>
+        <h1 className="state-panel__title">{title}</h1>
+        <p>{detail}</p>
       </div>
     </main>
   );

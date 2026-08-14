@@ -1726,6 +1726,17 @@ class CaptureInboxService:
         }
         CandidateEvaluationService(self.db).reactivate_for_review_board(candidate)
         CandidateEvaluationService(self.db).hydrateReviewCandidateFromCaptureItem(candidate, persist=True)
+        # Hydration records its generic self-heal provenance. This call is an
+        # explicit duplicate-promotion upsert, so preserve that more specific
+        # terminal authority after all shared hydration fields are applied.
+        candidate.metadata_json = {
+            **(candidate.metadata_json or {}),
+            "review_board_upsert_source": "capture_inbox_duplicate_promote",
+        }
+        source_video.metadata_json = {
+            **(source_video.metadata_json or {}),
+            "review_board_upsert_source": "capture_inbox_duplicate_promote",
+        }
         self.db.flush()
 
     def _existing_candidate_for_capture_item(self, item: CapturedItem) -> VideoCandidate | None:
@@ -1779,24 +1790,38 @@ class CaptureInboxService:
         item.promoted_video_candidate_id = candidate.id if candidate else None
         item.promoted_crawl_session_id = crawl_session_id or item.promoted_crawl_session_id
         item.status = CapturedItemStatus.PROMOTED
-        snapshot = buildCaptureInboxSourceMetadataSnapshot(item, session=item.capture_session, snapshot_source="capture_inbox_promote")
+        upsert_source = (
+            "capture_inbox_duplicate_promote"
+            if duplicate_detected
+            else "capture_inbox_promote"
+        )
+        snapshot = buildCaptureInboxSourceMetadataSnapshot(
+            item,
+            session=item.capture_session,
+            snapshot_source=upsert_source,
+        )
         if candidate is not None:
             CandidateEvaluationService(self.db).reactivate_for_review_board(candidate)
-            comparison = buildCaptureToReviewComparison(capture_snapshot=snapshot, review_metadata=snapshot, candidate_id=candidate.id, matched_by="promote")
+            comparison = buildCaptureToReviewComparison(
+                capture_snapshot=snapshot,
+                review_metadata=snapshot,
+                candidate_id=candidate.id,
+                matched_by="duplicate_promote" if duplicate_detected else "promote",
+            )
             candidate.metadata_json = {
                 **(candidate.metadata_json or {}),
                 **snapshot,
                 "source_metadata": snapshot,
                 "capture_to_review_comparison": comparison,
                 "review_board_upserted_at": datetime.now(UTC).isoformat(),
-                "review_board_upsert_source": "capture_inbox_promote",
+                "review_board_upsert_source": upsert_source,
             }
             source_video.metadata_json = {
                 **(source_video.metadata_json or {}),
                 **snapshot,
                 "source_metadata": snapshot,
                 "capture_to_review_comparison": comparison,
-                "review_board_upsert_source": "capture_inbox_promote",
+                "review_board_upsert_source": upsert_source,
             }
         item.metadata_json = {
             **(item.metadata_json or {}),
@@ -2065,7 +2090,11 @@ def mapCaptureInboxItemToReviewCandidateMetadata(item: CapturedItem, *, session:
         "share_count_text": _first_present(metadata.get("share_count_text"), raw.get("share_count_text")),
         "favorite_count": _first_present(metadata.get("favorite_count"), raw.get("favorite_count"), stats.get("favorite_count"), stats.get("collect_count")),
         "favorite_count_text": _first_present(metadata.get("favorite_count_text"), raw.get("favorite_count_text")),
-        "follower_count": _resolve_follower_count_for_capture_item(metadata=metadata, raw=raw, session_metadata=(session.metadata_json if session is not None else None)),
+        "follower_count": _resolve_follower_count_for_capture_item(
+            metadata=metadata,
+            raw=raw,
+            session_metadata=getattr(session, "metadata_json", None),
+        ),
         "follower_count_text": _first_present(metadata.get("follower_count_text"), raw.get("follower_count_text")),
         "engagement_score": reup_score.get("engagement_score"),
         "engagement_rate": reup_score.get("engagement_rate"),

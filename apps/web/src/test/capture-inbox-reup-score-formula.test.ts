@@ -74,7 +74,18 @@ function baseItem(overrides: Partial<CapturedItem> = {}): CapturedItem {
     has_views: true,
     has_all_core_metadata: true,
     missing_metadata_fields: [],
-    ...overrides
+    ...overrides,
+    intake_missing_requirements_json: overrides.intake_missing_requirements_json ?? null,
+    intake_filter_version: overrides.intake_filter_version ?? null,
+    intake_preset_name: overrides.intake_preset_name ?? null,
+    last_intake_evaluated_at: overrides.last_intake_evaluated_at ?? null,
+    intake_evaluation_error: overrides.intake_evaluation_error ?? null,
+    excluded_reason: overrides.excluded_reason ?? null,
+    error_code: overrides.error_code ?? null,
+    error_message: overrides.error_message ?? null,
+    raw_payload_json: overrides.raw_payload_json ?? {},
+    created_at: overrides.created_at ?? "2026-04-28T00:00:00.000Z",
+    updated_at: overrides.updated_at ?? "2026-04-28T00:00:00.000Z"
   };
 }
 

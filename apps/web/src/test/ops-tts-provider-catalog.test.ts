@@ -1,8 +1,13 @@
 import assert from "node:assert/strict";
 import {
+  canonicalizeGeminiVoiceId,
   defaultProviderForKind,
+  filterTtsCatalogLanguages,
+  filterTtsCatalogModels,
+  filterTtsCatalogVoices,
   getLocalInstallRecipe,
   getTtsFieldCapabilities,
+  GEMINI_TTS_VOICES,
   isPresetLocalProvider,
   looksLikeEdgeVoiceId,
   OMNIVOICE_CURATED_MODELS,
@@ -12,8 +17,11 @@ import {
   resolveTtsCatalogForProvider,
   resolveTtsProviderKind,
   showsTtsBaseUrl,
+  ttsCatalogLanguageOptions,
+  ttsCatalogModelOptions,
   TTS_PROVIDERS_BY_KIND
 } from "../lib/opsTtsProviderCatalog";
+import type { TtsAiCatalog } from "../lib/api";
 
 assert.deepEqual([...TTS_PROVIDERS_BY_KIND.local], ["edge", "vieneu", "omnivoice", "cli", "custom"]);
 assert.equal(defaultProviderForKind("cloud"), "google");
@@ -64,6 +72,15 @@ assert.ok((omniFallbackCatalog?.voices.length ?? 0) >= 10);
 assert.deepEqual(omniFallbackCatalog?.models, ["k2-fsa/OmniVoice"]);
 assert.equal(omniFallbackCatalog?.default_voice_id, "auto");
 
+const geminiCatalog = resolveTtsCatalogForProvider("google_gemini", null);
+assert.ok(geminiCatalog, "Gemini must hydrate its provider-native voice catalog without a remote list endpoint");
+assert.equal(geminiCatalog?.default_voice_id, "Kore");
+assert.ok(GEMINI_TTS_VOICES.length >= 30);
+assert.ok(geminiCatalog?.voices.some((voice) => voice.id === "Aoede"));
+assert.ok(geminiCatalog?.voices.every((voice) => !voice.id.includes("Chirp3-HD")));
+assert.equal(canonicalizeGeminiVoiceId("vi-VN-Chirp3-HD-Aoede"), "Aoede");
+assert.equal(canonicalizeGeminiVoiceId("not-a-gemini-voice"), "");
+
 const staleOmniCatalog = resolveTtsCatalogForProvider("omnivoice", {
   source: "sdk",
   voices: [],
@@ -110,5 +127,65 @@ assert.equal(
 const overridden = getTtsFieldCapabilities("edge", "auto", { model: true });
 assert.equal(overridden.model, true);
 assert.equal(overridden.voice, true);
+
+const remoteCatalog = {
+  source: "provider_api",
+  voices: [
+    { id: "vi-female", label: "Vietnamese female", languages: ["vi"], models: ["tts-pro"] },
+    { id: "en-male", label: "English male", languages: ["en-US"], models: ["tts-lite"] }
+  ],
+  styles: [],
+  // Legacy model ids remain usable beside richer metadata.
+  models: ["legacy-model"],
+  model_options: [
+    { id: "tts-pro", label: "TTS Pro", languages: ["vi", "en-US"], voices: ["vi-female"] },
+    { id: "tts-lite", label: "TTS Lite", languages: ["en-US"], voices: ["en-male"] }
+  ],
+  languages: [{ code: "vi", label: "Vietnamese" }],
+  default_voice_id: "vi-female",
+  default_model_id: "tts-pro",
+  default_language_code: "vi",
+  discovery: { status: "partial", endpoints: ["/models"], warnings: ["Voice endpoint unavailable"] },
+  warning: ""
+} satisfies TtsAiCatalog;
+
+assert.deepEqual(
+  ttsCatalogModelOptions(remoteCatalog).map((model) => model.id),
+  ["tts-pro", "tts-lite", "legacy-model"],
+  "Rich model options must merge with legacy string ids"
+);
+assert.deepEqual(
+  ttsCatalogLanguageOptions(remoteCatalog).map((language) => language.code),
+  ["vi", "en-US"],
+  "Partial catalogs must infer missing language choices from model/voice metadata"
+);
+assert.deepEqual(
+  filterTtsCatalogModels(remoteCatalog, { languageCode: "vi-VN", voiceId: "vi-female" }).map(
+    (model) => model.id
+  ),
+  ["tts-pro"],
+  "Model choices must respect language and voice compatibility metadata"
+);
+assert.deepEqual(
+  filterTtsCatalogVoices(remoteCatalog, { languageCode: "en-US", modelId: "tts-lite" }).map(
+    (voice) => voice.id
+  ),
+  ["en-male"],
+  "Voice choices must respect selected model and language"
+);
+assert.deepEqual(
+  filterTtsCatalogModels(remoteCatalog, { languageCode: "vi", voiceId: "vendor-manual-voice" }).map(
+    (model) => model.id
+  ),
+  ["tts-pro", "legacy-model"],
+  "An unknown manual voice id must not incorrectly eliminate otherwise compatible model choices"
+);
+assert.deepEqual(
+  filterTtsCatalogLanguages(remoteCatalog, { modelId: "tts-pro", voiceId: "vi-female" }).map(
+    (language) => language.code
+  ),
+  ["vi"],
+  "Language choices must be the intersection of selected model and voice metadata"
+);
 
 console.log("ops-tts-provider-catalog tests passed");

@@ -30,6 +30,7 @@ TTS_JOB_ID_KEY = "tts_job_id"
 OCR_JOB_ID_KEY = "ocr_job_id"
 RENDER_JOB_ID_KEY = "render_job_id"
 ANALYZE_AUDIO_JOB_ID_KEY = "analyze_audio_job_id"
+DOWNLOAD_JOB_ID_KEY = "download_job_id"
 # Automated verdict written by the post-render QA gate; Output Review reads it for badges.
 RENDER_QA_KEY = "render_qa"
 QUALITY_WORKFLOW_STAGE_KEY = "quality_workflow_stage"

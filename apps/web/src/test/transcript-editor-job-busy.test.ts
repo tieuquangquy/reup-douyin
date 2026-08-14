@@ -45,6 +45,11 @@ assert.match(pageSource, /tone=\"cancelled\"|cancelledMessage/, "Page must show 
 assert.match(pageSource, /TRANSCRIPT_CANCELLED_NOTICE_AUTO_DISMISS_MS|autoDismissMs/, "Cancelled notice must auto-dismiss");
 assert.match(pageSource, /setCancelledMessage\(null\)/, "Cancelled notice must clear on dismiss");
 assert.match(noticeSource, /transcript-inline-notice__dismiss/, "Notice must expose dismiss button");
+assert.doesNotMatch(
+  noticeSource,
+  /<p className="transcript-inline-notice__message">/,
+  "Notice message wrapper must allow interactive review content without invalid div-inside-p HTML"
+);
 assert.match(noticeSource, /autoDismissMs/, "Notice component must support auto-dismiss timer");
 assert.match(noticeSource, /TRANSCRIPT_SUCCESS_NOTICE_AUTO_DISMISS_MS/, "Notice must export success auto-dismiss constant");
 assert.match(cssSource, /transcript-job-strip/, "Job banner must sit in separated strip from header");

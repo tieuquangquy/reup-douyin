@@ -73,6 +73,10 @@ class Phase2OperatorReviewTests(unittest.TestCase):
                 (root / "phase2_approvals.json").read_text(encoding="utf-8")
             )
             self.assertEqual(approvals["approvals"][1]["ocr_text_approved"], "wrong")
+            self.assertEqual(
+                approvals["approvals"][0]["review_evidence"]["ocr_text_candidate"],
+                "exact",
+            )
             self.assertTrue((root / "phase2_operator_review_audit.json").is_file())
 
     def test_partial_review_preserves_only_fresh_existing_approvals(self) -> None:

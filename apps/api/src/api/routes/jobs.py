@@ -20,6 +20,11 @@ def create_job(
     request: JobCreateRequest,
     service: JobService = Depends(get_job_service),
 ) -> JobResponse:
+    if request.job_type == JobType.DOWNLOAD_VIDEO:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="DOWNLOAD_VIDEO must be created through POST /downloads so source, account, idempotency, and retry policy are validated",
+        )
     job = service.create_job(**request.model_dump())
     return JobResponse.model_validate(job)
 

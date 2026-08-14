@@ -6,6 +6,9 @@ import unittest
 import wave
 from io import BytesIO
 from types import SimpleNamespace
+from unittest.mock import patch
+
+import numpy as np
 
 from src.tts_pipeline.omnivoice_tts_provider import (
     DEFAULT_OMNIVOICE_MODEL,
@@ -54,6 +57,28 @@ class OmniVoiceResolveTests(unittest.TestCase):
 
 
 class OmniVoiceProviderTests(unittest.TestCase):
+    def test_preferred_batch_size_is_vram_aware(self) -> None:
+        provider = OmniVoiceTtsProvider(model_id="k2-fsa/OmniVoice")
+        fake_torch = SimpleNamespace(
+            cuda=SimpleNamespace(
+                is_available=lambda: True,
+                get_device_properties=lambda _index: SimpleNamespace(total_memory=4 * 1024**3),
+            )
+        )
+        with (
+            patch("src.tts_pipeline.omnivoice_tts_provider._resolve_device", return_value="cuda"),
+            patch.dict("sys.modules", {"torch": fake_torch}),
+        ):
+            self.assertEqual(provider.preferred_batch_size, 1)
+        fake_torch.cuda.get_device_properties = lambda _index: SimpleNamespace(
+            total_memory=12 * 1024**3
+        )
+        with (
+            patch("src.tts_pipeline.omnivoice_tts_provider._resolve_device", return_value="cuda"),
+            patch.dict("sys.modules", {"torch": fake_torch}),
+        ):
+            self.assertEqual(provider.preferred_batch_size, 4)
+
     def test_synthesize_returns_wav(self) -> None:
         seen: dict[str, object] = {}
 
@@ -94,6 +119,48 @@ class OmniVoiceProviderTests(unittest.TestCase):
                 )
             )
         self.assertIn("only the default OmniVoice", str(ctx.exception))
+
+    def test_synthesize_batch_uses_one_model_generate_call(self) -> None:
+        class _FakeModel:
+            sampling_rate = 24_000
+
+            def __init__(self) -> None:
+                self.calls = 0
+                self.last_text = None
+
+            def generate(self, **kwargs):  # noqa: ANN003
+                self.calls += 1
+                self.last_text = kwargs["text"]
+                return [np.zeros(2_400, dtype=np.float32), np.zeros(3_600, dtype=np.float32)]
+
+        model = _FakeModel()
+        provider = OmniVoiceTtsProvider(model_id="k2-fsa/OmniVoice")
+        requests = [
+            TtsProviderInput(
+                text="Một",
+                language_code="vi",
+                voice_config=VoiceConfig(voice_id="instruct:vi_female_north"),
+            ),
+            TtsProviderInput(
+                text="Hai",
+                language_code="vi",
+                voice_config=VoiceConfig(voice_id="instruct:vi_female_north"),
+            ),
+        ]
+        with (
+            patch("src.tts_pipeline.omnivoice_tts_provider._resolve_device", return_value="cpu"),
+            patch(
+                "src.tts_pipeline.omnivoice_tts_provider._get_or_load_model",
+                return_value=model,
+            ),
+        ):
+            outputs = provider.synthesize_batch(requests)
+
+        self.assertEqual(model.calls, 1)
+        self.assertEqual(model.last_text, ["Một", "Hai"])
+        self.assertEqual(len(outputs), 2)
+        self.assertTrue(all(output.audio_bytes.startswith(b"RIFF") for output in outputs))
+        self.assertEqual(outputs[0].provider_metadata["batch_size"], 2)
 
 
 class OmniVoiceFactoryPreviewTests(unittest.TestCase):
@@ -161,14 +228,15 @@ class OmniVoiceFactoryPreviewTests(unittest.TestCase):
             api_key=None,
             base_url="",
         )
-        result = probe_tts_ai_client(workspace)
-        # Package may or may not be installed in CI; if ok, catalog should attach.
-        if result.ok:
-            self.assertEqual(result.provider, "omnivoice")
-            self.assertIsNotNone(result.catalog)
-            self.assertNotIn("until a dedicated synthesize adapter", result.detail)
-        else:
-            self.assertIn("omnivoice", result.detail.lower())
+        with patch(
+            "src.tts_pipeline.provider_factory._module_importable",
+            return_value=True,
+        ):
+            result = probe_tts_ai_client(workspace)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.provider, "omnivoice")
+        self.assertIsNotNone(result.catalog)
+        self.assertNotIn("until a dedicated synthesize adapter", result.detail)
 
 
 if __name__ == "__main__":

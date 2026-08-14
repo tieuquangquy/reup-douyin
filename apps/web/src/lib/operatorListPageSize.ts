@@ -4,6 +4,7 @@ export type OperatorListPageSize = (typeof OPERATOR_LIST_PAGE_SIZE_PRESETS)[numb
 
 export const REUP_QUEUE_PAGE_SIZE_STORAGE_KEY = "reup.queue.pageSize";
 export const OPS_JOBS_PAGE_SIZE_STORAGE_KEY = "ops.jobs.pageSize";
+export const PUBLICATION_DISCOVERY_PAGE_SIZE_STORAGE_KEY = "publication.library.discovery.pageSize";
 
 export type OperatorListPageSizeStorage = {
   getItem: (key: string) => string | null;

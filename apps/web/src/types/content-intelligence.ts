@@ -155,3 +155,10 @@ export type ContentAiTestResponse = {
   model: string;
   detail: string;
 };
+
+export type ContentAiModelsResponse = {
+  ok: boolean;
+  provider: string;
+  models: string[];
+  detail: string;
+};

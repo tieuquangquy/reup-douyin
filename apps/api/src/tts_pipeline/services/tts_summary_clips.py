@@ -47,12 +47,24 @@ def extract_tts_clip_fits(assets: list[Any]) -> list[dict[str, Any]]:
         if not isinstance(meta, dict):
             meta = {}
         translation_segment_id = meta.get("translation_segment_id")
+        translation_segment_ids_raw = meta.get("translation_segment_ids") or []
+        translation_segment_ids = [
+            str(value)
+            for value in translation_segment_ids_raw
+            if str(value or "").strip()
+        ]
+        if translation_segment_id and str(translation_segment_id) not in translation_segment_ids:
+            translation_segment_ids.insert(0, str(translation_segment_id))
         warnings_raw = meta.get("warnings") or []
         warnings = [str(item) for item in warnings_raw] if isinstance(warnings_raw, list) else []
         clips.append(
             {
                 "asset_id": str(getattr(asset, "id", "")),
                 "translation_segment_id": str(translation_segment_id) if translation_segment_id else None,
+                "translation_segment_ids": translation_segment_ids,
+                "member_segment_indices": [
+                    int(value) for value in list(meta.get("member_segment_indices") or [])
+                ],
                 "fit_status": normalize_fit_status(meta.get("fit_status")),
                 "fit_ratio": _as_float(meta.get("fit_ratio")),
                 "duration_seconds": _as_float(meta.get("duration_seconds")),

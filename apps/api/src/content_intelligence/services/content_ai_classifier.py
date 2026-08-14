@@ -191,6 +191,19 @@ class ContentAiClassifier:
             )
         return result
 
+    def list_models(self, config: ContentAiConfig, opener: Any | None = None) -> tuple[bool, list[str], str]:
+        """Resolve `auto` then list provider models. Mock `opener` in tests; never call a live network by default."""
+        from src.audio_pipeline.translation_ai_models import list_models_timeout_seconds, list_translation_ai_models
+
+        resolved = self._resolve_provider(config)
+        return list_translation_ai_models(
+            provider=resolved,
+            api_key=config.api_key or "",
+            base_url=config.base_url or "",
+            timeout_seconds=list_models_timeout_seconds(config.timeout_seconds),
+            opener=opener,
+        )
+
     @staticmethod
     def _validate_evidence(raw: Any, evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not isinstance(raw, list) or not raw:

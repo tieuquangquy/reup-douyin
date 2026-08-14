@@ -1061,7 +1061,21 @@ export function CaptureInboxPage() {
     loadMoreInFlightRef.current = false;
     const sessionMeta = sessions.find((session) => session.id === sessionId);
     if (sessionMeta) {
-      setSelectedSession({ ...sessionMeta, items: [] });
+      setSelectedSession({
+        ...sessionMeta,
+        items: [],
+        reconciliation: {
+          visible_item_count: sessionMeta.visible_item_count,
+          captured_item_count: sessionMeta.captured_item_count,
+          normalized_item_count: sessionMeta.normalized_item_count,
+          duplicate_item_count: sessionMeta.duplicate_item_count,
+          ready_item_count: sessionMeta.ready_item_count,
+          skipped_item_count: sessionMeta.skipped_item_count,
+          promoted_item_count: sessionMeta.promoted_item_count,
+          candidate_created_count: sessionMeta.candidate_created_count,
+          failed_item_count: sessionMeta.failed_item_count
+        }
+      });
       setSessionItemsTotalCount(sessionMeta.captured_item_count);
     } else {
       setSelectedSession(null);
@@ -2928,7 +2942,7 @@ function MediaTile({ focused, item, onAction, onFocusItem, onToggleItem, pending
           <p className="capture-inbox-tile-meta-line" aria-label="Duration and posted">
             <span className="capture-inbox-tile-meta-stat" title={cardModel.meta.durationTitle}>
               <span aria-hidden="true" className="capture-inbox-tile-perf-stat-icon">
-                <CaptureInboxFilterChipIcon className="capture-inbox-tile-perf-stat-icon__glyph" kind="stat-duration" />
+                <CaptureInboxFilterChipIcon className="capture-inbox-tile-perf-stat-icon__glyph" kind="meta-duration" />
               </span>
               <span className="capture-inbox-tile-meta-copy">
                 <span className="capture-inbox-tile-meta-label">Duration</span>
@@ -2937,7 +2951,7 @@ function MediaTile({ focused, item, onAction, onFocusItem, onToggleItem, pending
             </span>
             <span className="capture-inbox-tile-meta-stat" title={cardModel.meta.postedTitle}>
               <span aria-hidden="true" className="capture-inbox-tile-perf-stat-icon">
-                <CaptureInboxFilterChipIcon className="capture-inbox-tile-perf-stat-icon__glyph" kind="stat-posted" />
+                <CaptureInboxFilterChipIcon className="capture-inbox-tile-perf-stat-icon__glyph" kind="meta-posted" />
               </span>
               <span className="capture-inbox-tile-meta-copy">
                 <span className="capture-inbox-tile-meta-label">Posted</span>
@@ -4276,4 +4290,3 @@ function actionLabel(action: CaptureInboxAction): string {
     re_evaluate_intake: "Re-evaluate intake"
   }[action];
 }
-

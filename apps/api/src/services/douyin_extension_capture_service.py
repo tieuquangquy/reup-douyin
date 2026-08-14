@@ -1198,9 +1198,11 @@ class DouyinExtensionCaptureService:
     def _apply_modal_harvest_to_item(self, item: CapturedItem, payload) -> dict[str, bool]:
         metadata = dict(item.metadata_json or {})
         evidence = payload.profile_card_evidence
-        previous_caption = item.caption
+        # Legacy projections can omit nullable presentation fields. Treat those
+        # as null and let this hydration pass populate canonical values.
+        previous_caption = getattr(item, "caption", None)
         previous_raw_payload = dict(item.raw_payload_json or {})
-        previous_duration = item.duration_seconds
+        previous_duration = getattr(item, "duration_seconds", None)
         previous_like = metadata.get("like_count")
         previous_comment = metadata.get("comment_count")
         previous_share = metadata.get("share_count")
@@ -1226,9 +1228,9 @@ class DouyinExtensionCaptureService:
                 raw_dom_snapshot=metadata.get("raw_dom_snapshot") if isinstance(metadata.get("raw_dom_snapshot"), dict) else None,
                 raw_dom_detail_metrics=raw_dom_detail_metrics,
                 raw_evidence_summary=raw_evidence_summary,
-                existing_posted_at=item.posted_at,
+                existing_posted_at=getattr(item, "posted_at", None),
                 existing_posted_text=metadata.get("posted_text") if isinstance(metadata.get("posted_text"), str) else None,
-                existing_duration_seconds=item.duration_seconds,
+                existing_duration_seconds=getattr(item, "duration_seconds", None),
                 existing_duration_text=metadata.get("duration_text") if isinstance(metadata.get("duration_text"), str) else None,
                 existing_view_count=_int_or_none(metadata.get("view_count")),
                 existing_like_count=_int_or_none(metadata.get("like_count")),
@@ -1369,7 +1371,7 @@ class DouyinExtensionCaptureService:
 
         updated = any(
             (
-                previous_caption != item.caption,
+                previous_caption != getattr(item, "caption", None),
                 previous_raw_payload != dict(item.raw_payload_json or {}),
                 previous_duration != item.duration_seconds,
                 previous_like != metadata.get("like_count"),

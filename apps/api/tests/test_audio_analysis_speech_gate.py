@@ -87,6 +87,7 @@ class AudioAnalysisSpeechGateTests(unittest.TestCase):
         self.assertEqual(persist_transcripts.call_args.args[1], [])
         self.assertEqual(result.transcript_count, 0)
         self.assertEqual(source_video.metadata_json.get("has_speech"), False)
+        self.assertIsInstance(source_video.metadata_json.get("audio_analysis_metrics"), dict)
         self.assertIn("skip_dubbing", result.flags_summary)
         metadata_payload = persist_json.call_args_list[0].args[3]
         self.assertEqual(metadata_payload["vad"]["has_speech"], False)

@@ -10,6 +10,43 @@ from typing import Any, Callable
 class TtsVoiceOption:
     id: str
     label: str
+    # Optional metadata returned by remote providers.  Local/curated catalogs
+    # leave these empty so the legacy {id, label} contract stays intact.
+    languages: list[str] = field(default_factory=list)
+    models: list[str] = field(default_factory=list)
+    gender: str | None = None
+    description: str | None = None
+    capabilities: list[str] = field(default_factory=list)
+
+
+@dataclass
+class TtsModelOption:
+    id: str
+    label: str = ""
+    languages: list[str] = field(default_factory=list)
+    voices: list[str] = field(default_factory=list)
+    description: str | None = None
+    capabilities: list[str] = field(default_factory=list)
+
+
+@dataclass
+class TtsLanguageOption:
+    code: str
+    label: str = ""
+
+
+@dataclass
+class TtsCatalogDiscovery:
+    status: str = "unavailable"  # complete | partial | unavailable
+    endpoints: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    # Safe, additive stage results for Ops Test Connection. Entries never
+    # contain credentials or response bodies.
+    checks: list[dict[str, Any]] = field(default_factory=list)
+    # Stable hash of the public connector manifest/base URL (never API key).
+    config_fingerprint: str = ""
+    # Internal signal for probe policy. Deliberately omitted from to_dict/API.
+    error_code: str = ""
 
 
 @dataclass
@@ -40,24 +77,81 @@ class TtsProviderCatalog:
     voices: list[TtsVoiceOption] = field(default_factory=list)
     styles: list[str] = field(default_factory=list)
     models: list[str] = field(default_factory=list)
+    model_options: list[TtsModelOption] = field(default_factory=list)
+    languages: list[TtsLanguageOption] = field(default_factory=list)
     default_voice_id: str = ""
+    default_model_id: str = ""
+    default_language_code: str = ""
     warning: str = ""
     sample_rate: int | None = None
     backends: list[str] = field(default_factory=list)
     capabilities: TtsFieldCapabilities | None = None
+    discovery: TtsCatalogDiscovery | None = None
 
     def to_dict(self) -> dict[str, Any]:
         caps = self.capabilities or capabilities_for_provider("custom")
         return {
             "source": self.source,
-            "voices": [{"id": v.id, "label": v.label} for v in self.voices],
+            "voices": [
+                {
+                    "id": v.id,
+                    "label": v.label,
+                    **({"languages": list(v.languages)} if v.languages else {}),
+                    **({"models": list(v.models)} if v.models else {}),
+                    **({"gender": v.gender} if v.gender else {}),
+                    **({"description": v.description} if v.description else {}),
+                    **({"capabilities": list(v.capabilities)} if v.capabilities else {}),
+                }
+                for v in self.voices
+            ],
             "styles": list(self.styles),
             "models": list(self.models),
+            "model_options": [
+                {
+                    "id": option.id,
+                    "label": option.label or option.id,
+                    **({"languages": list(option.languages)} if option.languages else {}),
+                    **({"voices": list(option.voices)} if option.voices else {}),
+                    **({"description": option.description} if option.description else {}),
+                    **({"capabilities": list(option.capabilities)} if option.capabilities else {}),
+                }
+                for option in (
+                    self.model_options
+                    or [TtsModelOption(id=model, label=model) for model in self.models]
+                )
+            ],
+            "languages": [
+                {"code": language.code, "label": language.label or language.code}
+                for language in self.languages
+            ],
             "default_voice_id": self.default_voice_id,
+            "default_model_id": self.default_model_id or (self.models[0] if self.models else ""),
+            "default_language_code": self.default_language_code,
             "warning": self.warning,
             "sample_rate": self.sample_rate,
             "backends": list(self.backends),
             "capabilities": caps.to_dict(),
+            **(
+                {
+                    "discovery": {
+                        "status": self.discovery.status,
+                        "endpoints": list(self.discovery.endpoints),
+                        "warnings": list(self.discovery.warnings),
+                        **(
+                            {"checks": [dict(item) for item in self.discovery.checks]}
+                            if self.discovery.checks
+                            else {}
+                        ),
+                        **(
+                            {"config_fingerprint": self.discovery.config_fingerprint}
+                            if self.discovery.config_fingerprint
+                            else {}
+                        ),
+                    }
+                }
+                if self.discovery is not None
+                else {}
+            ),
         }
 
 
@@ -78,6 +172,67 @@ EDGE_FALLBACK_VOICES = (
     ("vi-VN-HoaiMyNeural", "vi-VN-HoaiMyNeural (Female)"),
     ("vi-VN-NamMinhNeural", "vi-VN-NamMinhNeural (Male)"),
 )
+
+# Gemini TTS exposes a fixed set of prebuilt narrator identities.  These ids
+# are intentionally provider-native (``Kore``), not Google Cloud TTS voice
+# resource ids (``vi-VN-Chirp3-HD-Kore``).
+GEMINI_TTS_VOICES = (
+    ("Zephyr", "Zephyr · bright"),
+    ("Puck", "Puck · upbeat"),
+    ("Charon", "Charon · informative"),
+    ("Kore", "Kore · firm"),
+    ("Fenrir", "Fenrir · excitable"),
+    ("Leda", "Leda · youthful"),
+    ("Orus", "Orus · firm"),
+    ("Aoede", "Aoede · breezy"),
+    ("Callirrhoe", "Callirrhoe · easy-going"),
+    ("Autonoe", "Autonoe · bright"),
+    ("Enceladus", "Enceladus · breathy"),
+    ("Iapetus", "Iapetus · clear"),
+    ("Umbriel", "Umbriel · easy-going"),
+    ("Algieba", "Algieba · smooth"),
+    ("Despina", "Despina · smooth"),
+    ("Erinome", "Erinome · clear"),
+    ("Algenib", "Algenib · gravelly"),
+    ("Rasalgethi", "Rasalgethi · informative"),
+    ("Laomedeia", "Laomedeia · upbeat"),
+    ("Achernar", "Achernar · soft"),
+    ("Alnilam", "Alnilam · firm"),
+    ("Schedar", "Schedar · even"),
+    ("Gacrux", "Gacrux · mature"),
+    ("Pulcherrima", "Pulcherrima · forward"),
+    ("Achird", "Achird · friendly"),
+    ("Zubenelgenubi", "Zubenelgenubi · casual"),
+    ("Vindemiatrix", "Vindemiatrix · gentle"),
+    ("Sadachbia", "Sadachbia · lively"),
+    ("Sadaltager", "Sadaltager · knowledgeable"),
+    ("Sulafat", "Sulafat · warm"),
+)
+
+GEMINI_TTS_MODELS = (
+    "gemini-2.5-flash-tts",
+    "gemini-2.5-pro-tts",
+    "gemini-2.5-flash-preview-tts",
+    "gemini-2.5-pro-preview-tts",
+)
+
+
+def normalize_gemini_voice_id(value: Any) -> str:
+    """Return a canonical Gemini voice id, including legacy Cloud ids."""
+
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    by_lower = {voice_id.lower(): voice_id for voice_id, _label in GEMINI_TTS_VOICES}
+    direct = by_lower.get(text.lower())
+    if direct:
+        return direct
+    marker = "-chirp3-hd-"
+    lowered = text.lower()
+    if marker in lowered:
+        suffix = text[lowered.rfind(marker) + len(marker) :].strip()
+        return by_lower.get(suffix.lower(), "")
+    return ""
 
 # Curated OmniVoice-Studio TTS engine ids (Settings → TTS Engine / OMNIVOICE_TTS_BACKEND).
 # Not scraped from GitHub — kept in sync with the public engine matrix.
@@ -134,7 +289,7 @@ def capabilities_for_provider(provider: str, *, local_backend: str = "auto") -> 
         )
     if name == "cli":
         return TtsFieldCapabilities(voice=True, cli_binary=True)
-    if name in {"google", "elevenlabs"}:
+    if name in {"google", "google_gemini", "elevenlabs"}:
         return TtsFieldCapabilities(voice=True, model=True, api_key=True)
     if name in {"azure", "openai"}:
         return TtsFieldCapabilities(voice=True, model=True, api_key=True, base_url=True)
@@ -182,6 +337,8 @@ def discover_tts_catalog(
         )
     if name in {"omnivoice", "omnivoice_studio", "omnivoice-studio"}:
         return _discover_omnivoice()
+    if name == "google_gemini":
+        return _discover_google_gemini()
     if name in {
         "google",
         "azure",
@@ -218,6 +375,41 @@ def _discover_omnivoice() -> TtsProviderCatalog:
         sample_rate=None,
         backends=list(OMNIVOICE_MODELS),
         capabilities=capabilities_for_provider("omnivoice"),
+    )
+
+
+def _discover_google_gemini() -> TtsProviderCatalog:
+    voices = [
+        TtsVoiceOption(
+            id=voice_id,
+            label=label,
+            languages=["vi-VN"],
+            models=list(GEMINI_TTS_MODELS),
+            capabilities=["expressive", "single_speaker"],
+        )
+        for voice_id, label in GEMINI_TTS_VOICES
+    ]
+    models = [
+        TtsModelOption(
+            id=model_id,
+            label=model_id,
+            languages=["vi-VN"],
+            voices=[voice.id for voice in voices],
+            capabilities=["audio", "expressive_tts"],
+        )
+        for model_id in GEMINI_TTS_MODELS
+    ]
+    return TtsProviderCatalog(
+        source="curated",
+        voices=voices,
+        models=list(GEMINI_TTS_MODELS),
+        model_options=models,
+        languages=[TtsLanguageOption(code="vi-VN", label="Tiếng Việt (Việt Nam)")],
+        default_voice_id="Kore",
+        default_model_id=GEMINI_TTS_MODELS[0],
+        default_language_code="vi-VN",
+        warning="Gemini voice choices are provider-native curated presets.",
+        capabilities=capabilities_for_provider("google_gemini"),
     )
 
 

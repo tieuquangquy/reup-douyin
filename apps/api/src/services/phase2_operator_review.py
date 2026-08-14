@@ -51,6 +51,39 @@ def _verify_self_hash(payload: Mapping[str, Any], field: str) -> bool:
     return len(claimed) == 64 and claimed == _sha256_json(unsigned)
 
 
+def _stable_semantic_identity(content: Mapping[str, Any]) -> dict[str, Any]:
+    """Return only per-object semantic evidence suitable for approval carry.
+
+    ``semantic_authority_sha256`` summarizes the complete clip and therefore
+    changes when an unrelated residual is added.  It must not be the identity
+    used to decide whether one already-reviewed source object is unchanged.
+    """
+
+    semantic = dict(content.get("semantic_hardsub") or {})
+    return {
+        key: semantic.get(key)
+        for key in (
+            "schema_version",
+            "recipe_version",
+            "cue_id",
+            "classification",
+            "action",
+            "canonical_text_authority",
+        )
+    }
+
+
+def _review_evidence(content: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "geometry_refs": [str(value) for value in content.get("geometry_refs") or []],
+        "ocr_text_candidate": str(content.get("ocr_text_candidate") or ""),
+        "provenance_classifications": [
+            str(value) for value in content.get("provenance_classifications") or []
+        ],
+        "semantic_identity": _stable_semantic_identity(content),
+    }
+
+
 def apply_phase2_operator_review(
     *, root_dir: str | Path, decisions_path: str | Path
 ) -> dict[str, Any]:
@@ -142,6 +175,7 @@ def apply_phase2_operator_review(
                 "content_id": content_id,
                 "decision": decision,
                 "review_input_sha256": content.get("review_input_sha256"),
+                "review_evidence": _review_evidence(content),
                 "ocr_text_approved": approved_text or None,
                 "vi_text_approved": row.get("vi_text_approved"),
                 "reviewer": reviewer,

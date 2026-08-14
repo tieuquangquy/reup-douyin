@@ -13,6 +13,8 @@ _SAFE_METADATA_KEYS = {
     "timing_map",
     "assembly_strategy",
     "translation_segment_id",
+    "translation_segment_ids",
+    "member_segment_indices",
     "fit_status",
     "fit_ratio",
     "provider",
@@ -57,6 +59,7 @@ def build_render_prep_manifest(
     translation_input_sha256: str | None = None,
     background_stem_ref: dict[str, Any] | None = None,
     duration_gate_summary: dict[str, int] | None = None,
+    temporal_summary: dict[str, Any] | None = None,
 ) -> dict:
     by_type: dict[str, list[dict[str, Any]]] = {}
     seen_asset_ids: set[str] = set()
@@ -91,6 +94,7 @@ def build_render_prep_manifest(
         "subtitle_version": subtitle_version,
         "timing_fit_summary": dict(fit_summary),
         "duration_gate_summary": dict(duration_gate_summary or {}),
+        "temporal": dict(temporal_summary or {}),
         "provider_summary": provider_summary,
         "warnings": warnings,
         "audio_review": {
@@ -110,5 +114,7 @@ def build_render_prep_manifest(
                 if background_stem_ref
                 else "replace_with_timeline_aligned_vietnamese_narration"
             ),
+            "timeline_authority": "phase3_tts_final_timeline.json",
+            "subtitle_timing_authority": "synthesized_tts_timeline",
         },
     }

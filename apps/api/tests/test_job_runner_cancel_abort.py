@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
 from src.enums import JobStatus, JobStepStatus, JobType
+from src.services.frontend_core_runtime import bind_job_to_frontend_runtime
 from src.services.job_runner import JobRunner, StepHandlerRegistry
 from src.services.job_state_machine import InvalidJobStepTransition, validate_job_transition, validate_step_transition
 
@@ -102,7 +103,7 @@ def build_download_job_at_register_assets():
             job_id=job_id,
         ),
     ]
-    return SimpleNamespace(
+    job = SimpleNamespace(
         id=job_id,
         job_type=JobType.DOWNLOAD_VIDEO,
         status=JobStatus.RUNNING,
@@ -118,6 +119,8 @@ def build_download_job_at_register_assets():
         error_message=None,
         metadata_json={},
     )
+    bind_job_to_frontend_runtime(job)
+    return job
 
 
 def simulate_operator_cancel(job) -> None:

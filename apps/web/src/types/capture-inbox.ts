@@ -133,9 +133,9 @@ export type CapturedItem = {
   metadata_json: Record<string, unknown> | null;
   thumbnail_source?: "network_json" | "dom_fallback" | "detail_hydrate" | "dom_snapshot" | "existing_canonical" | "profile_card" | "video_poster" | "profile_card_image" | "modal_img" | "og_image" | "missing" | null;
   posted_source?: "network_json" | "dom_text" | "detail_hydrate" | "dom_detail_modal" | "dom_snapshot" | "existing_canonical" | "fallback_none" | "missing" | "modal_author_row" | "direct_publish_time" | "embedded_aweme_json" | "profile_card" | null;
-  duration_source?: "network_json" | "dom_text" | "detail_hydrate" | "dom_snapshot" | "existing_canonical" | "fallback_none" | "missing" | null;
-  view_count_source?: "network_json" | "dom_text" | "detail_hydrate" | "dom_snapshot" | "existing_canonical" | "fallback_none" | "missing" | null;
-  like_count_source?: "network_json" | "dom_text" | "detail_hydrate" | "dom_snapshot" | "existing_canonical" | "fallback_none" | "missing" | null;
+  duration_source?: "network_json" | "dom_text" | "detail_hydrate" | "dom_snapshot" | "existing_canonical" | "profile_card" | "fallback_none" | "missing" | null;
+  view_count_source?: "network_json" | "dom_text" | "detail_hydrate" | "dom_snapshot" | "existing_canonical" | "profile_card" | "fallback_none" | "missing" | null;
+  like_count_source?: "network_json" | "dom_text" | "detail_hydrate" | "dom_snapshot" | "existing_canonical" | "profile_card" | "fallback_none" | "missing" | null;
   comment_count_source?: "network_json" | "dom_text" | "detail_hydrate" | "dom_detail_modal" | "dom_snapshot" | "dom_zero_sentinel" | "existing_canonical" | "fallback_none" | "missing" | null;
   share_count_source?: "network_json" | "dom_text" | "detail_hydrate" | "dom_detail_modal" | "dom_snapshot" | "dom_zero_sentinel" | "existing_canonical" | "fallback_none" | "missing" | null;
   engagement_rate_source?: "derived" | "derived_from_counts" | "derived_from_canonical_counts" | "network_json" | "detail_hydrate" | "dom_text" | "dom_fallback" | "dom_snapshot" | "existing_canonical" | "fallback_none" | "missing" | null;

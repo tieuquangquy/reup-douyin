@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlalchemy.orm import Session
 
 from src.audio_pipeline.errors import AudioAnalysisError, AudioAnalysisErrorCode
@@ -10,6 +10,7 @@ from src.audio_pipeline.services.audio_analysis_service import AudioAnalysisServ
 from src.audio_pipeline.services.transcript_edit_service import SegmentEdit, TranscriptEditService
 from src.audio_pipeline.types import AudioAnalysisRequest
 from src.db.session import get_db_session
+from src.enums import JobType
 from src.schemas.audio_analysis import (
     ApproveSourceTranscriptResponse,
     ApproveTranslationDraftRequest,
@@ -27,6 +28,10 @@ from src.schemas.audio_analysis import (
     TranslationDraftListResponse,
     TranslationSegmentResponse,
 )
+from src.services.frontend_core_runtime import (
+    FrontendCoreRuntimeError,
+    assert_expected_stage_version,
+)
 
 router = APIRouter(tags=["audio-analysis"])
 
@@ -42,8 +47,21 @@ def get_transcript_edit_service(db: Session = Depends(get_db_session)) -> Transc
 @router.post("/audio-analysis", response_model=AudioAnalysisCreateResponse, status_code=status.HTTP_201_CREATED)
 def create_audio_analysis(
     request: AudioAnalysisCreateRequest,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     service: AudioAnalysisService = Depends(get_audio_analysis_service),
 ) -> AudioAnalysisCreateResponse:
+    try:
+        runtime_version = assert_expected_stage_version(
+            JobType.ANALYZE_AUDIO, request.expected_stage_version
+        )
+    except FrontendCoreRuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    supplied_key = (idempotency_key or "").strip()
+    if len(supplied_key) > 240:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Idempotency-Key is too long",
+        )
     try:
         job = service.create_analysis_job(
             AudioAnalysisRequest(
@@ -51,8 +69,11 @@ def create_audio_analysis(
                 translation_preset=request.translation_preset,
                 force_refresh=request.force_refresh,
                 skip_translation=request.skip_translation,
-            )
+            ),
+            idempotency_key=supplied_key or None,
         )
+    except FrontendCoreRuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except AudioAnalysisError as exc:
         raise _audio_http_error(exc) from exc
     return AudioAnalysisCreateResponse(
@@ -60,6 +81,7 @@ def create_audio_analysis(
         status=job.status,
         source_video_id=request.source_video_id,
         translation_preset=request.translation_preset,
+        runtime_version=runtime_version,
     )
 
 
@@ -82,10 +104,13 @@ def get_source_video_translation_draft(
     service: AudioAnalysisService = Depends(get_audio_analysis_service),
 ) -> TranslationDraftListResponse:
     segments = service.get_translation_segments(source_video_id)
+    quality_contract = service.get_translation_quality_contract(source_video_id)
     return TranslationDraftListResponse(
         source_video_id=source_video_id,
         translation_preset=segments[0].translation_preset if segments else None,
         segments=[TranslationSegmentResponse.model_validate(segment) for segment in segments],
+        recipe_version=str(quality_contract.get("recipe_version") or "") or None,
+        quality_contract=quality_contract or None,
     )
 
 
@@ -105,6 +130,19 @@ def get_source_video_audio_analysis_summary(
         translation_count=summary["translation_count"],
         asset_count=summary["asset_count"],
         manifest=summary["manifest"],
+        has_speech=summary.get("has_speech"),
+        dialogue_phase=summary.get("dialogue_phase"),
+        audio_recipe_version=summary.get("audio_recipe_version"),
+        analysis_metrics=dict(summary.get("analysis_metrics") or {}),
+        target_speech_authority=dict(summary.get("target_speech_authority") or {}),
+        dialogue_quality_contract=dict(summary.get("dialogue_quality_contract") or {}),
+        semantic_dialogue_segmentation=dict(
+            summary.get("semantic_dialogue_segmentation") or {}
+        ),
+        translation_recipe_version=summary.get("translation_recipe_version"),
+        downstream_authority_invalidations=list(
+            summary.get("downstream_authority_invalidations") or []
+        ),
     )
 
 
@@ -197,15 +235,31 @@ def approve_source_video_transcript(
 def rerun_source_video_translation_draft(
     source_video_id: UUID,
     request: RerunTranslationDraftRequest,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     service: TranscriptEditService = Depends(get_transcript_edit_service),
 ) -> AudioAnalysisCreateResponse:
+    try:
+        runtime_version = assert_expected_stage_version(
+            JobType.BUILD_TRANSLATION_DRAFT, request.expected_stage_version
+        )
+    except FrontendCoreRuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    supplied_key = (idempotency_key or "").strip()
+    if len(supplied_key) > 240:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Idempotency-Key is too long",
+        )
     try:
         job = service.create_rerun_job(
             source_video_id,
             translation_preset=request.translation_preset,
             force_refresh=request.force_refresh,
             require_source_approved=request.require_source_approved,
+            idempotency_key=supplied_key or None,
         )
+    except FrontendCoreRuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except AudioAnalysisError as exc:
         raise _audio_http_error(exc) from exc
     return AudioAnalysisCreateResponse(
@@ -213,6 +267,7 @@ def rerun_source_video_translation_draft(
         status=job.status,
         source_video_id=source_video_id,
         translation_preset=request.translation_preset,
+        runtime_version=runtime_version,
     )
 
 
@@ -237,6 +292,33 @@ def approve_source_video_translation_draft(
         resumed, job_id = ReupPipelineOrchestrator(db).resume_translation_approved_items(
             source_video_id=source_video_id
         )
+        # Analyze OCR may already have completed its expensive Phase 1 while
+        # waiting for approved dialogue meaning.  Resume only the hash-bound
+        # Phase-2 handoff after approval; do not force another video scan.
+        from src.ocr_pipeline.services.ocr_service import OcrPipelineService
+        from src.ocr_pipeline.types import OcrRequest
+        from src.services.quality_localization_service import (
+            QUALITY_ANALYSIS_ENGINE,
+            QUALITY_WORKFLOW_VERSION,
+            QualityLocalizationService,
+        )
+
+        quality = QualityLocalizationService(db).summary(source_video_id)
+        ocr_resume_job_id = None
+        if quality.get("requires_dialogue_translation_approval"):
+            ocr_job = OcrPipelineService(db).create_ocr_job(
+                OcrRequest(
+                    source_video_id=source_video_id,
+                    force_refresh=False,
+                    clean_hardsub=True,
+                    use_master_phase1=True,
+                    workflow_version=QUALITY_WORKFLOW_VERSION,
+                    workflow_action="resume_dialogue_translation",
+                    analysis_engine=QUALITY_ANALYSIS_ENGINE,
+                ),
+                commit=False,
+            )
+            ocr_resume_job_id = ocr_job.id
         db.commit()
     except ValueError as exc:
         db.rollback()
@@ -250,6 +332,7 @@ def approve_source_video_translation_draft(
         binding_sha256=str(result["binding_sha256"]),
         resumed_queue_items=resumed,
         job_id=job_id,
+        ocr_resume_job_id=ocr_resume_job_id,
     )
 
 

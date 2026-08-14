@@ -102,6 +102,124 @@ class TtsPreviewTests(unittest.TestCase):
             preview_tts_speech(workspace_tts=cfg, text=long_text, max_chars=40)
         self.assertEqual(len(seen["text"]), 40)
 
+    def test_preview_preserves_google_oauth_credential_fields(self) -> None:
+        class _GoogleFakeProvider:
+            provider_name = "google"
+
+            def synthesize(self, request):  # noqa: ANN001
+                return TtsProviderOutput(
+                    audio_bytes=b"google-audio",
+                    duration_seconds=0.5,
+                    mime_type="audio/mpeg",
+                    file_extension="mp3",
+                    provider_metadata={"provider": "google"},
+                    warnings=[],
+                )
+
+        cfg = SimpleNamespace(
+            enabled=False,
+            provider="google",
+            voice_id="vi-VN-Standard-A",
+            speaking_rate=1.0,
+            language_code="vi-VN",
+            model_id="",
+            api_key=None,
+            credential_mode="google_service_account",
+            google_service_account_json="service-account-json",
+            google_service_account_email="tts@example.iam.gserviceaccount.com",
+            google_service_account_project_id="tts-project",
+            base_url="https://texttospeech.googleapis.com/v1",
+            timeout_seconds=30.0,
+            fallback_provider="none",
+            fallback_voice_id="",
+            local_backend="auto",
+            device="auto",
+            cli_binary="",
+            options_json={},
+        )
+
+        def capture_factory(*, workspace_tts):  # noqa: ANN001
+            self.assertEqual(workspace_tts.credential_mode, "google_service_account")
+            self.assertEqual(workspace_tts.google_service_account_json, "service-account-json")
+            self.assertEqual(workspace_tts.google_service_account_project_id, "tts-project")
+            return _GoogleFakeProvider()
+
+        with patch("src.tts_pipeline.preview.build_default_tts_provider", side_effect=capture_factory):
+            result = preview_tts_speech(workspace_tts=cfg, text="Xin chÃ o Google")
+
+        self.assertTrue(result["ok"])
+
+    def test_preview_preserves_gemini_expressive_draft_fields(self) -> None:
+        class _GeminiFakeProvider:
+            provider_name = "google_gemini"
+
+            def synthesize(self, request):  # noqa: ANN001
+                self.assert_request(request)
+                return TtsProviderOutput(
+                    audio_bytes=b"gemini-expressive-audio",
+                    duration_seconds=0.75,
+                    mime_type="audio/wav",
+                    file_extension="wav",
+                    provider_metadata={
+                        "provider": "google_gemini",
+                        "voice_id": "Aoede",
+                        "requested_voice_id": "vi-VN-Chirp3-HD-Aoede",
+                        "resolved_voice_id": "Aoede",
+                    },
+                    warnings=[],
+                )
+
+            @staticmethod
+            def assert_request(request):  # noqa: ANN001
+                assert request.voice_config.voice_id == "vi-VN-Chirp3-HD-Aoede"
+
+        cfg = SimpleNamespace(
+            enabled=False,
+            provider="google_gemini",
+            voice_id="vi-VN-Chirp3-HD-Aoede",
+            speaking_rate=1.05,
+            language_code="vi-VN",
+            model_id="gemini-2.5-flash-preview-tts",
+            api_key="gemini-api-key",
+            credential_mode="api_key",
+            google_service_account_json=None,
+            google_service_account_email="",
+            google_service_account_project_id="",
+            base_url="https://generativelanguage.googleapis.com/v1beta",
+            timeout_seconds=45.0,
+            fallback_provider="none",
+            fallback_voice_id="",
+            local_backend="auto",
+            device="auto",
+            cli_binary="",
+            options_json={
+                "expressive_tts": {"mode": "required"},
+                "emotion_plan": {"version": "text-conditioned-emotion-planner-v1"},
+            },
+        )
+
+        def capture_factory(*, workspace_tts):  # noqa: ANN001
+            self.assertEqual(workspace_tts.provider, "google_gemini")
+            self.assertEqual(workspace_tts.credential_mode, "api_key")
+            self.assertEqual(workspace_tts.api_key, "gemini-api-key")
+            self.assertEqual(workspace_tts.model_id, "gemini-2.5-flash-preview-tts")
+            self.assertEqual(workspace_tts.voice_id, "vi-VN-Chirp3-HD-Aoede")
+            self.assertEqual(workspace_tts.options_json["expressive_tts"]["mode"], "required")
+            self.assertEqual(
+                workspace_tts.options_json["emotion_plan"]["version"],
+                "text-conditioned-emotion-planner-v1",
+            )
+            return _GeminiFakeProvider()
+
+        with patch("src.tts_pipeline.preview.build_default_tts_provider", side_effect=capture_factory):
+            result = preview_tts_speech(workspace_tts=cfg, text="Xin chÃƒÂ o Gemini Expressive")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["provider"], "google_gemini")
+        self.assertEqual(result["requested_voice_id"], "vi-VN-Chirp3-HD-Aoede")
+        self.assertEqual(result["resolved_voice_id"], "Aoede")
+        self.assertEqual(base64.b64decode(result["audio_base64"]), b"gemini-expressive-audio")
+
 
 if __name__ == "__main__":
     unittest.main()

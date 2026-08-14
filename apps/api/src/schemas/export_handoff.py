@@ -119,3 +119,4 @@ class ReupQueueBatchActionRequest(BaseModel):
     # START_AUTO_PIPELINE batch: auto_to_tts (default) | auto_to_render
     # SET_AUTOMATION batch: manual | auto_to_tts | auto_to_render (required)
     pipeline_mode: str | None = Field(default=None, max_length=40)
+    expected_stage_versions: dict[str, str] | None = None

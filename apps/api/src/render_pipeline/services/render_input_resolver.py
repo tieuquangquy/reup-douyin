@@ -10,6 +10,10 @@ from src.models.media import MediaAsset
 from src.render_pipeline.errors import RenderPipelineError, RenderPipelineErrorCode
 from src.render_pipeline.types import ResolvedRenderInput
 from src.storage.base import StorageBackend
+from src.tts_pipeline.errors import TtsPipelineError
+from src.tts_pipeline.services.profile_authority import (
+    assert_manifest_tts_authority_active,
+)
 
 
 class RenderInputResolver:
@@ -24,6 +28,17 @@ class RenderInputResolver:
         manifest = dict(manifest_asset.metadata_json.get("manifest") or {})
         if not manifest:
             raise RenderPipelineError(RenderPipelineErrorCode.MISSING_RENDER_PREP_MANIFEST, "Render-prep manifest payload is missing")
+        try:
+            assert_manifest_tts_authority_active(
+                self.db,
+                manifest_asset.workspace_id,
+                manifest,
+            )
+        except TtsPipelineError as exc:
+            raise RenderPipelineError(
+                RenderPipelineErrorCode.TTS_AUTHORITY_INVALID,
+                exc.message,
+            ) from exc
 
         cleaned = self._current_asset(source_video_id, MediaAssetType.CLEANED_VIDEO)
         source_video_asset = cleaned or self._current_asset(source_video_id, MediaAssetType.SOURCE_VIDEO_RAW)

@@ -62,7 +62,6 @@ const captureItem = {
   promoted_crawl_session_id: null,
   enrichment_json: null,
   metadata_json: null,
-  engagement_rate: sharedMetrics.engagement_rate,
   reup_score: 52,
   reup_score_label: "Average",
   reup_score_level: "average",
@@ -90,7 +89,17 @@ const reviewCandidate: Candidate = {
   updated_at: "2026-07-01T00:00:00Z",
   reup_score: 52,
   source_metadata: sharedMetrics,
-  ...sharedMetrics
+  ...sharedMetrics,
+  source_video: {
+    id: "video-1",
+    source_profile_id: "profile-1",
+    source_video_external_id: sharedMetrics.source_video_external_id,
+    source_url: `https://www.douyin.com/video/${sharedMetrics.source_video_external_id}`,
+    caption: "Beef egg noodles",
+    posted_at: null,
+    duration_seconds: sharedMetrics.duration_seconds,
+    metadata_json: sharedMetrics
+  }
 };
 
 const captureScore = getReupScoreForCaptureItem(captureItem).reup_score;

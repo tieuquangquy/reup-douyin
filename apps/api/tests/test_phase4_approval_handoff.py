@@ -253,6 +253,47 @@ class Phase4ApprovalHandoffTests(unittest.TestCase):
                     operator_id="local_operator",
                 )
 
+    def test_audio_handoff_retry_does_not_rewrite_approved_authority(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            narration = root / "incoming.wav"
+            narration.write_bytes(b"RIFF-approved-narration")
+            digest = hashlib.sha256(narration.read_bytes()).hexdigest()
+            manifest = {
+                "manifest_version": "RENDER_PREP_MANIFEST_V2",
+                "audio_review": {"status": "PENDING_AUDIO_REVIEW"},
+                "current_outputs": {
+                    "joined_narration": [
+                        {
+                            "storage_key": narration.name,
+                            "sha256": digest,
+                            "mime_type": "audio/wav",
+                        }
+                    ]
+                },
+            }
+            first = prepare_approved_audio_handoff(
+                root_dir=root,
+                manifest=manifest,
+                narration_path=narration,
+                operator_id="local_operator",
+            )
+            manifest_path = root / "render_prep_manifest.json"
+            approval_path = root / "phase4_audio_approval.json"
+            before = (manifest_path.read_bytes(), approval_path.read_bytes())
+
+            second = prepare_approved_audio_handoff(
+                root_dir=root,
+                manifest=json.loads(manifest_path.read_text(encoding="utf-8")),
+                narration_path=root / "phase4_joined_narration.wav",
+                operator_id="local_operator",
+            )
+
+            self.assertEqual(second, first)
+            self.assertEqual(
+                (manifest_path.read_bytes(), approval_path.read_bytes()), before
+            )
+
     def test_audio_staging_accepts_long_background_storage_path(self) -> None:
         with TemporaryDirectory() as tmp:
             try:

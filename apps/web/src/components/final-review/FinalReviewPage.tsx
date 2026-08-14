@@ -4,6 +4,7 @@ import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRe
 import { useT } from "../../lib/i18n";
 import {
   approveRender,
+  approveTranslationDraft,
   approveResidualReview,
   approveQualityAudioReview,
   approveOcrVisual,
@@ -18,6 +19,7 @@ import {
   fetchRiskSummary,
   fetchSourceVideoAssetManifest,
   markRenderPublishReady,
+  requestResidualTranslationSuggestions,
   runRiskScan,
   submitOcrReview,
   submitResidualTriage,
@@ -34,7 +36,10 @@ import {
   checklistComplete,
   findCurrentSourceVideoAsset,
   getRenderWarnings,
+  hasCurrentQualityVisualAuthority,
   isApproved,
+  isPublishReady,
+  isFinalReviewDialogueTranslationApprovalPending,
   isFinalReviewOcrReviewPending,
   nextCompareMode,
   resolveFinalReviewCompareDiff,
@@ -64,12 +69,13 @@ import {
 import { FinalReviewChecklist } from "./FinalReviewChecklist";
 import { FinalReviewHeader } from "./FinalReviewHeader";
 import { FinalReviewReadinessStrip } from "./FinalReviewReadinessStrip";
-import { FinalReviewEmptyState, FinalReviewErrorState, FinalReviewPrepBriefing, FinalReviewPrepJourney } from "./FinalReviewStates";
+import { FinalReviewEmptyState, FinalReviewErrorState, FinalReviewLoadingState, FinalReviewPrepBriefing, FinalReviewPrepJourney } from "./FinalReviewStates";
 import { FinalReviewVisualCheckpoint } from "./FinalReviewVisualCheckpoint";
 import { FinalReviewWarningsPanel } from "./FinalReviewWarningsPanel";
+import { QualityHandoffPanel } from "./QualityHandoffPanel";
 import { FinalReviewRailIcon, type FinalReviewRailIconKind } from "./FinalReviewRailIcon";
 
-type RailTab = "review" | "visual" | "risk" | "info";
+type RailTab = "review" | "visual" | "risk" | "info" | "handoff";
 
 export type FinalReviewPageHandle = {
   refresh: () => Promise<void>;
@@ -92,6 +98,7 @@ export const FinalReviewPage = forwardRef<FinalReviewPageHandle, { sourceVideoId
   const [renderBusy, setRenderBusy] = useState(false);
   const [approveBusy, setApproveBusy] = useState(false);
   const [audioApproveBusy, setAudioApproveBusy] = useState(false);
+  const [residualTranslationBusy, setResidualTranslationBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [actionStatus, setActionStatus] = useState<FinalReviewActionStatusState | null>(null);
   const [ocrStatus, setOcrStatus] = useState<FinalReviewActionStatusState | null>(null);
@@ -115,6 +122,7 @@ export const FinalReviewPage = forwardRef<FinalReviewPageHandle, { sourceVideoId
   const renderBusyRef = useRef(false);
   const renderCancelRequestedRef = useRef(false);
   const renderWatchPausedRef = useRef(false);
+  const residualTranslationAttemptedRef = useRef<string | null>(null);
 
   const loadData = useCallback(async (mode: "initial" | "refresh" = "initial") => {
     if (mode === "initial") setLoading(true);
@@ -128,7 +136,13 @@ export const FinalReviewPage = forwardRef<FinalReviewPageHandle, { sourceVideoId
       setRender(workspaceRender);
       setManifest(assetManifest);
       try {
-        setOcrSummary(await fetchOcrSummary(sourceVideoId));
+        const nextOcrSummary = await fetchOcrSummary(sourceVideoId);
+        setOcrSummary(nextOcrSummary);
+        if (hasCurrentQualityVisualAuthority(nextOcrSummary)) {
+          // The current hash-bound artifact is newer authority than any error
+          // retained in this mounted page from a previous terminal job.
+          setOcrStatus(null);
+        }
       } catch {
         setOcrSummary(null);
       }
@@ -168,6 +182,7 @@ export const FinalReviewPage = forwardRef<FinalReviewPageHandle, { sourceVideoId
   useEffect(() => {
     ocrResumeAttemptedRef.current = false;
     renderResumeAttemptedRef.current = false;
+    residualTranslationAttemptedRef.current = null;
   }, [sourceVideoId]);
 
   useEffect(() => {
@@ -250,6 +265,7 @@ export const FinalReviewPage = forwardRef<FinalReviewPageHandle, { sourceVideoId
     try {
       const updated = await markRenderPublishReady(render.id);
       setRender(updated);
+      setRailTab("handoff");
       setActionStatus({ phase: "success", message: t("finalReviewPage.publishReadySuccess") });
       notify({ id: `final-review-ready-${render.id}`, message: t("finalReviewPage.publishReadySuccess"), tone: "success" });
     } catch (err) {
@@ -634,6 +650,35 @@ export const FinalReviewPage = forwardRef<FinalReviewPageHandle, { sourceVideoId
     }
   }
 
+  async function handleApproveDialogueTranslation() {
+    ocrBusyRef.current = true;
+    ocrCancelRequestedRef.current = false;
+    ocrWatchPausedRef.current = false;
+    setOcrWatchPaused(false);
+    setOcrBusy(true);
+    setOcrPausePending(false);
+    setOcrCancelPending(false);
+    setOcrProgressPercent(0);
+    setOcrStatus({ phase: "queued", message: t("finalReviewVisual.approvingDialogueTranslation") });
+    setError(null);
+    try {
+      const approval = await approveTranslationDraft(sourceVideoId);
+      if (approval.ocr_resume_job_id) {
+        await settleOcrJob(approval.ocr_resume_job_id);
+      } else {
+        const summary = await fetchOcrSummary(sourceVideoId);
+        setOcrSummary(summary);
+        setOcrStatus({ phase: "success", message: t("finalReviewVisual.dialogueTranslationApproved") });
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : t("finalReviewVisual.dialogueTranslationApprovalFailed");
+      setOcrStatus({ phase: "error", message });
+      setError(message);
+    } finally {
+      finishOcrPollSession();
+    }
+  }
+
   async function runLocalizationReviewJob(createJob: () => Promise<{ job_id: string }>) {
     ocrBusyRef.current = true;
     ocrCancelRequestedRef.current = false;
@@ -658,6 +703,10 @@ export const FinalReviewPage = forwardRef<FinalReviewPageHandle, { sourceVideoId
   }
 
   function handleOcrJourneyAction() {
+    if (isFinalReviewDialogueTranslationApprovalPending(ocrSummary)) {
+      void asyncAction.run("approve-dialogue-translation", handleApproveDialogueTranslation);
+      return;
+    }
     if (isFinalReviewOcrReviewPending(ocrSummary)) {
       document
         .getElementById("final-review-ocr-review")
@@ -670,7 +719,7 @@ export const FinalReviewPage = forwardRef<FinalReviewPageHandle, { sourceVideoId
   async function handleSubmitOcrReview(
     decisions: Array<{
       content_id: string;
-      decision: "APPROVE" | "EDIT" | "PRESERVE_SOURCE";
+      decision: "APPROVE" | "EDIT" | "PRESERVE_SOURCE" | "REJECT_UI";
       ocr_text_approved?: string | null;
     }>
   ) {
@@ -686,13 +735,24 @@ export const FinalReviewPage = forwardRef<FinalReviewPageHandle, { sourceVideoId
   }
 
   async function handleSubmitResidualTriage(
-    suggestions: Array<{ ocr_text: string; ocr_text_corrected: string; vi_text_suggested: string }>
+    suggestions: Array<{ content_id?: string; ocr_text: string; ocr_text_corrected: string; vi_text_suggested: string }>
   ) {
     await runLocalizationReviewJob(() => submitResidualTriage(sourceVideoId, suggestions));
   }
 
   async function handleApproveResidual(proposalSha256: string) {
     await runLocalizationReviewJob(() => approveResidualReview(sourceVideoId, proposalSha256));
+  }
+
+  async function handleRequestResidualTranslationSuggestions() {
+    setResidualTranslationBusy(true);
+    try {
+      await runLocalizationReviewJob(() =>
+        requestResidualTranslationSuggestions(sourceVideoId)
+      );
+    } finally {
+      setResidualTranslationBusy(false);
+    }
   }
 
   async function resumeActiveOcrJob() {
@@ -878,10 +938,34 @@ export const FinalReviewPage = forwardRef<FinalReviewPageHandle, { sourceVideoId
     void resumeActiveRenderJob();
   }, [loading, sourceVideoId]);
 
+  useEffect(() => {
+    const authority = ocrSummary?.residual_authority_sha256;
+    if (
+      loading ||
+      ocrBusy ||
+      ocrSummary?.workflow_stage !== "WAITING_RESIDUAL_TRIAGE" ||
+      !authority ||
+      ocrSummary.residual_translation_status === "READY"
+    ) {
+      return;
+    }
+    const attemptKey = `${sourceVideoId}:${authority}`;
+    if (residualTranslationAttemptedRef.current === attemptKey) return;
+    residualTranslationAttemptedRef.current = attemptKey;
+    void handleRequestResidualTranslationSuggestions();
+  }, [
+    loading,
+    ocrBusy,
+    sourceVideoId,
+    ocrSummary?.workflow_stage,
+    ocrSummary?.residual_authority_sha256,
+    ocrSummary?.residual_translation_status
+  ]);
+
   if (loading) {
     return (
-      <main className="final-review">
-        <AsyncContentBoundary status="loading" skeletonVariant="detail" loadingLabel={t("finalReviewStates.loading")}>
+      <main className="final-review final-review--prep">
+        <AsyncContentBoundary status="loading" skeleton={<FinalReviewLoadingState />} loadingLabel={t("finalReviewStates.loading")}>
           {null}
         </AsyncContentBoundary>
       </main>
@@ -898,11 +982,15 @@ export const FinalReviewPage = forwardRef<FinalReviewPageHandle, { sourceVideoId
         analyzeBusy={ocrBusy}
         approveBusy={approveBusy}
         audioApproveBusy={audioApproveBusy}
+        residualTranslationBusy={residualTranslationBusy}
         status={ocrStatus}
         presentation="prep"
         prepFocus={prepFocus}
         onAnalyze={() => void asyncAction.run("analyze-ocr", () => handleAnalyzeOcr(false))}
         onReanalyze={() => void asyncAction.run("reanalyze-ocr", () => handleAnalyzeOcr(true))}
+        onApproveDialogueTranslation={() =>
+          void asyncAction.run("approve-dialogue-translation", handleApproveDialogueTranslation)
+        }
         onApprove={() => void asyncAction.run("approve-visual", handleApproveVisual)}
         onApproveAudio={() => void asyncAction.run("approve-audio", handleApproveAudio)}
         onSubmitOcrReview={(decisions) =>
@@ -919,6 +1007,13 @@ export const FinalReviewPage = forwardRef<FinalReviewPageHandle, { sourceVideoId
         onApproveResidual={(proposalSha256) =>
           void asyncAction.run("approve-residual", () => handleApproveResidual(proposalSha256))
         }
+        onRetryResidualTranslation={() => {
+          residualTranslationAttemptedRef.current = null;
+          void asyncAction.run(
+            "suggest-residual-translation",
+            handleRequestResidualTranslationSuggestions
+          );
+        }}
         onDismissStatus={() => setOcrStatus(null)}
         onPause={ocrJobId && !ocrWatchPaused ? () => pauseOcrWatch() : undefined}
         onResume={ocrJobId && ocrWatchPaused ? () => void resumeOcrWatch() : undefined}
@@ -936,6 +1031,7 @@ export const FinalReviewPage = forwardRef<FinalReviewPageHandle, { sourceVideoId
         prepFocus={prepFocus}
         presentation={prepFocus === "render" ? "bar" : "side"}
         actionStatus={actionStatus}
+        hideTranscriptLink={isFinalReviewDialogueTranslationApprovalPending(ocrSummary)}
         onStartRender={() => void asyncAction.run("start-render", handleStartFirstRender)}
         onDismissStatus={() => setActionStatus(null)}
         onPause={renderJobId && !renderWatchPaused ? () => pauseRenderWatch() : undefined}
@@ -994,7 +1090,8 @@ export const FinalReviewPage = forwardRef<FinalReviewPageHandle, { sourceVideoId
     { id: "review", label: t("finalReviewTabs.review"), icon: "review" },
     { id: "visual", label: t("finalReviewTabs.visual"), icon: "visual" },
     { id: "risk", label: t("finalReviewTabs.risk"), icon: "risk" },
-    { id: "info", label: t("finalReviewTabs.info"), icon: "info" }
+    { id: "info", label: t("finalReviewTabs.info"), icon: "info" },
+    { id: "handoff", label: "Export", icon: "info" }
   ];
 
   return (
@@ -1068,9 +1165,13 @@ export const FinalReviewPage = forwardRef<FinalReviewPageHandle, { sourceVideoId
                 analyzeBusy={ocrBusy}
                 approveBusy={approveBusy}
                 audioApproveBusy={audioApproveBusy}
+                residualTranslationBusy={residualTranslationBusy}
                 status={ocrStatus}
                   onAnalyze={() => void asyncAction.run("analyze-ocr", () => handleAnalyzeOcr(false))}
                   onReanalyze={() => void asyncAction.run("reanalyze-ocr", () => handleAnalyzeOcr(true))}
+                  onApproveDialogueTranslation={() =>
+                    void asyncAction.run("approve-dialogue-translation", handleApproveDialogueTranslation)
+                  }
                 onApprove={() => void asyncAction.run("approve-visual", handleApproveVisual)}
                 onApproveAudio={() => void asyncAction.run("approve-audio", handleApproveAudio)}
                 onSubmitOcrReview={(decisions) =>
@@ -1087,6 +1188,13 @@ export const FinalReviewPage = forwardRef<FinalReviewPageHandle, { sourceVideoId
                 onApproveResidual={(proposalSha256) =>
                   void asyncAction.run("approve-residual", () => handleApproveResidual(proposalSha256))
                 }
+                onRetryResidualTranslation={() => {
+                  residualTranslationAttemptedRef.current = null;
+                  void asyncAction.run(
+                    "suggest-residual-translation",
+                    handleRequestResidualTranslationSuggestions
+                  );
+                }}
                 onDismissStatus={() => setOcrStatus(null)}
                 onPause={ocrJobId && !ocrWatchPaused ? () => pauseOcrWatch() : undefined}
                 onResume={ocrJobId && ocrWatchPaused ? () => void resumeOcrWatch() : undefined}
@@ -1106,6 +1214,14 @@ export const FinalReviewPage = forwardRef<FinalReviewPageHandle, { sourceVideoId
               />
             ) : null}
             {railTab === "info" ? <FinalRenderMetadataPanel render={render} manifest={manifest} /> : null}
+            {railTab === "handoff" ? (
+              <QualityHandoffPanel
+                sourceVideoId={sourceVideoId}
+                publishReady={Boolean(render && isPublishReady(render))}
+                defaultTitle={manifest?.source_video?.caption || ""}
+                defaultCaption={manifest?.source_video?.caption || ""}
+              />
+            ) : null}
           </div>
         </aside>
       </section>

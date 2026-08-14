@@ -1207,7 +1207,7 @@ function CandidateMediaTile({
           <p className="capture-inbox-tile-meta-line" aria-label="Duration and posted">
             <span className="capture-inbox-tile-meta-stat" title={`Duration: ${metadata.durationText ?? "Not captured"}`}>
               <span aria-hidden="true" className="capture-inbox-tile-perf-stat-icon">
-                <CaptureInboxFilterChipIcon className="capture-inbox-tile-perf-stat-icon__glyph" kind="stat-duration" />
+                <CaptureInboxFilterChipIcon className="capture-inbox-tile-perf-stat-icon__glyph" kind="meta-duration" />
               </span>
               <span className="capture-inbox-tile-meta-copy">
                 <span className="capture-inbox-tile-meta-label">Duration</span>
@@ -1216,7 +1216,7 @@ function CandidateMediaTile({
             </span>
             <span className="capture-inbox-tile-meta-stat" title={`Posted: ${formatReviewPostedLabel(metadata)}`}>
               <span aria-hidden="true" className="capture-inbox-tile-perf-stat-icon">
-                <CaptureInboxFilterChipIcon className="capture-inbox-tile-perf-stat-icon__glyph" kind="stat-posted" />
+                <CaptureInboxFilterChipIcon className="capture-inbox-tile-perf-stat-icon__glyph" kind="meta-posted" />
               </span>
               <span className="capture-inbox-tile-meta-copy">
                 <span className="capture-inbox-tile-meta-label">Posted</span>

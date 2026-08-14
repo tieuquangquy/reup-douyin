@@ -21,7 +21,11 @@ class SubtitleBuilder:
         self.track_kind = track_kind
 
     def build(self, segments: list[TranslationInputSegment], synthesized: list[SynthesizedSegment]) -> list[SubtitleDraftSegment]:
-        synthesized_by_id = {item.input_segment.translation_segment_id: item for item in synthesized}
+        synthesized_by_id = {}
+        for item in synthesized:
+            synthesized_by_id[item.input_segment.translation_segment_id] = item
+            for member_id in item.input_segment.member_translation_segment_ids:
+                synthesized_by_id[member_id] = item
         subtitles: list[SubtitleDraftSegment] = []
         for segment in segments:
             synth = synthesized_by_id.get(segment.translation_segment_id)

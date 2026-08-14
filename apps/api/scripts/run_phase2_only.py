@@ -24,10 +24,24 @@ _OCR_SIGNATURE_RE = re.compile(r"[0-9\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 _LEADING_UI_DATE_RE = re.compile(
     r"^(?:[0-9]{1,4}\u5e74)?(?:[0-9]{1,2}\u6708)?[0-9]{1,2}[\u65e5\u53f7]"
 )
+_MEANINGFUL_SHORT_VALUE_RE = re.compile(
+    r"^\d+(?:[.,]\d+)?(?:%|g|kg|ml|kcal|Â°C|â„ƒ)?$",
+    re.IGNORECASE,
+)
 
 
 def _ocr_signature(text: str) -> str:
     return "".join(_OCR_SIGNATURE_RE.findall(str(text or "")))
+
+
+def _is_symbol_dominant_non_text(text: str) -> bool:
+    normalized = "".join(str(text or "").split())
+    if not normalized or _MEANINGFUL_SHORT_VALUE_RE.fullmatch(normalized):
+        return False
+    cjk = sum(1 for char in normalized if "\u3400" <= char <= "\u9fff")
+    alnum = sum(1 for char in normalized if char.isalnum())
+    symbols = sum(1 for char in normalized if not char.isalnum())
+    return cjk == 0 and alnum <= 1 and symbols >= 1
 
 
 def _sha256_json(payload: Mapping[str, Any]) -> str:
@@ -35,6 +49,41 @@ def _sha256_json(payload: Mapping[str, Any]) -> str:
         dict(payload), ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _load_semantic_dialogue_authority(
+    path: Path,
+    *,
+    expected_phase1_sha256: str,
+) -> dict[str, Any]:
+    """Load the frontend bridge only when every authority hash is current."""
+
+    if not path.is_file():
+        return {}
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise RuntimeError("semantic_dialogue_authority.json must be an object")
+    phase1_ref = dict(payload.get("phase1_ref") or {})
+    if str(phase1_ref.get("sha256") or "") != str(expected_phase1_sha256):
+        raise RuntimeError(
+            "semantic_dialogue_authority.json is stale for master_timeline.json"
+        )
+    recorded_sha256 = str(payload.get("authority_sha256") or "")
+    hash_payload = dict(payload)
+    hash_payload.pop("authority_sha256", None)
+    if not recorded_sha256 or recorded_sha256 != _sha256_json(hash_payload):
+        raise RuntimeError(
+            "semantic_dialogue_authority.json authority SHA-256 mismatch"
+        )
+    file_digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    authority_ref = dict(payload.get("authority_ref") or {})
+    payload["authority_ref"] = {
+        **authority_ref,
+        "path": path.name,
+        "sha256": file_digest,
+        "authority_sha256": recorded_sha256,
+    }
+    return payload
 
 
 def _is_single_deletion_variant(candidate: str, approved: str) -> bool:
@@ -81,6 +130,101 @@ def _is_hash_bound_date_prefix_noise(
         if candidate_index == len(label_candidate):
             return True
     return False
+
+
+def _hash_bound_visual_override_is_valid(
+    *,
+    root: Path | None,
+    visual_override: Mapping[str, Any],
+    approved_text: str,
+    operator_review: Mapping[str, Any],
+) -> bool:
+    """Verify that an operator-approved residual is bound to immutable pixels."""
+
+    if root is None or not approved_text:
+        return False
+    override = dict(visual_override)
+    operator = dict(operator_review)
+    proposal_sha256 = str(
+        override.get("batch_decision_proposal_sha256") or ""
+    )
+    if (
+        str(override.get("policy_version") or "")
+        != "phase2_operator_visual_override_v1"
+        or len(proposal_sha256) != 64
+        or len(str(override.get("cluster_evidence_sha256") or "")) != 64
+        or str(override.get("approved_source_text_sha256") or "")
+        != hashlib.sha256(approved_text.encode("utf-8")).hexdigest()
+        or str(operator.get("decision") or "").upper()
+        not in {"APPROVE", "EDIT"}
+        or not str(operator.get("reviewer") or "").strip()
+        or not str(operator.get("reviewed_at") or "").strip()
+        or str(operator.get("proposal_sha256") or "") != proposal_sha256
+    ):
+        return False
+
+    resolved_root = root.resolve()
+    for key in ("source_frame_ref", "crop_ref"):
+        ref = dict(override.get(key) or {})
+        evidence_path = (resolved_root / str(ref.get("path") or "")).resolve()
+        if (
+            not evidence_path.is_relative_to(resolved_root)
+            or not evidence_path.is_file()
+            or hashlib.sha256(evidence_path.read_bytes()).hexdigest()
+            != str(ref.get("sha256") or "")
+        ):
+            return False
+    return True
+
+
+def _bind_operator_approved_residual_provenance(
+    *,
+    root: Path,
+    occurrence: Mapping[str, Any],
+    authority: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Make a reviewed additive residual localizable without guessing provenance.
+
+    Generic rows with missing provenance still fail closed. Only a remediation
+    whose operator decision, proposal hash, approved text hash and image hashes
+    all agree is promoted to an editor overlay.
+    """
+
+    bound = dict(occurrence)
+    approved_text = str(authority.get("ocr_text_approved") or "").strip()
+    visual_override = dict(authority.get("visual_override") or {})
+    operator = dict(authority.get("operator_review") or {})
+    if not _hash_bound_visual_override_is_valid(
+        root=root,
+        visual_override=visual_override,
+        approved_text=approved_text,
+        operator_review=operator,
+    ):
+        raise RuntimeError(
+            "Residual visual override authority is stale for "
+            f"{str(bound.get('text_id') or 'unknown')}"
+        )
+    bound["visual_provenance"] = {
+        "classification": "EDITOR_OVERLAY",
+        "confidence": 1.0,
+        "policy_version": "phase2_hash_bound_residual_editor_provenance_v1",
+        "reasons": [
+            "operator_approved_additive_residual",
+            "proposal_and_visual_evidence_hashes_verified",
+        ],
+        "authority": {
+            "proposal_sha256": visual_override.get(
+                "batch_decision_proposal_sha256"
+            ),
+            "cluster_evidence_sha256": visual_override.get(
+                "cluster_evidence_sha256"
+            ),
+            "approved_source_text_sha256": visual_override.get(
+                "approved_source_text_sha256"
+            ),
+        },
+    }
+    return bound
 
 
 def _configure_stdout_utf8() -> None:
@@ -386,6 +530,11 @@ def _load_residual_remediation(
             )
             if visual_override:
                 row["visual_override"] = visual_override
+        occurrence = _bind_operator_approved_residual_provenance(
+            root=root,
+            occurrence=occurrence,
+            authority=row,
+        )
         cluster_id = str(visual_override.get("cluster_id") or "")
         probe = visual_probe_geometries.get(cluster_id)
         if (
@@ -486,6 +635,15 @@ def _remediation_approvals(
                 )
             )
         )
+        geometry_only_carry_forward = bool(authority.get("geometry_override")) and str(
+            dict(authority.get("localization") or {}).get("mode") or ""
+        ) == "translation_carry_forward_exact"
+        if geometry_only_carry_forward:
+            # A geometry delta changes only the cover rectangle. Its text and
+            # translation were already hash-bound to the prior approved Phase
+            # 3 row; a fresh OCR sample from a transition frame must not turn
+            # that visual-only operation into a new text decision.
+            accepted_operator_edit = True
         visual_override = dict(authority.get("visual_override") or {})
         visual_override_accepted = False
         if (
@@ -495,21 +653,6 @@ def _remediation_approvals(
             and str(visual_override.get("policy_version") or "")
             == "phase2_operator_visual_override_v1"
         ):
-            approved_text_hash = hashlib.sha256(
-                approved_text.encode("utf-8")
-            ).hexdigest()
-            evidence_valid = True
-            for key in ("source_frame_ref", "crop_ref"):
-                ref = dict(visual_override.get(key) or {})
-                path = (root / str(ref.get("path") or "")).resolve()
-                if (
-                    not path.is_relative_to(root)
-                    or not path.is_file()
-                    or hashlib.sha256(path.read_bytes()).hexdigest()
-                    != str(ref.get("sha256") or "")
-                ):
-                    evidence_valid = False
-                    break
             approved_digits = "".join(char for char in approved_text if char.isdigit())
             candidate_digits = "".join(char for char in candidate_text if char.isdigit())
             date_prefix_noise_safe = (
@@ -525,25 +668,11 @@ def _remediation_approvals(
                 or date_prefix_noise_safe
             )
             visual_override_accepted = (
-                evidence_valid
-                and len(
-                    str(
-                        visual_override.get("batch_decision_proposal_sha256")
-                        or ""
-                    )
-                )
-                == 64
-                and len(str(visual_override.get("cluster_evidence_sha256") or ""))
-                == 64
-                and str(visual_override.get("approved_source_text_sha256") or "")
-                == approved_text_hash
-                and (
-                    not str(operator.get("proposal_sha256") or "")
-                    or str(
-                        visual_override.get("batch_decision_proposal_sha256")
-                        or ""
-                    )
-                    == str(operator.get("proposal_sha256") or "")
+                _hash_bound_visual_override_is_valid(
+                    root=root,
+                    visual_override=visual_override,
+                    approved_text=approved_text,
+                    operator_review=operator,
                 )
                 and digit_shape_safe
             )
@@ -580,6 +709,69 @@ def _remediation_approvals(
     return approvals
 
 
+def _apply_operator_approved_residual_text_authority(
+    timeline: list[dict[str, Any]],
+    authority_by_text_id: Mapping[str, Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Make hash-reviewed additive text authoritative after OCR/ASR alignment.
+
+    A residual occurrence is re-OCRed to refresh geometry diagnostics, and the
+    semantic hard-sub pass may also align it to ASR. Neither observation may
+    replace text that the operator approved against hash-bound source pixels.
+    Geometry-only overrides are deliberately excluded because their existing
+    Phase-2 content authority already owns the text.
+    """
+
+    rebound: list[dict[str, Any]] = []
+    for raw in timeline:
+        row = dict(raw)
+        text_id = str(row.get("text_id") or "").strip()
+        authority = dict(authority_by_text_id.get(text_id) or {})
+        approved_text = str(authority.get("ocr_text_approved") or "").strip()
+        is_additive = bool(dict(authority.get("occurrence") or {}))
+        if not text_id or not approved_text or not is_additive:
+            rebound.append(row)
+            continue
+        observed_text = str(
+            row.get("ocr_text_raw")
+            or row.get("ocr_text")
+            or row.get("text")
+            or ""
+        ).strip()
+        semantic = dict(row.get("semantic_hardsub") or {})
+        previous_authority = str(
+            semantic.get("canonical_text_authority")
+            or semantic.get("text_authority")
+            or ""
+        ).strip()
+        semantic.update(
+            {
+                "ocr_text_observed": observed_text,
+                "pre_review_text_authority": previous_authority or None,
+                "canonical_text_authority": approved_text,
+                "text_authority": approved_text,
+                "operator_approved_text_authority": {
+                    "policy_version": "phase2_hash_bound_residual_text_authority_v1",
+                    "remediation_id": str(
+                        authority.get("remediation_id") or text_id
+                    ),
+                    "proposal_sha256": str(
+                        dict(authority.get("operator_review") or {}).get(
+                            "proposal_sha256"
+                        )
+                        or ""
+                    ),
+                    "approved_source_text_sha256": hashlib.sha256(
+                        approved_text.encode("utf-8")
+                    ).hexdigest(),
+                },
+            }
+        )
+        row["semantic_hardsub"] = semantic
+        rebound.append(row)
+    return rebound
+
+
 def _carry_forward_transient_ocr_failures(
     contract: Mapping[str, Any],
     approvals: Mapping[str, Mapping[str, Any]],
@@ -604,14 +796,24 @@ def _carry_forward_transient_ocr_failures(
             if str(value)
         }
         previous = dict(approvals.get(content_id) or {})
+        previous_decision = str(previous.get("decision") or "").upper()
+        source_preservation = previous_decision in {
+            "REJECT_UI",
+            "PRESERVE_SOURCE",
+        }
         if (
             str(content.get("review_status") or "") != "OCR_REVIEW_STALE"
-            or str(content.get("ocr_text_candidate") or "").strip()
+            or (
+                str(content.get("ocr_text_candidate") or "").strip()
+                and not source_preservation
+            )
             or not refs
             or refs.intersection(remediated_text_ids)
-            or str(previous.get("decision") or "").upper()
-            not in {"APPROVE", "EDIT"}
-            or not str(previous.get("ocr_text_approved") or "").strip()
+            or previous_decision not in {"APPROVE", "EDIT", "REJECT_UI", "PRESERVE_SOURCE"}
+            or (
+                not source_preservation
+                and not str(previous.get("ocr_text_approved") or "").strip()
+            )
             or any(
                 str(dict(enrichments.get(text_id) or {}).get("ocr_source") or "")
                 != "failed"
@@ -623,14 +825,279 @@ def _carry_forward_transient_ocr_failures(
             **previous,
             "review_input_sha256": content.get("review_input_sha256"),
             "carry_forward": {
-                "policy_version": "phase2_transient_ocr_failure_carry_v1",
-                "reason": "unchanged_phase1_retry_returned_empty_ocr",
+                "policy_version": (
+                    "phase2_source_preservation_carry_v1"
+                    if source_preservation
+                    else "phase2_transient_ocr_failure_carry_v1"
+                ),
+                "reason": (
+                    "unchanged_phase1_source_preservation_decision"
+                    if source_preservation
+                    else "unchanged_phase1_retry_returned_empty_ocr"
+                ),
                 "previous_review_input_sha256": previous.get(
                     "review_input_sha256"
                 ),
             },
         }
     return carried
+
+
+def _stable_semantic_identity(content: Mapping[str, Any]) -> dict[str, Any]:
+    semantic = dict(content.get("semantic_hardsub") or {})
+    return {
+        key: semantic.get(key)
+        for key in (
+            "schema_version",
+            "recipe_version",
+            "cue_id",
+            "classification",
+            "action",
+            "canonical_text_authority",
+        )
+    }
+
+
+def _previous_phase2_handoff(root: Path) -> dict[str, Any]:
+    """Resolve the exact Phase-2 handoff consumed by the current Phase 3.
+
+    Phase 2 quarantines its previous generated handoff before writing a new
+    preview.  Residual retries still need that hash-bound artifact to prove an
+    unaffected source-preservation decision refers to the same geometry.
+    """
+
+    phase3_path = root / "phase3_render_handoff.json"
+    phase3_candidates = [phase3_path]
+    stale = root / "qa" / "stale"
+    if stale.is_dir():
+        phase3_candidates.extend(
+            sorted(
+                stale.glob("phase3_render_handoff_*.json"),
+                key=lambda path: path.stat().st_mtime,
+                reverse=True,
+            )
+        )
+    handoff_candidates = [root / "phase2_handoff.json"]
+    if stale.is_dir():
+        handoff_candidates.extend(
+            sorted(
+                stale.glob("phase2_handoff_*.json"),
+                key=lambda path: path.stat().st_mtime,
+                reverse=True,
+            )
+        )
+    for candidate in phase3_candidates:
+        if not candidate.is_file():
+            continue
+        try:
+            payload = json.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, Mapping):
+            continue
+        ref = dict(payload.get("phase2_handoff_ref") or {})
+        expected_sha = str(ref.get("sha256") or "")
+        if len(expected_sha) != 64:
+            continue
+        for handoff_candidate in handoff_candidates:
+            resolved = handoff_candidate.resolve()
+            if (
+                not resolved.is_relative_to(root)
+                or not resolved.is_file()
+                or hashlib.sha256(resolved.read_bytes()).hexdigest()
+                != expected_sha
+            ):
+                continue
+            try:
+                handoff = json.loads(resolved.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if isinstance(handoff, Mapping):
+                return dict(handoff)
+    return {}
+
+
+def _carry_forward_unchanged_source_preservation(
+    contract: Mapping[str, Any],
+    approvals: Mapping[str, Mapping[str, Any]],
+    *,
+    root: Path,
+    remediated_text_ids: set[str],
+) -> dict[str, dict[str, Any]]:
+    """Rebind source-preservation only from exact per-object evidence.
+
+    Adding an unrelated residual changes the clip-wide semantic authority hash
+    and consequently the review-input hash.  That is not content drift.  This
+    carry path accepts only identical geometry, OCR text and stable semantic
+    identity, and never carries a decision onto remediated geometry.
+    """
+
+    previous_handoff = _previous_phase2_handoff(root)
+    previous_preserved = [
+        dict(row)
+        for row in list(previous_handoff.get("preserved_source_items") or [])
+        if isinstance(row, Mapping)
+    ]
+    carried: dict[str, dict[str, Any]] = {}
+    for raw in list(contract.get("content_objects") or []):
+        if not isinstance(raw, Mapping):
+            continue
+        content = dict(raw)
+        content_id = str(content.get("content_id") or "")
+        refs = [str(value) for value in content.get("geometry_refs") or [] if str(value)]
+        if (
+            not content_id
+            or str(content.get("review_status") or "") != "OCR_REVIEW_STALE"
+            or not refs
+            or set(refs).intersection(remediated_text_ids)
+        ):
+            continue
+
+        previous = dict(approvals.get(content_id) or {})
+        if str(previous.get("decision") or "").upper() not in {
+            "REJECT_UI",
+            "PRESERVE_SOURCE",
+        }:
+            continue
+
+        current_evidence = {
+            "geometry_refs": refs,
+            "ocr_text_candidate": str(content.get("ocr_text_candidate") or ""),
+            "provenance_classifications": [
+                str(value)
+                for value in content.get("provenance_classifications") or []
+            ],
+            "semantic_identity": _stable_semantic_identity(content),
+        }
+        recorded_evidence = dict(previous.get("review_evidence") or {})
+        evidence_source = "phase2_approval_review_evidence_v1"
+        if not recorded_evidence:
+            matches = [
+                row
+                for row in previous_preserved
+                if [str(value) for value in row.get("geometry_refs") or []] == refs
+                and str(row.get("content_id") or "") == content_id
+            ]
+            if len(matches) != 1:
+                continue
+            old = matches[0]
+            old_semantic = dict(old.get("semantic_hardsub") or {})
+            recorded_evidence = {
+                "geometry_refs": refs,
+                "ocr_text_candidate": str(
+                    old.get("zh_approved")
+                    or old_semantic.get("canonical_text_authority")
+                    or previous.get("ocr_text_approved")
+                    or ""
+                ),
+                "provenance_classifications": [
+                    str(old_semantic.get("classification") or "")
+                ],
+                "semantic_identity": _stable_semantic_identity(old),
+            }
+            evidence_source = "hash_bound_previous_phase2_handoff_v1"
+
+        # Older handoffs carry only the canonical semantic classification,
+        # while new approval evidence records the complete provenance list.
+        recorded_classes = [
+            value
+            for value in list(recorded_evidence.get("provenance_classifications") or [])
+            if str(value)
+        ]
+        current_classes = current_evidence["provenance_classifications"]
+        classes_match = (
+            recorded_classes == current_classes
+            or len(recorded_classes) == 1
+            and recorded_classes[0]
+            == str(current_evidence["semantic_identity"].get("classification") or "")
+        )
+        if (
+            list(recorded_evidence.get("geometry_refs") or []) != refs
+            or str(recorded_evidence.get("ocr_text_candidate") or "")
+            != current_evidence["ocr_text_candidate"]
+            or dict(recorded_evidence.get("semantic_identity") or {})
+            != current_evidence["semantic_identity"]
+            or not classes_match
+        ):
+            continue
+
+        carried[content_id] = {
+            **previous,
+            "review_input_sha256": content.get("review_input_sha256"),
+            "review_evidence": current_evidence,
+            "carry_forward": {
+                "policy_version": "phase2_unchanged_source_preservation_v1",
+                "reason": "unrelated_residual_changed_clip_wide_authority_hash",
+                "evidence_source": evidence_source,
+                "previous_review_input_sha256": previous.get(
+                    "review_input_sha256"
+                ),
+            },
+        }
+    return carried
+
+
+def _rebind_shifted_content_approvals(
+    contract: Mapping[str, Any],
+    approvals: Mapping[str, Mapping[str, Any]],
+    *,
+    remediated_text_ids: set[str],
+) -> dict[str, dict[str, Any]]:
+    """Rebind unchanged approval fossils after additive content-id shifts.
+
+    ``ocr_content_NNN`` is a projection identifier, not semantic authority.
+    Inserting a residual occurrence earlier on the timeline can renumber every
+    later object.  Preserve an old approval only when its exact approved OCR
+    text matches the new candidate, and never use this path for the newly
+    remediated geometry (which has its own hash-bound authority).
+    """
+
+    approvals_by_text: dict[str, list[dict[str, Any]]] = {}
+    for raw in approvals.values():
+        previous = dict(raw)
+        approved_text = str(previous.get("ocr_text_approved") or "").strip()
+        if approved_text and str(previous.get("decision") or "").upper() in {
+            "APPROVE",
+            "EDIT",
+        }:
+            approvals_by_text.setdefault(approved_text, []).append(previous)
+
+    rebound: dict[str, dict[str, Any]] = {}
+    for raw in list(contract.get("content_objects") or []):
+        if not isinstance(raw, Mapping):
+            continue
+        content = dict(raw)
+        content_id = str(content.get("content_id") or "")
+        refs = {
+            str(value)
+            for value in list(content.get("geometry_refs") or [])
+            if str(value)
+        }
+        candidate = str(content.get("ocr_text_candidate") or "").strip()
+        matches = approvals_by_text.get(candidate, [])
+        if (
+            not content_id
+            or str(content.get("review_status") or "") != "OCR_REVIEW_STALE"
+            or not candidate
+            or refs.intersection(remediated_text_ids)
+            or not matches
+        ):
+            continue
+        previous = matches[0]
+        rebound[content_id] = {
+            **previous,
+            "content_id": content_id,
+            "review_input_sha256": content.get("review_input_sha256"),
+            "carry_forward": {
+                "policy_version": "phase2_content_identity_rebind_v1",
+                "reason": "additive_residual_shifted_projection_content_id",
+                "previous_content_id": previous.get("content_id"),
+                "previous_review_input_sha256": previous.get(
+                    "review_input_sha256"
+                ),
+            },
+        }
+    return rebound
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -675,16 +1142,21 @@ def main(argv: list[str] | None = None) -> int:
     video = Path(args[1]) if len(args) > 1 else Path(str(meta.get("video") or ""))
     fps = float(meta.get("fps") or 30.0)
     frame_count = int(meta.get("frame_count") or 0)
-    # Prefer size from first keyframe if meta lacks it.
-    frame_w, frame_h = 1920, 1080
+    # Phase 1 may store analysis keyframes at proxy resolution while timeline
+    # geometry remains in source-video pixels. Prefer the explicit source
+    # raster contract and inspect a keyframe only for legacy artifacts.
+    frame_w = int(meta.get("frame_width") or 0)
+    frame_h = int(meta.get("frame_height") or 0)
     frames_dir = root / "frames"
     sample = next(iter(sorted(frames_dir.glob("*.jpg"))), None) if frames_dir.is_dir() else None
-    if sample is not None:
+    if (frame_w <= 0 or frame_h <= 0) and sample is not None:
         import cv2
 
         img = cv2.imread(str(sample))
         if img is not None:
             frame_h, frame_w = int(img.shape[0]), int(img.shape[1])
+    if frame_w <= 0 or frame_h <= 0:
+        frame_w, frame_h = 1920, 1080
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     logging.getLogger("onnxruntime").setLevel(logging.ERROR)
@@ -692,6 +1164,11 @@ def main(argv: list[str] | None = None) -> int:
     master_timeline = json.loads(timeline_path.read_text(encoding="utf-8"))
     if not isinstance(master_timeline, list):
         raise RuntimeError("master_timeline.json must contain a list")
+    current_phase1_sha256 = sha256_file(timeline_path)
+    dialogue_authority = _load_semantic_dialogue_authority(
+        root / "semantic_dialogue_authority.json",
+        expected_phase1_sha256=current_phase1_sha256,
+    )
     from src.media_pipeline.frame_sampling.phase1_geometry_review import (
         apply_phase1_geometry_materialization,
     )
@@ -731,6 +1208,7 @@ def main(argv: list[str] | None = None) -> int:
     provenance_path = root / "visual_text_provenance_v2.json"
     provenance_payload: dict[str, Any] = {}
     provenance_by_id: dict[str, dict[str, Any]] = {}
+    protected_source_by_id: dict[str, dict[str, Any]] = {}
     if provenance_path.is_file():
         provenance_payload = json.loads(provenance_path.read_text(encoding="utf-8"))
         phase1_ref = dict(provenance_payload.get("phase1_ref") or {})
@@ -743,8 +1221,40 @@ def main(argv: list[str] | None = None) -> int:
             for row in list(provenance_payload.get("tracks") or [])
             if isinstance(row, Mapping) and str(row.get("text_id") or "")
         }
+        protected_source_by_id = {
+            str(row.get("text_id") or ""): dict(row)
+            for row in list(provenance_payload.get("protected_source_tracks") or [])
+            if isinstance(row, Mapping) and str(row.get("text_id") or "")
+        }
     localizable_timeline: list[dict[str, Any]] = []
     protected_source_tracks: list[dict[str, Any]] = []
+    coverage_path = root / "phase1_track_coverage_v2.json"
+    coverage_by_id: dict[str, dict[str, Any]] = {}
+    phase1_coverage_ref: dict[str, Any] = {}
+    if coverage_path.is_file():
+        coverage_payload = json.loads(coverage_path.read_text(encoding="utf-8"))
+        if not isinstance(coverage_payload, Mapping):
+            raise RuntimeError("phase1_track_coverage_v2.json must be an object")
+        coverage_master_ref = dict(
+            coverage_payload.get("master_timeline_ref") or {}
+        )
+        if str(coverage_master_ref.get("sha256") or "") != sha256_file(
+            timeline_path
+        ):
+            raise RuntimeError(
+                "phase1_track_coverage_v2.json is stale for master_timeline.json"
+            )
+        coverage_by_id = {
+            str(item.get("text_id") or ""): dict(item)
+            for item in list(coverage_payload.get("tracks") or [])
+            if isinstance(item, Mapping) and str(item.get("text_id") or "")
+        }
+        phase1_coverage_ref = {
+            "path": coverage_path.name,
+            "sha256": sha256_file(coverage_path),
+            "schema_version": coverage_payload.get("schema_version"),
+            "policy_version": coverage_payload.get("policy_version"),
+        }
     for raw in timeline:
         row = dict(raw)
         text_id = str(row.get("text_id") or "")
@@ -756,15 +1266,21 @@ def main(argv: list[str] | None = None) -> int:
                 if key != "text_id"
             }
         if not provenance:
-            # Backward compatibility for pre-V2 supplemental remediation rows.
+            # Missing provenance is never evidence that pixels were added by
+            # an editor. Legacy rows fail closed until semantic dialogue or an
+            # explicit operator/source authority classifies them.
             provenance = {
-                "classification": "EDITOR_OVERLAY",
-                "confidence": 0.75,
-                "policy_version": "legacy_default_editor_overlay",
-                "reasons": ["legacy_or_operator_approved_geometry"],
+                "classification": "UNCERTAIN",
+                "confidence": 0.0,
+                "policy_version": "missing_provenance_fail_closed_v1",
+                "reasons": ["missing_explicit_visual_provenance"],
             }
         row["visual_provenance"] = provenance
-        if str(provenance.get("classification") or "") == "SOURCE_INTRINSIC":
+        if text_id in coverage_by_id:
+            row["coverage_authority"] = dict(coverage_by_id[text_id])
+        if text_id in protected_source_by_id:
+            protected = dict(protected_source_by_id[text_id])
+            provenance = dict(protected.get("visual_provenance") or provenance)
             protected_source_tracks.append(
                 {
                     "text_id": text_id,
@@ -773,6 +1289,47 @@ def main(argv: list[str] | None = None) -> int:
                     "box_coords": list(row.get("box_coords") or []),
                     "visual_provenance": provenance,
                     "action": "PRESERVE_SOURCE_PIXELS",
+                    "source": "phase1_protected_source_partition",
+                    "coverage_authority": dict(
+                        coverage_by_id.get(text_id) or {}
+                    ),
+                }
+            )
+            continue
+        # Uncertain tracks are preserve-only until an operator proves editor
+        # provenance.  Localizing them would violate the source/editor boundary.
+        if str(provenance.get("classification") or "") == "UNCERTAIN":
+            protected_source_tracks.append(
+                {
+                    "text_id": text_id,
+                    "start_frame": row.get("start_frame"),
+                    "end_frame": row.get("end_frame"),
+                    "box_coords": list(row.get("box_coords") or []),
+                    "visual_provenance": provenance,
+                    "action": "PRESERVE_SOURCE_PIXELS",
+                    "source": "phase1_uncertain_fail_closed",
+                    "coverage_authority": dict(
+                        coverage_by_id.get(text_id) or {}
+                    ),
+                }
+            )
+            continue
+        if str(provenance.get("classification") or "") in {
+            "SOURCE_INTRINSIC",
+            "SOURCE_INTRINSIC_PANEL",
+            "PLATFORM_UI",
+        }:
+            protected_source_tracks.append(
+                {
+                    "text_id": text_id,
+                    "start_frame": row.get("start_frame"),
+                    "end_frame": row.get("end_frame"),
+                    "box_coords": list(row.get("box_coords") or []),
+                    "visual_provenance": provenance,
+                    "action": "PRESERVE_SOURCE_PIXELS",
+                    "coverage_authority": dict(
+                        coverage_by_id.get(text_id) or {}
+                    ),
                 }
             )
             continue
@@ -823,7 +1380,151 @@ def main(argv: list[str] | None = None) -> int:
         cache_path=root / "qa" / "ocr_cache.json",
         cache_namespace=cache_namespace,
     )
-    current_phase1_sha256 = sha256_file(timeline_path)
+    from src.media_pipeline.frame_sampling.phase2_local_recovery import (
+        PHASE2_LOCAL_RECOVERY_POLICY_VERSION,
+        PHASE2_TEMPORAL_SHADOW_POLICY_VERSION,
+        reconcile_temporal_shadow_tracks,
+        repeated_recovered_source_ui_indices,
+    )
+
+    timeline, temporal_shadow_audit = reconcile_temporal_shadow_tracks(
+        timeline,
+        frame_width=frame_w,
+        frame_height=frame_h,
+        fps=fps,
+    )
+
+    recovery_rows = [
+        dict(row.get("ocr_recovery") or {})
+        for row in timeline
+        if dict(row.get("ocr_recovery") or {})
+    ]
+    geometry_recovery_rows = [
+        dict(row.get("geometry_recovery") or {})
+        for row in timeline
+        if dict(row.get("geometry_recovery") or {})
+    ]
+    recovered_source_indices = repeated_recovered_source_ui_indices(
+        timeline,
+        frame_width=frame_w,
+        frame_height=frame_h,
+    )
+    if recovered_source_indices:
+        localizable_after_recovery: list[dict[str, Any]] = []
+        for index, raw in enumerate(timeline):
+            row = dict(raw)
+            if index not in recovered_source_indices:
+                localizable_after_recovery.append(row)
+                continue
+            provenance = {
+                "classification": "SOURCE_INTRINSIC_PANEL",
+                "confidence": 0.96,
+                "policy_version": PHASE2_LOCAL_RECOVERY_POLICY_VERSION,
+                "reasons": [
+                    "repeated_short_ui_label_same_geometry",
+                    "preserve_source_when_editor_provenance_is_ambiguous",
+                ],
+            }
+            row["visual_provenance"] = provenance
+            protected_source_tracks.append(
+                {
+                    "text_id": str(row.get("text_id") or ""),
+                    "start_frame": row.get("start_frame"),
+                    "end_frame": row.get("end_frame"),
+                    "box_coords": list(row.get("box_coords") or []),
+                    "visual_provenance": provenance,
+                    "ocr_recovery": dict(row.get("ocr_recovery") or {}),
+                    "action": "PRESERVE_SOURCE_PIXELS",
+                }
+            )
+        timeline = localizable_after_recovery
+    from src.media_pipeline.frame_sampling.semantic_hardsub_cues import (
+        apply_semantic_hardsub_authority,
+    )
+
+    semantic_result = apply_semantic_hardsub_authority(
+        timeline,
+        dialogue_authority=dialogue_authority,
+        fps=fps,
+        frame_width=frame_w,
+        frame_height=frame_h,
+    )
+    timeline = [dict(row) for row in semantic_result.timeline]
+    if remediation_authority:
+        timeline = _apply_operator_approved_residual_text_authority(
+            timeline,
+            remediation_authority,
+        )
+    protected_source_tracks.extend(
+        dict(row) for row in semantic_result.protected_source_tracks
+    )
+    semantic_hardsub_summary = dict(semantic_result.summary)
+    local_recovery_summary = {
+        "policy_version": PHASE2_LOCAL_RECOVERY_POLICY_VERSION,
+        "temporal_shadow_policy_version": PHASE2_TEMPORAL_SHADOW_POLICY_VERSION,
+        "temporal_shadow_tracks_purged": len(temporal_shadow_audit),
+        "temporal_shadow_audit": temporal_shadow_audit,
+        "attempted_tracks": len(recovery_rows),
+        "recovered_tracks": sum(
+            str(row.get("status") or "")
+            == "RECOVERED_FOR_OPERATOR_REVIEW"
+            for row in recovery_rows
+        ),
+        "promoted_source_ui_tracks": len(recovered_source_indices),
+        "editor_candidates_recovered": max(
+            0,
+            sum(
+                str(row.get("status") or "")
+                == "RECOVERED_FOR_OPERATOR_REVIEW"
+                for row in recovery_rows
+            )
+            - len(recovered_source_indices),
+        ),
+        "unresolved_tracks": sum(
+            str(row.get("status") or "") == "UNRESOLVED"
+            for row in recovery_rows
+        ),
+        "prepared_inputs": sum(
+            int(row.get("prepared_inputs") or 0) for row in recovery_rows
+        ),
+        "decoded_frames": len(
+            {
+                int(frame)
+                for row in recovery_rows
+                for frame in list(row.get("decoded_frames") or [])
+            }
+        ),
+        "geometry_tracks_derived": sum(
+            str(row.get("status") or "") == "LOCAL_DERIVED_TEMPORAL_CONSENSUS"
+            for row in geometry_recovery_rows
+        ),
+        "geometry_tracks_fail_closed": sum(
+            str(row.get("status") or "") == "UNRESOLVED_FAIL_CLOSED"
+            for row in geometry_recovery_rows
+        ),
+    }
+    non_text_noise_tracks: list[dict[str, Any]] = []
+    filtered_timeline: list[dict[str, Any]] = []
+    for raw in timeline:
+        row = dict(raw)
+        candidate = str(
+            row.get("ocr_text_raw")
+            or row.get("ocr_text")
+            or row.get("text")
+            or ""
+        ).strip()
+        if _is_symbol_dominant_non_text(candidate):
+            non_text_noise_tracks.append(
+                {
+                    "text_id": str(row.get("text_id") or ""),
+                    "ocr_text": candidate,
+                    "action": "IGNORE_NON_TEXT_GLYPH",
+                    "reason": "symbol_dominant_single_glyph",
+                }
+            )
+            continue
+        filtered_timeline.append(row)
+    timeline = filtered_timeline
     approvals = _load_content_map(
         root / "phase2_approvals.json",
         list_key="approvals",
@@ -850,18 +1551,35 @@ def main(argv: list[str] | None = None) -> int:
         supplemental_occurrences=supplemental,
         geometry_overrides=geometry_overrides,
         protected_source_tracks=protected_source_tracks,
+        phase1_coverage_ref=phase1_coverage_ref or None,
+        semantic_hardsub_summary=semantic_hardsub_summary,
+        fps=fps,
         frame_width=frame_w,
         frame_height=frame_h,
     )
+    contract["local_recovery_summary"] = dict(local_recovery_summary)
     if remediation_authority:
+        shifted_rebind = _rebind_shifted_content_approvals(
+            contract,
+            approvals,
+            remediated_text_ids=set(remediation_authority),
+        )
         transient_carry = _carry_forward_transient_ocr_failures(
             contract,
             approvals,
             remediated_text_ids=set(remediation_authority),
         )
+        source_preservation_carry = _carry_forward_unchanged_source_preservation(
+            contract,
+            approvals,
+            root=root,
+            remediated_text_ids=set(remediation_authority),
+        )
         approvals = {
             **approvals,
+            **shifted_rebind,
             **transient_carry,
+            **source_preservation_carry,
             **_remediation_approvals(
                 contract,
                 remediation_authority,
@@ -883,9 +1601,13 @@ def main(argv: list[str] | None = None) -> int:
             supplemental_occurrences=supplemental,
             geometry_overrides=geometry_overrides,
             protected_source_tracks=protected_source_tracks,
+            phase1_coverage_ref=phase1_coverage_ref or None,
+            semantic_hardsub_summary=semantic_hardsub_summary,
+            fps=fps,
             frame_width=frame_w,
             frame_height=frame_h,
         )
+        contract["local_recovery_summary"] = dict(local_recovery_summary)
     if frame_count <= 0 and timeline:
         frame_count = max(int(e.get("end_frame") or 0) for e in timeline) + 1
     artifact_paths = write_phase2_artifacts(
@@ -899,6 +1621,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     (root / "qa").mkdir(parents=True, exist_ok=True)
     review_summary = dict(contract.get("review_summary") or {})
+    local_recovery_summary = dict(contract.get("local_recovery_summary") or {})
     content_objects = list(contract.get("content_objects") or [])
     handoff_preview = json.loads(
         artifact_paths["handoff_preview"].read_text(encoding="utf-8")
@@ -927,6 +1650,7 @@ def main(argv: list[str] | None = None) -> int:
             and (item.get("localization") or {}).get("mode") == "deterministic"
         ),
         "review_required": int(review_summary.get("unresolved") or 0),
+        "non_text_noise_tracks": len(non_text_noise_tracks),
         "status": review_summary.get("status"),
         "handoff_status": handoff_preview.get("status"),
         "ready_for_phase3": handoff_preview.get("status")
@@ -939,6 +1663,8 @@ def main(argv: list[str] | None = None) -> int:
         ),
         "residual_remediation_ref": contract.get("residual_remediation_ref"),
         "review_summary": review_summary,
+        "local_recovery_summary": local_recovery_summary,
+        "semantic_hardsub_summary": semantic_hardsub_summary,
         "elapsed_s": round(time.perf_counter() - t0, 2),
         "timeline_path": str(timeline_path),
         "phase2_timeline_path": str(artifact_paths["phase2_timeline"]),

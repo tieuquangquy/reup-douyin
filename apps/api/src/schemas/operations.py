@@ -148,6 +148,41 @@ class TranslationAiModelsResponse(BaseModel):
 class TtsAiVoiceOption(BaseModel):
     id: str
     label: str = ""
+    languages: list[str] = Field(default_factory=list)
+    models: list[str] = Field(default_factory=list)
+    gender: str | None = None
+    description: str | None = None
+    capabilities: list[str] = Field(default_factory=list)
+
+
+class TtsAiModelOption(BaseModel):
+    id: str
+    label: str = ""
+    languages: list[str] = Field(default_factory=list)
+    voices: list[str] = Field(default_factory=list)
+    description: str | None = None
+    capabilities: list[str] = Field(default_factory=list)
+
+
+class TtsAiLanguageOption(BaseModel):
+    code: str
+    label: str = ""
+
+
+class TtsAiConnectionCheck(BaseModel):
+    stage: str = ""
+    status: str = "skipped"  # passed | partial | failed | skipped
+    detail: str = ""
+    endpoint: str = ""
+    http_status: int | None = None
+
+
+class TtsAiCatalogDiscovery(BaseModel):
+    status: str = "unavailable"
+    endpoints: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    checks: list[TtsAiConnectionCheck] = Field(default_factory=list)
+    config_fingerprint: str = ""
 
 
 class TtsAiFieldCapabilities(BaseModel):
@@ -165,11 +200,16 @@ class TtsAiCatalog(BaseModel):
     voices: list[TtsAiVoiceOption] = Field(default_factory=list)
     styles: list[str] = Field(default_factory=list)
     models: list[str] = Field(default_factory=list)
+    model_options: list[TtsAiModelOption] = Field(default_factory=list)
+    languages: list[TtsAiLanguageOption] = Field(default_factory=list)
     default_voice_id: str = ""
+    default_model_id: str = ""
+    default_language_code: str = ""
     warning: str = ""
     sample_rate: int | None = None
     backends: list[str] = Field(default_factory=list)
     capabilities: TtsAiFieldCapabilities | None = None
+    discovery: TtsAiCatalogDiscovery | None = None
 
 
 class TtsAiEngineOption(BaseModel):
@@ -225,6 +265,8 @@ class TtsAiLastProbe(BaseModel):
     provider: str = ""
     detail: str = ""
     catalog: TtsAiCatalog | None = None
+    checks: list[TtsAiConnectionCheck] = Field(default_factory=list)
+    config_fingerprint: str = ""
 
 
 class TtsAiRuntime(BaseModel):
@@ -243,6 +285,10 @@ class TtsAiProfileSummary(BaseModel):
     model_id: str = ""
     api_key_set: bool = False
     api_key_masked: str = ""
+    credential_mode: str = "api_key"
+    google_service_account_set: bool = False
+    google_service_account_email: str = ""
+    google_service_account_project_id: str = ""
     base_url: str = ""
     timeout_seconds: float = 120.0
     fallback_provider: str = "none"
@@ -272,6 +318,10 @@ class TtsAiResponse(BaseModel):
     model_id: str = ""
     api_key_set: bool = False
     api_key_masked: str = ""
+    credential_mode: str = "api_key"
+    google_service_account_set: bool = False
+    google_service_account_email: str = ""
+    google_service_account_project_id: str = ""
     base_url: str = ""
     timeout_seconds: float = 120.0
     fallback_provider: str = "none"
@@ -308,6 +358,9 @@ class TtsAiUpdateRequest(BaseModel):
         description="Omit/null to keep existing key; empty string clears when clear_api_key is true",
     )
     clear_api_key: bool = False
+    credential_mode: str = "api_key"
+    google_service_account_json: str | None = Field(default=None, max_length=65_536, repr=False)
+    clear_google_service_account: bool = False
     base_url: str = ""
     timeout_seconds: float = 120.0
     fallback_provider: str = "none"
@@ -327,6 +380,9 @@ class TtsAiTestRequest(BaseModel):
     model_id: str | None = None
     api_key: str | None = None
     clear_api_key: bool = False
+    credential_mode: str | None = None
+    google_service_account_json: str | None = Field(default=None, max_length=65_536, repr=False)
+    clear_google_service_account: bool = False
     base_url: str | None = None
     timeout_seconds: float | None = None
     fallback_provider: str | None = None
@@ -344,6 +400,8 @@ class TtsAiTestResponse(BaseModel):
     detail: str = ""
     catalog: TtsAiCatalog | None = None
     runtime: TtsAiRuntime | None = None
+    checks: list[TtsAiConnectionCheck] = Field(default_factory=list)
+    config_fingerprint: str = ""
 
 
 class TtsAiInstallRequest(BaseModel):
@@ -394,6 +452,9 @@ class TtsAiPreviewRequest(BaseModel):
     model_id: str | None = None
     api_key: str | None = None
     clear_api_key: bool = False
+    credential_mode: str | None = None
+    google_service_account_json: str | None = Field(default=None, max_length=65_536, repr=False)
+    clear_google_service_account: bool = False
     base_url: str | None = None
     timeout_seconds: float | None = None
     fallback_provider: str | None = None
@@ -415,6 +476,8 @@ class TtsAiPreviewResponse(BaseModel):
     audio_base64: str = ""
     warnings: list[str] = Field(default_factory=list)
     text: str = ""
+    requested_voice_id: str = ""
+    resolved_voice_id: str = ""
 
 
 class BacklogSummary(BaseModel):

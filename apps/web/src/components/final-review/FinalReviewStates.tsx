@@ -6,6 +6,7 @@ import type { FinalReviewPrepFocus } from "../../lib/finalReviewState";
 import {
   formatRenderDuration,
   hasFinalReviewOcrRun,
+  isFinalReviewDialogueTranslationApprovalPending,
   isFinalReviewOcrReviewPending,
   resolveFinalReviewPrepBriefing,
   resolveFinalReviewPrepStepProgress
@@ -21,12 +22,38 @@ import {
 export function FinalReviewLoadingState() {
   const t = useT();
   return (
-    <main className="final-review">
-      <div className="state-panel">
-        <h2>{t("finalReviewStates.loading")}</h2>
-        <p>{t("finalReviewStates.loadingBody")}</p>
+    <section className="final-review-loading" role="status" aria-busy="true" aria-live="polite">
+      <div className="final-review-loading__status">
+        <span className="final-review-loading__spinner" aria-hidden="true" />
+        <span>{t("finalReviewStates.loading")}</span>
       </div>
-    </main>
+
+      <div className="final-review-loading__journey" aria-hidden="true">
+        <span className="final-review-loading__step is-active" />
+        <span className="final-review-loading__step" />
+        <span className="final-review-loading__step" />
+      </div>
+
+      <div className="final-review-loading__split" aria-hidden="true">
+        <div className="final-review-loading__hero">
+          <span className="final-review-loading__preview" />
+          <div className="final-review-loading__copy">
+            <span className="final-review-loading__line is-narrow" />
+            <span className="final-review-loading__line is-wide" />
+            <span className="final-review-loading__line is-mid" />
+            <span className="final-review-loading__field" />
+            <span className="final-review-loading__field is-tall" />
+          </div>
+        </div>
+        <aside className="final-review-loading__side">
+          <span className="final-review-loading__line is-narrow" />
+          <span className="final-review-loading__line is-wide" />
+          <span className="final-review-loading__field" />
+          <span className="final-review-loading__line is-mid" />
+          <span className="final-review-loading__field" />
+        </aside>
+      </div>
+    </section>
   );
 }
 
@@ -185,13 +212,18 @@ export function FinalReviewPrepJourney({
     renderProgressPercent
   });
   const ocrReviewPending = isFinalReviewOcrReviewPending(ocrSummary);
+  const dialogueTranslationPending =
+    isFinalReviewDialogueTranslationApprovalPending(ocrSummary);
   const lockedLabel = t("finalReviewStates.emptyStepLocked");
+  const waitingApprovalLabel = t("finalReviewStates.journeyWaitingTranslationApproval");
   const steps = [
     {
       key: "ocr" as const,
       progressKey: "clean" as const,
       label: t("finalReviewStates.emptyStepShort1"),
-      desc: t("finalReviewStates.emptyStepDesc1"),
+      desc: dialogueTranslationPending
+        ? waitingApprovalLabel
+        : t("finalReviewStates.emptyStepDesc1"),
       cta: ocrWatchPaused
         ? t("finalReviewVisual.analyzePausedShort")
         : ocrReviewPending
@@ -200,13 +232,20 @@ export function FinalReviewPrepJourney({
           ? t("finalReviewStates.emptyStepCta1Again")
           : t("finalReviewStates.emptyStepCta1"),
       icon: ocrReviewPending ? "details" as const : "recheck" as const,
-      pending: ocrBusy && !ocrWatchPaused && !ocrReviewPending,
+      pending: ocrBusy && !ocrWatchPaused && !ocrReviewPending && !dialogueTranslationPending,
       pendingLabel: t("finalReviewVisual.analyzing"),
       locked: false,
-      disabled: approveBusy || !onAnalyze || ocrWatchPaused,
+      hideCta: dialogueTranslationPending,
+      statusLabel: dialogueTranslationPending ? waitingApprovalLabel : null,
+      attention: dialogueTranslationPending,
+      disabled: approveBusy || !onAnalyze || ocrWatchPaused || dialogueTranslationPending,
       onClick: onAnalyze,
-      primary: prepFocus === "ocr" && !ocrWatchPaused,
-      title: ocrWatchPaused ? t("finalReviewVisual.ocrWatchPaused") : undefined as string | undefined
+      primary: prepFocus === "ocr" && !ocrWatchPaused && !dialogueTranslationPending,
+      title: ocrWatchPaused
+        ? t("finalReviewVisual.ocrWatchPaused")
+        : dialogueTranslationPending
+          ? waitingApprovalLabel
+          : undefined as string | undefined
     },
     {
       key: "render" as const,
@@ -220,6 +259,9 @@ export function FinalReviewPrepJourney({
       pending: startRenderPending && !renderWatchPaused,
       pendingLabel: t("finalReviewStates.startingRender"),
       locked: prepFocus === "ocr",
+      hideCta: false,
+      statusLabel: null as string | null,
+      attention: false,
       disabled:
         prepFocus === "ocr" ||
         actionBusy ||
@@ -246,6 +288,9 @@ export function FinalReviewPrepJourney({
       pending: false,
       pendingLabel: undefined,
       locked: true,
+      hideCta: false,
+      statusLabel: null as string | null,
+      attention: false,
       disabled: true,
       onClick: undefined,
       primary: false,
@@ -268,7 +313,7 @@ export function FinalReviewPrepJourney({
         const ctaLabel = locked ? lockedLabel : step.cta;
         return (
           <li
-            className={`final-review-prep-steps__item${active ? " is-active" : ""}${done ? " is-done" : ""}${locked ? " is-locked" : ""}`}
+            className={`final-review-prep-steps__item${active ? " is-active" : ""}${done ? " is-done" : ""}${locked ? " is-locked" : ""}${step.attention ? " is-attention" : ""}`}
             key={step.key}
             aria-current={active ? "step" : undefined}
           >
@@ -287,7 +332,7 @@ export function FinalReviewPrepJourney({
                 index + 1
               )}
             </span>
-            <div className={`final-review-prep-steps__card${locked ? " is-locked" : ""}`}>
+            <div className={`final-review-prep-steps__card${locked ? " is-locked" : ""}${step.attention ? " is-attention" : ""}`}>
               <span aria-hidden="true" className="final-review-prep-steps__icon">
                 <WorkItemActionIcon className="final-review-prep-steps__icon-svg" kind={step.icon} />
               </span>
@@ -305,6 +350,15 @@ export function FinalReviewPrepJourney({
                   <span className="final-review-prep-steps__pct">{pct}%</span>
                 </div>
               </div>
+              {step.hideCta ? (
+                <span className="final-review-prep-steps__waiting" role="status" title={step.statusLabel ?? undefined}>
+                  <svg className="final-review-prep-steps__waiting-icon" viewBox="0 0 16 16" aria-hidden="true">
+                    <circle cx="8" cy="8" r="5.6" fill="none" stroke="currentColor" strokeWidth="1.5" />
+                    <path d="M8 5.2v3.1l2 1.2" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                  <span>{step.statusLabel}</span>
+                </span>
+              ) : (
               <AsyncButton
                 className={`final-review-prep-steps__cta${step.primary && !locked ? " primary" : " is-quiet"}${locked ? " is-locked" : ""}`}
                 disabled={step.disabled || locked}
@@ -336,6 +390,7 @@ export function FinalReviewPrepJourney({
               >
                 {ctaLabel}
               </AsyncButton>
+              )}
             </div>
           </li>
         );
@@ -351,6 +406,7 @@ export function FinalReviewEmptyState({
   prepFocus = "ocr",
   presentation = "side",
   actionStatus = null,
+  hideTranscriptLink = false,
   onStartRender,
   onDismissStatus,
   onPause,
@@ -366,6 +422,8 @@ export function FinalReviewEmptyState({
   prepFocus?: FinalReviewPrepFocus;
   presentation?: "hero" | "side" | "bar";
   actionStatus?: FinalReviewActionStatusState | null;
+  /** When the visual gate already owns Transcript Editor, hide the duplicate side-card link. */
+  hideTranscriptLink?: boolean;
   onStartRender?: () => void;
   onDismissStatus?: () => void;
   onPause?: () => void;
@@ -418,14 +476,16 @@ export function FinalReviewEmptyState({
       className="final-review-empty__secondary final-review-empty__secondary--inline final-review-empty__bar-nav"
       aria-label={t("finalReviewHeader.navLabel")}
     >
-      <Link
-        className="fr-tool final-review-empty__nav-pill"
-        href={`/production/transcript-editor/${sourceVideoId}`}
-        title={t("finalReviewHeader.transcriptEditor")}
-      >
-        <WorkItemActionIcon className="fr-tool__icon" kind="transcript" />
-        {t("finalReviewHeader.transcriptEditor")}
-      </Link>
+      {hideTranscriptLink ? null : (
+        <Link
+          className="fr-tool final-review-empty__nav-pill"
+          href={`/production/transcript-editor/${sourceVideoId}`}
+          title={t("finalReviewHeader.transcriptEditor")}
+        >
+          <WorkItemActionIcon className="fr-tool__icon" kind="transcript" />
+          {t("finalReviewHeader.transcriptEditor")}
+        </Link>
+      )}
       <Link
         className="fr-tool final-review-empty__nav-pill"
         href="/selection/review-board"
@@ -448,10 +508,12 @@ export function FinalReviewEmptyState({
         className={`final-review-empty__secondary${isSide ? " final-review-empty__secondary--side" : ""}`}
         aria-label={t("finalReviewHeader.navLabel")}
       >
-        <Link className="fr-tool" href={`/production/transcript-editor/${sourceVideoId}`}>
-          <WorkItemActionIcon className="fr-tool__icon" kind="transcript" />
-          {t("finalReviewHeader.transcriptEditorFull")}
-        </Link>
+        {hideTranscriptLink ? null : (
+          <Link className="fr-tool" href={`/production/transcript-editor/${sourceVideoId}`}>
+            <WorkItemActionIcon className="fr-tool__icon" kind="transcript" />
+            {t("finalReviewHeader.transcriptEditorFull")}
+          </Link>
+        )}
         <Link className="fr-tool" href="/selection/review-board">
           <WorkItemActionIcon className="fr-tool__icon" kind="details" />
           {t("finalReviewStates.backToReviewBoard")}

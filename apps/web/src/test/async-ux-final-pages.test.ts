@@ -27,7 +27,7 @@ assert.match(jobs, /useNotice/, "Ops Jobs must publish terminal action notices")
 assert.match(jobs, /<AsyncButton[\s\S]*?pending=\{action\.isPending\(`retry-\$\{job\.id\}`\)\}/, "Retry must expose per-job pending feedback");
 assert.match(jobs, /<AsyncButton[\s\S]*?pending=\{action\.isPending\(`delete-\$\{job\.id\}`\)\}/, "Delete must expose per-job pending feedback");
 assert.match(jobs, /action\.run\(`copy-\$\{jobId\}`/, "Clipboard writes must be synchronously gated");
-assert.match(jobs, /OpsJobsPagination/, "Ops Jobs must preserve explicit pagination navigation");
+assert.match(jobs, /OperatorListPagination/, "Ops Jobs must preserve explicit pagination navigation");
 assert.match(jobs, /busy=\{request\.refreshing\}/, "Ops Jobs pagination must expose refresh feedback");
 assert.match(jobs, /ops-job-row-\$\{/, "Ops Jobs must preserve job detail focus rows");
 assert.match(jobs, /skeletonVariant="table"/, "Ops Jobs must use the table skeleton shape");

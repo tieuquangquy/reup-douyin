@@ -12,7 +12,9 @@ import {
   formatResolution,
   getRenderWarnings,
   hasFinalReviewOcrRun,
+  hasCurrentQualityVisualAuthority,
   isApproved,
+  isFinalReviewDialogueTranslationApprovalPending,
   isFinalReviewOcrPrepComplete,
   isFinalReviewOcrReviewPending,
   isPublishReady,
@@ -32,6 +34,25 @@ import type { RenderOutput, SourceVideoAssetManifest } from "../types/final-revi
 
 const testDir = dirname(fileURLToPath(import.meta.url));
 const pageSource = readFileSync(resolve(testDir, "../components/final-review/FinalReviewPage.tsx"), "utf8");
+const handoffSource = readFileSync(resolve(testDir, "../components/final-review/QualityHandoffPanel.tsx"), "utf8");
+const apiSource = readFileSync(resolve(testDir, "../lib/api.ts"), "utf8");
+const runtimeSource = readFileSync(resolve(testDir, "../lib/coreRuntime.ts"), "utf8");
+
+assert.match(runtimeSource, /RENDER_PREVIEW:\s*"QUALITY_LOCALIZATION_V24_1"/);
+assert.match(runtimeSource, /RENDER_FINAL:\s*"RENDER_PIPELINE_V1"/);
+assert.match(apiSource, /expected_stage_version:\s*CORE_STAGE_RUNTIME\.ANALYZE_OCR/);
+assert.match(apiSource, /expected_stage_version:\s*CORE_STAGE_RUNTIME\.RENDER_PREVIEW/);
+assert.match(apiSource, /expected_stage_version:\s*CORE_STAGE_RUNTIME\.RENDER_FINAL/);
+assert.match(
+  apiSource,
+  /assertAcceptedCoreRuntime\([\s\S]*?"Render Final"[\s\S]*?CORE_STAGE_RUNTIME\.RENDER_FINAL/,
+  "Final render creation must reject an unexpected server runtime"
+);
+
+assert.match(pageSource, /QualityHandoffPanel/, "Final Review must expose the Phase-5 handoff");
+assert.match(handoffSource, /approveQualityMetadata/, "Phase-5 UI must submit metadata approval");
+assert.match(handoffSource, /approveQualityRights/, "Phase-5 UI must require rights approval");
+assert.match(handoffSource, /finalizeQualityManualExport/, "Phase-5 UI must create the manual export package");
 
 const render = makeRender({
   status: "READY_FOR_REVIEW",
@@ -170,6 +191,31 @@ assert.equal(
   "frame detections mean a prior run"
 );
 assert.equal(isFinalReviewOcrReviewPending(null), false);
+assert.equal(isFinalReviewDialogueTranslationApprovalPending(null), false);
+assert.equal(
+  isFinalReviewDialogueTranslationApprovalPending({
+    workflow_stage: "WAITING_DIALOGUE_TRANSLATION_APPROVAL",
+    requires_dialogue_translation_approval: true,
+    dialogue_translation_blocked_count: 86
+  }),
+  true,
+  "completed OCR must expose the missing dialogue approval checkpoint instead of re-analysis"
+);
+assert.equal(hasCurrentQualityVisualAuthority(null), false);
+assert.equal(
+  hasCurrentQualityVisualAuthority({
+    workflow_version: "QUALITY_LOCALIZATION_V24_1",
+    workflow_stage: "WAITING_VISUAL_REVIEW"
+  }),
+  true
+);
+assert.equal(
+  hasCurrentQualityVisualAuthority({
+    workflow_version: "QUALITY_LOCALIZATION_V24_1",
+    workflow_stage: "WAITING_RESIDUAL_TRIAGE"
+  }),
+  false
+);
 assert.equal(
   isFinalReviewOcrReviewPending({
     workflow_stage: "WAITING_OCR_REVIEW",
@@ -226,7 +272,7 @@ assert.equal(
 assert.equal(
   isFinalReviewOcrPrepComplete({
     workflow_version: "QUALITY_LOCALIZATION_V24_1",
-    workflow_stage: "VISUAL_APPROVED",
+    workflow_stage: "AUDIO_APPROVED",
     can_render_final: true
   }),
   true
@@ -368,7 +414,7 @@ assert.equal(
   resolveFinalReviewPrepBriefing({
     sourceVideoId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
     manifest: {
-      source_video: { id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", caption: "Cooking clip", duration_seconds: 65 }
+      source_video: { caption: "Cooking clip", duration_seconds: 65 }
     },
     ocrSummary: null,
     ocrBusy: false,

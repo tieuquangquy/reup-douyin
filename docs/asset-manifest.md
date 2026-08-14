@@ -33,7 +33,7 @@ The pipeline also writes a `METADATA_JSON` mirror file into storage for local de
   "storage": {
     "provider": "local",
     "root": "./data/storage",
-    "video_prefix": "workspace_x/douyin/profile_y/niche_default/video_z"
+    "video_prefix": "workspace_x/dy/@creator__profile123"
   },
   "assets": [
     {
@@ -42,9 +42,9 @@ The pipeline also writes a `METADATA_JSON` mirror file into storage for local de
       "status": "AVAILABLE",
       "version": 1,
       "is_current": true,
-      "logical_key": "workspace_x/douyin/profile_y/niche_default/video_z/raw/v1_video.mp4",
-      "storage_key": "workspace_x/douyin/profile_y/niche_default/video_z/raw/v1_video.mp4",
-      "relative_path": "workspace_x/douyin/profile_y/niche_default/video_z/raw/v1_video.mp4",
+      "logical_key": "workspace_x/dy/@creator__profile123/7420000000000000000__source.mp4",
+      "storage_key": "workspace_x/dy/@creator__profile123/7420000000000000000__source.mp4",
+      "relative_path": "workspace_x/dy/@creator__profile123/7420000000000000000__source.mp4",
       "mime_type": "video/mp4",
       "size_bytes": 123456,
       "checksum_sha256": "sha256",
@@ -65,13 +65,18 @@ The pipeline also writes a `METADATA_JSON` mirror file into storage for local de
 
 ## Current Asset Rules
 
-Only current assets are included in the manifest. Historical versions remain in `MediaAsset` for trace/debug.
+Only current assets are included in the manifest. Historical sidecar versions
+remain in `MediaAsset` for trace/debug. The operator-facing raw source is not
+version-prefixed. When a force-refresh resolves to the same raw storage key, it
+is refreshed in place (the existing row remains the owner of that unique key),
+so the previous bytes are not preserved as a second historical object. A changed
+raw filename can create a new key/row. Introduce a content/version suffix before
+promising complete raw byte lineage to downstream consumers.
 
-When a force refresh happens:
-
-1. Existing current asset becomes `is_current = false`.
-2. New asset gets `version = previous_version + 1`.
-3. Manifest includes the new current asset only.
+When a force refresh happens, the current raw/thumbnail cache is bypassed, the
+new validated file is atomically promoted, and the manifest is rebuilt from the
+current DB rows. Versioned sidecars receive a new `version` and remain traceable;
+optional failed thumbnail rows may remain current to explain a partial manifest.
 
 ## Phase 1 Limits
 

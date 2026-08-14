@@ -51,6 +51,9 @@ class ReupQueueItemResponse(BaseModel):
     job_type: str | None = None
     job_status: str | None = None
     job_progress_percent: int | None = None
+    job_phase: str | None = None
+    job_phase_current: int | None = None
+    job_phase_total: int | None = None
     job_error_code: str | None = None
     job_error_message: str | None = None
     render_output_id: UUID | None
@@ -82,6 +85,7 @@ class ReupQueueActionRequest(BaseModel):
     # SET_AUTOMATION: manual | auto_to_tts | auto_to_render (required)
     pipeline_mode: str | None = Field(default=None, max_length=40)
     media_prep_status: ReupQueueMediaPrepStatus | None = None
+    expected_stage_versions: dict[str, str] | None = None
 
 
 class ReupQueueEnqueueRequest(BaseModel):

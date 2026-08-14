@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import inspect
 import unittest
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
+from src.enums import JobType
 from src.ocr_pipeline.completion_advisory import (
     OCR_NO_HARDSUB_OUTPUT,
     ocr_completion_advisory,
@@ -35,6 +38,26 @@ class OcrCompletionAdvisoryTests(unittest.TestCase):
         self.assertIn("ocr_completion_advisory", source)
         self.assertIn("OCR_NO_HARDSUB_OUTPUT", source)
         self.assertIn("result_json", source)
+
+        job = SimpleNamespace(
+            job_type=JobType.ANALYZE_OCR,
+            result_json=None,
+            error_code=None,
+            error_message=None,
+            steps=[
+                SimpleNamespace(
+                    result_json={"warnings": ["clean_skipped_no_hardsub"]},
+                    output_json=None,
+                )
+            ],
+        )
+        runner = job_runner.JobRunner(MagicMock())
+        self.assertTrue(runner._apply_completion_advisory(job))
+        self.assertEqual(job.error_code, OCR_NO_HARDSUB_OUTPUT)
+        self.assertEqual(
+            job.result_json["completion_advisory"]["code"],
+            OCR_NO_HARDSUB_OUTPUT,
+        )
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""Best OCR profile must use Authority V3.6 full-timeline in the production E2E path."""
+"""Best OCR profile must use Master Phase 1 as production geometry authority."""
 
 from __future__ import annotations
 
@@ -11,8 +11,8 @@ from unittest.mock import patch
 from src.media_pipeline.hardsub_e2e import run_hardsub_phases_1_to_4
 
 
-class HardsubE2EV3WiringTests(unittest.TestCase):
-    def test_best_profile_uses_v3_and_force_refresh_invalidates_cache(self) -> None:
+class HardsubE2EMasterWiringTests(unittest.TestCase):
+    def test_best_profile_uses_master_phase1_geometry_authority(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source = root / "source.mp4"
@@ -48,6 +48,24 @@ class HardsubE2EV3WiringTests(unittest.TestCase):
                     for index in range(694)
                 ],
             }
+            timeline_path = root / "master_timeline.json"
+            timeline_path.write_text("{}", encoding="utf-8")
+            master = SimpleNamespace(
+                timeline=[{"start_frame": 0, "best_keyframe_path": "sample.jpg"}],
+                frames_dir=root,
+                timeline_path=timeline_path,
+                frame_count=694,
+                fps=25.0,
+                frame_width=1080,
+                frame_height=1920,
+            )
+
+            def fake_master_extract(_source, output_root):
+                output_root = Path(output_root)
+                output_root.mkdir(parents=True, exist_ok=True)
+                master.timeline_path = output_root / "master_timeline.json"
+                master.timeline_path.write_text("{}", encoding="utf-8")
+                return master
 
             def fake_v3(*_args, **kwargs):
                 self.assertFalse(cache.exists())
@@ -64,6 +82,22 @@ class HardsubE2EV3WiringTests(unittest.TestCase):
                 return payload
 
             with (
+                patch(
+                    "src.media_pipeline.hardsub_e2e.MasterPhase1Extractor.extract",
+                    side_effect=fake_master_extract,
+                ) as run_master,
+                patch(
+                    "src.media_pipeline.hardsub_e2e.ocr_timeline_keyframes",
+                    return_value=list(master.timeline),
+                ),
+                patch(
+                    "src.media_pipeline.hardsub_e2e.timeline_to_ocr_payload",
+                    return_value=payload,
+                ),
+                patch(
+                    "src.media_pipeline.frame_sampling.ocr_translate_gate.finalize_ocr_for_translate",
+                    return_value=(list(master.timeline), {"ready": True}),
+                ),
                 patch(
                     "src.media_pipeline.hardsub_e2e.extract_phase1_frames",
                     return_value=[SimpleNamespace(path=sample, time_ms=0)],
@@ -99,10 +133,11 @@ class HardsubE2EV3WiringTests(unittest.TestCase):
                     force_refresh=True,
                 )
 
-        run_v3.assert_called_once()
+        run_master.assert_called_once()
+        run_v3.assert_not_called()
         legacy_provider.assert_not_called()
         self.assertEqual(result.ocr_payload["authority"], "ocr_authority_v3.6")
-        self.assertEqual(result.ocr_provider_name, "ocr_authority_v3.6")
+        self.assertEqual(result.ocr_provider_name, "master_phase1")
         self.assertEqual(int(result.ocr_payload["frame_count"]), 694)
         self.assertEqual(len(result.ocr_payload["frames"]), 694)
 

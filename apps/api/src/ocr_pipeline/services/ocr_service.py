@@ -6,7 +6,7 @@ import json
 import logging
 import os
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from uuid import UUID
 
@@ -14,7 +14,13 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session, selectinload
 
 from src.core.settings import get_settings
-from src.enums import JobType, MediaAssetStatus, MediaAssetType, OcrObjectStatus
+from src.enums import (
+    JobStatus,
+    JobType,
+    MediaAssetStatus,
+    MediaAssetType,
+    OcrObjectStatus,
+)
 from src.media_pipeline.hardsub_e2e import (
     CLEAN_METHOD_SINGLE_PASS,
     PIPELINE_BACKEND,
@@ -25,6 +31,7 @@ from src.media_pipeline.translator.errors import TranslatorError
 from src.media_pipeline.video_renderer.errors import VideoRendererError
 from src.models.artifacts import OcrFrameDetection, OcrTextObject
 from src.models.ingestion import SourceVideo
+from src.models.jobs import Job
 from src.models.media import MediaAsset
 from src.ocr_pipeline.band_crop import crop_bottom_band_image, remap_box_from_band_crop
 from src.ocr_pipeline.completion_advisory import ocr_run_produced_cleaned_video
@@ -79,8 +86,60 @@ class OcrPipelineService:
     def ocr_provider(self, value: OcrProvider) -> None:
         self._ocr_provider = value
 
-    def create_ocr_job(self, request: OcrRequest):
+    def create_ocr_job(self, request: OcrRequest, *, commit: bool = True):
         source_video = self._load_source_video(request.source_video_id)
+        analysis_engine = str(request.analysis_engine or "").strip()
+        if request.workflow_version == "QUALITY_LOCALIZATION_V24_1":
+            # Every action in one quality workflow (analyze, OCR approval and
+            # later replay) must carry the same official engine authority.
+            # OcrRequest retains a V58 default only for legacy media callers;
+            # it must never leak into a frontend quality checkpoint job.
+            from src.services.analyze_ocr_recipe import (
+                load_current_analyze_ocr_recipe,
+            )
+
+            analysis_engine = load_current_analyze_ocr_recipe().analysis_engine
+            if not request.force_refresh:
+                live_jobs = list(
+                    self.db.scalars(
+                        select(Job)
+                        .where(
+                            Job.source_video_id == source_video.id,
+                            Job.job_type == JobType.ANALYZE_OCR,
+                            Job.status.in_(
+                                {
+                                    JobStatus.QUEUED,
+                                    JobStatus.RUNNING,
+                                    JobStatus.RETRYABLE,
+                                }
+                            ),
+                        )
+                        .order_by(Job.created_at.desc())
+                        .limit(20)
+                    ).all()
+                )
+                for existing in live_jobs:
+                    payload = dict(existing.payload_json or {})
+                    if (
+                        payload.get("workflow_version")
+                        == "QUALITY_LOCALIZATION_V24_1"
+                        and str(payload.get("workflow_action") or "analyze")
+                        == str(request.workflow_action or "analyze")
+                        and not bool(payload.get("force_refresh"))
+                        and bool(payload.get("auto_advance"))
+                        == bool(request.auto_advance)
+                        and bool(payload.get("clean_hardsub", True))
+                        == bool(request.clean_hardsub)
+                    ):
+                        logger.info(
+                            "ocr_job_reused_live",
+                            extra={
+                                "job_id": str(existing.id),
+                                "source_video_id": str(source_video.id),
+                                "workflow_action": request.workflow_action,
+                            },
+                        )
+                        return existing
         job = JobService(self.db).create_job(
             job_type=JobType.ANALYZE_OCR,
             workspace_id=source_video.workspace_id,
@@ -96,14 +155,20 @@ class OcrPipelineService:
                 "workflow_action": request.workflow_action,
                 "review_decisions": list(request.review_decisions),
                 "operator_id": request.operator_id,
+                "analysis_engine": analysis_engine,
+                "auto_advance": request.auto_advance,
             },
             idempotency_key=None,
+            commit=commit,
         )
         if request.workflow_version == "QUALITY_LOCALIZATION_V24_1":
             from src.services.pipeline_recipe_runtime import bind_job_to_current_recipe
 
             bind_job_to_current_recipe(job)
-            self.db.commit()
+            if commit:
+                self.db.commit()
+            else:
+                self.db.flush()
         logger.info("ocr_job_created", extra={"job_id": str(job.id), "source_video_id": str(source_video.id)})
         return job
 
@@ -536,6 +601,149 @@ class OcrPipelineService:
             asset.metadata_json = meta
         self.db.commit()
         return self.get_ocr_summary(source_video_id)
+
+    def _persist_phase2_tracks(
+        self,
+        source_video: SourceVideo,
+        *,
+        phase2_contract: Mapping[str, object],
+        payload: Mapping[str, object],
+    ) -> tuple[int, int]:
+        """Persist the Phase-2 authority as content objects plus linked frames.
+
+        Phase 2 groups detections into temporal tracks/content objects.  The old
+        compatibility adapter materialized one ``OcrTextObject`` per box per
+        frame, including empty OCR candidates.  That made the relational rows
+        look like an OCR authority and made long videos explode in row count.
+        Here the content object is the authority; frame rows are only geometry
+        evidence linked back to it.
+        """
+        content_rows = [
+            row
+            for row in list(phase2_contract.get("content_objects") or [])
+            if isinstance(row, Mapping)
+        ]
+        track_rows = [
+            row
+            for row in list(phase2_contract.get("track_enrichments") or [])
+            if isinstance(row, Mapping)
+        ]
+        protected_ids = {
+            str(row.get("text_id") or "")
+            for row in list(phase2_contract.get("protected_source_tracks") or [])
+            if isinstance(row, Mapping) and str(row.get("text_id") or "")
+        }
+        text_id_to_content: dict[str, str] = {}
+        for row in track_rows:
+            text_id = str(row.get("text_id") or "")
+            content_id = str(row.get("content_id") or "")
+            if text_id and content_id and text_id not in protected_ids:
+                text_id_to_content[text_id] = content_id
+
+        object_by_content: dict[str, OcrTextObject] = {}
+        object_rows: list[OcrTextObject] = []
+        for row in content_rows:
+            content_id = str(row.get("content_id") or "")
+            if not content_id:
+                continue
+            status = str(row.get("review_status") or "")
+            if status in {"SOURCE_INTRINSIC_APPROVED", "OCR_REJECTED_UI"}:
+                continue
+            candidates = [
+                str(row.get("ocr_text_approved") or "").strip(),
+                str(row.get("ocr_text_candidate") or "").strip(),
+            ]
+            candidates.extend(
+                str(value or "").strip()
+                for value in list(row.get("ocr_text_raw_candidates") or [])
+            )
+            text = next((value for value in candidates if value), "")
+            # Empty candidates are review evidence, not OCR objects.  Keeping
+            # them out of the authority is essential for auto policy and DB
+            # correctness.
+            if not text:
+                continue
+            assets = [
+                asset
+                for asset in list(row.get("review_assets") or [])
+                if isinstance(asset, Mapping)
+            ]
+            starts = [int(asset.get("start_frame")) for asset in assets if str(asset.get("start_frame") or "").strip()]
+            ends = [int(asset.get("end_frame")) for asset in assets if str(asset.get("end_frame") or "").strip()]
+            fps = float(payload.get("fps") or 30.0)
+            first_ms = int(round(min(starts) * 1000.0 / fps)) if starts else None
+            last_ms = int(round(max(ends) * 1000.0 / fps)) if ends else None
+            obj = OcrTextObject(
+                workspace_id=source_video.workspace_id,
+                source_video_id=source_video.id,
+                text=text,
+                normalized_text="".join(text.split()).lower() or None,
+                language_code="zh",
+                status=OcrObjectStatus.DETECTED,
+                confidence=None,
+                first_seen_ms=first_ms,
+                last_seen_ms=last_ms,
+                metadata_json={
+                    "authority": "phase2_content_object",
+                    "pipeline_version": str(
+                        phase2_contract.get("schema_version") or "phase2_ocr_timeline_v2"
+                    ),
+                    "content_id": content_id,
+                    "geometry_refs": list(row.get("geometry_refs") or []),
+                    "review_status": status,
+                    "provenance_classifications": list(
+                        row.get("provenance_classifications") or []
+                    ),
+                },
+            )
+            object_rows.append(obj)
+            object_by_content[content_id] = obj
+        if object_rows:
+            self.db.add_all(object_rows)
+            self.db.flush()
+
+        detections: list[OcrFrameDetection] = []
+        for frame in list(payload.get("frames") or []):
+            if not isinstance(frame, Mapping):
+                continue
+            frame_time_ms = int(frame.get("time_ms") or 0)
+            for box in list(frame.get("boxes") or []):
+                if not isinstance(box, Mapping):
+                    continue
+                text_id = str(box.get("text_id") or "")
+                content_id = text_id_to_content.get(text_id)
+                obj = object_by_content.get(content_id or "")
+                if obj is None:
+                    continue
+                x = float(box.get("x") or 0.0)
+                y = float(box.get("y") or 0.0)
+                width = float(box.get("w") or box.get("width") or 0.0)
+                height = float(box.get("h") or box.get("height") or 0.0)
+                confidence_raw = box.get("confidence")
+                confidence = float(confidence_raw) if confidence_raw is not None else None
+                detections.append(
+                    OcrFrameDetection(
+                        workspace_id=source_video.workspace_id,
+                        source_video_id=source_video.id,
+                        ocr_text_object_id=obj.id,
+                        frame_time_ms=frame_time_ms,
+                        x=x,
+                        y=y,
+                        width=width,
+                        height=height,
+                        confidence=confidence,
+                        raw_payload_json={
+                            "authority": "phase2_frame_geometry",
+                            "text_id": text_id,
+                            "content_id": content_id,
+                            "cover_only": bool(box.get("cover_only")),
+                            "localization_mode": box.get("localization_mode"),
+                        },
+                    )
+                )
+        if detections:
+            self.db.add_all(detections)
+        return len(object_rows), len(detections)
 
     def _persist_detections(
         self,

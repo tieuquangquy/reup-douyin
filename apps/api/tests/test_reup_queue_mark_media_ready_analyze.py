@@ -33,7 +33,13 @@ class FakeAudioAnalysisService:
     def __init__(self):
         self.calls: list[dict] = []
 
-    def create_analysis_job(self, request: AudioAnalysisRequest, *, idempotency_key: str | None = None):
+    def create_analysis_job(
+        self,
+        request: AudioAnalysisRequest,
+        *,
+        idempotency_key: str | None = None,
+        commit: bool = True,
+    ):
         self.calls.append(
             {
                 "source_video_id": request.source_video_id,

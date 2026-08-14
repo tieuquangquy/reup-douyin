@@ -34,6 +34,7 @@ from src.services.reup_pipeline_meta import (
     QUALITY_WORKFLOW_STAGE_KEY,
     TRANSLATION_JOB_ID_KEY,
     TTS_JOB_ID_KEY,
+    DOWNLOAD_JOB_ID_KEY,
     get_last_completed_step,
     get_pipeline_mode,
     get_pipeline_step,
@@ -77,13 +78,39 @@ class ReupPipelineOrchestrator:
         updated = 0
         for item in items:
             if status == JobStatus.COMPLETED.value and completed_step is not None:
-                recorded = True
                 # Record progress for manual items too, so switching them to auto later
                 # resumes from what actually finished.
-                set_pipeline_meta(item, last_completed_step=completed_step)
+                recorded = self._record_completed_step(item, completed_step) or recorded
             if not is_auto_pipeline(item):
                 continue
             if status == JobStatus.FAILED.value:
+                # The preview worker deliberately fails closed when encoded
+                # Output QA finds residual CJK.  Treat that terminal job as a
+                # recoverable quality signal in the full-auto lane instead of
+                # converting it into a dead-end operator error.  The summary is
+                # hash-bound to the failed preview and exposes only current
+                # encoded residual evidence.
+                if (
+                    _type_value(getattr(job, "job_type", None))
+                    == JobType.RENDER_PREVIEW.value
+                    and get_pipeline_mode(item) == PIPELINE_MODE_AUTO_TO_RENDER
+                    and get_pipeline_step(item) == PIPELINE_STEP_QUALITY_REVIEW
+                ):
+                    from src.services.quality_localization_service import (
+                        QualityLocalizationService,
+                    )
+
+                    summary = QualityLocalizationService(self.db).summary(
+                        item.source_video_id
+                    )
+                    if (
+                        str(summary.get("workflow_stage") or "")
+                        == "WAITING_RESIDUAL_TRIAGE"
+                        and bool(summary.get("encoded_output_qa_current"))
+                    ):
+                        self._ensure_auto_residual_remediation(item)
+                        updated += 1
+                        continue
                 self._mark_needs_attention(
                     item,
                     error_code=getattr(job, "error_code", None) or "PIPELINE_JOB_FAILED",
@@ -120,12 +147,30 @@ class ReupPipelineOrchestrator:
                     QualityLocalizationService,
                 )
 
-                self._park_for_quality_review(
-                    item,
-                    summary=QualityLocalizationService(self.db).summary(
-                        item.source_video_id
-                    ),
+                summary = QualityLocalizationService(self.db).summary(
+                    item.source_video_id
                 )
+                if (
+                    get_pipeline_mode(item) == PIPELINE_MODE_AUTO_TO_RENDER
+                    and bool(summary.get("can_render_final"))
+                ):
+                    set_pipeline_meta(item, step=PIPELINE_STEP_RENDER)
+                    self._ensure_render(item)
+                elif get_pipeline_mode(item) == PIPELINE_MODE_AUTO_TO_RENDER:
+                    if str(summary.get("workflow_stage") or "") == "WAITING_RESIDUAL_TRIAGE":
+                        self._ensure_auto_residual_remediation(item)
+                    else:
+                        self._mark_needs_attention(
+                            item,
+                            error_code="AUTO_QUALITY_GATE_BLOCKED",
+                            error_message=(
+                                "Full-auto quality policy stopped at "
+                                f"{summary.get('workflow_stage') or 'UNKNOWN'}; "
+                                "the artifact did not satisfy deterministic approval rules."
+                            ),
+                        )
+                else:
+                    self._park_for_quality_review(item, summary=summary)
                 updated += 1
                 continue
             if self._advance_after_success(item, job):
@@ -177,14 +222,15 @@ class ReupPipelineOrchestrator:
         for item in admission_plan(candidates, limit=limit):
             try:
                 clear_slot_wait(item)
-                self._ensure_download(item)
+                mode = get_pipeline_mode(item)
+                self.set_automation(item, mode=mode)
             except Exception:  # noqa: BLE001 — one bad clip must not stall the lane
                 logger.exception(
                     "reup_pipeline_admission_failed",
                     extra={"reup_queue_item_id": str(getattr(item, "id", ""))},
                 )
                 continue
-            item.last_action_note = "Auto pipeline: slot free — download started."
+            item.last_action_note = "Auto pipeline: slot free — pipeline resumed."
             admitted += 1
         if admitted:
             logger.info(
@@ -208,6 +254,7 @@ class ReupPipelineOrchestrator:
 
         repaired = 0
         step_job_keys = {
+            PIPELINE_STEP_DOWNLOAD: DOWNLOAD_JOB_ID_KEY,
             PIPELINE_STEP_ANALYZE_AUDIO: ANALYZE_AUDIO_JOB_ID_KEY,
             PIPELINE_STEP_TRANSLATE: TRANSLATION_JOB_ID_KEY,
             PIPELINE_STEP_TTS: TTS_JOB_ID_KEY,
@@ -229,6 +276,8 @@ class ReupPipelineOrchestrator:
             # stage is being enqueued.
             stage_job_key = step_job_keys.get(step)
             raw_job_id = meta.get(stage_job_key) if stage_job_key else None
+            if not raw_job_id and step == PIPELINE_STEP_DOWNLOAD:
+                raw_job_id = getattr(item, "job_id", None)
             if not raw_job_id:
                 # Do not infer a missing download job for synthetic/test rows;
                 # production rows created by the orchestrator always persist an
@@ -283,9 +332,33 @@ class ReupPipelineOrchestrator:
         step = meta_dict(item).get("pipeline_step") or PIPELINE_STEP_DOWNLOAD
         if get_pipeline_mode(item) not in AUTO_PIPELINE_MODES:
             set_pipeline_meta(item, mode=PIPELINE_MODE_AUTO_TO_TTS)
+        if step == PIPELINE_STEP_NEEDS_ATTENTION:
+            # A quality gate can fail after its durable job technically
+            # completed. Resume the failed authority stage from its cache,
+            # rather than resetting the whole auto lane to Download.
+            last_completed = get_last_completed_step(item)
+            if (
+                last_completed == PIPELINE_STEP_ANALYZE_AUDIO
+                and not self._dialogue_is_uncertain(item)
+            ):
+                # The operator resolved low-confidence dialogue in Transcript.
+                # Continue from the approved Analyze output; re-running ASR here
+                # would discard the reviewed authority and can recreate the same gate.
+                self.set_automation(item, mode=get_pipeline_mode(item))
+                return item
+            if last_completed in {
+                PIPELINE_STEP_ANALYZE_AUDIO,
+                PIPELINE_STEP_TRANSLATE,
+                PIPELINE_STEP_TTS,
+                PIPELINE_STEP_OCR,
+                PIPELINE_STEP_RENDER,
+            }:
+                step = last_completed
+                set_pipeline_meta(item, step=step)
+            else:
+                return item
         if step in {
             PIPELINE_STEP_READY_FINAL,
-            PIPELINE_STEP_NEEDS_ATTENTION,
             PIPELINE_STEP_TRANSLATION_REVIEW,
         }:
             return item
@@ -365,6 +438,16 @@ class ReupPipelineOrchestrator:
 
         last_done = get_last_completed_step(item)
         pinned_step = meta_dict(item).get(PIPELINE_STEP_KEY)
+        if last_done == PIPELINE_STEP_ANALYZE_AUDIO and self._dialogue_is_uncertain(item):
+            self._mark_needs_attention(
+                item,
+                error_code="DIALOGUE_DETECTION_UNCERTAIN",
+                error_message=(
+                    "Speech was detected, but the transcript quality contract requires review. "
+                    "Review or re-run Analyze Audio before translation."
+                ),
+            )
+            return None
         if last_done is None and pinned_step in PIPELINE_STEP_ORDER:
             # No recorded progress (older item, or interrupted before finishing anything):
             # the pinned step is the safest place to pick up.
@@ -414,7 +497,55 @@ class ReupPipelineOrchestrator:
             )
             return True
         method = _ENSURE_METHOD_BY_STEP.get(step, "_ensure_download")
-        return bool(getattr(self, method)(item))
+        ensured = bool(getattr(self, method)(item))
+        if ensured:
+            self._catch_up_terminal_step(step, item)
+        return ensured
+
+    def _catch_up_terminal_step(self, step: str, item: ReupQueueItem) -> bool:
+        """Consume a terminal job that finished before its queue binding was observed."""
+        from src.models.jobs import Job
+
+        job_id = getattr(item, "job_id", None)
+        if job_id is None:
+            return False
+        job = self.db.get(Job, job_id)
+        if job is None:
+            return False
+        completed_step = _COMPLETED_STEP_BY_JOB_TYPE.get(
+            _type_value(getattr(job, "job_type", None))
+        )
+        if completed_step != step:
+            return False
+        status = _status_value(getattr(job, "status", None))
+        if status == JobStatus.COMPLETED.value:
+            self._record_completed_step(item, completed_step)
+            return self._advance_after_success(item, job)
+        if status in {JobStatus.FAILED.value, JobStatus.CANCELLED.value}:
+            self._mark_needs_attention(
+                item,
+                error_code=getattr(job, "error_code", None) or "PIPELINE_JOB_TERMINAL",
+                error_message=(
+                    getattr(job, "error_message", None)
+                    or f"The linked {step} job is {status.lower()} and needs review."
+                ),
+            )
+            return True
+        return False
+
+    def _record_completed_step(self, item: ReupQueueItem, completed_step: str) -> bool:
+        """Record progress monotonically so a delayed old callback cannot rewind it."""
+        if completed_step not in PIPELINE_STEP_ORDER:
+            return False
+        current = get_last_completed_step(item)
+        if current in PIPELINE_STEP_ORDER and (
+            PIPELINE_STEP_ORDER.index(current) > PIPELINE_STEP_ORDER.index(completed_step)
+        ):
+            return False
+        if current == completed_step:
+            return False
+        set_pipeline_meta(item, last_completed_step=completed_step)
+        return True
 
     def _bind_job_recipe(self, item: ReupQueueItem, job_id: Any) -> bool:
         """Attach the immutable item recipe to a durable stage job."""
@@ -456,6 +587,21 @@ class ReupPipelineOrchestrator:
         if completed_step is None:
             return False
 
+        current_step = get_pipeline_step(item)
+        if current_step != completed_step:
+            # Delayed completion from an earlier stage may update monotonic
+            # history, but it must never skip or rewind the current stage.
+            logger.info(
+                "reup_pipeline_stale_terminal_ignored",
+                extra={
+                    "reup_queue_item_id": str(getattr(item, "id", "")),
+                    "job_id": str(getattr(job, "id", "")),
+                    "completed_step": completed_step,
+                    "current_step": current_step,
+                },
+            )
+            return False
+
         if completed_step == PIPELINE_STEP_ANALYZE_AUDIO and self._dialogue_is_uncertain(item):
             # VAD measured speech the ASR could not decode: guessing either way here
             # either drops needed dubbing or dubs silence, so hand it to an operator.
@@ -475,6 +621,32 @@ class ReupPipelineOrchestrator:
                 from src.services.quality_localization_service import QualityLocalizationService
 
                 summary = QualityLocalizationService(self.db).summary(item.source_video_id)
+                if get_pipeline_mode(item) == PIPELINE_MODE_AUTO_TO_RENDER:
+                    stage = str(summary.get("workflow_stage") or "UNKNOWN")
+                    if bool(summary.get("can_render_final")):
+                        set_pipeline_meta(item, step=PIPELINE_STEP_RENDER)
+                        return self._ensure_render(item)
+                    if stage == "WAITING_OCR_REVIEW":
+                        return self._ensure_auto_ocr_review(item, summary=summary)
+                    if stage in {
+                        "WAITING_TRANSLATION_REVIEW",
+                        "READY_FOR_VISUAL_PREVIEW",
+                        # OCR can be resumed after a Phase 4 contract fix while
+                        # the independent TTS/audio handoff is already
+                        # approved. Rebuild only the visual preview authority;
+                        # do not force Download/ASR/Translation/TTS to run.
+                        "AUDIO_APPROVED",
+                    }:
+                        return self._ensure_quality_preview(item, summary=summary)
+                    self._mark_needs_attention(
+                        item,
+                        error_code="AUTO_QUALITY_GATE_BLOCKED",
+                        error_message=(
+                            f"Full-auto quality policy stopped at {stage}; "
+                            "the artifact did not satisfy deterministic approval rules."
+                        ),
+                    )
+                    return True
                 if not bool(summary.get("can_render_final")):
                     self._park_for_quality_review(item, summary=summary)
                     return True
@@ -500,6 +672,17 @@ class ReupPipelineOrchestrator:
                         error_message=verdict.summary,
                     )
                     return True
+                # In the explicit full-auto lane, a deterministic PASS is the
+                # final quality gate.  Promote the already persisted adaptive
+                # RenderOutput to publish-ready and create the local Phase-5
+                # package boundary.  Metadata/rights/manual upload remain
+                # explicit handoff gates; no external publish is triggered.
+                if (
+                    get_pipeline_mode(item) == PIPELINE_MODE_AUTO_TO_RENDER
+                    and str(verdict.status) == "pass"
+                    and self._auto_finalize_quality_render(item, job)
+                ):
+                    return True
 
         advanced = self._run_next_step(item, completed_step=completed_step)
         if completed_step == PIPELINE_STEP_RENDER and advanced:
@@ -507,6 +690,57 @@ class ReupPipelineOrchestrator:
             if qa.get("status") == "warn":
                 item.last_action_note = f"Auto pipeline: render complete — QA warning: {qa.get('summary', '')}"[:500]
         return advanced
+
+    def _auto_finalize_quality_render(self, item: ReupQueueItem, job: Any) -> bool:
+        """Finalize a deterministic quality render for the auto-to-render lane."""
+
+        payload = dict(getattr(job, "payload_json", None) or {})
+        if str(payload.get("workflow_version") or "") != "QUALITY_LOCALIZATION_V24_1":
+            return False
+        from src.models.media import RenderOutput
+        from src.render_pipeline.services.render_service import RenderService
+
+        render = self.db.scalar(
+            select(RenderOutput)
+            .where(
+                RenderOutput.source_video_id == item.source_video_id,
+                RenderOutput.created_by_job_id == getattr(job, "id", None),
+            )
+            .order_by(RenderOutput.version.desc())
+            .limit(1)
+        )
+        if render is None:
+            self._mark_needs_attention(
+                item,
+                error_code="AUTO_FINAL_RENDER_OUTPUT_MISSING",
+                error_message="Final render passed QA but its RenderOutput record is missing.",
+            )
+            return True
+        try:
+            RenderService(self.db).mark_publish_ready(render.id)
+        except Exception as exc:  # noqa: BLE001
+            self._mark_needs_attention(
+                item,
+                error_code="AUTO_FINAL_HANDOFF_FAILED",
+                error_message=f"Final render passed QA but local handoff failed: {exc}",
+            )
+            return True
+        item.render_output_id = render.id
+        item.job_id = getattr(job, "id", None)
+        set_pipeline_meta(
+            item,
+            step=PIPELINE_STEP_READY_FINAL,
+            extra={
+                QUALITY_WORKFLOW_STAGE_KEY: "FINAL_READY",
+                "quality_auto_finalized": True,
+                "quality_auto_finalized_at": utc_now().isoformat(),
+            },
+        )
+        item.last_action_note = (
+            "Full auto: final QA PASS; local Final Approval and export package boundary created. "
+            "Metadata, rights/music, and manual upload remain operator handoff gates."
+        )
+        return True
 
     def _render_qa_verdict(self, item: ReupQueueItem) -> Any:
         from src.services import render_qa_gate
@@ -565,7 +799,11 @@ class ReupPipelineOrchestrator:
 
         if not self._bind_job_recipe(item, item.job_id):
             return True
-        set_pipeline_meta(item, step=PIPELINE_STEP_DOWNLOAD)
+        set_pipeline_meta(
+            item,
+            step=PIPELINE_STEP_DOWNLOAD,
+            extra={DOWNLOAD_JOB_ID_KEY: str(item.job_id)},
+        )
         item.status = ReupQueueStatus.WAITING_FOR_MEDIA
         item.media_prep_status = ReupQueueMediaPrepStatus.WAITING_FOR_MEDIA
         item.started_at = item.started_at or utc_now()
@@ -612,6 +850,7 @@ class ReupPipelineOrchestrator:
                 force_refresh=False,
                 require_source_approved=False,
                 idempotency_key=f"reup-queue:{item.id}:translate",
+                commit=False,
             )
         except AudioAnalysisError as exc:
             self._mark_needs_attention(item, error_code=str(exc.code), error_message=exc.message)
@@ -633,25 +872,15 @@ class ReupPipelineOrchestrator:
         from src.tts_pipeline.errors import TtsPipelineError
         from src.tts_pipeline.services.tts_service import TtsPipelineService
         from src.tts_pipeline.types import TtsRequest
-        from src.services.pipeline_recipe_runtime import (
-            RuntimeRecipeError,
-            load_bound_recipe_tts,
-        )
 
         try:
-            runtime_authority = load_bound_recipe_tts(item)
             job = TtsPipelineService(self.db).create_tts_job(
                 TtsRequest(
                     source_video_id=item.source_video_id,
                     force_refresh=False,
-                    runtime_authority=runtime_authority,
-                )
+                ),
+                commit=False,
             )
-        except RuntimeRecipeError as exc:
-            self._mark_needs_attention(
-                item, error_code="PIPELINE_RECIPE_INVALID", error_message=str(exc)
-            )
-            return True
         except TtsPipelineError as exc:
             if str(exc.code) == "translation_review_required":
                 self._park_for_translation_review(item, message=exc.message)
@@ -679,6 +908,7 @@ class ReupPipelineOrchestrator:
         from src.ocr_pipeline.services.ocr_service import OcrPipelineService
         from src.ocr_pipeline.types import OcrRequest
         from src.services.quality_localization_service import QUALITY_WORKFLOW_VERSION
+        from src.services.quality_localization_service import QUALITY_ANALYSIS_ENGINE
 
         try:
             job = OcrPipelineService(self.db).create_ocr_job(
@@ -688,7 +918,12 @@ class ReupPipelineOrchestrator:
                     clean_hardsub=True,
                     use_master_phase1=True,
                     workflow_version=QUALITY_WORKFLOW_VERSION,
-                )
+                    analysis_engine=QUALITY_ANALYSIS_ENGINE,
+                    auto_advance=(
+                        get_pipeline_mode(item) == PIPELINE_MODE_AUTO_TO_RENDER
+                    ),
+                ),
+                commit=False,
             )
         except OcrPipelineError as exc:
             self._mark_needs_attention(item, error_code=str(exc.code), error_message=exc.message)
@@ -709,6 +944,181 @@ class ReupPipelineOrchestrator:
         item.last_action_note = "Auto pipeline: OCR enqueued."
         return True
 
+    def _ensure_auto_ocr_review(
+        self, item: ReupQueueItem, *, summary: dict[str, Any]
+    ) -> bool:
+        """Resume a pre-policy OCR run with deterministic provenance decisions."""
+
+        from src.ocr_pipeline.services.ocr_service import OcrPipelineService
+        from src.ocr_pipeline.types import OcrRequest
+        from src.services.quality_auto_policy import (
+            AUTO_QUALITY_ACTOR,
+            QualityAutoPolicyBlocked,
+            build_ocr_decisions,
+        )
+        from src.services.quality_localization_service import (
+            QUALITY_ANALYSIS_ENGINE,
+            QUALITY_WORKFLOW_VERSION,
+        )
+
+        try:
+            decisions = build_ocr_decisions(
+                list(summary.get("review_objects") or [])
+            )
+        except QualityAutoPolicyBlocked as exc:
+            self._mark_needs_attention(
+                item,
+                error_code="AUTO_OCR_DECISION_BLOCKED",
+                error_message=str(exc),
+            )
+            return True
+        job = OcrPipelineService(self.db).create_ocr_job(
+            OcrRequest(
+                source_video_id=item.source_video_id,
+                force_refresh=False,
+                clean_hardsub=False,
+                use_master_phase1=True,
+                workflow_version=QUALITY_WORKFLOW_VERSION,
+                workflow_action="approve_ocr",
+                review_decisions=decisions,
+                operator_id=AUTO_QUALITY_ACTOR,
+                analysis_engine=QUALITY_ANALYSIS_ENGINE,
+                auto_advance=True,
+            ),
+            commit=False,
+        )
+        item.job_id = job.id
+        if not self._bind_job_recipe(item, job.id):
+            return True
+        set_pipeline_meta(
+            item,
+            step=PIPELINE_STEP_OCR,
+            extra={OCR_JOB_ID_KEY: str(job.id)},
+        )
+        item.last_action_note = "Full auto: deterministic OCR review enqueued."
+        return True
+
+    def _ensure_quality_preview(
+        self, item: ReupQueueItem, *, summary: dict[str, Any]
+    ) -> bool:
+        from src.services.quality_auto_policy import (
+            AUTO_QUALITY_ACTOR,
+            QualityAutoPolicyBlocked,
+            build_translation_decisions,
+        )
+        from src.services.quality_localization_service import QualityLocalizationService
+
+        translations: list[dict[str, str]] | None
+        if str(summary.get("workflow_stage") or "") == "READY_FOR_VISUAL_PREVIEW":
+            translations = None
+        else:
+            try:
+                translations = build_translation_decisions(
+                    list(summary.get("translation_objects") or [])
+                )
+            except QualityAutoPolicyBlocked as exc:
+                self._mark_needs_attention(
+                    item,
+                    error_code="AUTO_TRANSLATION_DECISION_BLOCKED",
+                    error_message=str(exc),
+                )
+                return True
+        job = QualityLocalizationService(self.db).create_preview_job(
+            item.source_video_id,
+            translations=translations,
+            operator_id=AUTO_QUALITY_ACTOR,
+            auto_approve=True,
+        )
+        item.job_id = job.id
+        if not self._bind_job_recipe(item, job.id):
+            return True
+        set_pipeline_meta(
+            item,
+            step=PIPELINE_STEP_QUALITY_REVIEW,
+            extra={QUALITY_WORKFLOW_STAGE_KEY: "AUTO_PREVIEW_QUEUED"},
+        )
+        item.status = ReupQueueStatus.WAITING_FOR_METADATA
+        item.media_prep_status = ReupQueueMediaPrepStatus.WAITING_FOR_METADATA
+        item.last_action_note = (
+            "Full auto: translation, visual QA, and audio QA preview enqueued."
+        )
+        return True
+
+    def _ensure_auto_residual_remediation(
+        self,
+        item: ReupQueueItem,
+        *,
+        summary: dict[str, Any] | None = None,
+    ) -> bool:
+        from src.services.quality_auto_policy import AUTO_QUALITY_ACTOR
+        from src.services.quality_localization_service import QualityLocalizationService
+
+        meta = meta_dict(item)
+        current_summary = summary or QualityLocalizationService(self.db).summary(
+            item.source_video_id
+        )
+        authority = str(current_summary.get("residual_authority_source") or "")
+        attempts_key = (
+            "quality_auto_output_residual_attempts"
+            if authority == "encoded_visual_preview_output_qa"
+            else "quality_auto_preflight_residual_attempts"
+        )
+        authority_sha = str(current_summary.get("residual_authority_sha256") or "")
+        authority_sha_key = f"{attempts_key}_authority_sha256"
+        authority_revision_changed = bool(
+            authority_sha and str(meta.get(authority_sha_key) or "") != authority_sha
+        )
+        if authority_revision_changed:
+            attempts = 0
+        elif attempts_key in meta:
+            attempts = int(meta.get(attempts_key) or 0)
+        elif authority == "encoded_visual_preview_output_qa":
+            # Legacy total attempts were preflight-only.  Do not let them hide
+            # a newly discovered post-encode residual.
+            attempts = 0
+        else:
+            attempts = int(meta.get("quality_auto_residual_attempts") or 0)
+        if attempts >= 2:
+            self._mark_needs_attention(
+                item,
+                error_code="AUTO_RESIDUAL_REMEDIATION_EXHAUSTED",
+                error_message=(
+                    "Residual CJK remained after two hash-bound automatic remediation "
+                    f"attempts for {authority or 'preflight'} authority."
+                ),
+            )
+            return True
+        job = QualityLocalizationService(self.db).create_residual_review_job(
+            item.source_video_id,
+            action="auto_residual_remediation",
+            operator_id=AUTO_QUALITY_ACTOR,
+            auto_approve=True,
+        )
+        item.job_id = job.id
+        if not self._bind_job_recipe(item, job.id):
+            return True
+        set_pipeline_meta(
+            item,
+            step=PIPELINE_STEP_QUALITY_REVIEW,
+            extra={
+                QUALITY_WORKFLOW_STAGE_KEY: "AUTO_RESIDUAL_REMEDIATION_QUEUED",
+                attempts_key: attempts + 1,
+                authority_sha_key: authority_sha or None,
+                "quality_auto_residual_attempts": int(
+                    meta.get("quality_auto_residual_attempts") or 0
+                )
+                + 1,
+                "quality_auto_residual_authority": authority or "phase4_preflight",
+            },
+        )
+        item.status = ReupQueueStatus.WAITING_FOR_METADATA
+        item.media_prep_status = ReupQueueMediaPrepStatus.WAITING_FOR_METADATA
+        item.failed_at = None
+        item.last_action_note = "Full auto: residual CJK remediation enqueued."
+        item.last_error_code = None
+        item.last_error_message = None
+        return True
+
     def _ensure_render(self, item: ReupQueueItem) -> bool:
         from src.render_pipeline.errors import RenderPipelineError
         from src.render_pipeline.services.render_service import RenderService
@@ -721,7 +1131,8 @@ class ReupPipelineOrchestrator:
                     source_video_id=item.source_video_id,
                     force_refresh=True,
                     workflow_version=QUALITY_WORKFLOW_VERSION,
-                )
+                ),
+                commit=False,
             )
         except RenderPipelineError as exc:
             self._mark_needs_attention(item, error_code=str(exc.code), error_message=exc.message)
@@ -837,6 +1248,7 @@ class ReupPipelineOrchestrator:
                 continue
             meta = meta_dict(item)
             linked_ids = {
+                str(meta.get(DOWNLOAD_JOB_ID_KEY) or ""),
                 str(meta.get(ANALYZE_AUDIO_JOB_ID_KEY) or ""),
                 str(meta.get(TRANSLATION_JOB_ID_KEY) or ""),
                 str(meta.get(TTS_JOB_ID_KEY) or ""),

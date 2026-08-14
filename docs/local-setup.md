@@ -33,7 +33,11 @@ API:
 ```powershell
 cd apps/api
 pip install -e .
+# One-time install for Analyze Audio V4. Runtime inference remains fully local.
+python scripts/install_yamnet_audio_event_model.py
 ```
+
+The installer pins the YAMNet source revision and verifies the model and class-map SHA-256 values before promotion. API and worker must resolve the same `LOCAL_STORAGE_ROOT`; no model download occurs while an Analyze Audio job is running.
 
 Web:
 
@@ -91,6 +95,8 @@ Stop services started by that script:
 ```
 
 `dev-start` refuses to overwrite an existing `.dev/pids.json`; run `dev-stop` first if a previous local stack is still recorded. `dev-stop` verifies the recorded PowerShell command before stopping a PID, which avoids killing an unrelated process if a stale PID was reused.
+
+Before clearing `apps/web/.next`, `dev-start` also verifies that ports `3000` and `8000` are free. If a detached Next.js or API process still owns either port, startup stops with the owning PID instead of deleting files underneath a live server. This guard prevents the web app from returning HTML while its JavaScript chunks are missing, which otherwise leaves the browser stuck on `Loading authentication...`. Stop the reported stale process (or use `dev-stop` when it is still recorded), then rerun `dev-start`.
 
 Manual commands remain valid:
 

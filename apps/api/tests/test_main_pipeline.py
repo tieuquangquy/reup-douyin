@@ -53,9 +53,10 @@ class MainPipelineOrchestratorTests(unittest.TestCase):
 
         def fake_render(source, output, overlays=None, **kwargs):
             call_order.append("phase34")
-            self.assertIsNone(overlays)
-            self.assertIn("ocr_payload", kwargs)
-            self.assertEqual(kwargs.get("vi_texts"), {"0": "Xin chao"})
+            self.assertEqual(len(overlays or []), 1)
+            self.assertEqual((overlays or [])[0].text_vi, "Xin chao")
+            self.assertNotIn("ocr_payload", kwargs)
+            self.assertNotIn("vi_texts", kwargs)
             out = Path(output)
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_bytes(b"mp4")

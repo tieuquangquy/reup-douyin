@@ -42,6 +42,25 @@ def product_identity_fingerprint(*, platform: str, external_product_id: str | No
     return hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
 
+def build_affiliate_match_queue_kpis(
+    *,
+    eligible_count: int,
+    status_counts: dict[str, int],
+    stale_count: int,
+) -> dict[str, int]:
+    """Partition eligible publications by decision status; stale is orthogonal freshness."""
+    current_match_count = sum(int(count) for count in status_counts.values())
+    return {
+        "eligible_publications": int(eligible_count),
+        "unmatched_count": max(0, int(eligible_count) - current_match_count),
+        "needs_review_count": int(status_counts.get("NEEDS_REVIEW", 0)),
+        "approved_count": int(status_counts.get("APPROVED", 0)),
+        "rejected_count": int(status_counts.get("REJECTED", 0)),
+        "overridden_count": int(status_counts.get("OVERRIDDEN", 0)),
+        "stale_count": int(stale_count),
+    }
+
+
 class AffiliateCatalogService:
     def __init__(self, db: Session):
         self.db = db
@@ -151,7 +170,11 @@ class AffiliateCatalogService:
         if duplicate is not None:
             self.db.rollback()
             raise AffiliateIntelligenceError("affiliate_product_exists", "This affiliate product is already in the catalog")
-        self.db.commit()
+        try:
+            self.db.commit()
+        except IntegrityError as exc:
+            self.db.rollback()
+            raise AffiliateIntelligenceError("affiliate_product_exists", "This affiliate product is already in the catalog") from exc
         return self.get(workspace_id, product.id)
 
     def bulk_import(
@@ -295,14 +318,26 @@ class AffiliateCatalogService:
                 raise AffiliateIntelligenceError(
                     "affiliate_topic_invalid", "Every product topic must exist and be active in this workspace"
                 )
-            product.topic_mappings.clear()
+            desired = set(topic_ids)
+            existing = {mapping.topic_category_id: mapping for mapping in list(product.topic_mappings)}
+            for topic_id, mapping in existing.items():
+                if topic_id not in desired:
+                    product.topic_mappings.remove(mapping)
+            # Flush removals before inserts so kept topic ids never hit
+            # uq_affiliate_product_topic_mapping during the same commit.
+            self.db.flush()
+            mapping_source = (
+                "OPERATOR" if (product.metadata_json or {}).get("source") == "OPERATOR" else "CSV_IMPORT"
+            )
             for topic_id in topic_ids:
+                if topic_id in existing:
+                    continue
                 product.topic_mappings.append(
                     AffiliateProductTopicMapping(
                         workspace_id=workspace_id,
                         topic_category_id=topic_id,
                         relevance_weight=1.0,
-                        source="OPERATOR" if (product.metadata_json or {}).get("source") == "OPERATOR" else "CSV_IMPORT",
+                        source=mapping_source,
                     )
                 )
         if not str(product.name or "").strip() or not str(product.affiliate_url or "").strip():
@@ -644,7 +679,6 @@ class AffiliateProductMatchingService:
                 .group_by(AffiliateProductMatch.decision_status)
             ).all()
         }
-        current_match_count = sum(status_counts.values())
         stale_count = int(
             self.db.scalar(
                 select(func.count()).select_from(AffiliateProductMatch).where(
@@ -655,14 +689,11 @@ class AffiliateProductMatchingService:
             )
             or 0
         )
-        kpis = {
-            "eligible_publications": eligible_count,
-            "unmatched_count": max(0, eligible_count - current_match_count),
-            "needs_review_count": status_counts.get("NEEDS_REVIEW", 0),
-            "approved_count": status_counts.get("APPROVED", 0),
-            "rejected_count": status_counts.get("REJECTED", 0),
-            "stale_count": stale_count,
-        }
+        kpis = build_affiliate_match_queue_kpis(
+            eligible_count=eligible_count,
+            status_counts=status_counts,
+            stale_count=stale_count,
+        )
         return rows, total, kpis, latest_jobs
 
     def _match(

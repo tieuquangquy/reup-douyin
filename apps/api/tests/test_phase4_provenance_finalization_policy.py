@@ -22,7 +22,7 @@ def test_v22_65_editor_caption_covers_close_transition_gaps() -> None:
     assert float(geometry["x"]) + float(geometry["width"]) >= 0.45
     assert float(geometry["width"]) * float(geometry["height"]) <= 0.003
     assert supplement["mask_mode"] == "full_roi_plate"
-    assert supplement["strategy"] == "spatial_telea_r9"
+    assert supplement["strategy"] == "gaussian_blur_plate_v1"
 
     bottom_override = EDITOR_CAPTION_COVER_OVERRIDES["sub_28"]
     bottom_roi = bottom_override["roi"]
@@ -42,4 +42,4 @@ def test_v22_65_editor_caption_covers_close_transition_gaps() -> None:
     assert left_cover["start_frame"] == 188
     assert left_cover["end_frame"] == 439
     assert left_cover["mask_mode"] == "full_roi_plate"
-    assert left_cover["strategy"] == "spatial_telea_r9"
+    assert left_cover["strategy"] == "gaussian_blur_plate_v1"

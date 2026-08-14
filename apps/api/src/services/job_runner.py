@@ -3,17 +3,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 import logging
-from typing import Protocol
+from typing import Any, Mapping, Protocol
 from uuid import UUID
 
 from sqlalchemy import case, func, literal, or_, select, text
 from sqlalchemy.orm import Session, aliased, selectinload
 
 from src.core.settings import get_settings
+from src.db.session import get_session_factory
 from src.enums import JobStatus, JobStepStatus, JobType, SourcePlatformEnum
 from src.models.jobs import Job, JobStep
 from src.services.disk_guard import DISK_HEAVY_JOB_TYPES, check_disk_headroom, min_free_bytes
-from src.services.job_service import JobService
+from src.services.job_service import JobService, utc_now
 from src.services.reup_queue_download_sync import sync_reup_queue_from_download_job
 from src.services.reup_pipeline_orchestrator import ReupPipelineOrchestrator
 
@@ -30,6 +31,22 @@ PIPELINE_RETRY_JOB_TYPES: frozenset[str] = frozenset(
         JobType.RENDER_FINAL.value,
     }
 )
+
+
+def _should_auto_approve_visual(workflow: Mapping[str, Any]) -> bool:
+    """Return whether deterministic Output QA exposed an approvable preview.
+
+    ``workflow_stage`` is a presentation summary, not an exclusive state
+    machine.  Existing audio approval can make it read ``AUDIO_APPROVED`` while
+    a new visual preview is still awaiting its hash-bound approval.
+    """
+
+    if str(workflow.get("workflow_stage") or "") == "WAITING_VISUAL_REVIEW":
+        return True
+    return bool(
+        workflow.get("visual_preview_asset_id")
+        or workflow.get("cleaned_video_asset_id")
+    ) and not bool(workflow.get("visual_approved"))
 
 
 @dataclass(frozen=True)
@@ -51,6 +68,7 @@ def resolve_failure_outcome(
     error_code: str | None,
     error_message: str | None,
     retry_after_seconds: int | None = None,
+    failure_reason: str | None = None,
     now: datetime | None = None,
 ) -> FailureOutcome:
     """Single decision point for what happens after a step fails.
@@ -62,6 +80,16 @@ def resolve_failure_outcome(
     type_value = job_type.value if hasattr(job_type, "value") else str(job_type)
     attempts = int(attempts or 0)
 
+    if str(error_code or "").upper() == "INVALID_FRONTEND_RUNTIME_BINDING":
+        return FailureOutcome(
+            status=JobStatus.FAILED,
+            scheduled_at=None,
+            operator_message=str(
+                error_message or "Frontend runtime binding is invalid."
+            ),
+            metadata={"runtime_binding_invalid": True},
+        )
+
     if type_value == JobType.DOWNLOAD_VIDEO.value:
         from src.downloaders.download_error_policy import (
             classify_download_failure,
@@ -70,7 +98,9 @@ def resolve_failure_outcome(
             should_auto_retry_download_failure,
         )
 
-        failure_class = classify_download_failure(error_code, error_message)
+        failure_class = classify_download_failure(
+            error_code, error_message, reason=failure_reason
+        )
         will_retry = bool(retryable) and should_auto_retry_download_failure(
             failure_class=failure_class,
             attempts=attempts,
@@ -86,6 +116,7 @@ def resolve_failure_outcome(
             metadata={
                 "download_failure_class": str(failure_class),
                 "download_will_auto_retry": will_retry,
+                "download_failure_reason": failure_reason,
             },
         )
 
@@ -145,6 +176,16 @@ def resolve_failure_outcome(
         )
         message_lower = str(error_message or "").lower()
         provider_rate_limited = "http_429" in message_lower or "http 429" in message_lower
+        provider_billing_required = any(
+            marker in message_lower
+            for marker in (
+                "http_402",
+                "http 402",
+                "payment required",
+                "insufficient credit",
+                "insufficient balance",
+            )
+        )
         return FailureOutcome(
             status=JobStatus.RETRYABLE if will_retry else JobStatus.FAILED,
             scheduled_at=(
@@ -166,6 +207,7 @@ def resolve_failure_outcome(
                 "pipeline_failure_class": str(failure_class),
                 "pipeline_will_auto_retry": will_retry,
                 "pipeline_provider_rate_limited": provider_rate_limited,
+                "pipeline_provider_billing_required": provider_billing_required,
             },
         )
 
@@ -179,9 +221,13 @@ def resolve_failure_outcome(
 
 
 _CONCURRENCY_SETTING_BY_TYPE: dict[str, tuple[str, int]] = {
-    JobType.DOWNLOAD_VIDEO.value: ("download_video_max_concurrent_running", 1),
+    JobType.DOWNLOAD_VIDEO.value: ("download_video_max_concurrent_running", 2),
     JobType.ANALYZE_AUDIO.value: ("analyze_audio_max_concurrent_running", 1),
-    JobType.SYNTHESIZE_TTS.value: ("synthesize_tts_max_concurrent_running", 2),
+    JobType.BUILD_TRANSLATION_DRAFT.value: (
+        "build_translation_draft_max_concurrent_running",
+        1,
+    ),
+    JobType.SYNTHESIZE_TTS.value: ("synthesize_tts_max_concurrent_running", 1),
     JobType.ANALYZE_OCR.value: ("analyze_ocr_max_concurrent_running", 1),
     JobType.RENDER_FINAL.value: ("render_final_max_concurrent_running", 1),
     JobType.COLLECT_PUBLICATION_METRICS.value: ("metrics_collection_max_concurrent_running", 2),
@@ -361,6 +407,56 @@ class JobRunner:
         self.handlers = handlers or StepHandlerRegistry()
         self.service = JobService(db)
 
+    def _live_heartbeat(
+        self,
+        job: Job,
+        step: JobStep,
+        *,
+        metadata_key: str,
+        phase: str,
+        progress_percent: int | None,
+        job_progress_percent: int | None = None,
+    ) -> None:
+        """Record a real subphase without allowing progress to move backward."""
+        job.updated_at = utc_now()
+        metadata = dict(step.metadata_json or {})
+        previous_phase = metadata.get(metadata_key)
+        phase_name = str(phase).split("|", 1)[0]
+        metadata[metadata_key] = phase_name
+        phase_parts = str(phase).split("|")
+        if len(phase_parts) == 3:
+            try:
+                current = int(phase_parts[1])
+                total = int(phase_parts[2])
+                previous_total = metadata.get(f"{metadata_key}_total")
+                previous_current = metadata.get(f"{metadata_key}_current")
+                if previous_phase == phase_name and previous_total == total:
+                    try:
+                        current = max(current, int(previous_current))
+                    except (TypeError, ValueError):
+                        pass
+                metadata[f"{metadata_key}_current"] = current
+                metadata[f"{metadata_key}_total"] = total
+            except (TypeError, ValueError):
+                pass
+        elif previous_phase != phase_name:
+            metadata.pop(f"{metadata_key}_current", None)
+            metadata.pop(f"{metadata_key}_total", None)
+        step.metadata_json = metadata
+        previous_job_progress = int(getattr(job, "progress_percent", 0) or 0)
+        if progress_percent is not None:
+            bounded = max(0, min(99, int(progress_percent)))
+            step.progress_percent = max(int(step.progress_percent or 0), bounded)
+        self.service.refresh_progress(job)
+        if progress_percent is not None:
+            calculated = int(getattr(job, "progress_percent", 0) or 0)
+            floor = (
+                int(job_progress_percent)
+                if job_progress_percent is not None
+                else calculated
+            )
+            job.progress_percent = max(previous_job_progress, calculated, floor)
+
     def _settle_recovered_running_job(
         self,
         job: Job,
@@ -405,6 +501,50 @@ class JobRunner:
         claim_next only picks QUEUED/RETRYABLE — without this, a mid-step crash leaves
         the job stuck in Ops as Running forever while the worker idles.
         """
+        return self._release_worker_locks(
+            worker_id,
+            error_code="WORKER_ORPHANED",
+            step_error_message=(
+                "Worker restarted or crashed while this step was RUNNING; "
+                "job requeued automatically."
+            ),
+            job_error_message=(
+                "Worker restarted or crashed while job was RUNNING; "
+                "the retry policy will decide whether to requeue it."
+            ),
+        )
+
+    def release_failed_execution_locks(
+        self,
+        worker_id: str,
+        *,
+        error_type: str,
+    ) -> int:
+        """Recover a same-process runner exception without reporting a restart."""
+
+        safe_type = str(error_type or "Exception").strip()[:120] or "Exception"
+        return self._release_worker_locks(
+            worker_id,
+            error_code="WORKER_EXECUTION_ERROR",
+            step_error_message=(
+                "Worker caught an unexpected execution error "
+                f"({safe_type}); job requeued automatically."
+            ),
+            job_error_message=(
+                "Worker remained online but the job runner raised an unexpected "
+                f"execution error ({safe_type}); the retry policy will decide "
+                "whether to requeue it."
+            ),
+        )
+
+    def _release_worker_locks(
+        self,
+        worker_id: str,
+        *,
+        error_code: str,
+        step_error_message: str,
+        job_error_message: str,
+    ) -> int:
         stmt = (
             select(Job)
             .where(Job.status == JobStatus.RUNNING)
@@ -421,25 +561,20 @@ class JobRunner:
                         step,
                         JobStepStatus.FAILED,
                         progress_percent=0,
-                        error_code="WORKER_ORPHANED",
-                        error_message=(
-                            "Worker restarted or crashed while this step was RUNNING; "
-                            "job requeued automatically."
-                        ),
+                        error_code=error_code,
+                        error_message=step_error_message,
                     )
             outcome = self._settle_recovered_running_job(
                 job,
-                error_code="WORKER_ORPHANED",
-                error_message=(
-                    "Worker restarted or crashed while job was RUNNING; "
-                    "the retry policy will decide whether to requeue it."
-                ),
+                error_code=error_code,
+                error_message=job_error_message,
             )
             logger.warning(
-                "job_orphan_lock_released",
+                "job_worker_lock_released",
                 extra={
                     "job_id": str(job.id),
                     "worker_id": worker_id,
+                    "error_code": error_code,
                     "next_status": outcome.status.value,
                     "attempts": int(getattr(job, "attempts", 0) or 0),
                 },
@@ -637,6 +772,41 @@ class JobRunner:
         self.db.commit()
         return self.service.get_job(job.id)
 
+    def _apply_completion_advisory(self, job: Job) -> bool:
+        """Expose non-fatal OCR output warnings without failing the durable job."""
+
+        job_type = str(getattr(job.job_type, "value", job.job_type))
+        if job_type != JobType.ANALYZE_OCR.value:
+            return False
+        result_json = dict(getattr(job, "result_json", None) or {})
+        warnings = result_json.get("warnings")
+        if not isinstance(warnings, list):
+            warnings = []
+            for step in reversed(list(getattr(job, "steps", None) or [])):
+                payload = getattr(step, "result_json", None) or getattr(
+                    step, "output_json", None
+                )
+                if isinstance(payload, dict) and isinstance(payload.get("warnings"), list):
+                    warnings = list(payload["warnings"])
+                    break
+        from src.ocr_pipeline.completion_advisory import (
+            OCR_NO_HARDSUB_OUTPUT,
+            ocr_completion_advisory,
+        )
+
+        advisory = ocr_completion_advisory(warnings)
+        if advisory is None:
+            return False
+        code, message = advisory
+        job.error_code = code
+        job.error_message = message
+        job.result_json = {
+            **result_json,
+            "warnings": warnings,
+            "completion_advisory": {"code": code, "message": message},
+        }
+        return True
+
     def _disk_block_reason(self, job: Job) -> str | None:
         """Why this job must not start now, when the storage volume is nearly full."""
         type_value = str(getattr(job.job_type, "value", job.job_type))
@@ -664,6 +834,12 @@ class JobRunner:
         """Record a precondition failure and let the retry policy decide what happens next."""
         for step in job.steps:
             if step.status in {JobStepStatus.PENDING, JobStepStatus.RUNNING}:
+                if step.status == JobStepStatus.PENDING:
+                    self.service.transition_step(
+                        step,
+                        JobStepStatus.RUNNING,
+                        progress_percent=0,
+                    )
                 self.service.transition_step(
                     step,
                     JobStepStatus.FAILED,
@@ -713,6 +889,23 @@ class JobRunner:
             return self._abort_cancelled_job(job)
         if job.status != JobStatus.RUNNING:
             raise ValueError(f"Job must be RUNNING before execution, got {job.status}")
+
+        from src.services.frontend_core_runtime import (
+            FrontendCoreRuntimeError,
+            ensure_job_frontend_runtime,
+        )
+        try:
+            runtime_contract = ensure_job_frontend_runtime(job)
+            if runtime_contract is not None:
+                # Legacy jobs with no binding are pinned once before their first
+                # executable step. A present but stale binding is never upgraded.
+                self.db.commit()
+        except FrontendCoreRuntimeError as exc:
+            return self._fail_job_before_start(
+                job,
+                error_code="INVALID_FRONTEND_RUNTIME_BINDING",
+                error_message=str(exc),
+            )
 
         disk_reason = self._disk_block_reason(job)
         if disk_reason is not None:
@@ -868,20 +1061,71 @@ class JobRunner:
                 if source_video_id is None and job.source_video_id is not None:
                     source_video_id = str(job.source_video_id)
                 if source_video_id is not None:
+                    def _download_heartbeat(phase: str, progress_percent: int | None) -> None:
+                        if self._is_cancelled(job):
+                            raise JobCancelledAbort()
+                        bounded = (
+                            max(0, min(99, int(progress_percent)))
+                            if progress_percent is not None
+                            else None
+                        )
+                        completed_other = sum(
+                            1
+                            for candidate in (job.steps or [])
+                            if candidate is not step and candidate.status == JobStepStatus.COMPLETED
+                        )
+                        total_steps = max(1, len(job.steps or []))
+                        baseline = min(98, int(round((completed_other / total_steps) * 100)))
+                        mapped_job_progress = (
+                            baseline + int(round((bounded / 99) * (99 - baseline)))
+                            if bounded is not None
+                            else None
+                        )
+                        self._live_heartbeat(
+                            job,
+                            step,
+                            metadata_key="download_phase",
+                            phase=phase,
+                            progress_percent=bounded,
+                            # New jobs have no placeholder baseline. Old queued jobs
+                            # may already sit at 71%; map their live transfer into the
+                            # remaining monotonic range instead of moving backwards.
+                            job_progress_percent=mapped_job_progress,
+                        )
+                        self.db.commit()
+
                     try:
                         manifest = DownloadService(self.db).run_download(
                             UUID(str(source_video_id)),
                             job_id=job.id,
                             force_refresh=bool((job.payload_json or {}).get("force_refresh")),
+                            on_progress=_download_heartbeat,
+                            account_connection_id=(
+                                UUID(str((job.payload_json or {}).get("account_connection_id")))
+                                if (job.payload_json or {}).get("account_connection_id")
+                                else None
+                            ),
+                            # Keep the staging namespace stable when a queue
+                            # Hold/Resume recreates a terminal job row. Legacy
+                            # jobs without this field fall back to job.id in
+                            # DownloadService.
+                            transfer_id=(job.payload_json or {}).get("transfer_id"),
                         )
                         result = StepHandlerResult(output_json={"manifest": manifest})
+                    except JobCancelledAbort:
+                        return self._abort_cancelled_job(job)
                     except DownloadError as exc:
+                        if str(exc.code) == "cancelled":
+                            return self._abort_cancelled_job(job)
                         result = StepHandlerResult(
                             status=JobStepStatus.FAILED,
                             progress_percent=0,
                             error_code=str(exc.code),
                             error_message=exc.message,
-                            output_json={"source_video_id": str(source_video_id)},
+                            output_json={
+                                "source_video_id": str(source_video_id),
+                                "download_failure_reason": getattr(exc, "reason", None),
+                            },
                         )
                     except Exception as exc:
                         logger.exception(
@@ -895,6 +1139,14 @@ class JobRunner:
                             error_message=f"{type(exc).__name__}: {exc}",
                             output_json={"source_video_id": str(source_video_id)},
                         )
+                else:
+                    result = StepHandlerResult(
+                        status=JobStepStatus.FAILED,
+                        progress_percent=0,
+                        error_code="invalid_source_video",
+                        error_message="DOWNLOAD_VIDEO job is missing source_video_id",
+                        output_json={},
+                    )
 
             if str(job.job_type) == "ANALYZE_AUDIO" and step.step_key == "persist_outputs":
                 from src.audio_pipeline.errors import AudioAnalysisError
@@ -908,13 +1160,21 @@ class JobRunner:
                 if source_video_id is not None:
                     def _analysis_heartbeat(phase: str, progress_percent: int | None) -> None:
                         # Keep Ops Jobs "Updated" moving during long FunASR download/infer.
-                        job.updated_at = utc_now()
-                        meta = dict(step.metadata_json or {})
-                        meta["analysis_phase"] = phase
-                        step.metadata_json = meta
                         if progress_percent is not None:
-                            step.progress_percent = max(0, min(99, int(progress_percent)))
-                            self.service.refresh_progress(job)
+                            job_meta = dict(getattr(job, "metadata_json", None) or {})
+                            job_meta["progress_authority"] = "audio_subphase"
+                            job_meta["subphase_percent"] = max(
+                                int(job_meta.get("subphase_percent", 0) or 0),
+                                max(0, min(99, int(progress_percent))),
+                            )
+                            job.metadata_json = job_meta
+                        self._live_heartbeat(
+                            job,
+                            step,
+                            metadata_key="analysis_phase",
+                            phase=phase,
+                            progress_percent=progress_percent,
+                        )
                         self.db.commit()
 
                     try:
@@ -937,6 +1197,7 @@ class JobRunner:
                                 "transcript_count": analysis.transcript_count,
                                 "translation_count": analysis.translation_count,
                                 "flags_summary": analysis.flags_summary,
+                                "metrics": analysis.metrics,
                             }
                         )
                     except AudioAnalysisError as exc:
@@ -959,13 +1220,13 @@ class JobRunner:
                     source_video_id = str(job.source_video_id)
                 if source_video_id is not None:
                     def _translation_heartbeat(phase: str, progress_percent: int | None) -> None:
-                        job.updated_at = utc_now()
-                        meta = dict(step.metadata_json or {})
-                        meta["translation_phase"] = phase
-                        step.metadata_json = meta
-                        if progress_percent is not None:
-                            step.progress_percent = max(0, min(99, int(progress_percent)))
-                            self.service.refresh_progress(job)
+                        self._live_heartbeat(
+                            job,
+                            step,
+                            metadata_key="translation_phase",
+                            phase=phase,
+                            progress_percent=progress_percent,
+                        )
                         self.db.commit()
 
                     try:
@@ -976,6 +1237,7 @@ class JobRunner:
                                 payload.get("translation_preset", TranslationPreset.LITERAL_SAFE)
                             ),
                             require_source_approved=bool(payload.get("require_source_approved", True)),
+                            force_refresh=bool(payload.get("force_refresh", True)),
                             job_id=job.id,
                             on_progress=_translation_heartbeat,
                         )
@@ -997,6 +1259,7 @@ class JobRunner:
                                     "transcript_count": analysis.transcript_count,
                                     "translation_count": analysis.translation_count,
                                     "flags_summary": analysis.flags_summary,
+                                    "metrics": analysis.metrics,
                                 }
                             )
                     except AudioAnalysisError as exc:
@@ -1005,6 +1268,31 @@ class JobRunner:
                             progress_percent=0,
                             error_code=exc.code,
                             error_message=exc.message,
+                            output_json={"source_video_id": str(source_video_id)},
+                        )
+                    except Exception as exc:
+                        logger.exception(
+                            "translation_segments_unhandled_error",
+                            extra={
+                                "job_id": str(job.id),
+                                "source_video_id": str(source_video_id),
+                            },
+                        )
+                        try:
+                            self.db.rollback()
+                        except Exception:
+                            logger.exception(
+                                "translation_segments_rollback_failed",
+                                extra={"job_id": str(job.id)},
+                            )
+                        result = StepHandlerResult(
+                            status=JobStepStatus.FAILED,
+                            progress_percent=0,
+                            error_code="translation_unhandled_error",
+                            error_message=(
+                                "Translation failed unexpectedly at the worker boundary "
+                                f"({type(exc).__name__})."
+                            ),
                             output_json={"source_video_id": str(source_video_id)},
                         )
 
@@ -1019,16 +1307,44 @@ class JobRunner:
                     source_video_id = str(job.source_video_id)
                 if source_video_id is not None:
                     def _tts_heartbeat(phase: str, progress_percent: int | None) -> None:
-                        if self._is_cancelled(job):
-                            raise JobCancelledAbort()
-                        job.updated_at = utc_now()
-                        meta = dict(step.metadata_json or {})
-                        meta["tts_phase"] = phase
-                        step.metadata_json = meta
-                        if progress_percent is not None:
-                            step.progress_percent = max(0, min(99, int(progress_percent)))
-                            self.service.refresh_progress(job)
-                        self.db.commit()
+                        bounded = (
+                            max(0, min(99, int(progress_percent)))
+                            if progress_percent is not None
+                            else None
+                        )
+                        # Never commit TTS output rows from the heartbeat. The
+                        # synthesis transaction must remain atomic until joined
+                        # narration + subtitles + manifest are all complete.
+                        heartbeat_db = get_session_factory()()
+                        try:
+                            heartbeat_job = heartbeat_db.get(Job, job.id)
+                            heartbeat_step = heartbeat_db.get(JobStep, step.id)
+                            if heartbeat_job is None or heartbeat_step is None:
+                                raise RuntimeError("TTS heartbeat lost its durable job row")
+                            if heartbeat_job.status == JobStatus.CANCELLED:
+                                raise JobCancelledAbort()
+                            heartbeat_runner = JobRunner(heartbeat_db, self.handlers)
+                            heartbeat_runner._live_heartbeat(
+                                heartbeat_job,
+                                heartbeat_step,
+                                metadata_key="tts_phase",
+                                phase=phase,
+                                progress_percent=bounded,
+                                job_progress_percent=(
+                                    min(99, 8 + int(round(bounded * 0.91)))
+                                    if bounded is not None
+                                    else None
+                                ),
+                            )
+                            heartbeat_db.commit()
+                        except JobCancelledAbort:
+                            heartbeat_db.rollback()
+                            raise
+                        except Exception:
+                            heartbeat_db.rollback()
+                            raise
+                        finally:
+                            heartbeat_db.close()
 
                     try:
                         voice_config_json = (job.payload_json or {}).get("voice_config") or {}
@@ -1036,13 +1352,19 @@ class JobRunner:
                             TtsRequest(
                                 source_video_id=UUID(str(source_video_id)),
                                 voice_config=VoiceConfig(
-                                    voice_id=voice_config_json.get("voice_id", "vi_female_placeholder"),
+                                    voice_id=voice_config_json.get("voice_id", ""),
                                     language_code=voice_config_json.get("language_code", "vi"),
                                     speaking_rate=float(voice_config_json.get("speaking_rate", 1.0)),
                                 ),
                                 force_refresh=bool((job.payload_json or {}).get("force_refresh")),
                                 runtime_authority=(job.payload_json or {}).get(
                                     "runtime_authority"
+                                ),
+                                translation_input_sha256=(job.payload_json or {}).get(
+                                    "translation_input_sha256"
+                                ),
+                                translation_authority_sha256=(job.payload_json or {}).get(
+                                    "translation_authority_sha256"
                                 ),
                             ),
                             job_id=job.id,
@@ -1081,20 +1403,13 @@ class JobRunner:
                     def _ocr_heartbeat(phase: str, progress_percent: int | None) -> None:
                         if self._is_cancelled(job):
                             raise JobCancelledAbort()
-                        job.updated_at = utc_now()
-                        meta = dict(step.metadata_json or {})
-                        phase_parts = str(phase).split("|")
-                        meta["ocr_phase"] = phase_parts[0]
-                        if len(phase_parts) == 3:
-                            try:
-                                meta["ocr_frame_current"] = int(phase_parts[1])
-                                meta["ocr_frame_total"] = int(phase_parts[2])
-                            except ValueError:
-                                pass
-                        step.metadata_json = meta
-                        if progress_percent is not None:
-                            step.progress_percent = max(0, min(99, int(progress_percent)))
-                            self.service.refresh_progress(job)
+                        self._live_heartbeat(
+                            job,
+                            step,
+                            metadata_key="ocr_phase",
+                            phase=phase,
+                            progress_percent=progress_percent,
+                        )
                         self.db.commit()
 
                     try:
@@ -1117,6 +1432,11 @@ class JobRunner:
                                 decisions=list(payload.get("review_decisions") or []),
                                 operator_id=str(payload.get("operator_id") or "frontend_operator"),
                                 force_refresh=bool(payload.get("force_refresh")),
+                                analysis_engine=str(
+                                    payload.get("analysis_engine")
+                                    or "audio_visual_temporal_v1"
+                                ),
+                                auto_advance=bool(payload.get("auto_advance")),
                                 on_progress=_ocr_heartbeat,
                             )
                             result = StepHandlerResult(output_json=workflow)
@@ -1212,13 +1532,13 @@ class JobRunner:
                 def _preview_heartbeat(phase: str, progress_percent: int | None) -> None:
                     if self._is_cancelled(job):
                         raise JobCancelledAbort()
-                    job.updated_at = utc_now()
-                    meta = dict(step.metadata_json or {})
-                    meta["quality_phase"] = phase
-                    step.metadata_json = meta
-                    if progress_percent is not None:
-                        step.progress_percent = max(0, min(99, int(progress_percent)))
-                        self.service.refresh_progress(job)
+                    self._live_heartbeat(
+                        job,
+                        step,
+                        metadata_key="quality_phase",
+                        phase=phase,
+                        progress_percent=progress_percent,
+                    )
                     self.db.commit()
 
                 try:
@@ -1232,8 +1552,10 @@ class JobRunner:
                         or "translation_review_and_preview"
                     )
                     if action in {
+                        "suggest_residual_translation",
                         "build_residual_proposal",
                         "approve_residual_proposal",
+                        "auto_residual_remediation",
                     }:
                         workflow = quality.run_residual_review(
                             source_video_id=UUID(str(source_video_id)),
@@ -1251,6 +1573,36 @@ class JobRunner:
                             translations=list(payload.get("translations") or []),
                             operator_id=str(payload.get("operator_id") or "frontend_operator"),
                             on_progress=_preview_heartbeat,
+                        )
+                    # The summary stage is derived from several durable
+                    # authorities.  A previously approved audio handoff can
+                    # legitimately make it report ``AUDIO_APPROVED`` even
+                    # though this job has just produced a *new*, QA-bound
+                    # visual preview.  Full-auto must key off the current
+                    # preview artifact and deterministic QA, not the display
+                    # label, otherwise the A-Z lane stops before RENDER_FINAL.
+                    if bool(payload.get("auto_approve")) and _should_auto_approve_visual(
+                        workflow
+                    ):
+                        from src.services.quality_auto_policy import (
+                            AUTO_QUALITY_ACTOR,
+                            QualityAutoPolicyBlocked,
+                            assert_audio_ready,
+                        )
+
+                        _preview_heartbeat("auto_visual_approval", 92)
+                        workflow = quality.approve_visual(
+                            UUID(str(source_video_id)),
+                            operator_id=AUTO_QUALITY_ACTOR,
+                        )
+                        try:
+                            assert_audio_ready(workflow)
+                        except QualityAutoPolicyBlocked as exc:
+                            raise QualityLocalizationError(str(exc)) from exc
+                        _preview_heartbeat("auto_audio_approval", 97)
+                        workflow = quality.approve_audio_review(
+                            UUID(str(source_video_id)),
+                            operator_id=AUTO_QUALITY_ACTOR,
                         )
                     result = StepHandlerResult(output_json=workflow)
                 except JobCancelledAbort:
@@ -1274,6 +1626,23 @@ class JobRunner:
                         error_message=message,
                         output_json={"source_video_id": str(source_video_id)},
                     )
+                except Exception as exc:
+                    import traceback
+
+                    logger.exception(
+                        "render_preview_unhandled_error",
+                        extra={"job_id": str(job.id), "step_key": step.step_key},
+                    )
+                    meta = dict(step.metadata_json or {})
+                    meta["unhandled_traceback"] = traceback.format_exc()[-4000:]
+                    step.metadata_json = meta
+                    result = StepHandlerResult(
+                        status=JobStepStatus.FAILED,
+                        progress_percent=0,
+                        error_code="STEP_UNHANDLED_ERROR",
+                        error_message=f"{type(exc).__name__}: {exc}"[:500],
+                        output_json={"source_video_id": str(source_video_id)},
+                    )
 
             if str(job.job_type) == "RENDER_FINAL" and step.step_key == "persist_render_output":
                 from src.render_pipeline.errors import RenderPipelineError
@@ -1284,6 +1653,21 @@ class JobRunner:
                 if source_video_id is None and job.source_video_id is not None:
                     source_video_id = str(job.source_video_id)
                 if source_video_id is not None:
+                    def _render_heartbeat(
+                        phase: str,
+                        progress_percent: int | None,
+                    ) -> None:
+                        if self._is_cancelled(job):
+                            raise JobCancelledAbort()
+                        self._live_heartbeat(
+                            job,
+                            step,
+                            metadata_key="render_phase",
+                            phase=phase,
+                            progress_percent=progress_percent,
+                        )
+                        self.db.commit()
+
                     try:
                         from src.services.pipeline_recipe_runtime import (
                             RuntimeRecipeError,
@@ -1302,6 +1686,7 @@ class JobRunner:
                                 ),
                             ),
                             job_id=job.id,
+                            on_progress=_render_heartbeat,
                         )
                         result = StepHandlerResult(
                             output_json={
@@ -1311,6 +1696,8 @@ class JobRunner:
                                 "warnings": render_result.warnings,
                             }
                         )
+                    except JobCancelledAbort:
+                        return self._abort_cancelled_job(job)
                     except RenderPipelineError as exc:
                         result = StepHandlerResult(
                             status=JobStepStatus.FAILED,
@@ -1745,6 +2132,7 @@ class JobRunner:
                     error_code=result.error_code,
                     error_message=result.error_message,
                     retry_after_seconds=result.retry_after_seconds,
+                    failure_reason=(result.output_json or {}).get("download_failure_reason"),
                 )
                 operator_message = outcome.operator_message
                 next_status = outcome.status
@@ -1805,8 +2193,9 @@ class JobRunner:
             logger.info("job_step_complete", extra={"job_id": str(job.id), "step_key": step.step_key})
 
         self.service.transition_job(job, JobStatus.COMPLETED)
-        job.error_code = None
-        job.error_message = None
+        if not self._apply_completion_advisory(job):
+            job.error_code = None
+            job.error_message = None
         job.locked_by = None
         job.locked_at = None
         self.service.refresh_progress(job)

@@ -3,13 +3,66 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 import unittest
 
-from src.enums import JobStatus, JobType
-from src.services.job_runner import resolve_failure_outcome
+from src.enums import JobStatus, JobStepStatus, JobType
+from src.services.job_runner import JobRunner, resolve_failure_outcome
+from src.services.job_state_machine import validate_job_transition, validate_step_transition
 
 
 class ResolveFailureOutcomeTests(unittest.TestCase):
+    def test_precondition_failure_moves_pending_step_through_running(self) -> None:
+        transitions: list[tuple[JobStepStatus, JobStepStatus]] = []
+        step = SimpleNamespace(status=JobStepStatus.PENDING)
+        job = SimpleNamespace(
+            id="job-1",
+            job_type=JobType.SYNTHESIZE_TTS,
+            status=JobStatus.RUNNING,
+            steps=[step],
+            attempts=1,
+            retryable=True,
+            max_attempts=3,
+            scheduled_at=None,
+            locked_by="worker-1",
+            locked_at=datetime.now(UTC),
+        )
+
+        class Service:
+            def transition_step(self, target, status, **_kwargs):
+                validate_step_transition(target.status, status)
+                transitions.append((target.status, status))
+                target.status = status
+
+            def transition_job(self, target, status, **_kwargs):
+                validate_job_transition(target.status, status)
+                target.status = status
+
+            def refresh_progress(self, target):
+                return target
+
+            def get_job(self, _job_id):
+                return job
+
+        runner = JobRunner.__new__(JobRunner)
+        runner.service = Service()
+        runner.db = SimpleNamespace(commit=lambda: None)
+
+        result = runner._fail_job_before_start(
+            job,
+            error_code="INVALID_FRONTEND_RUNTIME_BINDING",
+            error_message="stale runtime",
+        )
+
+        self.assertEqual(
+            transitions,
+            [
+                (JobStepStatus.PENDING, JobStepStatus.RUNNING),
+                (JobStepStatus.RUNNING, JobStepStatus.FAILED),
+            ],
+        )
+        self.assertEqual(result.status, JobStatus.FAILED)
+
     def test_transient_render_failure_is_rescheduled(self) -> None:
         outcome = resolve_failure_outcome(
             job_type=JobType.RENDER_FINAL,
@@ -40,6 +93,20 @@ class ResolveFailureOutcomeTests(unittest.TestCase):
         self.assertIsNone(outcome.scheduled_at)
         self.assertIn("terminal", outcome.operator_message)
 
+    def test_stale_frontend_runtime_never_retries_even_for_download(self) -> None:
+        outcome = resolve_failure_outcome(
+            job_type=JobType.DOWNLOAD_VIDEO,
+            attempts=1,
+            retryable=True,
+            max_attempts=8,
+            error_code="INVALID_FRONTEND_RUNTIME_BINDING",
+            error_message="DOWNLOAD_VIDEO job is bound to a stale runtime",
+        )
+
+        self.assertEqual(outcome.status, JobStatus.FAILED)
+        self.assertIsNone(outcome.scheduled_at)
+        self.assertTrue(outcome.metadata["runtime_binding_invalid"])
+
     def test_provider_429_waits_for_full_rate_window(self) -> None:
         now = datetime(2026, 1, 1, tzinfo=UTC)
         outcome = resolve_failure_outcome(
@@ -68,6 +135,21 @@ class ResolveFailureOutcomeTests(unittest.TestCase):
 
         self.assertEqual(outcome.status, JobStatus.FAILED)
         self.assertIn("retries exhausted", outcome.operator_message)
+
+    def test_provider_402_is_terminal_without_wasteful_retry(self) -> None:
+        outcome = resolve_failure_outcome(
+            job_type=JobType.SYNTHESIZE_TTS,
+            attempts=1,
+            retryable=True,
+            max_attempts=3,
+            error_code="tts_provider_failed",
+            error_message="HTTP connector synthesis failed (http_402, HTTP 402).",
+        )
+
+        self.assertEqual(outcome.status, JobStatus.FAILED)
+        self.assertIsNone(outcome.scheduled_at)
+        self.assertIn("billing/credit required", outcome.operator_message)
+        self.assertTrue(outcome.metadata["pipeline_provider_billing_required"])
 
     def test_non_retryable_job_never_reschedules(self) -> None:
         outcome = resolve_failure_outcome(

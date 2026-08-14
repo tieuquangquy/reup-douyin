@@ -56,7 +56,7 @@ assert.match(transcriptPage, /resumeActiveTranscriptJob/, "Transcript job re-att
 assert.match(transcriptPage, /translatePartialAfterJob/, "Transcript partial translation must remain inline");
 assert.match(transcriptPage, /jobId=\{analyzeJobId\}/, "Transcript job ID must remain visible");
 assert.match(finalReviewPage, /resumeActiveOcrJob/, "Final Review OCR re-attachment must remain");
-assert.match(finalReviewPage, /maxAttempts:\s*900/, "Final Review OCR polling budget must remain");
+assert.match(finalReviewPage, /maxAttempts:\s*1800/, "Final Review OCR polling budget must remain");
 assert.match(finalReviewPage, /renderQueued[\s\S]*notify/, "Final Review queued render job ID must announce via toast");
 assert.doesNotMatch(
   finalReviewPage,

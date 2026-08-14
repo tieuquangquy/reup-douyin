@@ -74,6 +74,28 @@ assert.match(
   "Catalog metadata row must render only when metadata exists"
 );
 assert.match(cssSource, /\.ops-tts-section__head--with-action/, "Voice header action must have responsive layout styles");
+assert.match(apiSource, /model_options\?: TtsAiCatalogModel\[\]/, "Catalog contract must accept rich model metadata");
+assert.match(apiSource, /languages\?: TtsAiCatalogLanguage\[\]/, "Catalog contract must accept language choices");
+assert.match(apiSource, /discovery\?: TtsAiCatalogDiscovery/, "Catalog contract must expose discovery status");
+assert.match(componentSource, /TTS_CATALOG_MANUAL_VALUE/, "Remote catalog selects must retain a manual-ID option");
+assert.match(
+  componentSource,
+  /catalogStale[\s\S]*?onRemoteCredentialChange/,
+  "Changing Base URL or API key must mark the current provider catalog stale"
+);
+assert.match(componentSource, /filterTtsCatalogModels/, "Remote model choices must filter on provider metadata");
+assert.match(componentSource, /filterTtsCatalogVoices/, "Remote voice choices must filter on provider metadata");
+assert.match(componentSource, /filterTtsCatalogLanguages/, "Remote languages must filter on provider metadata");
+assert.match(componentSource, /allCatalogVoices\.map/, "Remote voice selects must show the complete provider catalog");
+assert.match(componentSource, /\.\.\.allCatalogModels/, "Remote model selects must show the complete provider catalog");
+assert.match(enSource, /"catalogSelectionMismatch"/, "English copy must explain incompatible catalog combinations");
+assert.match(viSource, /"catalogAllChoicesHint"/, "Vietnamese copy must explain complete catalog visibility");
+assert.match(componentSource, /ops-tts-catalog-detail/, "Selected remote models must expose a compact detail card");
+assert.match(componentSource, /catalogWarnings\.join/, "Catalog and discovery warnings must be visible");
+assert.match(enSource, /"catalogManualOption"/, "English copy must define the manual catalog fallback");
+assert.match(viSource, /"catalogDiscoveryPartial"/, "Vietnamese copy must define partial discovery status");
+assert.match(cssSource, /\.ops-tts-catalog-notice/, "Catalog discovery status must have dedicated styling");
+assert.match(cssSource, /\.ops-tts-catalog-detail/, "Selected model metadata must have compact styling");
 assert.match(componentSource, /fetchTtsAiEngines/, "OmniVoice editor must load the host-aware engine catalog");
 assert.match(componentSource, /installTtsAiEngine/, "OmniVoice editor must support registry-owned dependency installs");
 assert.match(componentSource, /onInstallEngine/, "OmniVoice engine rows must expose their install action");
@@ -168,6 +190,11 @@ assert.match(componentSource, /function onProviderSelect/, "Provider select must
 assert.match(componentSource, /function onCustomSlugInput/, "Custom slug must have a typed handler");
 assert.doesNotMatch(componentSource, /function onProviderNameInput/, "Free-text Name Provider handler must be removed");
 assert.match(componentSource, /providerHint/, "Provider select must show a hint");
+assert.match(componentSource, /id="tts-ai-synthesis-strategy"/, "Gemini must expose whole-video synthesis strategy");
+assert.match(componentSource, /synthesis_strategy/, "Gemini strategy must persist through options_json");
+assert.match(componentSource, /single_voice_mode/, "Whole-video mode must persist the single-voice requirement");
+assert.match(enSource, /"wholeVideoActiveTitle"/, "English copy must explain whole-video mode");
+assert.match(viSource, /"wholeVideoActiveTitle"/, "Vietnamese copy must explain whole-video mode");
 assert.doesNotMatch(componentSource, /ops-tts-install-more/, "Install extras must not use a collapsible details block");
 assert.doesNotMatch(componentSource, /installMoreOptions/, "Install more-options accordion label must be removed");
 assert.match(componentSource, /id="tts-ai-package"/, "Package name must stay on the Install form");
@@ -235,7 +262,31 @@ assert.match(componentSource, /sectionPreview/, "Must expose Preview speech sect
 assert.match(componentSource, /ops-tts-preview-bar/, "Preview controls must sit in one bar");
 assert.match(componentSource, /previewValidationMessage/, "Preview must validate provider configuration before API calls");
 assert.match(componentSource, /previewCloudUnavailable/, "Unsupported Cloud preview must use friendly guidance");
+assert.match(
+  componentSource,
+  /DIRECT_CLOUD_PREVIEW_PROVIDERS\s*=\s*new Set\(\["google", "google_gemini"\]\)/,
+  "Google Gemini Expressive must be treated as a direct Cloud Preview provider"
+);
+assert.match(
+  componentSource,
+  /kind === "cloud"[\s\S]*?!supportsDirectCloudPreview\(provider\)[\s\S]*?previewCloudUnavailable/,
+  "Cloud Preview validation must not block providers with a native synthesis adapter"
+);
+assert.match(
+  componentSource,
+  /provider === "google" \|\| provider === "google_gemini"[\s\S]*?payload\.credential_mode/,
+  "Gemini Preview payload must explicitly carry API-key or Vertex credential mode"
+);
 assert.match(componentSource, /showPreviewFailure/, "Preview failures must use panel-local feedback");
+assert.match(apiSource, /requested_voice_id:\s*string/, "Preview response must report the requested voice id");
+assert.match(apiSource, /resolved_voice_id:\s*string/, "Preview response must report the provider-resolved voice id");
+assert.match(componentSource, /previewMeta\.resolvedVoiceId/, "Preview UI must show the voice actually resolved by the provider");
+assert.match(componentSource, /URL\.revokeObjectURL\(previous\)/, "A new Preview must clear stale audio before synthesis starts");
+assert.doesNotMatch(
+  componentSource,
+  /started\.detail \|\| t\("opsTtsAi\.previewing"\)|status\.detail \|\| t\("opsTtsAi\.previewing"\)/,
+  "Running Preview copy must be frontend-localized instead of leaking provider-specific backend text"
+);
 assert.match(componentSource, /ops-tts-preview-feedback/, "Preview panel must render its own error banner");
 assert.match(cssSource, /\.ops-tts-preview-feedback/, "Preview feedback must have dedicated styling");
 assert.match(enSource, /"previewBlockedTitle"/, "English copy must define the Preview validation banner");
@@ -307,7 +358,7 @@ assert.match(
   "Kind tabs may seed the first catalog provider into the Provider select"
 );
 assert.match(componentSource, /function nextBlankSetupName/, "New/Save must auto-name blank setups");
-assert.match(componentSource, /activateTtsAiProfile/, "Must switch active TTS setup via API");
+assert.doesNotMatch(componentSource, /activateTtsAiProfile/, "Overview switch must not use a two-request activation race");
 assert.match(componentSource, /renameTtsAiProfile/, "Must rename TTS setup via API");
 assert.match(componentSource, /deleteTtsAiProfile/, "Must delete TTS setup via API");
 assert.match(componentSource, /setTtsAiProfileEnabled/, "Must toggle enabled on overview");
@@ -354,11 +405,11 @@ assert.doesNotMatch(componentSource, /ops-tts-setup-card/, "Card list layout mus
 assert.match(componentSource, /TtsSetupActionIcon/, "Edit/Delete must use icon components");
 assert.match(componentSource, /ops-tts-setup-table__icon-btn/, "Edit/Delete must be icon buttons");
 assert.match(componentSource, /kind=\"delete\"/, "Delete must be an icon action");
-assert.match(componentSource, /isOn \? \"is-active\"/, "On row (active+enabled) must get is-active class");
+assert.match(componentSource, /isOn \? \"is-active\"/, "On row must get is-active class");
 assert.match(
   componentSource,
-  /isActive && Boolean\(profile\.enabled\)/,
-  "Row highlight must match switch On = active profile and enabled"
+  /const isOn = Boolean\(profile\.enabled\)/,
+  "Row highlight must derive from the enabled authority instead of a legacy active pointer"
 );
 assert.match(componentSource, /aria-label=\{t\("opsTtsAi\.profileEdit"\)\}/, "Edit icon must keep accessible label");
 assert.doesNotMatch(componentSource, /kind=\"rename\"/, "Rename icon button must be removed");
@@ -388,7 +439,7 @@ assert.match(componentSource, /ops-tts-list-toolbar__active/, "Active setup must
 assert.match(
   componentSource,
   /activeOnProfile/,
-  "Toolbar Active must derive from enabled active setup (activeOnProfile)"
+  "Toolbar Active must derive from the enabled setup (activeOnProfile)"
 );
 assert.match(
   componentSource,
@@ -424,7 +475,7 @@ assert.match(cssSource, /tbody tr\.is-active/, "CSS must highlight active TTS se
 assert.match(cssSource, /ops-tts-setup-table__icon-btn--danger/, "CSS must style delete icon as danger");
 assert.doesNotMatch(componentSource, /profileSetActive/, "Separate Set active button must be removed");
 assert.match(componentSource, /statusControlCol/, "Combined status column must label the On/Off switch");
-assert.match(componentSource, /activateTtsAiProfile/, "On/Off On must call activate API");
+assert.match(componentSource, /setTtsAiProfileEnabled\(profileId, nextOn\)/, "On/Off must atomically select the exclusive active setup");
 assert.match(componentSource, /sampleRate/, "Must show sample rate meta from catalog");
 assert.match(componentSource, /EDGE_FALLBACK_VOICE_OPTIONS/, "Fallback edge voices must be selectable");
 assert.match(componentSource, /styleHint/, "Must clarify reading style vs voice label");
@@ -727,6 +778,16 @@ assert.equal(resolveTtsProviderKind("google"), "cloud");
 assert.equal(resolveTtsProviderKind("openai_compatible"), "http");
 assert.equal(resolveTtsProviderKind("auto"), "system");
 assert.equal(showsTtsApiKey("google"), true);
+assert.match(apiSource, /google_service_account_json\?: string \| null/, "TTS payload must accept a one-time Service Account JSON upload");
+assert.match(apiSource, /google_service_account_set: boolean/, "Public TTS contract must expose only a safe Service Account presence flag");
+assert.match(componentSource, /GOOGLE_SERVICE_ACCOUNT_MAX_BYTES = 64 \* 1024/, "Google credential upload must enforce the 64 KB limit");
+assert.match(componentSource, /accept="\.json,application\/json"/, "Google credential picker must accept JSON files only");
+assert.match(componentSource, /googleServiceAccountMetadata/, "Google credential upload must validate safe metadata before submission");
+assert.match(componentSource, /credentialMode === "google_adc"/, "Google setup must support Application Default Credentials");
+assert.match(componentSource, /credentialMode === "google_oauth_token"/, "Google setup must retain a temporary OAuth diagnostics mode");
+assert.doesNotMatch(componentSource, />\{form\.googleServiceAccountJson\}</, "Raw Service Account JSON must never be rendered");
+assert.match(enSource, /"googleServiceAccountPrivateHint"/, "English copy must explain private credential handling");
+assert.match(viSource, /"googleAdcDescription"/, "Vietnamese copy must explain host-managed ADC");
 assert.equal(showsTtsApiKey("edge"), false);
 assert.equal(showsTtsBaseUrl("openai_compatible"), true);
 assert.equal(showsTtsBaseUrl("vieneu"), false);

@@ -53,6 +53,23 @@ class PreprocessPostprocessTests(unittest.TestCase):
         self.assertGreater(b.width, 0.05)
         self.assertGreater(b.height, 0.02)
 
+    def test_postprocess_retains_slanted_component_orientation(self) -> None:
+        import cv2
+
+        prob = np.zeros((256, 256), dtype=np.float32)
+        polygon = cv2.boxPoints(((128.0, 128.0), (150.0, 24.0), -18.0))
+        cv2.fillConvexPoly(prob, polygon.astype(np.int32), 0.95)
+
+        boxes = postprocess_prob_map(
+            prob,
+            orig_h=256,
+            orig_w=256,
+            scale=1.0,
+        )
+
+        self.assertEqual(len(boxes), 1)
+        self.assertGreater(abs(boxes[0].angle_degrees), 10.0)
+
 
 class ExpandMergeTextBoxTests(unittest.TestCase):
     def test_expand_grows_box_and_clamps(self) -> None:
@@ -68,6 +85,16 @@ class ExpandMergeTextBoxTests(unittest.TestCase):
         self.assertGreaterEqual(e.y, 0.0)
         self.assertLessEqual(e.x + e.width, 1.0 + 1e-6)
         self.assertLessEqual(e.y + e.height, 1.0 + 1e-6)
+
+    def test_slanted_box_receives_larger_vertical_envelope(self) -> None:
+        horizontal = TextBox(0.10, 0.50, 0.60, 0.04, angle_degrees=0.0)
+        slanted = TextBox(0.10, 0.50, 0.60, 0.04, angle_degrees=-18.0)
+
+        flat = expand_text_boxes([horizontal], pad_w_frac=0.05)[0]
+        tilted = expand_text_boxes([slanted], pad_w_frac=0.05)[0]
+
+        self.assertGreater(tilted.height, flat.height)
+        self.assertLess(tilted.y, flat.y)
 
     def test_merge_collinear_fragments_into_one_line(self) -> None:
         # Truncated caption + trailing fragment on same baseline (f720-like).
@@ -110,12 +137,19 @@ class IoUGateTests(unittest.TestCase):
 
 
 class LocalTextDetectorLoadTests(unittest.TestCase):
-    def test_execution_provider_defaults_to_cpu_for_locked_baseline(self) -> None:
+    def test_execution_provider_auto_prefers_cuda_with_cpu_fallback(self) -> None:
         with patch.dict("os.environ", {}, clear=True):
             self.assertEqual(
                 resolve_dbnet_execution_providers(
-                    ["DmlExecutionProvider", "CPUExecutionProvider"]
+                    ["CUDAExecutionProvider", "DmlExecutionProvider", "CPUExecutionProvider"]
                 ),
+                ["CUDAExecutionProvider", "CPUExecutionProvider"],
+            )
+
+    def test_execution_provider_auto_falls_back_to_cpu(self) -> None:
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertEqual(
+                resolve_dbnet_execution_providers(["CPUExecutionProvider"]),
                 ["CPUExecutionProvider"],
             )
 

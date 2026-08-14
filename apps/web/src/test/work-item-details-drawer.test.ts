@@ -24,6 +24,10 @@ assert.match(drawerSource, /work-item-details-drawer/, "Drawer must use dedicate
 assert.match(drawerSource, /if \(!open\) return null/, "Drawer must not render when closed");
 assert.match(drawerSource, /onClick=\{onClose\}/, "Backdrop must close the drawer");
 assert.match(drawerSource, /stopPropagation/, "Panel click must not close the drawer");
+assert.match(drawerSource, /headerExtra\?:/, "Drawer must accept optional headerExtra under the title");
+assert.match(drawerSource, /work-item-details-drawer-header__extra/, "Drawer must render headerExtra in a dedicated header slot");
+assert.match(drawerSource, /headerLeading\?:/, "Drawer must accept optional headerLeading before the title");
+assert.match(drawerSource, /work-item-details-drawer-header__leading/, "Drawer must render headerLeading in a dedicated header slot");
 
 assert.match(captureSource, /WorkItemDetailsDrawer/, "Capture Inbox must use WorkItemDetailsDrawer");
 assert.doesNotMatch(captureSource, /capture-inbox-review-side/, "Capture Inbox must not reserve sticky side column");

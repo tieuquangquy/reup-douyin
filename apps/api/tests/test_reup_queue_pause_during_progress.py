@@ -192,8 +192,59 @@ class PauseDuringProgressTests(unittest.TestCase):
         call_kwargs = download_service.create_download_job.call_args.kwargs
         self.assertEqual(call_kwargs.get("idempotency_key"), logical_key)
         request_arg = download_service.create_download_job.call_args.args[0]
-        self.assertTrue(getattr(request_arg, "force_refresh", False))
+        self.assertFalse(
+            getattr(request_arg, "force_refresh", False),
+            "Resume should use the download cache unless the operator explicitly refreshes assets",
+        )
         self.assertNotEqual(stale_job.idempotency_key, logical_key)
+
+    def test_retry_releases_terminal_download_idempotency_key(self) -> None:
+        job_id = uuid4()
+        item = queue_item(
+            status=ReupQueueStatus.FAILED_NEEDS_ATTENTION,
+            media_prep_status=ReupQueueMediaPrepStatus.BLOCKED,
+            job_id=job_id,
+        )
+        logical_key = f"reup-queue:{item.id}:download"
+        failed_job = SimpleNamespace(
+            id=job_id,
+            status=JobStatus.FAILED,
+            idempotency_key=logical_key,
+        )
+        fake_db = FakeActionDb(item, job=failed_job)
+
+        updated = ReupQueueService(fake_db).apply_action(item.id, action=ReupQueueAction.RETRY)
+
+        self.assertIsNone(updated.job_id)
+        self.assertNotEqual(failed_job.idempotency_key, logical_key)
+        self.assertTrue(str(failed_job.idempotency_key).endswith(f":cancelled:{job_id}"))
+
+    def test_reactivation_releases_prior_terminal_job_idempotency_key(self) -> None:
+        job_id = uuid4()
+        item = queue_item(
+            status=ReupQueueStatus.COMPLETED,
+            job_id=job_id,
+        )
+        logical_key = f"reup-queue:{item.id}:download"
+        completed_job = SimpleNamespace(
+            id=job_id,
+            status=JobStatus.COMPLETED,
+            idempotency_key=logical_key,
+        )
+        fake_db = FakeActionDb(item, job=completed_job)
+        service = ReupQueueService(fake_db)
+
+        service._reactivate_terminal_item(
+            item,
+            priority=100,
+            queued_reason="requeued",
+            operator_note=None,
+            now=datetime.now(UTC),
+        )
+
+        self.assertIsNone(item.job_id)
+        self.assertNotEqual(completed_job.idempotency_key, logical_key)
+        self.assertTrue(str(completed_job.idempotency_key).endswith(f":cancelled:{job_id}"))
 
     def test_auto_pipeline_resume_after_pause_recreates_download_job(self) -> None:
         """Pause cancels DOWNLOAD; auto Resume must not reuse the cancelled job_id."""

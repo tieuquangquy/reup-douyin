@@ -558,6 +558,64 @@ def prepare_approved_audio_handoff(
             "mime_type": approved_background.get("mime_type") or "audio/wav",
         }
     approved["current_outputs"] = approved_outputs
+    # Retrying Final Render must not rewrite an already approved, byte-identical
+    # handoff with a fresh timestamp. Besides needless disk churn, that used to
+    # invalidate the signed late-audio rebind audit between worker attempts.
+    existing_manifest_path = root / "render_prep_manifest.json"
+    existing_approval_path = root / "phase4_audio_approval.json"
+    if existing_manifest_path.is_file() and existing_approval_path.is_file():
+        try:
+            existing_manifest = json.loads(
+                existing_manifest_path.read_text(encoding="utf-8")
+            )
+            existing_approval = json.loads(
+                existing_approval_path.read_text(encoding="utf-8")
+            )
+        except (OSError, json.JSONDecodeError):
+            existing_manifest = {}
+            existing_approval = {}
+        existing_outputs = dict(existing_manifest.get("current_outputs") or {})
+        existing_joined = _unique_asset_refs(
+            list(existing_outputs.get("joined_narration") or [])
+        )
+        existing_backgrounds = _unique_asset_refs(
+            list(existing_outputs.get("background_audio") or [])
+        )
+        existing_narration_ref = dict(existing_approval.get("narration_ref") or {})
+        existing_background_ref = dict(existing_approval.get("background_ref") or {})
+        background_matches = (
+            not raw_backgrounds
+            and not existing_backgrounds
+            and not existing_background_ref
+        ) or (
+            len(raw_backgrounds) == 1
+            and len(existing_backgrounds) == 1
+            and str(existing_backgrounds[0].get("storage_key") or "")
+            == "phase4_background.wav"
+            and str(existing_backgrounds[0].get("sha256") or "").lower()
+            == str(raw_backgrounds[0].get("sha256") or "").lower()
+            and existing_background_ref == approved_background_ref
+        )
+        if (
+            existing_manifest == dict(manifest)
+            and str(existing_manifest.get("manifest_version") or "")
+            == "RENDER_PREP_MANIFEST_V2"
+            and str(dict(existing_manifest.get("audio_review") or {}).get("status") or "")
+            == "AUDIO_APPROVED"
+            and str(existing_approval.get("status") or "") == "AUDIO_APPROVED"
+            and len(existing_joined) == 1
+            and str(existing_joined[0].get("storage_key") or "") == target.name
+            and str(existing_joined[0].get("sha256") or "").lower() == expected
+            and existing_narration_ref
+            == {
+                "path": target.name,
+                "sha256": expected,
+                "mime_type": approved_item.get("mime_type") or "audio/wav",
+            }
+            and background_matches
+        ):
+            return dict(existing_approval)
+
     approved_at = _now()
     approval = {
         "schema_version": "phase4_audio_approval_v1",

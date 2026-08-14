@@ -320,8 +320,9 @@ assert.deepEqual(getBreadcrumbs("/production/transcript-editor/source-1").map((i
 assert.deepEqual(getBreadcrumbs("/production/final-review/source-1").map((item) => item.label), ["nav.home", "nav.sectionProduction", "nav.finalReview"]);
 assert.deepEqual(getBreadcrumbs("/source-videos/source-1/publish").map((item) => item.label), ["nav.home", "nav.sectionPublishing", "nav.publishDraft"]);
 assert.deepEqual(getBreadcrumbs("/publishing/publications").map((item) => item.label), ["nav.home", "nav.sectionPublishing", "nav.publications"]);
-assert.deepEqual(getBreadcrumbs("/publishing/settings/content-intelligence").map((item) => item.label), ["nav.home", "nav.sectionPublishingSettings", "nav.contentIntelligenceSettings"]);
-assert.deepEqual(getBreadcrumbs("/publishing/settings/affiliate-catalog").map((item) => item.label), ["nav.home", "nav.sectionPublishingSettings", "nav.affiliateCatalog"]);
+assert.deepEqual(getBreadcrumbs("/publishing/settings/content-intelligence").map((item) => item.label), ["nav.home", "nav.sectionPublishing", "nav.contentIntelligenceSettings"]);
+assert.deepEqual(getBreadcrumbs("/publishing/settings/affiliate-catalog").map((item) => item.label), ["nav.home", "nav.sectionPublishing", "nav.affiliateCatalog"]);
+assert.deepEqual(getBreadcrumbs("/publishing/settings/affiliate-comments").map((item) => item.label), ["nav.home", "nav.sectionPublishing", "nav.affiliateComments"]);
 assert.deepEqual(getBreadcrumbs("/publishing/accounts").map((item) => item.label), ["nav.home", "nav.sectionPublishing", "nav.accounts"]);
 assert.deepEqual(getBreadcrumbs("/dashboard/publish-health").map((item) => item.label), ["nav.opsConsole", "nav.publishHealth"]);
 assert.deepEqual(getBreadcrumbs("/publishing/export-packages").map((item) => item.label), ["nav.home", "nav.sectionPublishing", "nav.exportPackages"]);

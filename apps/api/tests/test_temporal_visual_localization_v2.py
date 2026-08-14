@@ -14,6 +14,7 @@ from src.media_pipeline.frame_sampling.master_phase1_extractor import (
     bound_dense_rescan_frame_indices,
     classify_visual_text_provenance,
     dense_source_ui_panel_member_ids,
+    dense_source_ui_context_member_ids,
     filter_tracks_by_local_text,
     interval_dense_rescan_frame_indices,
 )
@@ -176,6 +177,98 @@ def test_phone_app_plane_propagates_to_joined_row_but_not_tall_editor_caption() 
         in classified[id(joined_source_row)]["reasons"]
     )
     assert classified[id(tall_editor_caption)]["classification"] == "EDITOR_OVERLAY"
+
+
+def test_dense_source_context_never_inherits_hardsub_provenance() -> None:
+    phone_cells = [
+        _track(
+            (
+                120.0 + column * 510.0,
+                1020.0 + row * 520.0,
+                360.0 + column * 510.0,
+                1080.0 + row * 520.0,
+            ),
+            start=778,
+            end=823,
+            hits=40,
+        )
+        for row in range(4)
+        for column in range(4)
+    ]
+    hardsub = _track(
+        (111.0, 3550.0, 1550.0, 3660.0),
+        start=778,
+        end=823,
+        hits=40,
+    )
+    tracks = [*phone_cells, hardsub]
+    panel_ids = dense_source_ui_panel_member_ids(
+        tracks, frame_w=2160, frame_h=3840
+    )
+
+    inherited = dense_source_ui_context_member_ids(
+        tracks,
+        dense_panel_ids=panel_ids,
+        frame_w=2160,
+        frame_h=3840,
+    )
+
+    assert id(hardsub) not in inherited
+    classified = classify_visual_text_provenance(
+        tracks,
+        frame_w=2160,
+        frame_h=3840,
+        text_audit={},
+    )
+    assert classified[id(hardsub)]["classification"] == "EDITOR_OVERLAY"
+
+
+def test_dense_phone_context_does_not_protect_second_editor_caption_line() -> None:
+    phone_cells = [
+        _track(
+            (
+                120.0 + column * 510.0,
+                1020.0 + row * 520.0,
+                360.0 + column * 510.0,
+                1080.0 + row * 520.0,
+            ),
+            start=100,
+            end=145,
+            hits=40,
+        )
+        for row in range(4)
+        for column in range(4)
+    ]
+    editor_anchor = _track(
+        (700.0, 1600.0, 1750.0, 1760.0),
+        start=106,
+        end=131,
+        hits=22,
+    )
+    editor_second_line_shadow = _track(
+        (950.0, 1768.0, 1510.0, 1830.0),
+        start=104,
+        end=150,
+        hits=32,
+    )
+    tracks = [*phone_cells, editor_anchor, editor_second_line_shadow]
+
+    classified = classify_visual_text_provenance(
+        tracks,
+        frame_w=2160,
+        frame_h=3840,
+        text_audit={},
+    )
+
+    assert classified[id(editor_anchor)]["classification"] == "EDITOR_OVERLAY"
+    assert (
+        classified[id(editor_second_line_shadow)]["classification"]
+        == "EDITOR_OVERLAY"
+    )
+    assert (
+        "editor_caption_sibling_of_wide_locked_anchor"
+        in classified[id(editor_second_line_shadow)]["reasons"]
+    )
 
 
 def test_repeated_phone_ui_row_overrides_hardsub_shape_without_absorbing_caption() -> None:
@@ -480,3 +573,62 @@ def test_full_timeline_qa_catches_one_missing_edited_frame() -> None:
         assert result["status"] == "BLOCKED"
         assert 2 in result["missing_edit_frames"]
         assert result["protected_source_damage_frames"] == []
+
+
+def test_full_timeline_soft_cover_does_not_treat_dark_scene_texture_as_text() -> None:
+    with TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir)
+        source_path = root / "source.avi"
+        rendered_path = root / "rendered.avi"
+        fourcc = cv2.VideoWriter_fourcc(*"MJPG")
+        source_writer = cv2.VideoWriter(str(source_path), fourcc, 30.0, (160, 96))
+        rendered_writer = cv2.VideoWriter(str(rendered_path), fourcc, 30.0, (160, 96))
+        assert source_writer.isOpened() and rendered_writer.isOpened()
+        try:
+            for frame_index in range(4):
+                source = np.full((96, 160, 3), 45, dtype=np.uint8)
+                # A dark textured surface crosses the authority ROI, but it
+                # does not have the bright-fill/dark-outline caption signature.
+                source[65:90:3, 28:132:5] = 88
+                rendered = source.copy()
+                rendered[64:91, 26:134] = cv2.GaussianBlur(
+                    source[64:91, 26:134], (0, 0), sigmaX=8.0
+                )
+                source_writer.write(source)
+                rendered_writer.write(rendered)
+        finally:
+            source_writer.release()
+            rendered_writer.release()
+        contract = {
+            "render_tracks": [
+                {
+                    "text_id": "editor",
+                    "start_frame": 0,
+                    "end_frame": 3,
+                    "geometry": {
+                        "x": 26 / 160,
+                        "y": 64 / 96,
+                        "width": 108 / 160,
+                        "height": 27 / 96,
+                    },
+                    "render_policy": {
+                        "context": {"caption_row": False},
+                        "cover": {
+                            "strategy": "soft_reconstruction_plate_v1",
+                            "roi": {
+                                "x": 26 / 160,
+                                "y": 64 / 96,
+                                "width": 108 / 160,
+                                "height": 27 / 96,
+                            },
+                        },
+                    },
+                }
+            ]
+        }
+
+        result = scan_full_timeline_visual_authority(
+            source_path, rendered_path, contract=contract
+        )
+
+        assert result["residual_stroke_frames"] == []

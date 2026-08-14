@@ -11,6 +11,12 @@ from sqlalchemy.orm import Session
 
 from src.audio_pipeline.services.transcript_builder import normalize_source_text
 from src.audio_pipeline.speech_budget import assess_speech_budget
+from src.audio_pipeline.translation_v3 import DEFAULT_TRANSLATION_V3_POLICY
+from src.audio_pipeline.translation_authority import (
+    sha256_json,
+    transcript_authority_sha256,
+    translation_rows_sha256,
+)
 from src.audio_pipeline.types import TranslationPreset
 from src.enums import TranscriptSegmentStatus
 from src.models.artifacts import TranscriptSegment, TranslationSegment
@@ -188,6 +194,7 @@ class TranscriptEditService:
         translation_preset: TranslationPreset,
         force_refresh: bool = True,
         require_source_approved: bool = True,
+        idempotency_key: str | None = None,
     ):
         """Phase B only: literal/style translation from current beats — never re-runs FunASR."""
         from src.audio_pipeline.services.audio_analysis_service import AudioAnalysisService
@@ -197,6 +204,7 @@ class TranscriptEditService:
             translation_preset=translation_preset or TranslationPreset.LITERAL_SAFE,
             force_refresh=force_refresh,
             require_source_approved=require_source_approved,
+            idempotency_key=idempotency_key,
         )
 
     def approve_translation_draft(
@@ -235,9 +243,25 @@ class TranscriptEditService:
             if contains_cjk(text):
                 issues.append(f"segment {row.segment_index}: Vietnamese text still contains CJK")
                 continue
+            v3_metadata = dict((row.metadata_json or {}).get("translation_v3") or {})
+            speech_policy = dict(v3_metadata.get("speech_policy") or {})
+            try:
+                units_per_second = float(
+                    speech_policy.get("units_per_second")
+                    or DEFAULT_TRANSLATION_V3_POLICY.units_per_second
+                )
+                fit_tolerance = float(
+                    speech_policy.get("acceptable_tolerance")
+                    or DEFAULT_TRANSLATION_V3_POLICY.acceptable_tolerance
+                )
+            except (TypeError, ValueError):
+                units_per_second = DEFAULT_TRANSLATION_V3_POLICY.units_per_second
+                fit_tolerance = DEFAULT_TRANSLATION_V3_POLICY.acceptable_tolerance
             assessment = assess_speech_budget(
                 text,
                 slot_seconds=max(0.0, slot_ms / 1000.0),
+                units_per_second=units_per_second,
+                fit_tolerance=fit_tolerance,
             )
             if assessment.status == "too_long":
                 issues.append(
@@ -299,6 +323,50 @@ class TranscriptEditService:
                 "binding_sha256": binding_sha256,
                 "segment_count": len(rows),
             }
+            quality_contract = dict(metadata.get("translation_quality_contract") or {})
+            if quality_contract:
+                quality_contract["review_required_count"] = 0
+                quality_contract["tts_ready"] = True
+                quality_contract["operator_approved"] = True
+                metadata["translation_quality_contract"] = quality_contract
+            translation_authority = dict(metadata.get("translation_authority") or {})
+            if translation_authority:
+                transcript_rows = [
+                    row.transcript_segment
+                    for row in rows
+                    if getattr(row, "transcript_segment", None) is not None
+                ]
+                rebound_rows_sha256 = translation_rows_sha256(rows)
+                translation_authority.update(
+                    {
+                        "source_transcript_sha256": transcript_authority_sha256(
+                            transcript_rows
+                        ),
+                        "translation_rows_sha256": rebound_rows_sha256,
+                        "quality_contract_sha256": sha256_json(quality_contract),
+                        "translation_row_count": len(rows),
+                        "tts_ready": True,
+                        "operator_approved": True,
+                        "operator_approval_binding_sha256": binding_sha256,
+                    }
+                )
+                metadata["translation_authority"] = translation_authority
+                row_authority_ref = {
+                    "schema_version": translation_authority.get("schema_version"),
+                    "source_transcript_sha256": translation_authority.get(
+                        "source_transcript_sha256"
+                    ),
+                    "translation_fingerprint": translation_authority.get(
+                        "translation_fingerprint"
+                    ),
+                    "translation_rows_sha256": rebound_rows_sha256,
+                    "operator_approval_binding_sha256": binding_sha256,
+                }
+                for row in rows:
+                    row.metadata_json = {
+                        **dict(row.metadata_json or {}),
+                        "translation_authority_ref": row_authority_ref,
+                    }
             source.metadata_json = metadata
         if commit:
             self.db.commit()

@@ -10,6 +10,11 @@ import type {
 import type { TtsCreateResponse, TtsSummaryResponse } from "../types/tts";
 import type { OcrCreateResponse, OcrSummaryResponse } from "../types/ocr";
 import type {
+  QualityHandoffSummary,
+  QualityMetadataApprovalPayload,
+  QualityRightsApprovalPayload
+} from "../types/quality-handoff";
+import type {
   Job,
   JobListResponse,
   JobStatus,
@@ -27,6 +32,7 @@ import type {
   RenderOutput,
   SourceVideoAssetManifest
 } from "../types/final-review";
+import { CORE_STAGE_RUNTIME } from "./coreRuntime";
 import type {
   PublishDraft,
   PublishDraftListResponse,
@@ -60,7 +66,7 @@ import type { AffiliateOpportunityQueueResponse, GrowthScoreRunResponse, Publica
 import type { AffiliateCommentApproveResponse, AffiliateCommentHistoryResponse, AffiliateCommentPlacement, AffiliateCommentPreviewResponse, AffiliateCommentVerificationJobResponse } from "../types/affiliate-comment";
 import type { AffiliateCommentTemplate, AffiliateCommentTemplateInput, AffiliateCommentTemplateListResponse } from "../types/affiliate-comment-template";
 import type { AnalyticsWindow, OperatorFeedbackPayload, PublishHealthDashboard } from "../types/analytics";
-import type { ContentAiConfig, ContentAiConfigUpdate, ContentAiTestResponse, ContentClassification, ContentClassificationQueueResponse, ContentClassificationRunResponse, TopicCategory, TopicCategoryListResponse } from "../types/content-intelligence";
+import type { ContentAiConfig, ContentAiConfigUpdate, ContentAiModelsResponse, ContentAiTestResponse, ContentClassification, ContentClassificationQueueResponse, ContentClassificationRunResponse, TopicCategory, TopicCategoryListResponse } from "../types/content-intelligence";
 import type { AffiliateProduct, AffiliateProductBulkImportResponse, AffiliateProductImageUpload, AffiliateProductInput, AffiliateProductListResponse, AffiliateProductMatch, AffiliateProductMatchQueueResponse, AffiliateProductMatchRunResponse } from "../types/affiliate";
 import type {
   AssignDraftPayload,
@@ -158,6 +164,18 @@ import {
 } from "./authSurface";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "/api";
+
+function assertAcceptedCoreRuntime(
+  action: string,
+  actual: string | null | undefined,
+  expected: string
+): void {
+  if (actual !== expected) {
+    throw new Error(
+      `${action} was accepted by an unexpected runtime (${actual || "missing"}); expected ${expected}. Refresh the app before retrying.`
+    );
+  }
+}
 const API_AUTH_TOKEN_STORAGE_KEY = "reup_douyin_api_auth_token";
 const API_REFRESH_TOKEN_STORAGE_KEY = "reup_douyin_api_refresh_token";
 const EXTENSION_AUTH_TOKEN_BRIDGE_EVENT = "REUP_DOUYIN_API_AUTH_TOKEN_SYNC";
@@ -1205,10 +1223,14 @@ export async function fetchReupQueueItem(itemId: string): Promise<ReupQueueItem>
 }
 
 export async function runReupQueueAction(itemId: string, payload: ReupQueueActionRequest): Promise<ReupQueueActionResponse> {
+  const versionedPayload =
+    payload.action === "START_PROCESSING" || payload.action === "START_AUTO_PIPELINE"
+      ? { ...payload, expected_stage_versions: CORE_STAGE_RUNTIME }
+      : payload;
   const response = await apiFetch(`${API_BASE_URL}/reup-queue/items/${encodeURIComponent(itemId)}/actions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload)
+    body: JSON.stringify(versionedPayload)
   });
   if (!response.ok) {
     throw new Error(await formatApiError(response, "Failed to run Reup Queue action"));
@@ -1217,10 +1239,14 @@ export async function runReupQueueAction(itemId: string, payload: ReupQueueActio
 }
 
 export async function runReupQueueBatchAction(payload: ReupQueueBatchActionRequest): Promise<BatchOperationResponse> {
+  const versionedPayload =
+    payload.action === "START_PROCESSING" || payload.action === "START_AUTO_PIPELINE"
+      ? { ...payload, expected_stage_versions: CORE_STAGE_RUNTIME }
+      : payload;
   const response = await apiFetch(`${API_BASE_URL}/reup-queue/batch-actions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload)
+    body: JSON.stringify(versionedPayload)
   });
   if (!response.ok) {
     throw new Error(await formatApiError(response, "Failed to run Reup Queue batch action"));
@@ -2240,6 +2266,44 @@ export async function listCaptionAiModels(payload: {
 export type TtsAiCatalogVoice = {
   id: string;
   label: string;
+  /** Provider-reported compatibility metadata (optional for legacy catalogs). */
+  languages?: string[];
+  models?: string[];
+  gender?: string;
+  description?: string;
+  capabilities?: string[];
+};
+
+export type TtsAiCatalogModel = {
+  id: string;
+  label: string;
+  /** Language codes supported by this model, when the provider reports them. */
+  languages?: string[];
+  /** Voice ids accepted by this model, when the provider reports them. */
+  voices?: string[];
+  description?: string;
+  capabilities?: string[];
+};
+
+export type TtsAiCatalogLanguage = {
+  code: string;
+  label: string;
+};
+
+export type TtsAiProbeCheck = {
+  stage: string;
+  status: "passed" | "partial" | "failed" | "skipped" | string;
+  detail: string;
+  endpoint?: string;
+  http_status?: number;
+};
+
+export type TtsAiCatalogDiscovery = {
+  status: "complete" | "partial" | "unavailable" | string;
+  endpoints?: string[];
+  warnings?: string[];
+  checks?: TtsAiProbeCheck[];
+  config_fingerprint?: string;
 };
 
 export type TtsAiFieldCapabilities = {
@@ -2258,6 +2322,12 @@ export type TtsAiCatalog = {
   styles: string[];
   models: string[];
   default_voice_id: string;
+  /** Rich model entries are additive; `models` remains the legacy fallback. */
+  model_options?: TtsAiCatalogModel[];
+  languages?: TtsAiCatalogLanguage[];
+  default_model_id?: string;
+  default_language_code?: string;
+  discovery?: TtsAiCatalogDiscovery | null;
   warning: string;
   sample_rate?: number | null;
   backends?: string[];
@@ -2319,6 +2389,8 @@ export type TtsAiRuntime = {
     provider?: string;
     detail?: string;
     catalog?: TtsAiCatalog | null;
+    checks?: TtsAiProbeCheck[];
+    config_fingerprint?: string;
   } | null;
 };
 
@@ -2333,6 +2405,10 @@ export type TtsAiProfileSummary = {
   model_id?: string;
   api_key_set?: boolean;
   api_key_masked?: string;
+  credential_mode?: string;
+  google_service_account_set?: boolean;
+  google_service_account_email?: string;
+  google_service_account_project_id?: string;
   base_url?: string;
   timeout_seconds?: number;
   fallback_provider?: string;
@@ -2353,6 +2429,10 @@ export type TtsAiResponse = {
   model_id: string;
   api_key_set: boolean;
   api_key_masked: string;
+  credential_mode: string;
+  google_service_account_set: boolean;
+  google_service_account_email: string;
+  google_service_account_project_id: string;
   base_url: string;
   timeout_seconds: number;
   fallback_provider: string;
@@ -2380,6 +2460,9 @@ export type TtsAiPayload = {
   model_id: string;
   api_key?: string | null;
   clear_api_key?: boolean;
+  credential_mode?: string;
+  google_service_account_json?: string | null;
+  clear_google_service_account?: boolean;
   base_url: string;
   timeout_seconds: number;
   fallback_provider: string;
@@ -2396,6 +2479,8 @@ export type TtsAiTestResponse = {
   detail: string;
   catalog?: TtsAiCatalog | null;
   runtime?: TtsAiRuntime | null;
+  checks?: TtsAiProbeCheck[];
+  config_fingerprint?: string;
 };
 
 export async function fetchTtsAi(): Promise<TtsAiResponse> {
@@ -2606,6 +2691,8 @@ export type TtsAiPreviewResponse = {
   audio_base64: string;
   warnings: string[];
   text: string;
+  requested_voice_id: string;
+  resolved_voice_id: string;
 };
 
 export async function previewTtsAiSpeech(payload: TtsAiPreviewPayload): Promise<TtsAiPreviewResponse> {
@@ -2781,6 +2868,7 @@ export type AudioAnalysisCreateResponse = {
   status: string;
   source_video_id: string;
   translation_preset: TranslationPreset;
+  runtime_version: string;
 };
 
 export type ApproveSourceTranscriptResponse = {
@@ -2795,6 +2883,7 @@ export type ApproveTranslationDraftResponse = {
   binding_sha256: string;
   resumed_queue_items: number;
   job_id: string | null;
+  ocr_resume_job_id: string | null;
 };
 
 export async function approveSourceTranscript(
@@ -2816,17 +2905,27 @@ export async function rerunTranslationDraft(
 ): Promise<AudioAnalysisCreateResponse> {
   const response = await apiFetch(`${API_BASE_URL}/source-videos/${sourceVideoId}/translation-draft/rerun`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      "Idempotency-Key": `translation:${sourceVideoId}:${translationPreset}:${CORE_STAGE_RUNTIME.BUILD_TRANSLATION_DRAFT}`
+    },
     body: JSON.stringify({
       translation_preset: translationPreset,
       force_refresh: true,
-      require_source_approved: true
+      require_source_approved: true,
+      expected_stage_version: CORE_STAGE_RUNTIME.BUILD_TRANSLATION_DRAFT
     })
   });
   if (!response.ok) {
     throw new Error(await formatApiError(response, "Failed to start literal translation"));
   }
-  return (await response.json()) as AudioAnalysisCreateResponse;
+  const payload = (await response.json()) as AudioAnalysisCreateResponse;
+  assertAcceptedCoreRuntime(
+    "Build Translation Draft",
+    payload.runtime_version,
+    CORE_STAGE_RUNTIME.BUILD_TRANSLATION_DRAFT
+  );
+  return payload;
 }
 
 export async function createAudioAnalysis(
@@ -2837,18 +2936,30 @@ export async function createAudioAnalysis(
 ): Promise<AudioAnalysisCreateResponse> {
   const response = await apiFetch(`${API_BASE_URL}/audio-analysis`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      // Stable per source/reanalysis command; the API also enforces a
+      // source-level single-flight guard when reconnects omit this header.
+      "Idempotency-Key": `audio-analysis:${sourceVideoId}:reanalyze`,
+    },
     body: JSON.stringify({
       source_video_id: sourceVideoId,
       translation_preset: translationPreset,
       force_refresh: forceRefresh,
-      skip_translation: skipTranslation
+      skip_translation: skipTranslation,
+      expected_stage_version: CORE_STAGE_RUNTIME.ANALYZE_AUDIO
     })
   });
   if (!response.ok) {
     throw new Error(await formatApiError(response, "Failed to start audio analysis"));
   }
-  return (await response.json()) as AudioAnalysisCreateResponse;
+  const payload = (await response.json()) as AudioAnalysisCreateResponse;
+  assertAcceptedCoreRuntime(
+    "Analyze Audio",
+    payload.runtime_version,
+    CORE_STAGE_RUNTIME.ANALYZE_AUDIO
+  );
+  return payload;
 }
 
 export async function fetchLatestRender(sourceVideoId: string): Promise<RenderOutput | null> {
@@ -2871,12 +2982,23 @@ export async function createRenderJob(sourceVideoId: string, forceRefresh = true
   const response = await apiFetch(`${API_BASE_URL}/renders`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ source_video_id: sourceVideoId, render_mode: "final", force_refresh: forceRefresh })
+    body: JSON.stringify({
+      source_video_id: sourceVideoId,
+      render_mode: "final",
+      force_refresh: forceRefresh,
+      expected_stage_version: CORE_STAGE_RUNTIME.RENDER_FINAL
+    })
   });
   if (!response.ok) {
     throw new Error(`Failed to create render job: ${response.status}`);
   }
-  return (await response.json()) as RenderCreateResponse;
+  const payload = (await response.json()) as RenderCreateResponse;
+  assertAcceptedCoreRuntime(
+    "Render Final",
+    payload.runtime_version,
+    CORE_STAGE_RUNTIME.RENDER_FINAL
+  );
+  return payload;
 }
 
 export async function approveRender(renderId: string): Promise<RenderOutput> {
@@ -2928,7 +3050,8 @@ export function mediaAssetContentUrl(assetId: string): string {
 }
 
 const DEFAULT_TTS_VOICE = {
-  // Empty voice_id → API uses active Ops TTS profile (Preview parity) or env fallback.
+  // Durable Generate is rebound to the immutable production recipe by the API.
+  // Keep this browser payload neutral; Ops provider Preview is a separate route.
   voice_id: "",
   language_code: "vi",
   speaking_rate: 1.0
@@ -2948,13 +3071,21 @@ export async function createTtsJob(
     body: JSON.stringify({
       source_video_id: sourceVideoId,
       voice_config,
-      force_refresh: options.forceRefresh ?? true
+      // Cache-first is the production default. Full regeneration is explicit.
+      force_refresh: options.forceRefresh ?? false,
+      expected_stage_version: CORE_STAGE_RUNTIME.SYNTHESIZE_TTS
     })
   });
   if (!response.ok) {
     throw new Error(await formatApiError(response, "Failed to start TTS job"));
   }
-  return (await response.json()) as TtsCreateResponse;
+  const payload = (await response.json()) as TtsCreateResponse;
+  assertAcceptedCoreRuntime(
+    "Synthesize TTS",
+    payload.runtime_version,
+    CORE_STAGE_RUNTIME.SYNTHESIZE_TTS
+  );
+  return payload;
 }
 
 export async function createOcrJob(
@@ -2969,13 +3100,21 @@ export async function createOcrJob(
       force_refresh: options.forceRefresh ?? false,
       clean_hardsub: options.cleanHardsub ?? true,
       sample_fps: 1.0,
-      hard_sub_band_ratio: 0.28
+      hard_sub_band_ratio: 0.28,
+      analysis_engine: "audio_visual_temporal_v1",
+      expected_stage_version: CORE_STAGE_RUNTIME.ANALYZE_OCR
     })
   });
   if (!response.ok) {
     throw new Error(await formatApiError(response, "Failed to start OCR job"));
   }
-  return (await response.json()) as OcrCreateResponse;
+  const payload = (await response.json()) as OcrCreateResponse;
+  assertAcceptedCoreRuntime(
+    "Analyze OCR",
+    payload.runtime_version,
+    CORE_STAGE_RUNTIME.ANALYZE_OCR
+  );
+  return payload;
 }
 
 export async function fetchOcrSummary(sourceVideoId: string): Promise<OcrSummaryResponse> {
@@ -3447,19 +3586,29 @@ export async function submitOcrReview(
   sourceVideoId: string,
   decisions: Array<{
     content_id: string;
-    decision: "APPROVE" | "EDIT" | "PRESERVE_SOURCE";
+    decision: "APPROVE" | "EDIT" | "PRESERVE_SOURCE" | "REJECT_UI";
     ocr_text_approved?: string | null;
   }>
 ): Promise<OcrCreateResponse> {
   const response = await apiFetch(`${API_BASE_URL}/source-videos/${sourceVideoId}/ocr-review`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ decisions, operator_id: "frontend_operator" })
+    body: JSON.stringify({
+      decisions,
+      operator_id: "frontend_operator",
+      expected_stage_version: CORE_STAGE_RUNTIME.ANALYZE_OCR
+    })
   });
   if (!response.ok) {
     throw new Error(await formatApiError(response, "Failed to submit OCR review"));
   }
-  return (await response.json()) as OcrCreateResponse;
+  const payload = (await response.json()) as OcrCreateResponse;
+  assertAcceptedCoreRuntime(
+    "Analyze OCR review",
+    payload.runtime_version,
+    CORE_STAGE_RUNTIME.ANALYZE_OCR
+  );
+  return payload;
 }
 
 export async function submitVisualTranslationReview(
@@ -3469,27 +3618,73 @@ export async function submitVisualTranslationReview(
   const response = await apiFetch(`${API_BASE_URL}/source-videos/${sourceVideoId}/translation-review`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ translations, operator_id: "frontend_operator" })
+    body: JSON.stringify({
+      translations,
+      operator_id: "frontend_operator",
+      expected_stage_version: CORE_STAGE_RUNTIME.RENDER_PREVIEW
+    })
   });
   if (!response.ok) {
     throw new Error(await formatApiError(response, "Failed to submit visual translation review"));
   }
-  return (await response.json()) as OcrCreateResponse;
+  const payload = (await response.json()) as OcrCreateResponse;
+  assertAcceptedCoreRuntime(
+    "Render Preview",
+    payload.runtime_version,
+    CORE_STAGE_RUNTIME.RENDER_PREVIEW
+  );
+  return payload;
 }
 
 export async function submitResidualTriage(
   sourceVideoId: string,
-  suggestions: Array<{ ocr_text: string; ocr_text_corrected: string; vi_text_suggested: string }>
+  suggestions: Array<{ content_id?: string; ocr_text: string; ocr_text_corrected: string; vi_text_suggested: string }>
 ): Promise<OcrCreateResponse> {
   const response = await apiFetch(`${API_BASE_URL}/source-videos/${sourceVideoId}/residual-triage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ suggestions, operator_id: "frontend_operator" })
+    body: JSON.stringify({
+      suggestions,
+      operator_id: "frontend_operator",
+      expected_stage_version: CORE_STAGE_RUNTIME.RENDER_PREVIEW
+    })
   });
   if (!response.ok) {
     throw new Error(await formatApiError(response, "Failed to build residual remediation proposal"));
   }
-  return (await response.json()) as OcrCreateResponse;
+  const payload = (await response.json()) as OcrCreateResponse;
+  assertAcceptedCoreRuntime(
+    "Render Preview residual triage",
+    payload.runtime_version,
+    CORE_STAGE_RUNTIME.RENDER_PREVIEW
+  );
+  return payload;
+}
+
+export async function requestResidualTranslationSuggestions(
+  sourceVideoId: string
+): Promise<OcrCreateResponse> {
+  const response = await apiFetch(
+    `${API_BASE_URL}/source-videos/${sourceVideoId}/residual-translation-suggestions`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        operator_id: "frontend_operator",
+        expected_stage_version: CORE_STAGE_RUNTIME.RENDER_PREVIEW
+      })
+    }
+  );
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to translate residual OCR text"));
+  }
+  const payload = (await response.json()) as OcrCreateResponse;
+  assertAcceptedCoreRuntime(
+    "Render Preview residual translation",
+    payload.runtime_version,
+    CORE_STAGE_RUNTIME.RENDER_PREVIEW
+  );
+  return payload;
 }
 
 export async function approveResidualReview(
@@ -3499,12 +3694,22 @@ export async function approveResidualReview(
   const response = await apiFetch(`${API_BASE_URL}/source-videos/${sourceVideoId}/residual-review-approve`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ proposal_sha256: proposalSha256, operator_id: "frontend_operator" })
+    body: JSON.stringify({
+      proposal_sha256: proposalSha256,
+      operator_id: "frontend_operator",
+      expected_stage_version: CORE_STAGE_RUNTIME.RENDER_PREVIEW
+    })
   });
   if (!response.ok) {
     throw new Error(await formatApiError(response, "Failed to approve residual remediation"));
   }
-  return (await response.json()) as OcrCreateResponse;
+  const payload = (await response.json()) as OcrCreateResponse;
+  assertAcceptedCoreRuntime(
+    "Render Preview residual approval",
+    payload.runtime_version,
+    CORE_STAGE_RUNTIME.RENDER_PREVIEW
+  );
+  return payload;
 }
 
 export async function fetchLocalizationArtifactObjectUrl(
@@ -3523,6 +3728,89 @@ export async function fetchLocalizationArtifactObjectUrl(
     throw new Error(await formatApiError(response, "Failed to load localization artifact"));
   }
   return URL.createObjectURL(await response.blob());
+}
+
+export async function fetchQualityHandoff(
+  sourceVideoId: string
+): Promise<QualityHandoffSummary> {
+  const response = await apiFetch(
+    `${API_BASE_URL}/source-videos/${sourceVideoId}/quality-handoff`,
+    { cache: "no-store" }
+  );
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to load quality handoff"));
+  }
+  return (await response.json()) as QualityHandoffSummary;
+}
+
+export async function approveQualityFinalHandoff(
+  sourceVideoId: string
+): Promise<QualityHandoffSummary> {
+  const response = await apiFetch(
+    `${API_BASE_URL}/source-videos/${sourceVideoId}/quality-handoff/final-approve`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ operator_id: "frontend_operator" })
+    }
+  );
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to approve final handoff"));
+  }
+  return (await response.json()) as QualityHandoffSummary;
+}
+
+export async function approveQualityMetadata(
+  sourceVideoId: string,
+  payload: QualityMetadataApprovalPayload
+): Promise<QualityHandoffSummary> {
+  const response = await apiFetch(
+    `${API_BASE_URL}/source-videos/${sourceVideoId}/quality-handoff/metadata-approve`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ operator_id: "frontend_operator", target_platform: "FACEBOOK_REELS", ...payload })
+    }
+  );
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to approve publish metadata"));
+  }
+  return (await response.json()) as QualityHandoffSummary;
+}
+
+export async function approveQualityRights(
+  sourceVideoId: string,
+  payload: QualityRightsApprovalPayload
+): Promise<QualityHandoffSummary> {
+  const response = await apiFetch(
+    `${API_BASE_URL}/source-videos/${sourceVideoId}/quality-handoff/rights-approve`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ operator_id: "frontend_operator", ...payload })
+    }
+  );
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to approve source rights and music"));
+  }
+  return (await response.json()) as QualityHandoffSummary;
+}
+
+export async function finalizeQualityManualExport(
+  sourceVideoId: string
+): Promise<QualityHandoffSummary> {
+  const response = await apiFetch(
+    `${API_BASE_URL}/source-videos/${sourceVideoId}/quality-handoff/manual-export`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ operator_id: "frontend_operator" })
+    }
+  );
+  if (!response.ok) {
+    throw new Error(await formatApiError(response, "Failed to create manual export"));
+  }
+  return (await response.json()) as QualityHandoffSummary;
 }
 
 export async function fetchContentAiConfig(): Promise<ContentAiConfig> {
@@ -3554,6 +3842,22 @@ export async function testContentAi(): Promise<ContentAiTestResponse> {
   return (await response.json()) as ContentAiTestResponse;
 }
 
+export async function listContentAiModels(payload: {
+  provider: string;
+  api_key?: string | null;
+  clear_api_key?: boolean;
+  base_url?: string | null;
+  timeout_seconds?: number;
+}): Promise<ContentAiModelsResponse> {
+  const response = await apiFetch(`${API_BASE_URL}/content-intelligence/ai-config/models`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) throw new Error(await apiErrorMessage(response, "Failed to list Content AI models"));
+  return (await response.json()) as ContentAiModelsResponse;
+}
+
 export async function createContentAiPrompt(name: string): Promise<ContentAiConfig> {
   const response = await apiFetch(`${API_BASE_URL}/content-intelligence/prompts`, {
     method: "POST",
@@ -3582,6 +3886,14 @@ export async function activateContentAiPrompt(promptId: string): Promise<Content
     method: "POST",
   });
   if (!response.ok) throw new Error(await apiErrorMessage(response, "Failed to activate Content AI prompt"));
+  return (await response.json()) as ContentAiConfig;
+}
+
+export async function deleteContentAiPrompt(promptId: string): Promise<ContentAiConfig> {
+  const response = await apiFetch(`${API_BASE_URL}/content-intelligence/prompts/${encodeURIComponent(promptId)}`, {
+    method: "DELETE",
+  });
+  if (!response.ok) throw new Error(await apiErrorMessage(response, "Failed to delete Content AI prompt"));
   return (await response.json()) as ContentAiConfig;
 }
 

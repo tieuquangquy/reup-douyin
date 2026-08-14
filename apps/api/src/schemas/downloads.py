@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from src.enums import JobStatus, MediaAssetStatus, MediaAssetType
 
@@ -10,6 +10,14 @@ class DownloadCreateRequest(BaseModel):
     source_video_id: UUID | None = None
     candidate_id: UUID | None = None
     force_refresh: bool = False
+    account_connection_id: UUID | None = None
+    expected_stage_version: str | None = None
+
+    @model_validator(mode="after")
+    def require_one_canonical_selector(self) -> "DownloadCreateRequest":
+        if (self.source_video_id is None) == (self.candidate_id is None):
+            raise ValueError("Exactly one of source_video_id or candidate_id is required")
+        return self
 
 
 class DownloadCreateResponse(BaseModel):
@@ -18,6 +26,7 @@ class DownloadCreateResponse(BaseModel):
     source_video_id: UUID
     asset_count: int
     manifest: dict
+    runtime_version: str
 
 
 class MediaAssetResponse(BaseModel):
@@ -56,4 +65,3 @@ class LocalAssetRevealResponse(BaseModel):
     revealed: bool
     asset_type: str
     source_video_id: UUID
-

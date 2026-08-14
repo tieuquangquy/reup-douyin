@@ -24,6 +24,10 @@ export type TranscriptPipelineGuide = {
   ttsOutdated: boolean;
   /** UI chip: hide unless joined TTS + VI + known fingerprint. */
   ttsFreshness: TtsFreshness;
+  /** True only when every current Chinese beat is approved for translation. */
+  sourceTranscriptApproved: boolean;
+  /** A new/uncertain ASR run keeps the pipeline on Review and fails closed. */
+  sourceReviewRequired: boolean;
 };
 
 export type TtsFreshness = "hidden" | "current" | "outdated";
@@ -32,6 +36,15 @@ const STEP_ORDER: TranscriptPipelineStepKey[] = ["review", "translate", "tts", "
 
 function countVietnameseFilled(segments: EditableSegment[]): number {
   return segments.filter((segment) => segment.translatedText.trim().length > 0).length;
+}
+
+/** Backend-equivalent source gate used before trusting any Translation/TTS projection. */
+export function isSourceTranscriptReadyForTranslation(
+  state: TranscriptEditorState,
+  dialoguePhase: string | null | undefined
+): boolean {
+  if (state.segments.length === 0 || dialoguePhase === "dialogue_uncertain") return false;
+  return state.segments.every((segment) => segment.status === "APPROVED");
 }
 
 /** Stable VI draft fingerprint for TTS freshness checks. */
@@ -73,9 +86,12 @@ export function resolveTtsFreshness(options: {
  */
 export function resolveTranscriptPipelineCurrentStep(
   state: TranscriptEditorState,
-  options: { hasJoinedTts?: boolean } = {}
+  options: { hasJoinedTts?: boolean; sourceTranscriptApproved?: boolean } = {}
 ): TranscriptPipelineStepKey {
   if (state.segments.length === 0) return "review";
+  const sourceTranscriptApproved =
+    options.sourceTranscriptApproved ?? state.segments.every((segment) => segment.status === "APPROVED");
+  if (!sourceTranscriptApproved) return "review";
   const hasVietnamese = countVietnameseFilled(state.segments) > 0;
   if (!hasVietnamese) return "translate";
   if (!options.hasJoinedTts) return "tts";
@@ -100,12 +116,20 @@ function stepStateFor(
  */
 export function resolveTranscriptPipelineGuide(
   state: TranscriptEditorState,
-  options: { hasJoinedTts?: boolean; ttsSourceFingerprint?: string | null } = {}
+  options: {
+    hasJoinedTts?: boolean;
+    ttsSourceFingerprint?: string | null;
+    sourceTranscriptApproved?: boolean;
+  } = {}
 ): TranscriptPipelineGuide {
   const segmentCount = state.segments.length;
   const viFilledCount = countVietnameseFilled(state.segments);
   const hasVietnamese = viFilledCount > 0;
   const hasJoinedTts = Boolean(options.hasJoinedTts);
+  const sourceTranscriptApproved =
+    options.sourceTranscriptApproved ??
+    (segmentCount > 0 && state.segments.every((segment) => segment.status === "APPROVED"));
+  const sourceReviewRequired = !sourceTranscriptApproved;
   const ttsOutdated = isTtsDraftOutdated(state.segments, {
     hasJoinedTts,
     ttsSourceFingerprint: options.ttsSourceFingerprint
@@ -116,7 +140,10 @@ export function resolveTranscriptPipelineGuide(
     ttsOutdated,
     ttsSourceFingerprint: options.ttsSourceFingerprint
   });
-  const currentStep = resolveTranscriptPipelineCurrentStep(state, { hasJoinedTts });
+  const currentStep = resolveTranscriptPipelineCurrentStep(state, {
+    hasJoinedTts,
+    sourceTranscriptApproved,
+  });
 
   const primaryAction: TranscriptPipelinePrimaryAction =
     currentStep === "review" || currentStep === "translate"
@@ -139,7 +166,9 @@ export function resolveTranscriptPipelineGuide(
     hasVietnamese,
     hasJoinedTts,
     ttsOutdated,
-    ttsFreshness
+    ttsFreshness,
+    sourceTranscriptApproved,
+    sourceReviewRequired
   };
 }
 
@@ -160,8 +189,9 @@ export function isTranscriptPipelineActionUnlocked(
   action: TranscriptPipelinePrimaryAction,
   currentStep: TranscriptPipelineStepKey
 ): boolean {
+  if (currentStep === "review") return false;
   const currentAction: TranscriptPipelinePrimaryAction =
-    currentStep === "review" || currentStep === "translate"
+    currentStep === "translate"
       ? "translate"
       : currentStep === "tts"
         ? "tts"

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from src.tts_pipeline.catalog import discover_tts_catalog
+from src.tts_pipeline.catalog import discover_tts_catalog, normalize_gemini_voice_id
 
 
 class TtsCatalogTests(unittest.TestCase):
@@ -86,6 +86,21 @@ class TtsCatalogTests(unittest.TestCase):
         caps = catalog.to_dict()["capabilities"]
         self.assertTrue(caps["voice"])
         self.assertTrue(caps["model"])
+
+    def test_gemini_catalog_uses_provider_native_voice_ids(self) -> None:
+        catalog = discover_tts_catalog("google_gemini", language_code="vi-VN")
+        ids = [voice.id for voice in catalog.voices]
+        self.assertEqual(catalog.source, "curated")
+        self.assertEqual(catalog.default_voice_id, "Kore")
+        self.assertIn("Aoede", ids)
+        self.assertIn("Puck", ids)
+        self.assertFalse(any("Chirp3-HD" in voice_id for voice_id in ids))
+        self.assertIn("gemini-2.5-flash-tts", catalog.models)
+
+    def test_gemini_voice_normalizes_legacy_cloud_resource_id(self) -> None:
+        self.assertEqual(normalize_gemini_voice_id("vi-VN-Chirp3-HD-Aoede"), "Aoede")
+        self.assertEqual(normalize_gemini_voice_id("kore"), "Kore")
+        self.assertEqual(normalize_gemini_voice_id("not-a-gemini-voice"), "")
 
 
 if __name__ == "__main__":

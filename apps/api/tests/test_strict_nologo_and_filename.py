@@ -4,6 +4,7 @@ import json
 import unittest
 from pathlib import Path
 from subprocess import CompletedProcess
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
@@ -99,10 +100,11 @@ class YtDlpNoLogoFormatTests(unittest.TestCase):
             "download/bestvideo*+bestaudio/best",
         )
 
-    def test_format_id_download_is_logo_best_is_no_logo(self) -> None:
+    def test_format_id_requires_affirmative_clean_playback_provenance(self) -> None:
         self.assertFalse(is_yt_dlp_no_logo_format("download", info=None))
         self.assertFalse(is_yt_dlp_no_logo_format("download+影音", info={"format_id": "download"}))
-        self.assertTrue(is_yt_dlp_no_logo_format("best", info={"format_id": "best", "height": 1080}))
+        self.assertFalse(is_yt_dlp_no_logo_format("best", info={"format_id": "best", "height": 1080}))
+        self.assertTrue(is_yt_dlp_no_logo_format("play", info={"format_id": "play", "height": 1080}))
         self.assertFalse(
             is_yt_dlp_no_logo_format(
                 "x+y",
@@ -308,16 +310,18 @@ class YtDlpStrictResolveTests(unittest.TestCase):
             info_path.write_text(json.dumps({"format_id": "download", "height": 1080}), encoding="utf-8")
             return CompletedProcess(command, 0, stdout="", stderr="")
 
-        with (
-            patch.object(resolver, "is_available", return_value=True),
-            patch("src.downloaders.yt_dlp_douyin_resolver.subprocess.run", side_effect=fake_run),
-            patch(
-                "src.core.settings.get_settings",
-                return_value=MagicMock(douyin_download_allow_watermarked_fallback=False),
-            ),
-        ):
-            with self.assertRaises(DownloadError) as ctx:
-                resolver.resolve(request)
+        with TemporaryDirectory() as staging_tmp:
+            with (
+                patch.object(resolver, "is_available", return_value=True),
+                patch("src.downloaders.yt_dlp_douyin_resolver.subprocess.run", side_effect=fake_run),
+                patch("src.downloaders.yt_dlp_douyin_resolver.staging_directory", return_value=Path(staging_tmp)),
+                patch(
+                    "src.core.settings.get_settings",
+                    return_value=MagicMock(douyin_download_allow_watermarked_fallback=False),
+                ),
+            ):
+                with self.assertRaises(DownloadError) as ctx:
+                    resolver.resolve(request)
         self.assertEqual(ctx.exception.code, DownloadErrorCode.DOWNLOAD_FAILED)
         self.assertIn("no-logo", ctx.exception.message.lower())
 
@@ -341,21 +345,24 @@ class YtDlpStrictResolveTests(unittest.TestCase):
             output_path.write_bytes(b"nl-hq")
             info_path = output_path.with_name(f"{output_path.stem}.info.json")
             info_path.write_text(
-                json.dumps({"format_id": "best", "height": 1080, "width": 1920}),
+                json.dumps({"format_id": "play", "height": 1080, "width": 1920}),
                 encoding="utf-8",
             )
             return CompletedProcess(command, 0, stdout="", stderr="")
 
-        with (
-            patch.object(resolver, "is_available", return_value=True),
-            patch("src.downloaders.yt_dlp_douyin_resolver.subprocess.run", side_effect=fake_run),
-            patch(
-                "src.core.settings.get_settings",
-                return_value=MagicMock(douyin_download_allow_watermarked_fallback=False),
-            ),
-        ):
-            result = resolver.resolve(request)
-        self.assertEqual(result.content, b"nl-hq")
+        with TemporaryDirectory() as staging_tmp:
+            with (
+                patch.object(resolver, "is_available", return_value=True),
+                patch("src.downloaders.yt_dlp_douyin_resolver.subprocess.run", side_effect=fake_run),
+                patch("src.downloaders.yt_dlp_douyin_resolver.staging_directory", return_value=Path(staging_tmp)),
+                patch(
+                    "src.core.settings.get_settings",
+                    return_value=MagicMock(douyin_download_allow_watermarked_fallback=False),
+                ),
+            ):
+                result = resolver.resolve(request)
+                self.assertIsNone(result.content)
+                self.assertEqual(Path(result.local_path or "").read_bytes(), b"nl-hq")
         self.assertTrue(result.watermark_free)
         self.assertEqual(result.height, 1080)
 

@@ -43,6 +43,7 @@ export type Job = {
   id: string;
   workspace_id: string;
   job_type: JobType;
+  workflow_action?: string | null;
   status: JobStatus;
   source_video_id: string | null;
   crawl_session_id: string | null;

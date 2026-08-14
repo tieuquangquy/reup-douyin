@@ -11,6 +11,199 @@ from scripts import run_phase4_adaptive
 
 
 class RunPhase4AdaptiveTests(unittest.TestCase):
+    def test_final_reuses_hash_bound_preview_and_skips_full_visual_qa(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source.mp4"
+            source.write_bytes(b"source")
+            contract_path = root / "phase4_render_input.json"
+            contract_path.write_text(
+                json.dumps(
+                    {
+                        "status": "READY_FOR_PHASE4",
+                        "refs": {"source_video_ref": {"sha256": "s" * 64}},
+                        "authorities": {
+                            "timebase": {"status": "READY", "mode": "CFR"},
+                            "audio": {"status": "READY"},
+                        },
+                        "render_tracks": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (root / "phase1_meta.json").write_text(
+                json.dumps({"video": str(source)}), encoding="utf-8"
+            )
+            preview = root / "phase4_adaptive_visual_preview.mp4"
+            preview.write_bytes(b"preview")
+            preview_qa_path = root / "qa" / "preview-output-qa.json"
+            preview_qa_path.parent.mkdir(parents=True)
+            preview_qa_path.write_text(
+                json.dumps(
+                    {
+                        "status": "PASS",
+                        "failed_checks": [],
+                        "checks": {"residual_cjk": True},
+                        "residual_cjk": {"complete": True, "detections": []},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (root / "phase4_adaptive_render_meta.json").write_text(
+                json.dumps(
+                    {
+                        "status": "VISUAL_PREVIEW_RENDERED",
+                        "output_qa_status": "PASS",
+                        "visual_preview": True,
+                        "phase4_input_sha256": "c" * 64,
+                        "visual_remediation_ref": {},
+                        "output_video_sha256": "p" * 64,
+                        "artifacts": {
+                            "video": preview.name,
+                            "output_qa": preview_qa_path.relative_to(root).as_posix(),
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            final = root / "phase4_adaptive_final.mp4"
+            render_qa = root / "qa" / "phase4_adaptive_final_qa.json"
+            progress_events: list[tuple[str, int | None]] = []
+
+            def hash_for(path):
+                resolved = Path(path)
+                if resolved == source:
+                    return "s" * 64
+                if resolved == contract_path:
+                    return "c" * 64
+                if resolved == preview:
+                    return "p" * 64
+                return "f" * 64
+
+            def fake_remux(*_args, **_kwargs):
+                final.write_bytes(b"final")
+                render_qa.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    output_path=final,
+                    frame_count=30,
+                    qa_path=render_qa,
+                    visual_preview=False,
+                    encoder_metadata={"visual_authority_reused": True},
+                    audio_mix_metadata={"narration_complete": True},
+                )
+
+            with patch.object(
+                run_phase4_adaptive, "_sha256_file", side_effect=hash_for
+            ), patch.object(
+                run_phase4_adaptive,
+                "remux_adaptive_preview_as_final",
+                side_effect=fake_remux,
+            ) as remux, patch.object(
+                run_phase4_adaptive,
+                "collect_reused_visual_output_qa",
+                return_value={"status": "PASS", "failed_checks": [], "audio": {"status": "PASS"}},
+            ) as reused_qa, patch.object(
+                run_phase4_adaptive, "render_adaptive_video"
+            ) as full_render, patch.object(
+                run_phase4_adaptive, "collect_adaptive_output_qa"
+            ) as full_qa, patch.object(
+                run_phase4_adaptive,
+                "load_residual_cjk_false_positive_approval",
+                return_value=None,
+            ):
+                result = run_phase4_adaptive.run(
+                    root,
+                    visual_preview=False,
+                    narration_path=source,
+                    on_progress=lambda phase, percent: progress_events.append(
+                        (phase, percent)
+                    ),
+                )
+
+            self.assertEqual(result, 0)
+            remux.assert_called_once()
+            reused_qa.assert_called_once()
+            full_render.assert_not_called()
+            full_qa.assert_not_called()
+            self.assertEqual(
+                [percent for _phase, percent in progress_events],
+                [35, 78, 95, 100],
+            )
+
+    def test_final_reuses_preview_after_hash_bound_audio_only_rebind(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            contract_path = root / "phase4_render_input.json"
+            contract_path.write_text('{"authorities":{"audio":{"status":"READY"}}}', encoding="utf-8")
+            current_contract_sha = run_phase4_adaptive._sha256_file(contract_path)
+            old_contract_sha = "a" * 64
+            preview = root / "phase4_adaptive_visual_preview.mp4"
+            preview.write_bytes(b"approved-preview")
+            preview_sha = run_phase4_adaptive._sha256_file(preview)
+            qa_path = root / "qa" / "phase4_adaptive_visual_preview_output_qa.json"
+            qa_path.parent.mkdir(parents=True)
+            qa_path.write_text(
+                json.dumps(
+                    {
+                        "status": "PASS",
+                        "failed_checks": [],
+                        "residual_cjk": {"complete": True, "detections": []},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            remediation = {
+                "schema_version": "phase4_visual_remediation_v1",
+                "status": "PHASE4_VISUAL_REMEDIATION_APPROVED",
+                "operations": [],
+                "non_goals": ["do_not_change_visual_operations"],
+                "authority_refs": {
+                    "encoded_output_qa": {
+                        "path": qa_path.relative_to(root).as_posix(),
+                        "sha256": run_phase4_adaptive._sha256_file(qa_path),
+                    },
+                    "audio_authority_rebind": {
+                        "policy_version": "phase4_late_audio_authority_rebind_v1",
+                        "old_phase4_input_sha256": old_contract_sha,
+                        "new_phase4_input_sha256": current_contract_sha,
+                    },
+                },
+            }
+            remediation_path = root / "phase4_visual_remediation_audio_rebind.json"
+            remediation_path.write_text(json.dumps(remediation), encoding="utf-8")
+            remediation_ref = {
+                "path": remediation_path.name,
+                "sha256": run_phase4_adaptive._sha256_file(remediation_path),
+            }
+            (root / "phase4_adaptive_render_meta.json").write_text(
+                json.dumps(
+                    {
+                        "status": "VISUAL_PREVIEW_RENDERED",
+                        "output_qa_status": "PASS",
+                        "visual_preview": True,
+                        "phase4_input_sha256": old_contract_sha,
+                        "visual_remediation_ref": None,
+                        "output_video_sha256": preview_sha,
+                        "artifacts": {
+                            "video": preview.name,
+                            "output_qa": qa_path.relative_to(root).as_posix(),
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            authority = run_phase4_adaptive._approved_visual_preview_authority(
+                root,
+                contract_path=contract_path,
+                visual_remediation_ref=remediation_ref,
+            )
+
+            self.assertIsNotNone(authority)
+            assert authority is not None
+            self.assertEqual(authority[0], preview)
+            self.assertEqual(authority[1], preview_sha)
+
     def test_source_path_uses_the_shared_phase1_resolver(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -141,6 +334,7 @@ class RunPhase4AdaptiveTests(unittest.TestCase):
                     frame_count=10,
                     qa_path=qa,
                     visual_preview=False,
+                    audio_mix_metadata={"narration_complete": True},
                 ),
             ), patch.object(
                 run_phase4_adaptive,

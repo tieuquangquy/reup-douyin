@@ -29,6 +29,8 @@ class TtsPreviewJobSnapshot:
     audio_base64: str = ""
     warnings: list[str] = field(default_factory=list)
     text: str = ""
+    requested_voice_id: str = ""
+    resolved_voice_id: str = ""
     ok: bool = False
 
 
@@ -60,6 +62,8 @@ def _copy_snapshot(snap: TtsPreviewJobSnapshot) -> TtsPreviewJobSnapshot:
         audio_base64=snap.audio_base64,
         warnings=list(snap.warnings),
         text=snap.text,
+        requested_voice_id=snap.requested_voice_id,
+        resolved_voice_id=snap.resolved_voice_id,
         ok=snap.ok,
     )
 
@@ -116,8 +120,10 @@ def start_tts_preview_job(
     snapshot = TtsPreviewJobSnapshot(
         workspace_id=ws_key,
         status="running",
-        detail="Preview running… first OmniVoice run may download the model (several minutes).",
+        detail="TTS preview synthesis is running.",
+        provider=str(getattr(workspace_tts, "provider", "") or "").strip(),
         text=(text or "").strip()[: max(20, min(int(max_chars or 280), 500))],
+        requested_voice_id=str(getattr(workspace_tts, "voice_id", "") or "").strip(),
         ok=False,
     )
 
@@ -200,6 +206,8 @@ def _run_preview_job(
             record.snapshot.audio_base64 = str(result.get("audio_base64") or "")
             record.snapshot.warnings = list(result.get("warnings") or [])
             record.snapshot.text = str(result.get("text") or "")
+            record.snapshot.requested_voice_id = str(result.get("requested_voice_id") or "")
+            record.snapshot.resolved_voice_id = str(result.get("resolved_voice_id") or "")
         logger.info(
             "tts_preview_job_ok",
             extra={"workspace_id": workspace_id, "provider": record.snapshot.provider},

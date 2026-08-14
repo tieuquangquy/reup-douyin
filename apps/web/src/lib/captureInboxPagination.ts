@@ -57,7 +57,7 @@ export function computeSessionNeedsActionCount(session: CaptureSessionSummaryCou
 
 export function resolveItemsLoadScopeForSession(
   profileUrlFromQuery: string | null,
-  sessionId: string,
+  sessionId: string | null,
   matchedProfileSessionId: string | null,
   manualSessionSelection = false
 ): CaptureInboxItemsLoadScope {

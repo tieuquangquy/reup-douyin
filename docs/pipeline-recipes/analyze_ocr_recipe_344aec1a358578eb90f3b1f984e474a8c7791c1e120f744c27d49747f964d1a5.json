@@ -1,0 +1,113 @@
+{
+  "schema_version": "analyze_ocr_recipe_lock_v1",
+  "status": "LOCKED_AS_OFFICIAL_DEFAULT",
+  "locked_at": "2026-08-12T00:00:00+07:00",
+  "operator_id": "ocr_v27_1_cjk_single_frame_consensus",
+  "release_label": "OCR-V27.1",
+  "phase1": {
+    "analysis_engine": "audio_visual_temporal_v1",
+    "analysis_policy_version": "audio_visual_temporal_policy_v10_cjk_single_frame_consensus",
+    "decode_backend": "ffmpeg_two_pass_selected_rawvideo",
+    "detector_budget_policy": "completeness_first_adaptive",
+    "all_frame_proxy_long_edge": 512,
+    "dual_preprocess_detection": true,
+    "unassigned_text_discovery": true,
+    "source_geometry_required": true,
+    "authority_artifact": "phase1_track_coverage_v2.json",
+    "authority_v3_6_full_duration": false,
+    "provenance_fail_closed": true,
+    "protected_classes": [
+      "SOURCE_INTRINSIC",
+      "SOURCE_INTRINSIC_PANEL",
+      "PLATFORM_UI"
+    ],
+    "compatibility_artifact": "master_timeline.json",
+    "coverage_policy_version": "coverage_first_track_closure_v2_unassigned",
+    "frame_exact_presence_required": true,
+    "per_frame_geometry_required": true,
+    "single_frame_detector_budget_bypass": true,
+    "detector_candidates_are_retention_authority": false,
+    "single_frame_retention_authority": "local_cjk_or_temporal_consensus",
+    "blank_hardsub_directional_texture_guard": true,
+    "post_track_residual_dbnet_pass": true,
+    "encoded_output_unassigned_cjk_gate": true
+  },
+  "phase2": {
+    "provider": "local",
+    "network_calls_allowed": 0,
+    "geometry_authority": "phase1_meta_source_raster",
+    "output_artifact": "phase2_ocr_timeline.json",
+    "overwrite_master_timeline": false,
+    "approval_policy": "exact_operator_review",
+    "content_authority": {
+      "recipe_version": "semantic-hardsub-cue-authority-v1",
+      "schema_version": "semantic_hardsub_cues_v1",
+      "contract_schema_version": "phase2_ocr_timeline_v3_semantic_cues",
+      "handoff_schema_version": "phase2_handoff_v2_semantic_cues",
+      "review_input_schema_version": "phase2_review_input_v2_semantic_cues",
+      "dialogue_text_authority": "current_asr_token_timeline",
+      "dialogue_render_authority": "approved_translation_segment",
+      "missing_provenance_policy": "uncertain_fail_closed",
+      "caption_ai_dialogue_fragments_allowed": false
+    },
+    "local_recovery": {
+      "policy_version": "phase2_local_temporal_recovery_v1",
+      "hardsub_geometry_policy_version": "phase2_hardsub_geometry_recovery_v1",
+      "max_frames_per_failed_track": 2,
+      "max_prepared_inputs_per_run": 12,
+      "repeated_short_ui_fail_closed": true
+    },
+    "coverage_authority": "phase1_track_coverage_v2.json",
+    "frame_geometry_passthrough": true
+  },
+  "frontend_contract": {
+    "button": "Advanced -> Re-analyze OCR",
+    "durable_job_type": "ANALYZE_OCR",
+    "required_analysis_engine": "audio_visual_temporal_v1",
+    "worker_execution": true,
+    "inline_http_processing": false
+  },
+  "evidence": {
+    "promotion_basis": "LOCAL_CONTRACT_SYNTHETIC_FLASH_AND_REAL_VIDEO_SMOKE",
+    "artifacts": {
+      "real_smoke_phase1": "apps/api/tmp_ocr_v27_smoke_20260812_f"
+    },
+    "metrics": {
+      "network_calls": 0,
+      "synthetic_single_frame_flash_passed": true,
+      "per_frame_geometry_contract_passed": true,
+      "coverage_safe_blur_contract_passed": true,
+      "semantic_hardsub_contract_passed": true,
+      "all_frame_512_proxy_enabled": true,
+      "dual_preprocess_detection_enabled": true,
+      "unassigned_text_discovery_enabled": true,
+      "encoded_output_unassigned_cjk_gate_enabled": true,
+      "detector_retention_authority_separated": true,
+      "single_frame_local_cjk_required": true,
+      "directional_texture_guard_enabled": true,
+      "real_smoke_duration_s": 8.126,
+      "real_smoke_elapsed_s": 24.41,
+      "real_smoke_detector_frames": 72,
+      "real_smoke_final_tracks": 1,
+      "real_smoke_uncertain_tracks": 1
+    },
+    "operator_decision": {
+      "batch_regression": "PENDING_FRONTEND_OPERATOR_VALIDATION",
+      "accepted_as_official_default": true
+    }
+  },
+  "claims": {
+    "official_frontend_default": true,
+    "network_calls_allowed": 0,
+    "local_only_ocr": true,
+    "source_editor_provenance_enabled": true,
+    "universal_video_support": false,
+    "batch_regression_completed": false,
+    "frame_exact_track_closure": true,
+    "single_frame_cjk_fail_closed": true,
+    "semantic_hardsub_authority_enabled": true,
+    "completeness_first_discovery_enabled": true,
+    "no_silent_unassigned_cjk": true
+  },
+  "recipe_sha256": "344aec1a358578eb90f3b1f984e474a8c7791c1e120f744c27d49747f964d1a5"
+}

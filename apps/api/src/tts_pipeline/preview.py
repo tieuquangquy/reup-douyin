@@ -32,6 +32,14 @@ def _as_preview_cfg(workspace_tts: Any) -> SimpleNamespace:
         language_code=str(getattr(src, "language_code", "vi") or "vi") or "vi",
         model_id=str(getattr(src, "model_id", "") or ""),
         api_key=getattr(src, "api_key", None),
+        credential_mode=str(getattr(src, "credential_mode", "api_key") or "api_key"),
+        google_service_account_json=getattr(src, "google_service_account_json", None),
+        google_service_account_email=str(
+            getattr(src, "google_service_account_email", "") or ""
+        ),
+        google_service_account_project_id=str(
+            getattr(src, "google_service_account_project_id", "") or ""
+        ),
         base_url=str(getattr(src, "base_url", "") or ""),
         timeout_seconds=float(getattr(src, "timeout_seconds", 120.0) or 120.0),
         fallback_provider=str(getattr(src, "fallback_provider", "none") or "none"),
@@ -89,6 +97,13 @@ def preview_tts_speech(
         or (output.provider_metadata or {}).get("provider")
         or "unknown"
     )
+    metadata = dict(output.provider_metadata or {})
+    requested_voice_id = str(cfg.voice_id or "").strip()
+    resolved_voice_id = str(
+        metadata.get("resolved_voice_id")
+        or metadata.get("voice_id")
+        or requested_voice_id
+    ).strip()
     logger.info(
         "tts_preview_ok",
         extra={
@@ -106,4 +121,6 @@ def preview_tts_speech(
         "audio_base64": base64.b64encode(bytes(output.audio_bytes)).decode("ascii"),
         "warnings": list(output.warnings or []),
         "text": cleaned,
+        "requested_voice_id": requested_voice_id,
+        "resolved_voice_id": resolved_voice_id,
     }

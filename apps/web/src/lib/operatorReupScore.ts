@@ -56,7 +56,31 @@ function emptyCapturedItem(): CapturedItem {
     promoted_video_candidate_id: null,
     promoted_crawl_session_id: null,
     enrichment_json: null,
-    metadata_json: null
+    metadata_json: null,
+    metadata_status: "missing",
+    time_status: "missing",
+    performance_status: "missing",
+    processing_fit_status: "missing",
+    metadata_missing_reason: null,
+    time_missing_reason: null,
+    performance_missing_reason: null,
+    processing_fit_missing_reason: null,
+    metadata_source_summary: null,
+    last_metadata_hydrated_at: null,
+    intake_evaluation_status: "NOT_EVALUATED",
+    matches_intake: null,
+    intake_failed_rules_json: null,
+    intake_missing_requirements_json: null,
+    intake_filter_version: null,
+    intake_preset_name: null,
+    last_intake_evaluated_at: null,
+    intake_evaluation_error: null,
+    excluded_reason: null,
+    error_code: null,
+    error_message: null,
+    raw_payload_json: {},
+    created_at: "2026-04-28T00:00:00.000Z",
+    updated_at: "2026-04-28T00:00:00.000Z"
   };
 }
 

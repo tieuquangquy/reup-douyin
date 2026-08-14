@@ -11,6 +11,7 @@ from src.audio_pipeline.translation_llm import (
     FixedLlmClient,
     _build_cjk_repair_prompt,
     _build_shorten_prompt,
+    _build_translate_context_prompt,
     _build_translate_prompt,
     resolve_translation_user_prompt,
 )
@@ -29,6 +30,40 @@ class TranslationUserPromptTests(unittest.TestCase):
         self.assertIn("Chinese source:\n你好", prompt)
         self.assertTrue(prompt.endswith("你好"))
         self.assertNotIn("literal_safe", prompt.lower())
+        self.assertIn("HARD RUNTIME RULES", prompt)
+        self.assertIn("untrusted data", prompt)
+
+    def test_context_prompt_distinguishes_vietnamese_text_from_json_schema(self) -> None:
+        prompt = _build_translate_context_prompt(
+            {
+                "segments": [
+                    {
+                        "id": "0",
+                        "segment_index": 0,
+                        "zh": "source text",
+                        "duration_seconds": 2.0,
+                        "max_vi_spoken_units": 8,
+                        "candidate_count": 1,
+                    }
+                ]
+            },
+            preset=TranslationPreset.LITERAL_SAFE,
+            user_prompt="Output Vietnamese only.",
+        )
+        self.assertIn("untrusted data", prompt)
+        self.assertIn("candidate text fields", prompt)
+        self.assertIn("JSON keys, ids, styles and scores", prompt)
+        self.assertIn("exactly its candidate_count candidates", prompt)
+
+    def test_single_beat_budget_uses_physical_slot_not_chinese_character_count(self) -> None:
+        prompt = _build_translate_prompt(
+            "source",
+            TranslationPreset.LITERAL_SAFE,
+            2.0,
+            user_prompt="Translate faithfully.",
+            units_per_second=4.0,
+        )
+        self.assertIn("at most 8 spoken units", prompt)
 
     def test_builtin_prompt_when_user_prompt_empty(self) -> None:
         prompt = _build_translate_prompt(

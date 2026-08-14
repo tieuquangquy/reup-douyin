@@ -76,4 +76,47 @@ const catalog = catalogFromRuntime({
 assert.equal(catalog?.source, "sdk");
 assert.equal(catalog?.voices[0]?.id, "A");
 
+assert.equal(
+  catalogFromRuntime(
+    {
+      last_probe: {
+        ok: true,
+        provider: "google",
+        catalog: {
+          source: "provider",
+          voices: [{ id: "vi-VN-Chirp3-HD-Aoede", label: "Aoede" }],
+          styles: [],
+          models: [],
+          default_voice_id: "vi-VN-Chirp3-HD-Aoede",
+          warning: ""
+        }
+      }
+    },
+    "google_gemini"
+  ),
+  null,
+  "A persisted catalog from another provider must never hydrate the current editor"
+);
+
+const richRemoteCatalog = catalogFromRuntime({
+  last_probe: {
+    ok: true,
+    catalog: {
+      source: "provider_api",
+      voices: [],
+      styles: [],
+      models: [],
+      model_options: [{ id: "tts-pro", label: "TTS Pro", languages: ["vi"] }],
+      languages: [{ code: "vi", label: "Vietnamese" }],
+      default_voice_id: "",
+      default_model_id: "tts-pro",
+      default_language_code: "vi",
+      discovery: { status: "partial", endpoints: ["/models"], warnings: [] },
+      warning: ""
+    }
+  }
+});
+assert.equal(richRemoteCatalog?.model_options?.[0]?.id, "tts-pro");
+assert.equal(richRemoteCatalog?.discovery?.status, "partial");
+
 console.log("ops-tts-ready-state tests passed");

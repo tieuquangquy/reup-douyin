@@ -40,7 +40,10 @@ def resolve_ocr_http_timeout_seconds() -> float:
     except ValueError:
         logger.warning("invalid_%s", OCR_HTTP_TIMEOUT_ENV, extra={"raw": raw[:40]})
         return DEFAULT_TIMEOUT_SECONDS
-    return max(30.0, value)
+    # Scale-to-zero plus Paddle initialization routinely exceeds 120s. A lower
+    # override makes healthy cold starts fail, so overrides may only extend the
+    # documented production floor.
+    return max(DEFAULT_TIMEOUT_SECONDS, value)
 
 
 def is_transient_ocr_http_error(message: str) -> bool:

@@ -61,6 +61,44 @@ export function isFinalReviewOcrReviewPending(
   return (summary.review_required ?? 0) > 0 || (summary.review_objects?.length ?? 0) > 0;
 }
 
+/** OCR geometry is reusable; only approved Vietnamese dialogue authority is missing. */
+export function isFinalReviewDialogueTranslationApprovalPending(
+  summary: {
+    workflow_stage?: string | null;
+    requires_dialogue_translation_approval?: boolean;
+    dialogue_translation_blocked_count?: number | null;
+  } | null
+): boolean {
+  if (!summary) return false;
+  return (
+    summary.workflow_stage === "WAITING_DIALOGUE_TRANSLATION_APPROVAL" ||
+    (summary.requires_dialogue_translation_approval === true &&
+      (summary.dialogue_translation_blocked_count ?? 0) > 0)
+  );
+}
+
+/**
+ * A durable quality artifact at or beyond visual preview supersedes any
+ * terminal error banner left in the mounted page by an older OCR/preview job.
+ * Job history remains available in Ops; Final Review must present the current
+ * artifact authority instead of a stale failure from a prior attempt.
+ */
+export function hasCurrentQualityVisualAuthority(
+  summary: {
+    workflow_version?: string | null;
+    workflow_stage?: string | null;
+  } | null
+): boolean {
+  if (summary?.workflow_version !== "QUALITY_LOCALIZATION_V24_1") return false;
+  return new Set([
+    "WAITING_VISUAL_REVIEW",
+    "VISUAL_APPROVED",
+    "WAITING_AUDIO_REVIEW",
+    "AUDIO_APPROVED",
+    "FINAL_READY"
+  ]).has(summary.workflow_stage ?? "");
+}
+
 /**
  * OCR prep is complete only when cleaned video exists, or OCR explicitly skipped clean
  * (no hard-sub / clean skipped). Orphan OCR events alone must not unlock Start render.
@@ -151,6 +189,11 @@ export function resolveFinalReviewPrepStepProgress(input: {
   else if (typeof input.ocrProgressPercent === "number") {
     // Keep last live job % across UI watch-pause (ocrBusy false) — do not snap to idle 0%.
     clean = clampInFlightPercent(input.ocrProgressPercent);
+  } else if (isFinalReviewDialogueTranslationApprovalPending(input.ocrSummary)) {
+    // OCR geometry is done; operator gate owns the remaining Clean work.
+    clean = 72;
+  } else if (isFinalReviewOcrReviewPending(input.ocrSummary)) {
+    clean = 58;
   }
 
   let render = 0;

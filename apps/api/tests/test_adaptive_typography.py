@@ -18,6 +18,28 @@ def _font() -> Path:
 
 
 class ResponsiveTypographyTests(unittest.TestCase):
+    def test_caption_row_wraps_long_vietnamese_inside_original_cover_lane(self) -> None:
+        background = np.full((3840, 2160, 3), 96, dtype=np.uint8)
+        layout = plan_text_layout(
+            "Cả vùng giữa mặt trông có chiều sâu",
+            kind="caption_row",
+            safe_area={
+                "x": 0.24121527777777774,
+                "y": 0.4967187499999999,
+                "width": 0.504375,
+                "height": 0.04101562500000011,
+            },
+            frame_width=2160,
+            frame_height=3840,
+            fontfile=_font(),
+            background_bgr=background,
+            max_lines=2,
+        )
+
+        self.assertEqual(len(layout.lines), 2)
+        self.assertGreaterEqual(layout.font_size_px, 69)
+        self.assertLessEqual(layout.height, round(0.04101562500000011 * 3840))
+
     def test_hardsub_wraps_to_two_lines_inside_safe_area(self) -> None:
         background = np.full((1080, 1920, 3), 80, dtype=np.uint8)
         layout = plan_text_layout(

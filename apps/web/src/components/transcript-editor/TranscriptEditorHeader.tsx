@@ -9,7 +9,7 @@ import {
   transcriptPipelineStepLabelKey,
   type TranscriptPipelinePrimaryAction
 } from "../../lib/transcriptEditorPipeline";
-import type { TranscriptEditorState, TranslationPreset } from "../../types/transcript-editor";
+import type { TranscriptEditorState, TranslationPreset, TranslationDraftListResponse } from "../../types/transcript-editor";
 import { AsyncButton } from "../shared/AsyncButton";
 
 type Props = {
@@ -20,8 +20,13 @@ type Props = {
   reanalyzing: boolean;
   translating: boolean;
   synthesizingTts: boolean;
+  approvingSource: boolean;
+  sourceTranscriptApproved: boolean;
   hasJoinedTts: boolean;
   ttsSourceFingerprint?: string | null;
+  audioRecipeVersion?: string | null;
+  translationRecipeVersion?: string | null;
+  translationQualityContract?: TranslationDraftListResponse["quality_contract"];
   onSave: () => void;
   onDiscard: () => void;
   onTranslateLiteral: (preset: TranslationPreset) => void;
@@ -168,8 +173,13 @@ export function TranscriptEditorHeader({
   reanalyzing,
   translating,
   synthesizingTts,
+  approvingSource,
+  sourceTranscriptApproved,
   hasJoinedTts,
   ttsSourceFingerprint = null,
+  audioRecipeVersion = null,
+  translationRecipeVersion = null,
+  translationQualityContract = null,
   onSave,
   onDiscard,
   onTranslateLiteral,
@@ -177,8 +187,12 @@ export function TranscriptEditorHeader({
   onGenerateTts
 }: Props) {
   const t = useT();
-  const busy = saving || reanalyzing || translating || synthesizingTts;
-  const guide = resolveTranscriptPipelineGuide(state, { hasJoinedTts, ttsSourceFingerprint });
+  const busy = saving || reanalyzing || translating || synthesizingTts || approvingSource;
+  const guide = resolveTranscriptPipelineGuide(state, {
+    hasJoinedTts,
+    ttsSourceFingerprint,
+    sourceTranscriptApproved
+  });
   const ttsBlocked = !guide.hasVietnamese;
   const primary = guide.primaryAction;
   const translateUnlocked = isTranscriptPipelineActionUnlocked("translate", guide.currentStep);
@@ -196,13 +210,12 @@ export function TranscriptEditorHeader({
 
   function runTts(isPrimary: boolean) {
     if (!ttsUnlocked || ttsBlocked) return;
-    const regenerating = !isPrimary || guide.hasJoinedTts || guide.ttsOutdated;
-    const confirmKey = regenerating
-      ? "transcriptEditorHeader.regenerateTtsConfirm"
-      : "transcriptEditorHeader.generateTtsConfirm";
-    if (window.confirm(t(confirmKey))) {
-      onGenerateTts();
-    }
+    // TTS is a durable, idempotent worker action with segment cache.  A native
+    // confirmation here used to leave the frontend stuck waiting for a dialog
+    // and made auto-queue feel broken. Dirty-draft persistence is handled by
+    // TranscriptEditorPage before the job is enqueued.
+    void isPrimary;
+    onGenerateTts();
   }
 
   function actionClass(action: TranscriptPipelinePrimaryAction, base: string): string {
@@ -210,6 +223,19 @@ export function TranscriptEditorHeader({
     if (action === "tts" && guide.ttsOutdated) return `${role} editor-command__tts--stale`;
     return role;
   }
+
+  const showV3Meta = Boolean(translationRecipeVersion?.startsWith("translation-v3"));
+  const filledCount =
+    translationQualityContract?.filled_count ?? state.segments.filter((row) => row.translatedText.trim()).length;
+  const totalCount = translationQualityContract?.total_count ?? state.segments.length;
+  const qualityStatus = translationQualityContract?.blocked_count
+    ? `${translationQualityContract.blocked_count} ${t("transcriptEditorHeader.metaBlocked")}`
+    : translationQualityContract?.review_required_count
+      ? `${translationQualityContract.review_required_count} ${t("transcriptEditorHeader.metaReview")}`
+      : t("transcriptEditorHeader.metaTtsReady");
+  const shortAudioRecipe = audioRecipeVersion
+    ? audioRecipeVersion.replace(/^audio-analysis-v5-/, "") || audioRecipeVersion
+    : null;
 
   return (
     <header className="transcript-header transcript-header--command">
@@ -297,8 +323,12 @@ export function TranscriptEditorHeader({
                 pending={translating}
                 pendingLabel={t("transcriptEditorHeader.translating")}
                 leadingIcon={<CommandIcon kind="translate" />}
-                disabled={busy}
-                title={t("transcriptEditorHeader.pipelineNowTranslate")}
+                disabled={busy || !guide.sourceTranscriptApproved || approvingSource}
+                title={
+                  guide.sourceReviewRequired
+                    ? t("transcriptEditorPage.translateRequiresSourceApproval")
+                    : t("transcriptEditorHeader.pipelineNowTranslate")
+                }
                 onClick={() => runTranslate(true)}
               >
                 <span>{t(transcriptPipelineActionLabelKey("translate", { isPrimary: true }))}</span>
@@ -401,6 +431,34 @@ export function TranscriptEditorHeader({
           </button>
         </div>
       </div>
+      {showV3Meta || audioRecipeVersion ? (
+        <div className="editor-command__meta" aria-label={t("transcriptEditorHeader.metaLabel")}>
+          {showV3Meta ? (
+            <span
+              className={`editor-command__meta-item${translationQualityContract?.tts_ready ? "" : " is-attention"}`}
+              title={translationRecipeVersion ?? undefined}
+            >
+              <span className="editor-command__meta-kicker">V3</span>
+              <span>
+                {filledCount}/{totalCount} {t("transcriptEditorHeader.metaFilled")}
+                <span className="editor-command__meta-sep" aria-hidden="true">
+                  ·
+                </span>
+                {qualityStatus}
+              </span>
+            </span>
+          ) : null}
+          {showV3Meta && audioRecipeVersion ? (
+            <span className="editor-command__meta-divider" aria-hidden="true" />
+          ) : null}
+          {audioRecipeVersion && shortAudioRecipe ? (
+            <span className="editor-command__meta-item" title={audioRecipeVersion}>
+              <span className="editor-command__meta-kicker">{t("transcriptEditorHeader.metaAudio")}</span>
+              <span>{shortAudioRecipe}</span>
+            </span>
+          ) : null}
+        </div>
+      ) : null}
     </header>
   );
 }

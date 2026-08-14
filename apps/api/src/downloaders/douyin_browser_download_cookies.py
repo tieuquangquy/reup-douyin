@@ -31,8 +31,16 @@ class BrowserDownloadCookieExport:
     cookie_source: str = "browser_live"
 
 
-def _account_for_workspace(db: Session, workspace_id: UUID):
+def _account_for_workspace(db: Session, workspace_id: UUID, account_id: UUID | None = None):
     service = DouyinAccountService(db)
+    if account_id is not None:
+        try:
+            account = service.get_account(account_id)
+        except Exception:
+            return None
+        if getattr(account, "workspace_id", None) != workspace_id:
+            return None
+        return account
     account = service.default_account(workspace_id=workspace_id)
     if account is None:
         active_accounts = service.list_accounts(
@@ -43,13 +51,17 @@ def _account_for_workspace(db: Session, workspace_id: UUID):
     return account
 
 
-def sync_download_cookie_store_from_live_browser(db: Session, workspace_id: UUID) -> BrowserDownloadCookieExport | None:
+def sync_download_cookie_store_from_live_browser(
+    db: Session,
+    workspace_id: UUID,
+    account_connection_id: UUID | None = None,
+) -> BrowserDownloadCookieExport | None:
     """Flush live Playwright cookies to shared store (API process owns the browser)."""
     settings = get_settings()
     if not settings.douyin_persistent_browser_profile_enabled:
         return None
 
-    account = _account_for_workspace(db, workspace_id)
+    account = _account_for_workspace(db, workspace_id, account_connection_id)
     if account is None:
         return None
 
@@ -97,12 +109,16 @@ def sync_download_cookie_store_from_live_browser(db: Session, workspace_id: UUID
     )
 
 
-def resolve_browser_download_cookies(db: Session, workspace_id: UUID) -> BrowserDownloadCookieExport | None:
+def resolve_browser_download_cookies(
+    db: Session,
+    workspace_id: UUID,
+    account_connection_id: UUID | None = None,
+) -> BrowserDownloadCookieExport | None:
     settings = get_settings()
     if not settings.douyin_persistent_browser_profile_enabled:
         return None
 
-    account = _account_for_workspace(db, workspace_id)
+    account = _account_for_workspace(db, workspace_id, account_connection_id)
     if account is None:
         return None
 

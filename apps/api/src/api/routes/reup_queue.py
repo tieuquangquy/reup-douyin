@@ -24,6 +24,10 @@ from src.schemas.reup_queue import (
 from src.schemas.candidates import CandidateSourceVideoSummary
 from src.schemas.capture_inbox import CaptureSessionListResponse, CaptureSessionResponse
 from src.services.export_handoff_service import BatchOperationResult, ExportHandoffError, ExportHandoffService
+from src.services.frontend_core_runtime import (
+    FrontendCoreRuntimeError,
+    assert_expected_stage_versions,
+)
 from src.services.reup_queue_download_sync import next_action_for_item
 from src.services.reup_queue_service import (
     ReupQueueError,
@@ -117,9 +121,33 @@ def _queue_item_response(
     dialogue = _dialogue_summary_from_source_video(source_video)
     job_id = getattr(job, "id", None) if job is not None else item.job_id
     job_status = None
+    job_phase = None
+    job_phase_current = None
+    job_phase_total = None
     if job is not None:
         status = getattr(job, "status", None)
         job_status = status.value if status is not None and hasattr(status, "value") else status
+        current_step_key = getattr(job, "current_step_key", None)
+        for step in list(getattr(job, "steps", None) or []):
+            if current_step_key and getattr(step, "step_key", None) != current_step_key:
+                continue
+            metadata = dict(getattr(step, "metadata_json", None) or {})
+            for key in (
+                "download_phase",
+                "analysis_phase",
+                "translation_phase",
+                "tts_phase",
+                "ocr_phase",
+                "quality_phase",
+            ):
+                value = metadata.get(key)
+                if value:
+                    job_phase = str(value)
+                    job_phase_current = metadata.get(f"{key}_current")
+                    job_phase_total = metadata.get(f"{key}_total")
+                    break
+            if job_phase:
+                break
     return ReupQueueItemResponse.model_validate(
         {
             "id": item.id,
@@ -157,6 +185,9 @@ def _queue_item_response(
             "job_type": _job_type_value(job),
             "job_status": job_status,
             "job_progress_percent": int(job.progress_percent) if job is not None else None,
+            "job_phase": job_phase,
+            "job_phase_current": job_phase_current,
+            "job_phase_total": job_phase_total,
             "job_error_code": job.error_code if job is not None else None,
             "job_error_message": job.error_message if job is not None else None,
             "render_output_id": item.render_output_id,
@@ -243,6 +274,10 @@ def run_reup_queue_action(
     service: ReupQueueService = Depends(get_reup_queue_service),
 ) -> ReupQueueActionResponse:
     try:
+        assert_expected_stage_versions(request.expected_stage_versions)
+    except FrontendCoreRuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    try:
         item = service.apply_action(
             item_id,
             action=request.action,
@@ -262,6 +297,10 @@ def run_reup_queue_batch_action(
     request: ReupQueueBatchActionRequest,
     service: ExportHandoffService = Depends(get_export_handoff_service),
 ) -> BatchOperationResponse:
+    try:
+        assert_expected_stage_versions(request.expected_stage_versions)
+    except FrontendCoreRuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     try:
         result = service.run_batch_action(
             action=request.action,

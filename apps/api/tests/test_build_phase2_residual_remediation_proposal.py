@@ -9,13 +9,17 @@ from scripts.build_phase2_residual_remediation_proposal import (
     _active_expansion_target,
     _same_content_translation,
     build_boundary_scan_frames,
+    classify_phase1_geometry_overlap,
     cluster_residual_detections,
+    cluster_reviewable_residual_detections,
     dominant_active_window,
+    encoded_temporal_geometry_authority,
     has_approved_translation_authority,
     infer_contiguous_hit_window,
     match_source_box,
     match_source_cluster_crop,
     match_source_box_for_geometry_expansion,
+    preflight_source_bound_temporal_matches,
     refine_hit_boundaries,
     select_residual_authority,
     source_match_cluster,
@@ -41,6 +45,275 @@ class _Box:
 
 
 class Phase2ResidualRemediationProposalTests(unittest.TestCase):
+    def test_reviewable_clusters_exclude_raw_protected_or_unreviewed_rows(self) -> None:
+        detections = [
+            {
+                "frame_index": frame,
+                "text": text,
+                "confidence": 0.9,
+                "geometry": geometry,
+            }
+            for frame, text, geometry in [
+                (10, "保留源文字", {"x": 0.1, "y": 0.1, "width": 0.3, "height": 0.04}),
+                (11, "保留源文字", {"x": 0.1, "y": 0.1, "width": 0.3, "height": 0.04}),
+                (20, "编辑字幕", {"x": 0.2, "y": 0.8, "width": 0.4, "height": 0.05}),
+                (21, "编辑字慕", {"x": 0.2, "y": 0.8, "width": 0.4, "height": 0.05}),
+            ]
+        ]
+        review_objects = [
+            {
+                "content_id": "residual_content_editor",
+                "text": "编辑字幕",
+                "start_frame": 20,
+                "end_frame": 21,
+                "geometry": {"x": 0.2, "y": 0.8, "width": 0.4, "height": 0.05},
+            }
+        ]
+
+        clusters = cluster_reviewable_residual_detections(
+            detections,
+            review_objects,
+        )
+
+        self.assertEqual(len(clusters), 1)
+        self.assertEqual(clusters[0]["content_id"], "residual_content_editor")
+        self.assertEqual(
+            [row["frame_index"] for row in clusters[0]["detections"]],
+            [20, 21],
+        )
+
+    def test_dense_long_encoded_caption_is_bounded_temporal_authority(self) -> None:
+        geometry = {"x": 0.2, "y": 0.8, "width": 0.4, "height": 0.05}
+        detections = [
+            {
+                "frame_index": frame,
+                "text": "编辑字幕",
+                "confidence": 0.9,
+                "geometry": geometry,
+                "temporal_confirmation": {
+                    "status": "CONFIRMED_ON_ADJACENT_FRAME",
+                    "match": {"frame_index": frame - 1, "geometry": geometry},
+                },
+            }
+            for frame in range(100, 132)
+        ]
+        cluster = {
+            "review_object": {
+                "geometry": geometry,
+                "start_frame": 100,
+                "end_frame": 131,
+            },
+            "detections": detections,
+        }
+
+        authority = encoded_temporal_geometry_authority(cluster, frame_count=500)
+
+        self.assertIsNotNone(authority)
+        assert authority is not None
+        self.assertEqual(authority["mode"], "dense_temporal_object")
+        self.assertEqual(
+            (authority["start_frame"], authority["end_frame"]),
+            (100, 131),
+        )
+
+    def test_sparse_long_encoded_noise_is_not_geometry_authority(self) -> None:
+        geometry = {"x": 0.2, "y": 0.8, "width": 0.4, "height": 0.05}
+        cluster = {
+            "review_object": {"geometry": geometry},
+            "detections": [
+                {
+                    "frame_index": frame,
+                    "text": "编辑字幕",
+                    "confidence": 0.9,
+                    "geometry": geometry,
+                    "temporal_confirmation": {},
+                }
+                for frame in (100, 115, 131)
+            ],
+        }
+
+        self.assertIsNone(
+            encoded_temporal_geometry_authority(cluster, frame_count=500)
+        )
+
+    def test_bounded_half_sampled_caption_with_adjacent_confirmation_is_authority(self) -> None:
+        geometry = {"x": 0.2, "y": 0.8, "width": 0.4, "height": 0.05}
+        frames = list(range(100, 151, 2))
+        cluster = {
+            "review_object": {"geometry": geometry},
+            "detections": [
+                {
+                    "frame_index": frame,
+                    "text": "编辑字幕",
+                    "confidence": 0.9,
+                    "geometry": geometry,
+                    "temporal_confirmation": {
+                        "status": "CONFIRMED_ON_ADJACENT_FRAME",
+                        "match": {"frame_index": frame - 1, "geometry": geometry},
+                    },
+                }
+                for frame in frames
+            ],
+        }
+
+        authority = encoded_temporal_geometry_authority(cluster, frame_count=500)
+
+        self.assertIsNotNone(authority)
+        assert authority is not None
+        self.assertEqual(authority["mode"], "dense_temporal_object")
+
+    def test_reuses_source_bound_adjacent_preflight_when_crop_reprobe_misses(self) -> None:
+        detection = {
+            "frame_index": 0,
+            "text": "正饰分享",
+            "confidence": 0.807,
+            "geometry": {
+                "x": 0.182,
+                "y": 0.710,
+                "width": 0.704,
+                "height": 0.069,
+            },
+            "temporal_confirmation": {
+                "status": "CONFIRMED_ON_ADJACENT_FRAME",
+                "match": {
+                    "frame_index": 1,
+                    "text": "正饰分享",
+                    "confidence": 0.807,
+                    "geometry": {
+                        "x": 0.182,
+                        "y": 0.710,
+                        "width": 0.704,
+                        "height": 0.069,
+                    },
+                },
+            },
+        }
+        cluster = cluster_residual_detections([detection])[0]
+        residual = {
+            "policy_version": "source_bound_temporal_cjk_confirmation_v2",
+            "complete": True,
+            "error": None,
+            "source_detections": [
+                {
+                    "frame_index": 0,
+                    "text": "正饰分享",
+                    "confidence": 0.807,
+                    "geometry": dict(detection["geometry"]),
+                }
+            ],
+        }
+
+        matches = preflight_source_bound_temporal_matches(
+            residual,
+            cluster,
+            frame_count=100,
+        )
+
+        self.assertEqual([row["frame_index"] for row in matches], [0, 1])
+        self.assertTrue(matches[0]["source_bound_preflight_authority"])
+
+    def test_preflight_fallback_requires_same_frame_source_ocr(self) -> None:
+        detection = {
+            "frame_index": 0,
+            "text": "耳饰分享",
+            "confidence": 0.9,
+            "geometry": {"x": 0.1, "y": 0.7, "width": 0.7, "height": 0.07},
+            "temporal_confirmation": {
+                "status": "CONFIRMED_ON_ADJACENT_FRAME",
+                "match": {
+                    "frame_index": 1,
+                    "text": "耳饰分享",
+                    "confidence": 0.9,
+                    "geometry": {"x": 0.1, "y": 0.7, "width": 0.7, "height": 0.07},
+                },
+            },
+        }
+        residual = {
+            "policy_version": "source_bound_temporal_cjk_confirmation_v2",
+            "complete": True,
+            "source_detections": [],
+        }
+
+        self.assertEqual(
+            preflight_source_bound_temporal_matches(
+                residual,
+                cluster_residual_detections([detection])[0],
+                frame_count=100,
+            ),
+            [],
+        )
+
+    def test_preflight_fallback_rejects_non_adjacent_confirmation(self) -> None:
+        geometry = {"x": 0.1, "y": 0.7, "width": 0.7, "height": 0.07}
+        detection = {
+            "frame_index": 10,
+            "text": "耳饰分享",
+            "confidence": 0.9,
+            "geometry": geometry,
+            "temporal_confirmation": {
+                "status": "CONFIRMED_ON_ADJACENT_FRAME",
+                "match": {
+                    "frame_index": 12,
+                    "text": "耳饰分享",
+                    "confidence": 0.9,
+                    "geometry": geometry,
+                },
+            },
+        }
+        residual = {
+            "policy_version": "source_bound_temporal_cjk_confirmation_v2",
+            "complete": True,
+            "source_detections": [
+                {
+                    "frame_index": 10,
+                    "text": "耳饰分享",
+                    "confidence": 0.9,
+                    "geometry": geometry,
+                }
+            ],
+        }
+
+        self.assertEqual(
+            preflight_source_bound_temporal_matches(
+                residual,
+                cluster_residual_detections([detection])[0],
+                frame_count=100,
+            ),
+            [],
+        )
+    def test_protected_phase1_overlap_is_evidence_not_duplicate_render(self) -> None:
+        self.assertEqual(
+            classify_phase1_geometry_overlap(
+                text_id="sub_01",
+                existing_content={},
+                residual_text="教程",
+                active_render_text_ids={"sub_08"},
+            ),
+            "PROTECTED_EVIDENCE",
+        )
+
+    def test_active_phase1_overlap_still_fails_closed_on_conflicting_text(self) -> None:
+        self.assertEqual(
+            classify_phase1_geometry_overlap(
+                text_id="sub_08",
+                existing_content={"ocr_text_approved": "原有字幕"},
+                residual_text="不同字幕",
+                active_render_text_ids={"sub_08"},
+            ),
+            "CONFLICTING_RENDER_CONTENT",
+        )
+
+    def test_active_phase1_overlap_reuses_exact_render_content(self) -> None:
+        self.assertEqual(
+            classify_phase1_geometry_overlap(
+                text_id="sub_08",
+                existing_content={"ocr_text_approved": "教程"},
+                residual_text="教程",
+                active_render_text_ids={"sub_08"},
+            ),
+            "SAME_RENDER_CONTENT",
+        )
+
     def test_boundary_scan_covers_stale_window_and_later_residual(self) -> None:
         frames, scan_start, scan_end = build_boundary_scan_frames(
             start_frame=424,

@@ -63,11 +63,14 @@ class RuntimeCrashReleaseTests(unittest.TestCase):
         runner = MagicMock()
         runner.release_stale_running_locks.return_value = 0
         runner.release_orphaned_locks.return_value = 1
+        runner.release_failed_execution_locks.return_value = 1
 
         releases_before_crash: list[int] = []
 
         def crash(_message=None):
-            releases_before_crash.append(runner.release_orphaned_locks.call_count)
+            releases_before_crash.append(
+                runner.release_failed_execution_locks.call_count
+            )
             worker.stop()
             raise RuntimeError("register_assets exploded")
 
@@ -79,9 +82,12 @@ class RuntimeCrashReleaseTests(unittest.TestCase):
         ):
             worker.run_forever()
 
-        runner.release_orphaned_locks.assert_called_with("local-worker-1")
+        runner.release_failed_execution_locks.assert_called_once_with(
+            "local-worker-1",
+            error_type="RuntimeError",
+        )
         self.assertGreater(
-            runner.release_orphaned_locks.call_count,
+            runner.release_failed_execution_locks.call_count,
             releases_before_crash[0],
             "The crashed job must be requeued right away, not left RUNNING",
         )

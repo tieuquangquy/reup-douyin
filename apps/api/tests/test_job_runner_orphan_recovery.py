@@ -13,6 +13,90 @@ from src.services.job_runner import JobRunner, StepHandlerResult
 
 
 class ReleaseOrphanedLocksTests(unittest.TestCase):
+    def test_live_heartbeat_exposes_subphase_and_never_regresses_progress(self) -> None:
+        step = SimpleNamespace(
+            progress_percent=74,
+            metadata_json={"ocr_phase": "phase1_complete"},
+        )
+        job = SimpleNamespace(progress_percent=81, updated_at=None, steps=[step])
+        runner = JobRunner(MagicMock())
+
+        def regress_progress(row):  # noqa: ANN001
+            row.progress_percent = 73
+            return row
+
+        runner.service.refresh_progress = regress_progress
+        runner._live_heartbeat(
+            job,
+            step,
+            metadata_key="ocr_phase",
+            phase="phase2_local_ocr|8|15",
+            progress_percent=50,
+        )
+
+        self.assertEqual(step.progress_percent, 74)
+        self.assertEqual(job.progress_percent, 81)
+        self.assertEqual(step.metadata_json["ocr_phase"], "phase2_local_ocr")
+        self.assertEqual(step.metadata_json["ocr_phase_current"], 8)
+        self.assertEqual(step.metadata_json["ocr_phase_total"], 15)
+
+    def test_same_process_error_is_not_reported_as_worker_orphaned(self) -> None:
+        job_id = uuid4()
+        step = SimpleNamespace(
+            step_key="translate_segments",
+            status=JobStepStatus.RUNNING,
+            progress_percent=25,
+            error_code=None,
+            error_message=None,
+            metadata_json={"translation_phase": "translate_start"},
+            job_id=job_id,
+        )
+        job = SimpleNamespace(
+            id=job_id,
+            job_type=JobType.BUILD_TRANSLATION_DRAFT,
+            status=JobStatus.RUNNING,
+            locked_by="local-worker-1",
+            locked_at=datetime.now(UTC),
+            scheduled_at=None,
+            steps=[step],
+            attempts=1,
+            max_attempts=3,
+            retryable=True,
+            error_code=None,
+            error_message=None,
+            metadata_json={},
+        )
+        db = MagicMock()
+        db.scalars.return_value.all.return_value = [job]
+        runner = JobRunner(db)
+        runner.service = MagicMock()
+        runner.service.refresh_progress.side_effect = lambda j: j
+
+        def transition_job(row, status, **kwargs):
+            row.status = status
+            row.error_code = kwargs.get("error_code")
+            row.error_message = kwargs.get("error_message")
+
+        def transition_step(row, status, **kwargs):
+            row.status = status
+            row.error_code = kwargs.get("error_code")
+            row.error_message = kwargs.get("error_message")
+
+        runner.service.transition_job.side_effect = transition_job
+        runner.service.transition_step.side_effect = transition_step
+
+        count = runner.release_failed_execution_locks(
+            "local-worker-1",
+            error_type="TimeoutError",
+        )
+
+        self.assertEqual(count, 1)
+        self.assertEqual(job.status, JobStatus.RETRYABLE)
+        self.assertEqual(job.error_code, "WORKER_EXECUTION_ERROR")
+        self.assertEqual(step.error_code, "WORKER_EXECUTION_ERROR")
+        self.assertNotIn("restarted", job.error_message.casefold())
+        self.assertIn("TimeoutError", job.error_message)
+
     def test_release_orphaned_locks_requeues_running_job_for_same_worker(self) -> None:
         job_id = uuid4()
         step = SimpleNamespace(

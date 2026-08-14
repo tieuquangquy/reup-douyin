@@ -388,7 +388,7 @@ class RunPhase4PreflightTests(unittest.TestCase):
         self.assertEqual(meta["status"], "PHASE4_PREFLIGHT_BLOCKED")
         self.assertEqual(meta["final_render_gate"], "BLOCKED_VISUAL_RESIDUAL_CJK")
 
-    def test_unconfirmed_single_frame_residual_is_audited_without_blocking(self) -> None:
+    def test_unconfirmed_single_frame_residual_fails_closed(self) -> None:
         detection = {
             "frame_index": 10,
             "text": "22.2å…ƒ",
@@ -479,13 +479,10 @@ class RunPhase4PreflightTests(unittest.TestCase):
                 (root / "phase4_preflight_meta.json").read_text(encoding="utf-8")
             )
 
-        self.assertEqual(result, 0)
-        self.assertEqual(meta["status"], "READY_FOR_PHASE4")
-        self.assertEqual(meta["residual_cjk"]["detections"], [])
-        self.assertEqual(
-            meta["residual_cjk"]["temporal_false_positives"][0]["classification"],
-            "TEMPORAL_OCR_SINGLE_FRAME_FALSE_POSITIVE",
-        )
+        self.assertEqual(result, 1)
+        self.assertEqual(meta["status"], "PHASE4_PREFLIGHT_BLOCKED")
+        self.assertEqual(len(meta["residual_cjk"]["detections"]), 1)
+        self.assertEqual(meta["residual_cjk"]["temporal_false_positives"], [])
 
 
 if __name__ == "__main__":

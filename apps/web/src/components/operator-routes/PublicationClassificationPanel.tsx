@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   decideContentClassification,
   fetchContentTopics,
@@ -15,9 +15,19 @@ import type { Job } from "../../types/jobs";
 import { AsyncButton } from "../shared/AsyncButton";
 import { useNotice } from "../shared/NoticeCenter";
 
-
 const ACTIVE_JOB_STATUSES = new Set(["QUEUED", "RUNNING", "RETRYABLE"]);
 
+type ClassificationIconKind = "sync" | "check" | "edit" | "close";
+
+function ClassificationIcon({ kind }: { kind: ClassificationIconKind }) {
+  const paths: Record<ClassificationIconKind, ReactNode> = {
+    sync: <><path d="M20 7v5h-5" /><path d="M4 17v-5h5" /><path d="M6.1 9a7 7 0 0 1 11.8-2L20 9M4 15l2.1 2a7 7 0 0 0 11.8-2" /></>,
+    check: <><circle cx="12" cy="12" r="8.5" /><path d="m8.2 12.2 2.5 2.5 5.2-5.4" /></>,
+    edit: <><path d="M4 20h4l10.5-10.5a2.1 2.1 0 0 0-3-3L5 17z" /><path d="M13.5 6.5l3 3" /></>,
+    close: <><path d="M7 7l10 10" /><path d="M17 7l-10 10" /></>,
+  };
+  return <svg aria-hidden="true" className="publication-library-icon" fill="none" viewBox="0 0 24 24"><g stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8">{paths[kind]}</g></svg>;
+}
 
 function confidenceTone(confidence: number): string {
   if (confidence >= 0.75) return "high";
@@ -25,6 +35,11 @@ function confidenceTone(confidence: number): string {
   return "low";
 }
 
+function shortVersionLabel(value: string | null | undefined): string {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  return text.split(":")[0];
+}
 
 export function PublicationClassificationPanel({ publicationId }: { publicationId: string }) {
   const t = useT();
@@ -166,25 +181,169 @@ export function PublicationClassificationPanel({ publicationId }: { publicationI
   const jobActive = job != null && ACTIVE_JOB_STATUSES.has(job.status);
   const classifierSource = classification ? getClassificationSourcePresentation(classification) : null;
 
-  return <section className="publication-classification">
-    <header>
-      <div><strong>{t("contentClassification.title")}</strong><small>{t("contentClassification.hint")}</small></div>
-      {classification ? <span className={`publication-classification-status is-${classification.decision_status.toLowerCase()}`}>{t(`contentClassification.status.${classification.decision_status}`)}</span> : null}
-    </header>
-    {error ? <div className="publication-classification-error" role="alert">{error}</div> : null}
-    {loading ? <p className="muted">{t("contentClassification.loading")}</p> : !classification ? <div className="publication-classification-empty"><div><strong>{t("contentClassification.noResult")}</strong><small>{t("contentClassification.noResultHint")}</small></div><AsyncButton className="primary" pending={busy === "run"} onClick={() => void runClassification()}>{t("contentClassification.run")}</AsyncButton></div> : <>
-      <div className="publication-classification-result">
-        <div><span>{t("contentClassification.primaryTopic")}</span><strong>{classification.primary_topic_name || classification.primary_topic_code || "—"}</strong><small>{classification.primary_topic_code}</small></div>
-        <div><span>{t("contentClassification.confidence")}</span><strong className={`is-${confidenceTone(classification.confidence)}`}>{Math.round(classification.confidence * 100)}%</strong><small>{classification.classifier_version}</small></div>
-        <div><span>{t("contentClassification.evidenceSources")}</span><strong>{evidence.length}</strong><small>{classification.taxonomy_version}</small></div>
-      </div>
-      {classifierSource ? <div className={`publication-classification-runtime is-${classifierSource.kind.toLowerCase()}`} title={classificationSourceTitle(classifierSource)}><span><i aria-hidden="true" />{t(`classificationSource.${classifierSource.kind}`)}</span><div><strong>{classifierSource.provider}{classifierSource.model ? ` · ${classifierSource.model}` : ""}</strong><small>{classifierSource.promptVersion ? `${t("classificationSource.prompt")} ${classifierSource.promptVersion}` : t("classificationSource.noExternalPrompt")}</small></div></div> : null}
-      {secondaryTopics.length > 0 ? <div className="publication-classification-secondary"><span>{t("contentClassification.secondaryTopics")}</span><div>{secondaryTopics.map((topic, index) => <em key={String(topic.topic_id || topic.code || index)}>{String(topic.name || topic.code || "")}</em>)}</div></div> : null}
-      <div className="publication-classification-rationale"><strong>{t("contentClassification.why")}</strong><small>{classification.rationale || "—"}</small><small>{classifierSource?.networkUsed ? t("contentClassification.aiUsed") : t("contentClassification.localOnly")}</small></div>
-      <details className="publication-classification-evidence"><summary>{t("contentClassification.evidence").replace("{count}", String(evidence.length))}</summary><div>{evidence.length === 0 ? <p className="muted">{t("contentClassification.noEvidence")}</p> : evidence.map((item, index) => <article key={`${item.source}-${item.source_id || index}`}><header><b>{t(`contentClassification.source.${item.source}`)}</b>{item.confidence == null ? null : <span>{Math.round(item.confidence * 100)}%</span>}</header><p>{item.text}</p>{item.matched_keywords.length > 0 ? <footer>{item.matched_keywords.map((keyword) => <em key={keyword}>{keyword.split(":").slice(1).join(":") || keyword}</em>)}</footer> : null}</article>)}</div></details>
-      {job ? <div className={`publication-classification-job is-${job.status.toLowerCase()}`}><i /><div><strong>{t(`contentClassification.jobStatus.${job.status}`)}</strong><small>{t("contentClassification.jobProgress").replace("{id}", job.id.slice(0, 8)).replace("{progress}", String(job.progress_percent))}</small></div></div> : null}
-      {overrideOpen ? <div className="publication-classification-override"><label><span>{t("contentClassification.overrideTopic")}</span><select value={overrideTopicId} onChange={(event) => setOverrideTopicId(event.target.value)}><option value="">{t("contentClassification.selectTopic")}</option>{activeTopics.map((topic) => <option key={topic.id} value={topic.id}>{topic.name} · {topic.code}</option>)}</select></label><label><span>{t("contentClassification.overrideReason")}</span><textarea maxLength={1000} onChange={(event) => setOverrideReason(event.target.value)} value={overrideReason} /></label><footer><button onClick={() => setOverrideOpen(false)} type="button">{t("common.cancel")}</button><AsyncButton className="primary" disabled={!overrideTopicId || !overrideReason.trim()} pending={busy === "override"} onClick={() => void saveOverride()}>{t("contentClassification.saveOverride")}</AsyncButton></footer></div> : null}
-      <footer className="publication-classification-actions"><AsyncButton pending={busy === "run" || jobActive} onClick={() => void runClassification()}>{t("contentClassification.reclassify")}</AsyncButton><AsyncButton disabled={classification.decision_status === "APPROVED" || jobActive} pending={busy === "approve"} onClick={() => void approve()}>{t("contentClassification.approve")}</AsyncButton><button disabled={jobActive} onClick={() => setOverrideOpen((current) => !current)} type="button">{t("contentClassification.override")}</button></footer>
-    </>}
-  </section>;
+  return (
+    <section className="publication-classification">
+      <header>
+        <div>
+          <strong>{t("contentClassification.title")}</strong>
+          <small>{t("contentClassification.hint")}</small>
+        </div>
+        {classification ? (
+          <span className={`publication-classification-status is-${classification.decision_status.toLowerCase()}`}>
+            {t(`contentClassification.status.${classification.decision_status}`)}
+          </span>
+        ) : null}
+      </header>
+      {error ? <div className="publication-classification-error" role="alert">{error}</div> : null}
+      {loading ? (
+        <p className="muted">{t("contentClassification.loading")}</p>
+      ) : !classification ? (
+        <div className="publication-classification-empty">
+          <div>
+            <strong>{t("contentClassification.noResult")}</strong>
+            <small>{t("contentClassification.noResultHint")}</small>
+          </div>
+          <AsyncButton className="primary" leadingIcon={<ClassificationIcon kind="sync" />} pending={busy === "run"} onClick={() => void runClassification()}>
+            {t("contentClassification.run")}
+          </AsyncButton>
+        </div>
+      ) : (
+        <>
+          <div className="publication-classification-result is-sheet">
+            <div>
+              <span>{t("contentClassification.primaryTopic")}</span>
+              <strong title={classification.primary_topic_name || classification.primary_topic_code || undefined}>{classification.primary_topic_name || classification.primary_topic_code || "—"}</strong>
+              <small title={classification.primary_topic_code || undefined}>{classification.primary_topic_code}</small>
+            </div>
+            <div>
+              <span>{t("contentClassification.confidence")}</span>
+              <strong className={`is-${confidenceTone(classification.confidence)}`}>{Math.round(classification.confidence * 100)}%</strong>
+              <small title={classification.classifier_version || undefined}>{shortVersionLabel(classification.classifier_version)}</small>
+            </div>
+            <div>
+              <span>{t("contentClassification.evidenceSources")}</span>
+              <strong>{evidence.length}</strong>
+              <small title={classification.taxonomy_version || undefined}>{shortVersionLabel(classification.taxonomy_version)}</small>
+            </div>
+          </div>
+          <div className="publication-classification-insight">
+            {classifierSource ? (
+              <div className={`publication-classification-runtime is-${classifierSource.kind.toLowerCase()}`} title={classificationSourceTitle(classifierSource)}>
+                <span>
+                  <i aria-hidden="true" />
+                  {t(`classificationSource.${classifierSource.kind}`)}
+                </span>
+                <div>
+                  <strong>
+                    {classifierSource.provider}
+                    {classifierSource.model ? ` · ${classifierSource.model}` : ""}
+                  </strong>
+                  <small title={classifierSource.promptVersion || undefined}>
+                    {classifierSource.promptVersion
+                      ? t("classificationSource.prompt")
+                      : t("classificationSource.noExternalPrompt")}
+                  </small>
+                </div>
+              </div>
+            ) : null}
+            {secondaryTopics.length > 0 ? (
+              <div className="publication-classification-secondary">
+                <span>{t("contentClassification.secondaryTopics")}</span>
+                <div>
+                  {secondaryTopics.map((topic, index) => (
+                    <em key={String(topic.topic_id || topic.code || index)}>{String(topic.name || topic.code || "")}</em>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+            <div className="publication-classification-rationale">
+              <strong>{t("contentClassification.why")}</strong>
+              <small>{classification.rationale || "—"}</small>
+              <small>{classifierSource?.networkUsed ? t("contentClassification.aiUsed") : t("contentClassification.localOnly")}</small>
+            </div>
+          </div>
+          <details className="publication-classification-evidence">
+            <summary>{t("contentClassification.evidence").replace("{count}", String(evidence.length))}</summary>
+            <div>
+              {evidence.length === 0 ? (
+                <p className="muted">{t("contentClassification.noEvidence")}</p>
+              ) : (
+                evidence.map((item, index) => (
+                  <article key={`${item.source}-${item.source_id || index}`}>
+                    <header>
+                      <b>{t(`contentClassification.source.${item.source}`)}</b>
+                      {item.confidence == null ? null : <span>{Math.round(item.confidence * 100)}%</span>}
+                    </header>
+                    <p>{item.text}</p>
+                    {item.matched_keywords.length > 0 ? (
+                      <footer>
+                        {item.matched_keywords.map((keyword) => (
+                          <em key={keyword}>{keyword.split(":").slice(1).join(":") || keyword}</em>
+                        ))}
+                      </footer>
+                    ) : null}
+                  </article>
+                ))
+              )}
+            </div>
+          </details>
+          {job ? (
+            <div className={`publication-classification-job is-${job.status.toLowerCase()}`}>
+              <i />
+              <div>
+                <strong>{t(`contentClassification.jobStatus.${job.status}`)}</strong>
+                <small>
+                  {t("contentClassification.jobProgress")
+                    .replace("{id}", job.id.slice(0, 8))
+                    .replace("{progress}", String(job.progress_percent))}
+                </small>
+              </div>
+            </div>
+          ) : null}
+          {overrideOpen ? (
+            <div className="publication-classification-override">
+              <label>
+                <span>{t("contentClassification.overrideTopic")}</span>
+                <select value={overrideTopicId} onChange={(event) => setOverrideTopicId(event.target.value)}>
+                  <option value="">{t("contentClassification.selectTopic")}</option>
+                  {activeTopics.map((topic) => (
+                    <option key={topic.id} value={topic.id}>
+                      {topic.name} · {topic.code}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span>{t("contentClassification.overrideReason")}</span>
+                <textarea maxLength={1000} onChange={(event) => setOverrideReason(event.target.value)} value={overrideReason} />
+              </label>
+              <footer>
+                <button onClick={() => setOverrideOpen(false)} type="button">
+                  <ClassificationIcon kind="close" />
+                  {t("common.cancel")}
+                </button>
+                <AsyncButton className="primary" disabled={!overrideTopicId || !overrideReason.trim()} leadingIcon={<ClassificationIcon kind="check" />} pending={busy === "override"} onClick={() => void saveOverride()}>
+                  {t("contentClassification.saveOverride")}
+                </AsyncButton>
+              </footer>
+            </div>
+          ) : null}
+          <footer className="publication-classification-actions">
+            <AsyncButton leadingIcon={<ClassificationIcon kind="sync" />} pending={busy === "run" || jobActive} onClick={() => void runClassification()}>
+              {t("contentClassification.reclassify")}
+            </AsyncButton>
+            {classification.decision_status !== "APPROVED" ? (
+              <AsyncButton className="primary" disabled={jobActive} leadingIcon={<ClassificationIcon kind="check" />} pending={busy === "approve"} onClick={() => void approve()}>
+                {t("contentClassification.approve")}
+              </AsyncButton>
+            ) : null}
+            <button className="publication-classification-override-trigger" disabled={jobActive} onClick={() => setOverrideOpen((current) => !current)} type="button">
+              <ClassificationIcon kind="edit" />
+              {t("contentClassification.override")}
+            </button>
+          </footer>
+        </>
+      )}
+    </section>
+  );
 }

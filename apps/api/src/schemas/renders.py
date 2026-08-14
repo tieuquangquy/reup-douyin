@@ -12,12 +12,14 @@ class RenderCreateRequest(BaseModel):
     source_video_id: UUID
     render_mode: str = "final"
     force_refresh: bool = False
+    expected_stage_version: str | None = None
 
 
 class RenderCreateResponse(BaseModel):
     job_id: UUID
     status: JobStatus
     source_video_id: UUID
+    runtime_version: str
 
 
 class RenderOutputResponse(BaseModel):

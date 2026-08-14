@@ -49,10 +49,10 @@ assert.match(reviewPageSource, /ReviewStatusFlow/, "Review Board must present st
 assert.match(reviewPageSource, /useTransition/, "Review status switches must use a non-blocking React transition");
 assert.match(reviewPageSource, /startStatusTransition/, "Status tab changes must enter the transition boundary");
 assert.match(reviewPageSource, /ReviewGalleryPreloading/, "Review Board must provide a dedicated gallery preloading surface");
-assert.match(reviewPageSource, /isStatusPending \? \([\s\S]*<ReviewGalleryPreloading/, "Pending status changes must replace heavy tiles with preloading UI");
-assert.match(reviewPageSource, /displayVisible\.length > 0 \|\| isStatusPending/, "Preloading must remain visible when switching away from an empty status");
+assert.match(reviewPageSource, /galleryBusy \? \([\s\S]*<ReviewGalleryPreloading/, "Pending status changes must replace heavy tiles with preloading UI");
+assert.match(reviewPageSource, /displayVisible\.length > 0 \|\| galleryBusy/, "Preloading must remain visible when switching away from an empty status");
 assert.match(reviewPageSource, /<\/>\s*\)\}\s*\{hasMoreCandidates \|\| totalCount > 0 \? \(/, "Auto-load sentinel must remain mounted outside the preloading tile branch");
-assert.match(reviewPageSource, /disabled=\{mutating \|\| isStatusPending\}/, "Auto-load must pause safely while status tiles transition");
+assert.match(reviewPageSource, /disabled=\{mutating \|\| galleryBusy\}/, "Auto-load must pause safely while status tiles transition");
 assert.match(globalStylesSource, /\.review-board-media-tile\s*\{[^}]*content-visibility: auto;[^}]*contain-intrinsic-size: 510px;/, "Offscreen Review tiles must defer browser layout and paint");
 assert.match(globalStylesSource, /\.review-board-gallery-preloading\s*\{[^}]*min-height: 510px;/, "Preloading UI must reserve a stable gallery height");
 assert.match(apiSource, /statusCounts: payload\.status_counts/, "Candidate API client must expose backend status counts");

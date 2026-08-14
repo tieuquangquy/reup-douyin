@@ -34,7 +34,7 @@ const slimProfileItem = {
   metadata_status: "complete",
   created_at: "2026-07-13T06:00:00.000Z",
   updated_at: "2026-07-13T06:00:00.000Z"
-} as CapturedItem;
+} as unknown as CapturedItem;
 
 const fullItem: CapturedItem = {
   ...slimProfileItem,

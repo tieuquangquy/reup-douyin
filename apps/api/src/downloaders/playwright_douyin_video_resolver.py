@@ -11,6 +11,9 @@ from uuid import UUID
 
 from src.core.settings import get_settings
 from src.downloaders.douyin_video_resolver import DouyinVideoResolveRequest, ResolvedDouyinVideo
+from src.downloaders.douyin_video_resolver import media_quality_sort_key
+from src.downloaders.download_quality_policy import DownloadQualityProfile, WatermarkAuthority
+from src.downloaders.download_staging import download_staging_root, staging_path
 from src.downloaders.errors import DownloadError, DownloadErrorCode
 from src.downloaders.source_video_filename import parse_height_from_format_label
 
@@ -28,6 +31,9 @@ class RankedPlayUrl:
     bitrate: int = 0
     watermark_free: bool = False
     gear_name: str | None = None
+    codec: str | None = None
+    fps: float = 0.0
+    hdr: bool = False
 
     @property
     def format_label(self) -> str:
@@ -38,6 +44,8 @@ class RankedPlayUrl:
             parts.append(f"br{self.bitrate}")
         if self.gear_name:
             parts.append(self.gear_name)
+        if self.codec:
+            parts.append(self.codec)
         return "|".join(parts)
 
 
@@ -94,6 +102,9 @@ def extract_play_urls_from_aweme_payload(payload: dict[str, Any]) -> list[Ranked
                     width=width,
                     bitrate=bitrate,
                     watermark_free=classify_douyin_cdn_watermark_free(url, source="download_addr"),
+                    codec=_codec_from_node(download_addr),
+                    fps=_as_float(download_addr.get("fps")),
+                    hdr=_as_bool(download_addr.get("hdr") or download_addr.get("is_hdr")),
                 )
             )
 
@@ -119,6 +130,9 @@ def extract_play_urls_from_aweme_payload(payload: dict[str, Any]) -> list[Ranked
                         bitrate=bitrate,
                         watermark_free=classify_douyin_cdn_watermark_free(url, source="bit_rate"),
                         gear_name=gear_name,
+                        codec=_codec_from_node(item) or _codec_from_node(play_addr),
+                        fps=_as_float(item.get("fps") or item.get("frame_rate")),
+                        hdr=_as_bool(item.get("hdr") or item.get("is_hdr")),
                     )
                 )
 
@@ -136,6 +150,9 @@ def extract_play_urls_from_aweme_payload(payload: dict[str, Any]) -> list[Ranked
                     width=width,
                     bitrate=bitrate,
                     watermark_free=classify_douyin_cdn_watermark_free(url, source="play_addr"),
+                    codec=_codec_from_node(play_addr),
+                    fps=_as_float(play_addr.get("fps")),
+                    hdr=_as_bool(play_addr.get("hdr") or play_addr.get("is_hdr")),
                 )
             )
 
@@ -148,16 +165,43 @@ def extract_play_urls_from_aweme_payload(payload: dict[str, Any]) -> list[Ranked
     return sorted(best.values(), key=_candidate_sort_key, reverse=True)
 
 
-def _candidate_sort_key(item: RankedPlayUrl) -> tuple[int, int, int, int]:
-    # Prefer no-logo, then max height, then max bitrate, then play/bit_rate over download_addr.
+def _candidate_sort_key(
+    item: RankedPlayUrl,
+    *,
+    quality_profile: str = DownloadQualityProfile.BALANCED_PROCESSING.value,
+    target_long_edge: int = 1920,
+) -> tuple[int, int, int, int, int, int, int]:
+    # Keep browser candidate ordering identical to the cross-resolver policy.
     source_bonus = {"bit_rate": 2, "play_addr": 1, "download_addr": 0}.get(item.source, 0)
-    return (1 if item.watermark_free else 0, item.height, item.bitrate, source_bonus)
+    return media_quality_sort_key(
+        watermark_free=item.watermark_free,
+        width=item.width,
+        height=item.height,
+        codec=item.codec,
+        bitrate=item.bitrate,
+        hdr=item.hdr,
+        source_bonus=source_bonus,
+        target_long_edge=target_long_edge,
+        source_master=str(quality_profile).strip().lower() == DownloadQualityProfile.SOURCE_MASTER.value,
+    )
 
 
-def select_preferred_play_candidate(urls: list[RankedPlayUrl]) -> RankedPlayUrl | None:
+def select_preferred_play_candidate(
+    urls: list[RankedPlayUrl],
+    *,
+    quality_profile: str = DownloadQualityProfile.BALANCED_PROCESSING.value,
+    target_long_edge: int = 1920,
+) -> RankedPlayUrl | None:
     if not urls:
         return None
-    return max(urls, key=_candidate_sort_key)
+    return max(
+        urls,
+        key=lambda item: _candidate_sort_key(
+            item,
+            quality_profile=quality_profile,
+            target_long_edge=target_long_edge,
+        ),
+    )
 
 
 def select_preferred_play_url(urls: list[RankedPlayUrl]) -> str | None:
@@ -176,6 +220,38 @@ def _url_list(addr: dict[str, Any]) -> list[str]:
     return out
 
 
+def _as_float(value: Any) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return number if number > 0 else 0.0
+
+
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "hdr"}
+
+
+def _codec_from_node(node: Any) -> str | None:
+    if not isinstance(node, dict):
+        return None
+    if node.get("is_bytevc1") or node.get("is_h265") or node.get("is_hevc"):
+        return "hevc"
+    raw = node.get("codec") or node.get("codec_name") or node.get("video_codec")
+    if not isinstance(raw, str):
+        return None
+    value = raw.strip().lower()
+    if any(token in value for token in ("h264", "avc")):
+        return "h264"
+    if any(token in value for token in ("h265", "hevc", "bytevc")):
+        return "hevc"
+    if "av1" in value:
+        return "av1"
+    return value or None
+
+
 def _find_aweme_detail(payload: dict[str, Any]) -> dict[str, Any] | None:
     if isinstance(payload.get("aweme_detail"), dict):
         return payload["aweme_detail"]
@@ -188,22 +264,29 @@ def _find_aweme_detail(payload: dict[str, Any]) -> dict[str, Any] | None:
         return data["aweme_detail"]
     if isinstance(payload.get("aweme"), dict):
         return payload["aweme"]
+    if isinstance(payload.get("video"), dict):
+        return payload
     return None
 
 
 def playwright_download_staging_root() -> Path:
-    settings = get_settings()
-    override = getattr(settings, "douyin_playwright_download_staging_dir", None)
-    if isinstance(override, str) and override.strip():
-        return Path(override).expanduser().resolve()
-    return (_REPO_ROOT / ".douyin_profiles" / "download_staging").resolve()
+    return download_staging_root()
 
 
-def staging_path_for_aweme(aweme_id: str) -> Path:
-    safe = re.sub(r"[^0-9A-Za-z_-]", "", aweme_id) or "unknown"
-    root = playwright_download_staging_root()
-    root.mkdir(parents=True, exist_ok=True)
-    return root / f"{safe}.mp4"
+def staging_path_for_aweme(
+    aweme_id: str,
+    *,
+    workspace_id: object | None = None,
+    account_connection_id: object | None = None,
+    transfer_id: object | None = None,
+) -> Path:
+    return staging_path(
+        aweme_id=aweme_id,
+        workspace_id=workspace_id,
+        account_connection_id=account_connection_id,
+        transfer_id=transfer_id,
+        extension="mp4",
+    )
 
 
 class PlaywrightDouyinVideoResolver:
@@ -224,36 +307,107 @@ class PlaywrightDouyinVideoResolver:
         except Exception:
             return False
 
+    def discover(self, request: DouyinVideoResolveRequest) -> list[ResolvedDouyinVideo]:
+        from src.services.douyin_browser_context_registry import douyin_browser_context_registry
+
+        candidates = douyin_browser_context_registry.discover_aweme_video(
+            aweme_id=request.aweme_id,
+            page_url=request.page_url,
+            account_connection_id=request.account_connection_id,
+            timeout_ms=min(
+                self.timeout_ms,
+                max(1_000, int(request.timeout_seconds or self.timeout_ms / 1000) * 1_000),
+            ),
+            quality_profile=request.quality_profile,
+            target_long_edge=request.target_long_edge,
+        )
+        return [
+            ResolvedDouyinVideo(
+                content=None,
+                mime_type="video/mp4",
+                filename=None,
+                resolver_name="playwright_discovery",
+                format_id=item.format_label,
+                height=item.height,
+                width=item.width,
+                bitrate=item.bitrate,
+                codec=item.codec,
+                fps=item.fps or None,
+                hdr=item.hdr,
+                watermark_free=item.watermark_free,
+                watermark_authority=(
+                    WatermarkAuthority.VERIFIED_PLAYBACK_PROVENANCE.value
+                    if item.watermark_free
+                    else WatermarkAuthority.EXPLICIT_WATERMARKED.value
+                ),
+                candidate_url=item.url,
+            )
+            for item in candidates
+        ]
     def resolve(self, request: DouyinVideoResolveRequest) -> ResolvedDouyinVideo:
         from src.services.douyin_browser_context_registry import douyin_browser_context_registry
 
         account_id = getattr(request, "account_connection_id", None)
+        staging = staging_path_for_aweme(
+            request.aweme_id,
+            workspace_id=request.workspace_id,
+            account_connection_id=request.account_connection_id,
+            transfer_id=request.transfer_id,
+        )
+        request_timeout_ms = (
+            max(1_000, int(request.timeout_seconds) * 1_000)
+            if request.timeout_seconds is not None
+            else self.timeout_ms
+        )
         downloaded = douyin_browser_context_registry.download_aweme_video(
             aweme_id=request.aweme_id,
             page_url=request.page_url,
             account_connection_id=account_id,
-            timeout_ms=self.timeout_ms,
+            timeout_ms=min(self.timeout_ms, request_timeout_ms),
+            destination_path=staging,
+            on_progress=request.on_progress,
+            quality_profile=request.quality_profile,
+            target_long_edge=request.target_long_edge,
+            preferred_candidate_url=request.preferred_candidate_url,
+            preferred_format_id=request.preferred_format_id,
         )
-        content = downloaded.content
         format_id = downloaded.format_id
         watermark_free = downloaded.watermark_free
-        if not content:
-            raise DownloadError(DownloadErrorCode.VALIDATION_FAILED, "Playwright Douyin download returned empty content")
-        staging = staging_path_for_aweme(request.aweme_id)
-        staging.write_bytes(content)
+        resolved_path = Path(downloaded.local_path).resolve() if downloaded.local_path else staging
+        if not resolved_path.is_file() or resolved_path.stat().st_size <= 0:
+            if downloaded.content:
+                temp = staging.with_suffix(staging.suffix + ".part")
+                temp.write_bytes(downloaded.content)
+                temp.replace(staging)
+                resolved_path = staging
+            else:
+                raise DownloadError(DownloadErrorCode.VALIDATION_FAILED, "Playwright Douyin download returned empty content")
         height = downloaded.height if isinstance(downloaded.height, int) and downloaded.height > 0 else None
         if height is None:
             height = parse_height_from_format_label(format_id)
         return ResolvedDouyinVideo(
-            content=content,
+            content=None,
             mime_type="video/mp4",
             filename=f"{request.aweme_id}.mp4",
             resolver_name="playwright_browser",
             format_id=format_id,
             height=height,
+            width=downloaded.width,
+            bitrate=downloaded.bitrate,
+            codec=downloaded.codec,
+            fps=downloaded.fps,
+            hdr=downloaded.hdr,
             watermark_free=watermark_free,
+            watermark_authority=(
+                WatermarkAuthority.VERIFIED_PLAYBACK_PROVENANCE.value
+                if watermark_free
+                else WatermarkAuthority.EXPLICIT_WATERMARKED.value
+            ),
             author_handle=downloaded.author_handle,
             author_display_name=downloaded.author_display_name,
+            local_path=str(resolved_path),
+            size_bytes=resolved_path.stat().st_size,
+            cleanup_local_path=True,
         )
 
 

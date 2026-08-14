@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
@@ -43,7 +44,7 @@ class RenderService:
         self.runner = runner or FfmpegRenderRunner()
         self.probe_service = VideoProbeService(self.storage)
 
-    def create_render_job(self, request: RenderRequest):
+    def create_render_job(self, request: RenderRequest, *, commit: bool = True):
         source_video = self._load_source_video(request.source_video_id)
         from src.services.quality_localization_service import (
             QUALITY_METADATA_KEY,
@@ -81,14 +82,24 @@ class RenderService:
                 "workflow_version": workflow_version,
             },
             idempotency_key=None,
+            commit=commit,
         )
         if workflow_version == QUALITY_WORKFLOW_VERSION:
             bind_job_to_recipe_reference(job, recipe_reference)
-            self.db.commit()
+            if commit:
+                self.db.commit()
+            else:
+                self.db.flush()
         logger.info("render_job_created", extra={"job_id": str(job.id), "source_video_id": str(source_video.id)})
         return job
 
-    def run_render(self, request: RenderRequest, *, job_id: UUID | None = None) -> RenderPipelineResult:
+    def run_render(
+        self,
+        request: RenderRequest,
+        *,
+        job_id: UUID | None = None,
+        on_progress: Callable[[str, int | None], None] | None = None,
+    ) -> RenderPipelineResult:
         source_video = self._load_source_video(request.source_video_id)
         context = self._storage_context(source_video)
         from src.services.quality_localization_service import (
@@ -136,6 +147,7 @@ class RenderService:
                 started_at=started_at,
                 job_id=job_id,
                 quality_service=quality_service,
+                on_progress=on_progress,
             )
 
         try:
@@ -265,6 +277,7 @@ class RenderService:
         started_at: datetime,
         job_id: UUID | None,
         quality_service,
+        on_progress: Callable[[str, int | None], None] | None,
     ) -> RenderPipelineResult:
         """Persist the same adaptive Phase 4 output validated by regression."""
 
@@ -273,6 +286,7 @@ class RenderService:
             final_path = quality_service.run_final_adaptive(
                 source_video.id,
                 operator_id="frontend_operator",
+                on_progress=on_progress,
             )
             output_key = final_path.resolve().relative_to(self.storage.root).as_posix()
             output_probe = self.probe_service.probe(output_key)
@@ -384,6 +398,24 @@ class RenderService:
             )
         render.status = RenderOutputStatus.APPROVED
         render.metadata_json = self._merge_final_review_metadata(render.metadata_json, {"approved_at": datetime.now(UTC).isoformat()})
+        if bool(dict(render.metadata_json or {}).get("quality_workflow")):
+            from src.services.quality_handoff_service import (
+                QualityHandoffError,
+                QualityHandoffService,
+            )
+
+            try:
+                QualityHandoffService(
+                    self.db, storage=self.storage
+                ).approve_final(
+                    render.source_video_id,
+                    operator_id="frontend_operator",
+                )
+            except QualityHandoffError as exc:
+                raise RenderPipelineError(
+                    RenderPipelineErrorCode.OUTPUT_VALIDATION_FAILED,
+                    f"Phase 5 final approval failed: {exc}",
+                ) from exc
         self.db.commit()
         self.db.refresh(render)
         logger.info("render_output_approved", extra={"render_id": str(render.id), "source_video_id": str(render.source_video_id)})
@@ -449,6 +481,18 @@ class RenderService:
             )
             item.metadata_json = {
                 **dict(item.metadata_json or {}),
+                # A successful independent Final Review retry supersedes a
+                # stale quality hold from an older OCR/preview attempt. Keep
+                # the durable history fields, but move the active UI authority
+                # to the real completed render boundary.
+                "pipeline_hold": False,
+                "pipeline_step": "ready_final",
+                "quality_workflow_stage": "FINAL_READY",
+                "render_job_id": (
+                    str(render.created_by_job_id)
+                    if render.created_by_job_id is not None
+                    else None
+                ),
                 "render_qa": {
                     "status": "pass",
                     "summary": "Adaptive encoded-output QA PASS",

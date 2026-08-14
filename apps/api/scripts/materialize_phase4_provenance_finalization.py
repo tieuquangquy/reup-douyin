@@ -48,7 +48,7 @@ EDITOR_CAPTION_SUPPLEMENTAL_COVERS: dict[str, dict[str, Any]] = {
         "parent_text_id": "sub_20",
         "geometry": {"x": 0.405, "y": 0.07, "width": 0.05, "height": 0.06},
         "mask_mode": "full_roi_plate",
-        "strategy": "spatial_telea_r9",
+        "strategy": "gaussian_blur_plate_v1",
     },
     # On an already-materialized v12 case sub_28 starts at frame 188. This
     # bounded cover-only track handles frames 185-187, including the single
@@ -70,7 +70,7 @@ EDITOR_CAPTION_SUPPLEMENTAL_COVERS: dict[str, dict[str, Any]] = {
         "parent_text_id": "sub_28",
         "geometry": {"x": 0.22, "y": 0.90, "width": 0.10, "height": 0.10},
         "mask_mode": "full_roi_plate",
-        "strategy": "spatial_telea_r9",
+        "strategy": "gaussian_blur_plate_v1",
         "start_frame": 188,
         "end_frame": 439,
     },

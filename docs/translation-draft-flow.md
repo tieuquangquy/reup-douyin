@@ -1,5 +1,56 @@
 # Translation Draft Flow
 
+## Translation V5 recipe
+
+The active recipe is `translation-v3-contextual-semantic-utterance-ranking-5`. Approved
+semantic utterances remain the only speech authority; raw ASR timing units, video
+caption, title and hashtags are never treated as complete dialogue sentences.
+
+Before the first provider call, `semantic-dialogue-segmentation-v1` reconstructs each
+utterance from the immutable local ASR token timeline. It aligns partial text duplicated
+at FunASR chunk seams, scores boundaries with pause/punctuation/speaker/discourse
+evidence, vetoes incomplete clauses and lexical splits, and persists token-range lineage
+plus an authority hash. A failed authority/overlap contract blocks Translation locally.
+
+1. Build non-overlapping dialogue blocks (up to 10 beats or 30 seconds) with two
+   neighboring beats on each side as read-only context.
+2. Send one structured request per block with speaker labels, timeline budgets,
+   glossary and non-authoritative exact translation memory. Candidate count is adaptive:
+   one for clean/high-confidence spacious beats, two for moderate timing risk, and three
+   for short, low-confidence or protected-token beats.
+3. Calibrate the spoken-unit rate from recent TTS clips for the active provider,
+   voice ID and speaking rate. Fewer than three valid samples falls back to the
+   provider-neutral default, so Translation never has to synthesize a probe.
+4. Run local deterministic gates and ranking: CJK removal, protected number/unit/URL
+   checks, glossary consistency, speech-budget fit, naturalness and prosody. A
+   provider self-score is only a tie-breaker and never replaces a hard local gate.
+5. Select the best candidate. Only a selected candidate outside the 15% over-duration
+   limit enters the existing controlled rewrite path.
+6. Checkpoint every completed block in the durable job metadata. A retry resumes from
+   the first incomplete block and does not repeat completed provider calls.
+7. Persist the immutable V3 fingerprint, candidate history and a quality contract with
+   `filled_count`, `review_required_count`, `blocked_count`, `complete` and `tts_ready`.
+   Hard-valid alternative candidates are forwarded to Temporal TTS V3 so an actual
+   duration miss can be corrected locally without translating the whole dialogue again.
+8. Persist `translation_authority_v1`, binding the source transcript hash, prompt hash,
+   provider/model identity, quality-contract hash and current TranslationSegment rows.
+   TTS validates this manifest and fails closed when transcript or translation data changes.
+
+The run fingerprint binds the transcript timing/text, preset, provider/model, prompt,
+glossary, speech policy and recipe version. A non-forced rerun with the same fingerprint
+reuses the current verified draft; a forced rerun creates a new immutable version.
+
+Runtime hard rules always override conflicting operator style instructions. Chinese
+source/context and translation memory are treated as untrusted data, candidate text fields
+must be Vietnamese-only, and JSON keys/IDs remain part of the required transport schema.
+The physical TTS-calibrated slot is the hard spoken-unit budget; Chinese character count is
+not used as a hard Vietnamese length cap.
+
+The compact V5 operator prompt template is versioned at
+`apps/api/prompts/translation_user_v5.txt`. Workspace prompt profiles may still override
+style preferences, but the runtime hard rules above are always appended and cannot be
+weakened by a profile.
+
 The translation draft flow turns current `TranscriptSegment` rows (DialogueBeats) into Vietnamese `TranslationSegment` rows for later review, TTS, and subtitle generation.
 
 ## Biphasic contract (pilot, machine-first)
@@ -109,6 +160,7 @@ TTS/subtitle generation should read:
 3. `quality_flags_json` to decide whether a segment needs review before synthesis.
 4. `metadata.speech_budget` and `metadata.duration_adaptation` as review evidence, never as approval authority.
 5. `TranscriptSegment` timing for subtitle alignment.
+6. `translation_authority` as the hash-bound transcript/translation handoff contract.
 
 Before TTS, risky or unapproved rows park the Reup Queue at `translation_review`. The frontend approval endpoint hash-binds the reviewed Vietnamese text and timing; only then may the recipe-owned OmniVoice TTS job resume. `timing_fit_blocked` is terminal and is never retried as a transient provider error.
 
@@ -116,4 +168,7 @@ Before TTS, risky or unapproved rows park the Reup Queue at `translation_review`
 
 - The default translation provider is an explicit placeholder.
 - No external LLM or translation model is bundled.
-- No automatic style adaptation beyond preset metadata is implemented.
+- Candidate semantic fidelity is constrained by the configured translation provider;
+  local ranking can prove structural/timing safety but is not a bilingual semantic proof.
+- Glossary input currently comes from `source_videos.metadata_json.translation_glossary`;
+  a dedicated operator glossary UI remains future work.

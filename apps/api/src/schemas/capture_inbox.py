@@ -344,7 +344,16 @@ class CapturedItemResponse(BaseModel):
             self.performance_status = "captured" if performance_captured else ("missing" if attempted else "pending")
             self.processing_fit_status = "captured" if processing_fit_captured else ("missing" if attempted else "pending")
             captured_count = sum(status == "captured" for status in (self.time_status, self.performance_status, self.processing_fit_status))
-            if captured_count == 3 and thumbnail_captured and self.has_all_core_metadata:
+            # Douyin's modal harvest can be fully captured without a trustworthy
+            # view count. The ingest authority marks that case complete when
+            # identity, posting, duration and interaction metrics are present;
+            # serialization must not downgrade it solely because views are absent.
+            explicit_complete = _string_metadata(
+                metadata, raw_payload, key="metadata_status"
+            ) == "complete"
+            if captured_count == 3 and thumbnail_captured and (
+                self.has_all_core_metadata or explicit_complete
+            ):
                 self.metadata_status = "complete"
             elif captured_count > 0:
                 self.metadata_status = "partial"

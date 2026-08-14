@@ -1,18 +1,14 @@
 from __future__ import annotations
 
-import os
 import unittest
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from uuid import uuid4
 
-os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
-os.environ.setdefault("API_AUTH_REQUIRED", "true")
-os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-with-at-least-thirty-two-characters")
-
 from fastapi.testclient import TestClient
 
 from src.api.routes.capture_inbox import get_capture_inbox_service
+from src.core.auth import AuthenticatedPrincipal, get_current_principal
 from src.core.settings import get_settings
 from src.enums import CapturedItemStatus
 from src.main import create_app
@@ -24,20 +20,26 @@ class CaptureInboxItemDetailRouteTests(unittest.TestCase):
         self.app = create_app()
         self.item_id = uuid4()
         self.session_id = uuid4()
+        self.workspace_id = uuid4()
         self.now = datetime(2026, 7, 13, 6, 0, tzinfo=UTC)
+        # This suite tests the Capture Inbox route contract, not login or DB
+        # seeding. Override the router-level principal so it remains a true unit
+        # test and cannot depend on a process-global SQLite database.
+        principal = AuthenticatedPrincipal(
+            subject="operator@local.test",
+            workspace_id=self.workspace_id,
+            roles=("operator",),
+            audience="reup-douyin-operator",
+        )
+        self.app.dependency_overrides[get_current_principal] = lambda: principal
 
     def tearDown(self) -> None:
         self.app.dependency_overrides.clear()
         get_settings.cache_clear()
 
     def _auth_headers(self, client: TestClient) -> dict[str, str]:
-        response = client.post(
-            "/auth/login",
-            json={"email": "operator@local.test", "password": "local-password", "workspace_slug": "local-workspace"},
-        )
-        self.assertEqual(response.status_code, 200)
-        token = response.json()["access_token"]
-        return {"Authorization": f"Bearer {token}"}
+        del client
+        return {}
 
     def test_get_captured_item_returns_full_inspector_fields(self) -> None:
         item_id = self.item_id

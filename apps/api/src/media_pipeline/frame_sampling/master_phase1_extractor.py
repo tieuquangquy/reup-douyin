@@ -23,7 +23,10 @@ import json
 import hashlib
 import logging
 import re
+import shutil
+import subprocess
 import tempfile
+import time
 import unicodedata
 from collections import Counter, OrderedDict, defaultdict
 from dataclasses import dataclass, field
@@ -60,6 +63,19 @@ from src.media_pipeline.frame_sampling.phase1_policy import (
 )
 
 from src.media_pipeline.frame_sampling.ensure_dbnet_model import ensure_dbnet_onnx
+from src.media_pipeline.frame_sampling.coverage_track_closure import (
+    COVERAGE_TRACK_POLICY_VERSION,
+    COVERAGE_TRACK_SCHEMA_VERSION,
+    CoverageTrackClosure,
+    schedule_unassigned_discovery_frames,
+)
+from src.media_pipeline.frame_sampling.event_candidate_scheduler import (
+    CANDIDATE_WINDOW_SCHEMA_VERSION,
+    EVENT_SCAN_ENGINE_VERSION,
+    EVENT_SCAN_POLICY_VERSION,
+    CandidateWindow,
+    EventFrameScheduler,
+)
 from src.media_pipeline.frame_sampling.local_text_detector import LocalTextDetector, TextBox
 
 logger = logging.getLogger(__name__)
@@ -102,6 +118,11 @@ VISUAL_TEXT_PROVENANCE_SCHEMA_VERSION = "visual_text_provenance_v2"
 # fall back to DBNet on every frame when a persistent title produces a hit on
 # every periodic probe.
 PHASE1_DENSE_RESCAN_MAX_HEAVY_RATIO = 0.48
+PHASE1_EVENT_DENSE_RESCAN_MAX_HEAVY_RATIO = 0.12
+PHASE1_EVENT_MAX_HEAVY_FPS = 3.5
+PHASE1_EVENT_ANALYSIS_LONG_EDGE = 1280
+PHASE1_EVENT_PROXY_LONG_EDGE = 512
+PHASE1_COVERAGE_PROXY_LONG_EDGE = 384
 # Small UI copy on a 2160x3840 phone/app surface becomes only a few pixels tall
 # at the normal 1280 long edge.  A bounded high-resolution recovery pass runs
 # only on dense-UI anchors, never across the whole timeline.
@@ -113,6 +134,24 @@ PHASE1_SMALL_TEXT_MAX_ANCHORS_PER_MINUTE = 18
 PHASE1_EXPAND_PAD_W_FRAC = 0.05
 PHASE1_EXPAND_PAD_H_TOP_FRAC = 0.22
 PHASE1_EXPAND_PAD_H_BOTTOM_FRAC = 0.15
+
+
+def phase1_event_proxy_size(
+    source_width: int,
+    source_height: int,
+) -> tuple[int, int] | None:
+    """Return the all-frame event raster, or None for already-small sources."""
+
+    width = max(0, int(source_width))
+    height = max(0, int(source_height))
+    long_edge = max(width, height)
+    if long_edge <= PHASE1_EVENT_PROXY_LONG_EDGE:
+        return None
+    scale = PHASE1_EVENT_PROXY_LONG_EDGE / float(long_edge)
+    return (
+        max(2, int(round(width * scale))),
+        max(2, int(round(height * scale))),
+    )
 # Full-frame scan: editor titles/UI can sit near y=0. Douyin chrome is filtered by
 # ``is_chrome_noise_box`` / purge — not by cropping the top away.
 # Bottom must be full-frame: burn-ins often sit at y≈0.93–0.97H; ROI_Y1=0.95
@@ -135,6 +174,18 @@ HARDSUB_BAND_CY = 0.78
 # Burn-in *role* is only the true bottom strip. Endcard list rows often sit in
 # cy 0.78–0.87 and must stay ui_chip/generic (not hardsub recover/drop).
 HARDSUB_ROLE_CY = 0.88
+# Many creator templates place dialogue captions above the legacy bottom strip
+# (roughly 0.74-0.87H) so they do not collide with platform controls.  A global
+# Y-threshold cannot distinguish those captions from endcard/table rows.  Lane
+# inference below therefore needs repeated, sequential, screen-locked line
+# tracks before this upper band is promoted to caption authority.
+CAPTION_LANE_MIN_CY = 0.72
+CAPTION_LANE_MAX_CY = HARDSUB_ROLE_CY
+CAPTION_LANE_MIN_WIDTH_FRAC = 0.18
+CAPTION_LANE_MAX_HEIGHT_FRAC = 0.075
+CAPTION_LANE_MAX_CY_DELTA_FRAC = 0.025
+CAPTION_LANE_MAX_OVERLAP_RATIO = 0.35
+CAPTION_LANE_MIN_MEMBERS = 3
 # Burn-in lines are wide; square food/texture in the band is not hardsub.
 HARDSUB_MIN_ASPECT = 2.5
 HARDSUB_MIN_W_FRAC = 0.22
@@ -265,9 +316,159 @@ class _DiskBackedFrameCache(Mapping[int, np.ndarray]):
         if not self._file.closed:
             self._file.close()
 
-    def __del__(self) -> None:  # pragma: no cover - defensive process cleanup
+    def __del__(self) -> None:  # pragma: no cover - defensive file cleanup
         try:
             self.close()
+        except Exception:
+            pass
+
+
+def _ffmpeg_proxy_decode_command(
+    ffmpeg_binary: str,
+    source: Path,
+    *,
+    width: int,
+    height: int,
+    selected_frame_indices: Sequence[int] = (),
+) -> list[str]:
+    """Build a frame-preserving, scaled BGR decode stream for event analysis."""
+
+    filters: list[str] = []
+    selected = sorted({max(0, int(value)) for value in selected_frame_indices})
+    if selected:
+        expression = "+".join(f"eq(n\\,{value})" for value in selected)
+        filters.append(f"select={expression}")
+    filters.append(f"scale={int(width)}:{int(height)}:flags=fast_bilinear")
+    return [
+        ffmpeg_binary,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        str(source),
+        "-map",
+        "0:v:0",
+        "-an",
+        "-sn",
+        "-dn",
+        "-vf",
+        ",".join(filters),
+        "-pix_fmt",
+        "bgr24",
+        "-fps_mode",
+        "passthrough",
+        "-f",
+        "rawvideo",
+        "pipe:1",
+    ]
+
+
+class _FfmpegProxyFrameReader:
+    """Sequential OpenCV-compatible reader that never materializes 4K frames.
+
+    FFmpeg performs decode and downscale in its optimized native pipeline.  The
+    Python process receives only the event-analysis raster, avoiding a full 4K
+    BGR allocation and ``cv2.resize`` for every source frame.
+    """
+
+    def __init__(
+        self,
+        source: Path,
+        *,
+        width: int,
+        height: int,
+        selected_frame_indices: Sequence[int] = (),
+    ) -> None:
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            raise FileNotFoundError("ffmpeg was not found on PATH")
+        self._width = max(2, int(width))
+        self._height = max(2, int(height))
+        self._frame_bytes = self._width * self._height * 3
+        self._stderr = tempfile.TemporaryFile(
+            prefix="phase1_ffmpeg_", suffix=".stderr"
+        )
+        try:
+            self._process = subprocess.Popen(
+                _ffmpeg_proxy_decode_command(
+                    ffmpeg,
+                    source,
+                    width=self._width,
+                    height=self._height,
+                    selected_frame_indices=selected_frame_indices,
+                ),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=self._stderr,
+                shell=False,
+            )
+        except OSError:
+            self._stderr.close()
+            raise
+        if self._process.stdout is None:
+            self.release()
+            raise RuntimeError("FFmpeg proxy decoder did not expose stdout")
+        self._closed = False
+
+    def _error_detail(self) -> str:
+        try:
+            self._stderr.flush()
+            self._stderr.seek(0)
+            return self._stderr.read().decode("utf-8", errors="replace")[-800:].strip()
+        except (OSError, ValueError):
+            return ""
+
+    def read(self) -> tuple[bool, np.ndarray | None]:
+        if self._closed or self._process.stdout is None:
+            return False, None
+        chunks: list[bytes] = []
+        remaining = self._frame_bytes
+        while remaining > 0:
+            chunk = self._process.stdout.read(remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if remaining == self._frame_bytes:
+            return_code = self._process.wait()
+            if return_code != 0:
+                detail = self._error_detail() or f"exit={return_code}"
+                raise RuntimeError(f"FFmpeg proxy decode failed: {detail}")
+            return False, None
+        if remaining:
+            detail = self._error_detail() or f"missing_bytes={remaining}"
+            raise RuntimeError(f"FFmpeg proxy decode returned a partial frame: {detail}")
+        frame = np.frombuffer(b"".join(chunks), dtype=np.uint8).reshape(
+            (self._height, self._width, 3)
+        )
+        return True, frame
+
+    def release(self) -> None:
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
+        process = getattr(self, "_process", None)
+        stdout = getattr(process, "stdout", None)
+        if stdout is not None:
+            try:
+                stdout.close()
+            except OSError:
+                pass
+        if process is not None and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=3)
+        try:
+            self._stderr.close()
+        except (OSError, ValueError):
+            pass
+
+    def __del__(self) -> None:  # pragma: no cover - defensive process cleanup
+        try:
+            self.release()
         except Exception:
             pass
 
@@ -669,6 +870,8 @@ class MasterPhase1Result:
     timeline_path: Path
     frames_dir: Path
     qa_dir: Path | None = None
+    analysis_engine: str = "v58_candidate"
+    analysis_metrics: dict[str, Any] = field(default_factory=dict)
 
 
 def apply_temporal_pad(
@@ -833,6 +1036,21 @@ def bound_dense_rescan_frame_indices(
         "max_heavy_ratio": float(max_heavy_ratio),
         "guard_triggered": bool(guard_triggered),
     }
+
+
+def event_dense_rescan_max_ratio(fps: float) -> float:
+    """Cap expensive event evidence by wall-clock time, not source FPS."""
+
+    return min(
+        PHASE1_EVENT_DENSE_RESCAN_MAX_HEAVY_RATIO,
+        PHASE1_EVENT_MAX_HEAVY_FPS / max(1.0, float(fps)),
+    )
+
+
+def event_track_merge_gap_frames(fps: float) -> int:
+    """Bridge the expected gap between 3 FPS event-detector observations."""
+
+    return max(MERGE_GAP_FRAMES, int(np.ceil(max(1.0, float(fps)) / 3.0)))
 
 
 def dense_ui_recovery_anchor_frame_indices(
@@ -2567,6 +2785,114 @@ def _copy_track_with_hit_indices(
     )
 
 
+def split_tracks_by_visual_content_change(
+    tracks: Sequence[MergedTrack],
+    *,
+    frame_cache: Mapping[int, np.ndarray],
+) -> tuple[list[MergedTrack], dict[str, Any]]:
+    """Split a stable geometry track using local edge-content change points.
+
+    This is intentionally model-free. It compares normalized glyph-edge maps
+    only on detector evidence frames, then requires at least two observations
+    on both sides of a change. Geometry and content state remain independent.
+    """
+
+    output: list[MergedTrack] = []
+    rows: list[dict[str, Any]] = []
+    for track in tracks:
+        if len(track.hit_frames) < 5 or len(track.hit_boxes) != len(track.hit_frames):
+            output.append(track)
+            continue
+        signatures: list[np.ndarray] = []
+        valid_indices: list[int] = []
+        for index, frame_index in enumerate(track.hit_frames):
+            frame = frame_cache.get(int(frame_index))
+            crop = (
+                _crop_xyxy_from_frame(frame, track.box_coords)
+                if frame is not None
+                else None
+            )
+            if crop is None or crop.size < 64:
+                continue
+            gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+            normalized = cv2.resize(gray, (128, 32), interpolation=cv2.INTER_AREA)
+            normalized = cv2.createCLAHE(
+                clipLimit=2.0, tileGridSize=(8, 4)
+            ).apply(normalized)
+            signatures.append(cv2.Canny(normalized, 48, 136) > 0)
+            valid_indices.append(index)
+        if len(signatures) < 5:
+            output.append(track)
+            continue
+        deltas = np.asarray(
+            [
+                float(np.mean(np.logical_xor(left, right)))
+                for left, right in zip(signatures, signatures[1:])
+            ],
+            dtype=np.float32,
+        )
+        median = float(np.median(deltas))
+        mad = float(np.median(np.abs(deltas - median)))
+        threshold = max(0.08, median + 3.5 * max(0.005, mad))
+        cuts = [
+            index + 1
+            for index, score in enumerate(deltas)
+            if float(score) >= threshold
+            and index + 1 >= 2
+            and len(signatures) - (index + 1) >= 2
+        ]
+        groups: list[list[int]] = []
+        offset = 0
+        for cut in cuts:
+            if cut - offset >= 2:
+                groups.append(valid_indices[offset:cut])
+                offset = cut
+        if len(valid_indices) - offset >= 2:
+            groups.append(valid_indices[offset:])
+        elif groups:
+            groups[-1].extend(valid_indices[offset:])
+        if len(groups) < 2:
+            output.append(track)
+            continue
+        segments = [_copy_track_with_hit_indices(track, group) for group in groups]
+        boundaries = [
+            (
+                int(left.hit_frames[-1]) + int(right.hit_frames[0])
+            )
+            // 2
+            for left, right in zip(segments, segments[1:])
+        ]
+        rebuilt: list[MergedTrack] = []
+        for index, segment in enumerate(segments):
+            start = int(track.start_frame) if index == 0 else boundaries[index - 1] + 1
+            end = int(track.end_frame) if index == len(segments) - 1 else boundaries[index]
+            rebuilt.append(
+                _copy_track_with_span(segment, start_frame=start, end_frame=end)
+            )
+        output.extend(rebuilt)
+        rows.append(
+            {
+                "prior_span": [track.start_frame, track.end_frame],
+                "result_spans": [
+                    [segment.start_frame, segment.end_frame] for segment in rebuilt
+                ],
+                "threshold": round(threshold, 4),
+                "peak_delta": round(float(np.max(deltas)), 4),
+            }
+        )
+    return output, {
+        "method": "visual_edge_change_point_v1",
+        "before_count": len(tracks),
+        "after_count": len(output),
+        "split_tracks": len(rows),
+        "trimmed_tracks": 0,
+        "segments_created": sum(len(row["result_spans"]) for row in rows),
+        "network_calls": 0,
+        "model_calls": 0,
+        "rows": rows,
+    }
+
+
 def _trim_isolated_sparse_hit_cluster(
     track: MergedTrack,
     *,
@@ -3562,6 +3888,120 @@ def is_horizontally_locked_track(
     return sx <= max(lim, 0.18 * med_w)
 
 
+def sequential_caption_lane_member_ids(
+    tracks: Sequence[MergedTrack],
+    *,
+    frame_w: int,
+    frame_h: int,
+) -> set[int]:
+    """Infer editor caption lanes above the legacy bottom-subtitle strip.
+
+    Caption sentences replace one another at nearly one Y locus.  Source UI
+    rows instead coexist in a two-dimensional panel or remain persistent.
+    Requiring at least three line-like, screen-locked, mostly non-overlapping
+    epochs prevents a single package label or an endcard table row from opening
+    this authority.
+    """
+
+    fw = max(1.0, float(frame_w))
+    fh = max(1.0, float(frame_h))
+
+    def eligible(track: MergedTrack) -> bool:
+        x0, y0, x1, y1 = (float(value) for value in track.box_coords[:4])
+        width = max(1.0, x1 - x0)
+        height = max(1.0, y1 - y0)
+        cy = 0.5 * (y0 + y1) / fh
+        return bool(
+            CAPTION_LANE_MIN_CY <= cy < CAPTION_LANE_MAX_CY
+            and width / fw >= CAPTION_LANE_MIN_WIDTH_FRAC
+            and height / fh <= CAPTION_LANE_MAX_HEIGHT_FRAC
+            and width / height >= HARDSUB_MIN_ASPECT
+            and int(track.hit_count) >= 2
+            and is_horizontally_locked_track(
+                track, frame_w=frame_w, frame_h=frame_h
+            )
+        )
+
+    candidates = [track for track in tracks if eligible(track)]
+    if len(candidates) < CAPTION_LANE_MIN_MEMBERS:
+        return set()
+
+    parents = list(range(len(candidates)))
+
+    def find(index: int) -> int:
+        while parents[index] != index:
+            parents[index] = parents[parents[index]]
+            index = parents[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        left_root, right_root = find(left), find(right)
+        if left_root != right_root:
+            parents[right_root] = left_root
+
+    for left_index, left in enumerate(candidates):
+        left_cy = 0.5 * (
+            float(left.box_coords[1]) + float(left.box_coords[3])
+        ) / fh
+        for right_index in range(left_index + 1, len(candidates)):
+            right = candidates[right_index]
+            right_cy = 0.5 * (
+                float(right.box_coords[1]) + float(right.box_coords[3])
+            ) / fh
+            if abs(left_cy - right_cy) > CAPTION_LANE_MAX_CY_DELTA_FRAC:
+                continue
+            left_width = max(
+                1.0, float(left.box_coords[2]) - float(left.box_coords[0])
+            )
+            right_width = max(
+                1.0, float(right.box_coords[2]) - float(right.box_coords[0])
+            )
+            horizontal = max(
+                0.0,
+                min(float(left.box_coords[2]), float(right.box_coords[2]))
+                - max(float(left.box_coords[0]), float(right.box_coords[0])),
+            )
+            if horizontal / min(left_width, right_width) < 0.40:
+                continue
+            union(left_index, right_index)
+
+    groups: dict[int, list[MergedTrack]] = defaultdict(list)
+    for index, track in enumerate(candidates):
+        groups[find(index)].append(track)
+
+    members: set[int] = set()
+    for group in groups.values():
+        if len(group) < CAPTION_LANE_MIN_MEMBERS:
+            continue
+        ordered = sorted(group, key=lambda row: (row.start_frame, row.end_frame))
+        duration_sum = sum(
+            max(1, int(row.end_frame) - int(row.start_frame) + 1)
+            for row in ordered
+        )
+        overlap_sum = 0
+        transition_pairs = 0
+        for index, left in enumerate(ordered):
+            for right in ordered[index + 1 :]:
+                overlap = max(
+                    0,
+                    min(int(left.end_frame), int(right.end_frame))
+                    - max(int(left.start_frame), int(right.start_frame))
+                    + 1,
+                )
+                overlap_sum += overlap
+                if (
+                    int(right.start_frame) >= int(left.end_frame) - 2
+                    and int(right.start_frame) - int(left.end_frame) <= 45
+                ):
+                    transition_pairs += 1
+        if overlap_sum / float(max(1, duration_sum)) > CAPTION_LANE_MAX_OVERLAP_RATIO:
+            continue
+        if transition_pairs < min(2, len(group) - 1):
+            continue
+        members.update(id(track) for track in group)
+    return members
+
+
 def is_editor_overlay_track(
     track: MergedTrack,
     *,
@@ -4164,6 +4604,189 @@ def has_solid_colored_editor_panel(
         dominant_values.size >= 24
         and float(np.std(dominant_values.astype(np.float32))) <= 58.0
     )
+
+
+def has_solid_neutral_editor_panel(
+    frame_bgr: np.ndarray,
+    xyxy: Sequence[float],
+) -> bool:
+    """Detect a coherent black/white/grey editor card behind one text row.
+
+    Editor callouts are commonly neutral rather than saturated (black product
+    comparison cards are a frequent example).  The coloured-panel detector
+    intentionally rejects those cards.  This companion detector is kept
+    conservative: most of the padded row and its border must share one neutral
+    luminance class.  It is supporting *group* evidence only; no track becomes
+    editor-authored from this predicate alone.
+    """
+
+    if frame_bgr is None or getattr(frame_bgr, "size", 0) <= 0:
+        return False
+    frame_h, frame_w = frame_bgr.shape[:2]
+    x0, y0, x1, y1 = (float(value) for value in xyxy[:4])
+    line_w = max(1.0, x1 - x0)
+    line_h = max(1.0, y1 - y0)
+    pad_x = max(4, int(round(0.08 * line_w)))
+    pad_y = max(4, int(round(0.45 * line_h)))
+    ix0 = max(0, int(round(x0)) - pad_x)
+    iy0 = max(0, int(round(y0)) - pad_y)
+    ix1 = min(frame_w, int(round(x1)) + pad_x)
+    iy1 = min(frame_h, int(round(y1)) + pad_y)
+    if ix1 - ix0 < 8 or iy1 - iy0 < 8:
+        return False
+    crop = frame_bgr[iy0:iy1, ix0:ix1]
+    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    saturation = hsv[:, :, 1]
+    value = hsv[:, :, 2]
+    neutral = saturation <= 48
+    dark = neutral & (value <= 78)
+    light = neutral & (value >= 178)
+    candidates = (dark, light)
+    for coherent in candidates:
+        if float(np.mean(coherent)) < 0.52:
+            continue
+        border = np.concatenate(
+            (coherent[0, :], coherent[-1, :], coherent[:, 0], coherent[:, -1])
+        )
+        if float(np.mean(border)) < 0.72:
+            continue
+        values = value[coherent]
+        if values.size >= 32 and float(np.std(values.astype(np.float32))) <= 42.0:
+            return True
+    return False
+
+
+def neutral_editor_panel_bounds(
+    frame_bgr: np.ndarray,
+    xyxy: Sequence[float],
+) -> list[float] | None:
+    """Return the containing neutral-card rectangle for a proven row.
+
+    The rectangle is derived from the current frame, never from a hard-coded
+    lane.  It is deliberately unavailable unless the row already satisfies
+    the conservative neutral-panel predicate.  This lets Phase 1 preserve one
+    physical editor-card envelope through Phase 4 without turning a caption
+    into several independently blurred OCR fragments.
+    """
+
+    if not has_solid_neutral_editor_panel(frame_bgr, xyxy):
+        return None
+    frame_h, frame_w = frame_bgr.shape[:2]
+    hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+    neutral = hsv[:, :, 1] <= 55
+    value = hsv[:, :, 2]
+    line_x0, line_y0, line_x1, line_y1 = (
+        float(value_) for value_ in xyxy[:4]
+    )
+    # The line centre can land on a bright glyph. Select the dominant neutral
+    # surface class from a padded row region instead of one pixel.
+    pad_x = max(4, int(round((line_x1 - line_x0) * 0.08)))
+    pad_y = max(4, int(round((line_y1 - line_y0) * 0.45)))
+    sample = (
+        max(0, int(round(line_y0)) - pad_y),
+        min(frame_h, int(round(line_y1)) + pad_y),
+        max(0, int(round(line_x0)) - pad_x),
+        min(frame_w, int(round(line_x1)) + pad_x),
+    )
+    sy0, sy1, sx0, sx1 = sample
+    sample_neutral = neutral[sy0:sy1, sx0:sx1]
+    sample_value = value[sy0:sy1, sx0:sx1]
+    dark_fraction = float(np.mean(sample_neutral & (sample_value <= 88)))
+    light_fraction = float(np.mean(sample_neutral & (sample_value >= 168)))
+    mode_dark = dark_fraction >= light_fraction
+    coherent = neutral & ((value <= 88) if mode_dark else (value >= 168))
+    coherent = cv2.morphologyEx(
+        coherent.astype(np.uint8) * 255,
+        cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (13, 7)),
+    )
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(coherent, 8)
+    line_area = max(1.0, (line_x1 - line_x0) * (line_y1 - line_y0))
+    best: tuple[float, list[float]] | None = None
+    for label in range(1, count):
+        x, y, width, height, area = (int(v) for v in stats[label])
+        x1, y1 = x + width, y + height
+        intersection = max(0.0, min(float(x1), line_x1) - max(float(x), line_x0)) * max(
+            0.0, min(float(y1), line_y1) - max(float(y), line_y0)
+        )
+        if intersection / line_area < 0.65:
+            continue
+        component_area = max(1, width * height)
+        fill = float(area) / float(component_area)
+        if fill < 0.52 or width < (line_x1 - line_x0) * 0.85:
+            continue
+        area_fraction = component_area / float(max(1, frame_w * frame_h))
+        if area_fraction > 0.18 or height / float(max(1, frame_h)) > 0.22:
+            continue
+        score = intersection / line_area + min(1.0, fill)
+        candidate = [float(x), float(y), float(x1), float(y1)]
+        if best is None or score > best[0]:
+            best = (score, candidate)
+    return None if best is None else best[1]
+
+
+def editor_card_panel_bounds(
+    frame_bgr: np.ndarray,
+    xyxy: Sequence[float],
+) -> list[float] | None:
+    """Return a bounded solid editor-panel component containing the text row.
+
+    Neutral cards use a luminance component. Saturated cards use the dominant
+    hue component. This helper is only consumed after group provenance has an
+    independent editor anchor, so it cannot promote arbitrary source pixels.
+    """
+
+    neutral_bounds = neutral_editor_panel_bounds(frame_bgr, xyxy)
+    if neutral_bounds is not None:
+        return neutral_bounds
+    if not has_solid_colored_editor_panel(frame_bgr, xyxy):
+        return None
+    frame_h, frame_w = frame_bgr.shape[:2]
+    hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+    x0, y0, x1, y1 = (float(value) for value in xyxy[:4])
+    ix0, iy0 = max(0, int(x0)), max(0, int(y0))
+    ix1, iy1 = min(frame_w, int(np.ceil(x1))), min(frame_h, int(np.ceil(y1)))
+    sample = hsv[iy0:iy1, ix0:ix1]
+    colored = sample[:, :, 1] >= 60
+    hues = sample[:, :, 0][colored]
+    if hues.size < 24:
+        return None
+    histogram, _ = np.histogram(hues, bins=18, range=(0, 180))
+    dominant = int(np.argmax(histogram))
+    hue_center = dominant * 10 + 5
+    hue_delta = np.abs(hsv[:, :, 0].astype(np.int16) - hue_center)
+    hue_delta = np.minimum(hue_delta, 180 - hue_delta)
+    coherent = (
+        (hue_delta <= 14)
+        & (hsv[:, :, 1] >= 48)
+        & (hsv[:, :, 2] >= 24)
+    ).astype(np.uint8) * 255
+    coherent = cv2.morphologyEx(
+        coherent,
+        cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (13, 7)),
+    )
+    count, _labels, stats, _ = cv2.connectedComponentsWithStats(coherent, 8)
+    line_area = max(1.0, (x1 - x0) * (y1 - y0))
+    best: tuple[float, list[float]] | None = None
+    for label in range(1, count):
+        cx, cy, width, height, area = (int(value) for value in stats[label])
+        cx1, cy1 = cx + width, cy + height
+        intersection = max(0.0, min(float(cx1), x1) - max(float(cx), x0)) * max(
+            0.0, min(float(cy1), y1) - max(float(cy), y0)
+        )
+        if intersection / line_area < 0.65:
+            continue
+        component_area = max(1, width * height)
+        fill = float(area) / float(component_area)
+        area_fraction = component_area / float(max(1, frame_w * frame_h))
+        if fill < 0.48 or area_fraction > 0.18 or height / float(frame_h) > 0.22:
+            continue
+        score = intersection / line_area + fill
+        candidate = [float(cx), float(cy), float(cx1), float(cy1)]
+        if best is None or score > best[0]:
+            best = (score, candidate)
+    return None if best is None else best[1]
 
 
 def semantic_scene_label_background_signature(
@@ -4831,6 +5454,12 @@ def dense_source_ui_context_member_ids(
         role = classify_ocr_box_role(
             candidate.box_coords, frame_w=frame_w, frame_h=frame_h
         )
+        # Temporal coincidence with a dense device/app panel is not spatial
+        # provenance.  Editor captions frequently sit on top of a phone UI;
+        # inheriting the panel's SOURCE_INTRINSIC classification leaves the
+        # caption deliberately unprocessed by Phase 4.  The function contract
+        # has always promised this exclusion, but the guard was accidentally
+        # removed when joined-row propagation was introduced.
         if role == "hardsub" or int(candidate.hit_count) < 2:
             continue
         if not is_horizontally_locked_track(
@@ -4862,6 +5491,76 @@ def dense_source_ui_context_member_ids(
                 if peer_count >= DENSE_SOURCE_UI_CONTEXT_MIN_PEERS:
                     members.add(id(candidate))
                     break
+    return members
+
+
+def source_panel_containment_member_ids(
+    tracks: Sequence[MergedTrack],
+    *,
+    strong_source_ids: set[int],
+    frame_w: int,
+    frame_h: int,
+) -> set[int]:
+    """Protect compact locked labels contained by a proven source UI plane.
+
+    Phone/app controls may appear sequentially, so they do not always satisfy
+    the synchronized dense-panel rule. A compact candidate is inherited only
+    from at least four temporally overlapping, spatially diverse source-bound
+    peers. Hardsubs and large editor cards are explicitly excluded.
+    """
+
+    if not strong_source_ids:
+        return set()
+    fw = max(1.0, float(frame_w))
+    fh = max(1.0, float(frame_h))
+    source_tracks = [track for track in tracks if id(track) in strong_source_ids]
+    members: set[int] = set()
+    for candidate in tracks:
+        if id(candidate) in strong_source_ids:
+            continue
+        role = classify_ocr_box_role(
+            candidate.box_coords, frame_w=frame_w, frame_h=frame_h
+        )
+        if role == "hardsub" or int(candidate.hit_count) < 2:
+            continue
+        if not is_horizontally_locked_track(
+            candidate, frame_w=frame_w, frame_h=frame_h
+        ):
+            continue
+        x0, y0, x1, y1 = (float(value) for value in candidate.box_coords[:4])
+        if (y1 - y0) / fh > 0.045 or (x1 - x0) / fw > 0.45:
+            continue
+        candidate_span = max(
+            1, int(candidate.end_frame) - int(candidate.start_frame) + 1
+        )
+        peers: list[MergedTrack] = []
+        for peer in source_tracks:
+            overlap = max(
+                0,
+                min(int(candidate.end_frame), int(peer.end_frame))
+                - max(int(candidate.start_frame), int(peer.start_frame))
+                + 1,
+            )
+            if overlap / float(candidate_span) >= 0.35:
+                peers.append(peer)
+        required_peers = 6 if role == "hardsub" else 4
+        if len(peers) < required_peers:
+            continue
+        peer_x0 = min(float(peer.box_coords[0]) for peer in peers)
+        peer_y0 = min(float(peer.box_coords[1]) for peer in peers)
+        peer_x1 = max(float(peer.box_coords[2]) for peer in peers)
+        peer_y1 = max(float(peer.box_coords[3]) for peer in peers)
+        if peer_x1 - peer_x0 < 0.35 * fw or peer_y1 - peer_y0 < 0.25 * fh:
+            continue
+        cx, cy = _box_centroid(candidate.box_coords)
+        margin_x = 0.05 * fw
+        margin_y = 0.05 * fh
+        if not (
+            peer_x0 - margin_x <= cx <= peer_x1 + margin_x
+            and peer_y0 - margin_y <= cy <= peer_y1 + margin_y
+        ):
+            continue
+        members.add(id(candidate))
     return members
 
 
@@ -5045,6 +5744,11 @@ def filter_tracks_by_local_text(
     hardsub_recovery_rows: list[dict[str, Any]] = []
     dense_ui_grid_recovery_skips = 0
 
+    pre_recovery_caption_lane_ids = sequential_caption_lane_member_ids(
+        tracks,
+        frame_w=frame_w,
+        frame_h=frame_h,
+    )
     expanded: list[MergedTrack] = []
     for track in tracks:
         role = classify_ocr_box_role(
@@ -5088,6 +5792,7 @@ def filter_tracks_by_local_text(
             and h_frac <= THIN_HARDSUB_HEIGHT_FRAC
             and w_frac >= 0.18
             and aspect >= HARDSUB_MIN_ASPECT
+            and id(track) not in pre_recovery_caption_lane_ids
         )
         dense_ui_grid_cell = (
             role != "hardsub"
@@ -5183,9 +5888,19 @@ def filter_tracks_by_local_text(
             and h_frac <= 0.12
             and (w / fw) * h_frac <= 0.045
         )
+        intro_title_geom = (
+            role in {"mid_label", "generic"}
+            and int(track.start_frame) <= 2
+            and int(track.end_frame) - int(track.start_frame) + 1 <= 8
+            and aspect >= 2.0
+            and w / fw >= 0.20
+            and h_frac <= 0.20
+            and 0.25 <= ((x0 + x1) * 0.5) / fw <= 0.75
+        )
         narrow_stack = aspect < 1.2 and h_frac > 0.055 and (w / fw) < 0.12
         if role in {"mid_label", "ui_chip", "generic"} and (
-            (h_frac > 0.085 and not mid_title_geom) or narrow_stack
+            (h_frac > 0.085 and not mid_title_geom and not intro_title_geom)
+            or narrow_stack
         ):
             frame = frame_cache.get(int(track.best_frame_index))
             expanded.extend(
@@ -5200,6 +5915,11 @@ def filter_tracks_by_local_text(
             expanded.append(track)
 
     dense_source_panel_ids = dense_source_ui_panel_member_ids(
+        expanded,
+        frame_w=frame_w,
+        frame_h=frame_h,
+    )
+    caption_lane_ids = sequential_caption_lane_member_ids(
         expanded,
         frame_w=frame_w,
         frame_h=frame_h,
@@ -5363,10 +6083,19 @@ def filter_tracks_by_local_text(
         role = classify_ocr_box_role(
             track.box_coords, frame_w=frame_w, frame_h=frame_h
         )
+        caption_lane = id(track) in caption_lane_ids
         dense_source_panel = (
             preserve_source_candidates and id(track) in dense_source_panel_ids
         )
+        requires_single_frame_cjk = bool(
+            getattr(track, "_single_frame_retention_candidate", False)
+            or getattr(track, "_strong_single_frame_textness", False)
+        ) and int(track.hit_count) == 1
         need_hits = min_hits_for_role(role)
+        if requires_single_frame_cjk:
+            # Textness/closure evidence may carry a one-frame DBNet hit to the
+            # recognizer, but cannot make it authoritative on its own.
+            need_hits = 1
         if dense_source_panel:
             # A high-resolution recovery anchor may supply only N-1/N/N+1 for
             # a label whose surrounding panel is independently authoritative.
@@ -5382,11 +6111,11 @@ def filter_tracks_by_local_text(
                 "need_hits": need_hits,
                 "box": list(track.box_coords),
             }
-        if dense_source_panel:
+        if dense_source_panel and not requires_single_frame_cjk:
             setattr(track, "_source_intrinsic_candidate", "dense_source_ui_panel")
             return True, None
 
-        source_scene_candidate = not is_editor_overlay_track(
+        source_scene_candidate = False if caption_lane else not is_editor_overlay_track(
             track,
             role=role,
             frame_w=frame_w,
@@ -5407,6 +6136,15 @@ def filter_tracks_by_local_text(
         h = max(1.0, y1 - y0)
         fw = max(1.0, float(frame_w))
         fh = max(1.0, float(frame_h))
+        intro_title_geom = (
+            role in {"mid_label", "generic"}
+            and int(track.start_frame) <= 2
+            and int(track.end_frame) - int(track.start_frame) + 1 <= 8
+            and (w / h) >= 2.0
+            and w / fw >= 0.20
+            and h / fh <= 0.12
+            and 0.25 <= ((x0 + x1) * 0.5) / fw <= 0.75
+        )
         # Hardsub-role stubs that never became a burn-in line.
         if not source_scene_candidate and role == "hardsub" and not _box_is_hardsub_line_geometry(
             track.box_coords, frame_w=frame_w, frame_h=frame_h
@@ -5416,6 +6154,8 @@ def filter_tracks_by_local_text(
                 "role": role,
                 "box": list(track.box_coords),
             }
+        if intro_title_geom:
+            setattr(track, "_intro_title_candidate", True)
         # Wide thin mid-band slabs that never promoted to burn-in (food edges).
         if (
             not source_scene_candidate
@@ -5427,6 +6167,7 @@ def filter_tracks_by_local_text(
             and (h / fh) <= THIN_HARDSUB_HEIGHT_FRAC
             and (w / fw) >= 0.18
             and ((y0 + y1) * 0.5) / fh < HARDSUB_ROLE_CY
+            and not caption_lane
         ):
             return False, {
                 "reason": "not_overlay_geometry",
@@ -5473,7 +6214,10 @@ def filter_tracks_by_local_text(
             and (h / fh) <= 0.12
             and area_frac <= 0.045
         )
-        if not source_scene_candidate and ((h / fh) > 0.085 or area_frac > 0.045):
+        if not source_scene_candidate and (
+            ((h / fh) > 0.085 or area_frac > 0.045)
+            and not intro_title_geom
+        ):
             if not wide_hardsub and not mid_title_ok:
                 return False, {
                     "reason": "oversized_blob",
@@ -5507,6 +6251,12 @@ def filter_tracks_by_local_text(
                     }
 
         if recognizer is None:
+            if requires_single_frame_cjk:
+                return False, {
+                    "reason": "single_frame_recognizer_unavailable",
+                    "role": role,
+                    "box": list(track.box_coords),
+                }
             if wide_hardsub or role == "mid_label":
                 if role == "mid_label" and (w / h) < 1.2 and (w / fw) < 0.12:
                     return False, {
@@ -5525,7 +6275,7 @@ def filter_tracks_by_local_text(
             track, frame_cache, max_frames=3
         )
         if not frame_candidates:
-            if wide_hardsub:
+            if wide_hardsub and not requires_single_frame_cjk:
                 return True, None
             return False, {
                 "reason": "missing_frame",
@@ -5534,6 +6284,10 @@ def filter_tracks_by_local_text(
             }
 
         accepted = False
+        accepted_signatures: set[str] = set()
+        accepted_texts: list[str] = []
+        accepted_cjk_max = 0
+        accepted_sample_count = 0
         last_reject: dict[str, Any] | None = None
         saw_crop = False
         for frame in frame_candidates:
@@ -5559,16 +6313,40 @@ def filter_tracks_by_local_text(
                 id(track) in semantic_scene_label_peer_ids
                 and not latin_card_evidence
             )
-            if local_text_accepts_track(
+            locally_accepted = local_text_accepts_track(
                 recognition,
-                role=role,
+                role="hardsub" if caption_lane else role,
                 allow_latin_editor_card=latin_card_evidence,
                 allow_latin_semantic_scene_label=semantic_scene_evidence,
                 allow_bare_numeric_ui=bool(
                     getattr(track, "_ui_grid_split_child", False)
                 ),
+            )
+            recognized_text = str(getattr(recognition, "text", "") or "")
+            if (
+                locally_accepted
+                and requires_single_frame_cjk
+                and _cjk_count(recognized_text) < 1
             ):
+                locally_accepted = False
+                last_reject = {
+                    "reason": "single_frame_requires_local_cjk",
+                    "role": role,
+                    "text": recognized_text,
+                    "confidence": float(
+                        getattr(recognition, "confidence", 0.0) or 0.0
+                    ),
+                    "box": list(track.box_coords),
+                }
+            if locally_accepted:
                 accepted = True
+                accepted_sample_count += 1
+                accepted_signatures.add(_local_text_timing_signature(recognized_text))
+                if recognized_text.strip():
+                    accepted_texts.append(recognized_text.strip())
+                accepted_cjk_max = max(accepted_cjk_max, _cjk_count(recognized_text))
+                if caption_lane:
+                    setattr(track, "_sequential_caption_lane", True)
                 if latin_card_evidence and _cjk_count(
                     str(getattr(recognition, "text", "") or "")
                 ) == 0:
@@ -5587,7 +6365,11 @@ def filter_tracks_by_local_text(
                         ),
                         "peer_evidence": semantic_peer_evidence.get(id(track), []),
                     }
-                break
+                # Do not stop at the first positive sample.  A compact
+                # screen-locked texture can decode as one plausible glyph in
+                # one frame; provenance needs multi-frame consensus before it
+                # is allowed to become an editor concealment authority.
+                continue
             rejected_text = str(getattr(recognition, "text", "") or "")
             ascii_letters = sum(
                 1
@@ -5612,11 +6394,17 @@ def filter_tracks_by_local_text(
             }
 
         if accepted:
+            setattr(track, "_local_text_consensus_count", int(accepted_sample_count))
+            setattr(track, "_local_text_consensus_signatures", sorted(accepted_signatures))
+            setattr(track, "_local_text_consensus_texts", sorted(set(accepted_texts)))
+            setattr(track, "_local_text_cjk_max", int(accepted_cjk_max))
+            if requires_single_frame_cjk:
+                setattr(track, "_single_frame_cjk_confirmed", True)
             if source_scene_candidate:
                 setattr(track, "_source_intrinsic_candidate", "moving_source_text")
             return True, None
         if not saw_crop:
-            if wide_hardsub:
+            if wide_hardsub and not requires_single_frame_cjk:
                 return True, None
             return False, {
                 "reason": "empty_crop",
@@ -5624,19 +6412,45 @@ def filter_tracks_by_local_text(
                 "box": list(track.box_coords),
             }
         if last_reject is not None:
-            if last_reject.get("reason") == "recognize_error" and wide_hardsub:
+            if (
+                last_reject.get("reason") == "recognize_error"
+                and wide_hardsub
+                and not requires_single_frame_cjk
+            ):
                 return True, None
             # Bright-food OCR often returns blank on real stroke burn-ins.
             # Require strong glyph ink so soft food/lettuce bands stay out.
             if (
                 wide_hardsub
+                and not requires_single_frame_cjk
                 and last_reject.get("reason") == "local_text_reject"
                 and not str(last_reject.get("text") or "").strip()
             ):
-                ink = max(
-                    crop_ink_score(fr, track.box_coords) for fr in frame_candidates
+                stroke_evidence = [
+                    (
+                        crop_ink_score(fr, track.box_coords),
+                        crop_stroke_orientation_balance(fr, track.box_coords),
+                    )
+                    for fr in frame_candidates
+                ]
+                if any(
+                    ink >= 6.0 and orientation_balance >= 0.45
+                    for ink, orientation_balance in stroke_evidence
+                ):
+                    return True, None
+                ink = max((row[0] for row in stroke_evidence), default=0.0)
+                orientation_at_peak_ink = next(
+                    (
+                        orientation_balance
+                        for row_ink, orientation_balance in stroke_evidence
+                        if row_ink == ink
+                    ),
+                    0.0,
                 )
                 if ink >= 6.0:
+                    # A wide confirmed hardsub is a recall-first authority;
+                    # directional cloth/skin guards belong to compact UI
+                    # provenance, not the bottom caption fallback.
                     return True, None
             return False, last_reject
         return False, {
@@ -5779,6 +6593,7 @@ def filter_tracks_by_local_text(
             or bool(getattr(track, "_source_intrinsic_candidate", None))
         ),
         "dense_source_panel_candidates": len(dense_source_panel_ids),
+        "sequential_caption_lane_candidates": len(caption_lane_ids),
         "hardsub_recovery": {
             "applied": len(hardsub_recovery_rows),
             "dense_ui_grid_skips": dense_ui_grid_recovery_skips,
@@ -5993,6 +6808,7 @@ def split_tracks_by_local_text_change(
     source: Path | None = None,
     batch_size: int = 32,
     min_cluster_support: int = 2,
+    max_samples_per_track: int | None = None,
 ) -> tuple[list[MergedTrack], dict[str, Any]]:
     """
     Split geometry-stable tracks when local OCR proves the text content changed.
@@ -6029,7 +6845,36 @@ def split_tracks_by_local_text_change(
         )
         frame_indices: list[int] = []
         crops: list[np.ndarray] = []
-        for frame_index in range(int(track.start_frame), int(track.end_frame) + 1):
+        start_frame = int(track.start_frame)
+        end_frame = int(track.end_frame)
+        candidate_frame_indices = list(range(start_frame, end_frame + 1))
+        if (
+            max_samples_per_track is not None
+            and len(candidate_frame_indices) > max(3, int(max_samples_per_track))
+        ):
+            sample_count = max(3, int(max_samples_per_track))
+            uniform = [
+                int(value)
+                for value in np.linspace(
+                    start_frame,
+                    end_frame,
+                    num=sample_count,
+                    dtype=np.int64,
+                )
+            ]
+            anchors = [
+                start_frame,
+                int(track.best_frame_index),
+                end_frame,
+            ]
+            candidate_frame_indices = sorted(
+                {
+                    value
+                    for value in [*uniform, *anchors]
+                    if start_frame <= int(value) <= end_frame
+                }
+            )
+        for frame_index in candidate_frame_indices:
             frame = _boundary_frame(
                 frame_index, frame_cache=frame_cache, source=source
             )
@@ -7940,6 +8785,57 @@ def coalesce_near_duplicate_tracks(
     return groups
 
 
+def integrate_residual_tracks_without_recoalescing_authority(
+    existing_tracks: Sequence[MergedTrack],
+    residual_tracks: Sequence[MergedTrack],
+    *,
+    frame_w: int,
+    frame_h: int,
+) -> tuple[list[MergedTrack], dict[str, Any]]:
+    """Append recovered residuals without reopening approved temporal epochs.
+
+    ``existing_tracks`` have already passed content-change segmentation,
+    boundary reconciliation and provenance partitioning.  Running the broad
+    near-duplicate coalescer over that authority again can bridge unrelated
+    captions across scenes.  This used to happen even when every residual was
+    rejected by local OCR: the mere presence of raw DBNet residual hits caused
+    hundreds of valid epochs to collapse into a handful of full-video tracks.
+
+    Residual candidates may still be fragmented, so they are coalesced among
+    themselves before being appended.  Later duplicate/shadow guards may drop
+    redundant residuals, but existing authority rows are never merged with one
+    another in this pass.
+    """
+
+    authority = list(existing_tracks)
+    residual = list(residual_tracks)
+    consolidated_residual = (
+        coalesce_near_duplicate_tracks(
+            residual,
+            frame_w=frame_w,
+            frame_h=frame_h,
+        )
+        if residual
+        else []
+    )
+    output = [*authority, *consolidated_residual]
+    output.sort(
+        key=lambda track: (
+            int(track.start_frame),
+            float(track.box_coords[1]),
+            float(track.box_coords[0]),
+        )
+    )
+    return output, {
+        "policy_version": "residual_append_preserve_authority_v1",
+        "authority_tracks_before": len(authority),
+        "residual_tracks_before": len(residual),
+        "residual_tracks_after_coalesce": len(consolidated_residual),
+        "tracks_after_append": len(output),
+        "authority_recoalesced": False,
+    }
+
+
 def crop_ink_score(frame_bgr: np.ndarray, xyxy: Sequence[float]) -> float:
     """
     Stroke / edge ink score inside a box (burn-in friendly; not Laplacian).
@@ -7962,6 +8858,30 @@ def crop_ink_score(frame_bgr: np.ndarray, xyxy: Sequence[float]) -> float:
     stroke = float(np.mean(tophat) + np.mean(blackhat))
     lap = float(cv2.Laplacian(enh, cv2.CV_32F).var())
     return stroke / 25.0 + edge / 40.0 + lap / 500.0
+
+
+def crop_stroke_orientation_balance(
+    frame_bgr: np.ndarray, xyxy: Sequence[float]
+) -> float:
+    """Return 0..1 balance between horizontal and vertical stroke energy.
+
+    Glyphs normally contain energy in both orientations. Cloth, hair and rails
+    can score as strong ink while remaining strongly one-directional. This
+    cheap local check is used only for the blank-recognizer hardsub fallback.
+    """
+
+    if frame_bgr is None or getattr(frame_bgr, "size", 0) == 0:
+        return 0.0
+    crop = _crop_xyxy_from_frame(frame_bgr, xyxy)
+    if crop is None or crop.size < 16:
+        return 0.0
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    gx = float(np.mean(np.abs(cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3))))
+    gy = float(np.mean(np.abs(cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3))))
+    strongest = max(gx, gy)
+    if strongest <= 1e-6:
+        return 0.0
+    return min(gx, gy) / strongest
 
 
 def pick_ink_aware_keyframe(
@@ -8495,13 +9415,19 @@ def confirm_tracks(
     tracks: Sequence[MergedTrack],
     *,
     min_hits: int = MIN_HITS_TO_CONFIRM,
+    strong_single_frame_indices: Sequence[int] = (),
 ) -> tuple[list[MergedTrack], list[MergedTrack]]:
     """Keep tracks with ≥ min_hits; return (kept, dropped_suspects)."""
     kept: list[MergedTrack] = []
     dropped: list[MergedTrack] = []
     need = max(1, int(min_hits))
+    strong = {int(value) for value in strong_single_frame_indices}
     for track in tracks:
-        if int(track.hit_count) >= need:
+        independently_confirmed_single = (
+            int(track.hit_count) == 1
+            and any(int(value) in strong for value in track.hit_frames)
+        )
+        if int(track.hit_count) >= need or independently_confirmed_single:
             kept.append(track)
         else:
             dropped.append(track)
@@ -8582,6 +9508,7 @@ def split_overmerged_tracks(
     pad: int = POST_EVIDENCE_PAD,
     frame_w: int | None = None,
     frame_h: int | None = None,
+    editor_gap_max: int | None = None,
 ) -> list[MergedTrack]:
     """
     Split a track when consecutive hits jump in time/geometry (over-merge undo).
@@ -8601,7 +9528,22 @@ def split_overmerged_tracks(
             c0 = _box_centroid(track.hit_boxes[prev])
             c1 = _box_centroid(track.hit_boxes[idx])
             dist = ((c0[0] - c1[0]) ** 2 + (c0[1] - c1[1]) ** 2) ** 0.5
-            broke = gap > int(gap_max) or (
+            allowed_gap = int(gap_max)
+            if (
+                editor_gap_max is not None
+                and int(editor_gap_max) > allowed_gap
+                and _is_mid_overlay_box(
+                    track.hit_boxes[prev], frame_w=frame_w, frame_h=frame_h
+                )
+                and _is_mid_overlay_box(
+                    track.hit_boxes[idx], frame_w=frame_w, frame_h=frame_h
+                )
+                and _mid_overlay_geometry_compatible(
+                    track.hit_boxes[prev], track.hit_boxes[idx]
+                )
+            ):
+                allowed_gap = int(editor_gap_max)
+            broke = gap > allowed_gap or (
                 iou < float(min_iou) and dist > float(max_centroid_px)
             )
             if not broke and _both_hardsub_line_boxes(
@@ -8699,6 +9641,9 @@ def finalize_confirmed_tracks(
     frame_w: int,
     frame_h: int,
     min_hits: int = MIN_HITS_TO_CONFIRM,
+    split_gap_max: int = SPLIT_GAP_FRAMES,
+    editor_split_gap_max: int | None = None,
+    strong_single_frame_indices: Sequence[int] = (),
 ) -> tuple[list[MergedTrack], dict[str, Any]]:
     """
     Last-mile polish before OCR: split over-merge → shrink to evidence → purge chrome.
@@ -8706,10 +9651,12 @@ def finalize_confirmed_tracks(
     before = list(tracks)
     split = split_overmerged_tracks(
         before,
+        gap_max=split_gap_max,
         frame_count=frame_count,
         pad=POST_EVIDENCE_PAD,
         frame_w=frame_w,
         frame_h=frame_h,
+        editor_gap_max=editor_split_gap_max,
     )
     split_events = []
     if len(split) > len(before):
@@ -8734,7 +9681,11 @@ def finalize_confirmed_tracks(
         shrunk.append(after)
 
     # Re-drop segments that fell below confirm after split.
-    confirmed, re_dropped = confirm_tracks(shrunk, min_hits=min_hits)
+    confirmed, re_dropped = confirm_tracks(
+        shrunk,
+        min_hits=min_hits,
+        strong_single_frame_indices=strong_single_frame_indices,
+    )
     cleaned, purged = purge_chrome_tracks(
         confirmed, frame_w=frame_w, frame_h=frame_h
     )
@@ -8831,6 +9782,7 @@ def classify_visual_text_provenance(
     frame_w: int,
     frame_h: int,
     text_audit: Mapping[str, Any],
+    frame_cache: Mapping[int, np.ndarray] | None = None,
 ) -> dict[int, dict[str, Any]]:
     """Classify localization authority before OCR touches source-scene text.
 
@@ -8840,6 +9792,9 @@ def classify_visual_text_provenance(
     """
 
     compact_source_ids = compact_scene_ui_cluster_member_ids(
+        tracks, frame_w=frame_w, frame_h=frame_h
+    )
+    caption_lane_ids = sequential_caption_lane_member_ids(
         tracks, frame_w=frame_w, frame_h=frame_h
     )
     perspective_ids = perspective_ui_provenance_member_ids(
@@ -8858,13 +9813,74 @@ def classify_visual_text_provenance(
         tracks,
         dense_panel_ids=dense_panel_ids,
     )
+    strong_source_ids = set(dense_panel_context_ids) | set(repeated_source_row_ids)
+    for track in tracks:
+        if str(getattr(track, "_source_intrinsic_candidate", "") or ""):
+            strong_source_ids.add(id(track))
+        elif not is_horizontally_locked_track(
+            track, frame_w=frame_w, frame_h=frame_h
+        ):
+            strong_source_ids.add(id(track))
+    panel_containment_ids = source_panel_containment_member_ids(
+        tracks,
+        strong_source_ids=strong_source_ids,
+        frame_w=frame_w,
+        frame_h=frame_h,
+    )
     anchors = [
         track
         for track in tracks
         if is_editor_card_anchor_track(track, frame_w=frame_w, frame_h=frame_h)
     ]
+    # A DBNet box from a second line of an editor caption can be absorbed into
+    # the dense phone/UI cohort (especially when the source frame also shows a
+    # device).  Do not let that inherited source label punch a hole through the
+    # editor caption plate.  Only use an anchor that is not itself backed by
+    # source-plane evidence, and require strong temporal + horizontal
+    # correspondence with the anchor.  This keeps genuine phone labels outside
+    # the caption lane protected while resolving the common two-line caption
+    # shadow case.
+    editor_anchor_candidates = [
+        anchor
+        for anchor in anchors
+        if id(anchor) not in strong_source_ids
+        and id(anchor) not in panel_containment_ids
+    ]
     fw = max(1.0, float(frame_w))
     fh = max(1.0, float(frame_h))
+
+    def _editor_caption_sibling(track: MergedTrack) -> bool:
+        x0, y0, x1, y1 = (float(value) for value in track.box_coords[:4])
+        track_width = max(1.0, x1 - x0)
+        track_width_frac = track_width / fw
+        if track_width_frac < 0.14:
+            return False
+        for anchor in editor_anchor_candidates:
+            if not _tracks_time_overlap(track, anchor):
+                continue
+            anchor_span = max(
+                1, int(anchor.end_frame) - int(anchor.start_frame) + 1
+            )
+            overlap_frames = max(
+                0,
+                min(int(track.end_frame), int(anchor.end_frame))
+                - max(int(track.start_frame), int(anchor.start_frame))
+                + 1,
+            )
+            track_span = max(
+                1, int(track.end_frame) - int(track.start_frame) + 1
+            )
+            if overlap_frames / float(min(anchor_span, track_span)) < 0.75:
+                continue
+            ax0, ay0, ax1, ay1 = (float(value) for value in anchor.box_coords[:4])
+            horizontal_intersection = max(0.0, min(x1, ax1) - max(x0, ax0))
+            if horizontal_intersection / min(track_width, max(1.0, ax1 - ax0)) < 0.80:
+                continue
+            vertical_gap = max(0.0, ay0 - y1, y0 - ay1)
+            if vertical_gap > max(0.018 * fh, 1.5 * max(y1 - y0, ay1 - ay0)):
+                continue
+            return True
+        return False
     near_limit = 0.55 * min(fw, fh)
 
     def _near_editor_anchor(track: MergedTrack) -> bool:
@@ -8876,6 +9892,163 @@ def classify_visual_text_provenance(
             if ((tx - ax) ** 2 + (ty - ay) ** 2) ** 0.5 <= near_limit:
                 return True
         return False
+
+    def _temporal_overlap_ratio(left: MergedTrack, right: MergedTrack) -> float:
+        overlap = max(
+            0,
+            min(int(left.end_frame), int(right.end_frame))
+            - max(int(left.start_frame), int(right.start_frame))
+            + 1,
+        )
+        shorter = max(
+            1,
+            min(
+                int(left.end_frame) - int(left.start_frame) + 1,
+                int(right.end_frame) - int(right.start_frame) + 1,
+            ),
+        )
+        return overlap / float(shorter)
+
+    def _row_has_solid_panel(track: MergedTrack) -> bool:
+        if frame_cache is None:
+            return False
+        return any(
+            has_solid_colored_editor_panel(frame, track.box_coords)
+            or has_solid_neutral_editor_panel(frame, track.box_coords)
+            for frame in _cached_frames_for_track(
+                track, frame_cache, max_frames=3
+            )
+        )
+
+    def _track_has_containing_panel(track: MergedTrack) -> bool:
+        """Return true only when a detected solid component contains the row."""
+        if frame_cache is None:
+            return False
+        return any(
+            editor_card_panel_bounds(frame, track.box_coords) is not None
+            for frame in _cached_frames_for_track(track, frame_cache, max_frames=3)
+        )
+
+    # A multi-row editor card is one visual object.  Geometry-first source
+    # partitioning used to classify one small row as SOURCE_INTRINSIC and an
+    # adjacent row as EDITOR_OVERLAY, leaving holes in the card.  Build a
+    # strong, local group authority before the per-row decision: synchronized
+    # solid-panel rows may inherit editor provenance only from an independently
+    # confirmed editor anchor/caption peer.  Source phone/app panels lack that
+    # peer and stay protected.
+    solid_panel_ids = {
+        id(track)
+        for track in tracks
+        if _row_has_solid_panel(track)
+        and _track_has_containing_panel(track)
+    }
+    editor_card_panel_boxes: dict[int, list[float]] = {}
+    if frame_cache is not None:
+        for track in tracks:
+            if id(track) not in solid_panel_ids:
+                continue
+            candidates = [
+                bounds
+                for frame in _cached_frames_for_track(
+                    track, frame_cache, max_frames=3
+                )
+                if (
+                    bounds := editor_card_panel_bounds(
+                        frame, track.box_coords
+                    )
+                )
+                is not None
+            ]
+            if not candidates:
+                continue
+            editor_card_panel_boxes[id(track)] = max(
+                candidates,
+                key=lambda box: max(1.0, box[2] - box[0])
+                * max(1.0, box[3] - box[1]),
+            )
+    editor_card_anchor_ids = {
+        id(track)
+        for track in tracks
+        if id(track) in solid_panel_ids
+        and (
+            id(track) in caption_lane_ids
+            or (
+                is_editor_card_anchor_track(
+                    track, frame_w=frame_w, frame_h=frame_h
+                )
+                and id(track) not in strong_source_ids
+                and id(track) not in panel_containment_ids
+            )
+        )
+    }
+    editor_card_group_ids: set[int] = set(editor_card_anchor_ids)
+    if editor_card_anchor_ids:
+        changed = True
+        while changed:
+            changed = False
+            current_members = [
+                track for track in tracks if id(track) in editor_card_group_ids
+            ]
+            for track in tracks:
+                if id(track) in editor_card_group_ids:
+                    continue
+                tx0, ty0, tx1, ty1 = (
+                    float(value) for value in track.box_coords[:4]
+                )
+                track_height = max(1.0, ty1 - ty0)
+                track_width = max(1.0, tx1 - tx0)
+                for peer in current_members:
+                    if _temporal_overlap_ratio(track, peer) < 0.65:
+                        continue
+                    px0, py0, px1, py1 = (
+                        float(value) for value in peer.box_coords[:4]
+                    )
+                    peer_height = max(1.0, py1 - py0)
+                    horizontal_gap = max(0.0, px0 - tx1, tx0 - px1)
+                    vertical_gap = max(0.0, py0 - ty1, ty0 - py1)
+                    horizontal_overlap = max(
+                        0.0, min(tx1, px1) - max(tx0, px0)
+                    )
+                    same_panel = bool(
+                        horizontal_gap <= 0.035 * fw
+                        and vertical_gap
+                        <= max(0.040 * fh, 2.0 * max(track_height, peer_height))
+                        and (
+                            horizontal_overlap
+                            / min(track_width, max(1.0, px1 - px0))
+                            >= 0.15
+                            or horizontal_gap <= 0.012 * fw
+                        )
+                    )
+                    peer_panel = editor_card_panel_boxes.get(id(peer))
+                    candidate_inside_panel = False
+                    if peer_panel is not None:
+                        px0, py0, px1, py1 = (float(value) for value in peer_panel[:4])
+                        overlap_area = max(0.0, min(tx1, px1) - max(tx0, px0)) * max(
+                            0.0, min(ty1, py1) - max(ty0, py0)
+                        )
+                        track_area = max(1.0, (tx1 - tx0) * (ty1 - ty0))
+                        candidate_inside_panel = overlap_area / track_area >= 0.55
+                        # A nearby caption below a solid card is a separate
+                        # physical object.  The former proximity fallback let
+                        # that caption inherit the card component even when it
+                        # lay completely outside the detected panel.  Phase 4
+                        # then processed the card once and suppressed the real
+                        # caption cover as a duplicate.  Once a peer has a
+                        # frame-derived panel boundary, containment—not a
+                        # loose row gap—is the authority for membership.
+                        if not candidate_inside_panel:
+                            same_panel = False
+                    # A row that is not itself contained by the peer's
+                    # component must not inherit panel provenance merely from
+                    # a nearby row.  This prevents a lower-third caption from
+                    # being absorbed into an upper product-card panel.
+                    if same_panel and (
+                        candidate_inside_panel or _track_has_containing_panel(track)
+                    ) or candidate_inside_panel:
+                        editor_card_group_ids.add(id(track))
+                        changed = True
+                        break
 
     output: dict[int, dict[str, Any]] = {}
     for track in tracks:
@@ -8893,9 +10066,38 @@ def classify_visual_text_provenance(
             getattr(track, "_source_intrinsic_candidate", "") or ""
         )
         reasons: list[str]
-        if semantic_role == "semantic_scene_label":
+        if id(track) in editor_card_group_ids:
+            classification, confidence = "EDITOR_OVERLAY", 0.985
+            reasons = [
+                "solid_editor_card_group",
+                "temporally_synchronized_editor_anchor_peer",
+                "group_provenance_overrides_early_source_partition",
+            ]
+        elif int(track.hit_count) == 1:
+            classification, confidence = "UNCERTAIN", 0.50
+            reasons = [
+                (
+                    "single_frame_local_cjk_confirmed"
+                    if bool(getattr(track, "_single_frame_cjk_confirmed", False))
+                    else "single_frame_temporal_evidence_insufficient"
+                ),
+                "single_frame_provenance_requires_review",
+            ]
+        elif semantic_role == "semantic_scene_label":
             classification, confidence = "SOURCE_INTRINSIC", 0.99
             reasons = ["audited_semantic_scene_label"]
+        elif _editor_caption_sibling(track):
+            classification, confidence = "EDITOR_OVERLAY", 0.95
+            reasons = [
+                "editor_caption_sibling_of_wide_locked_anchor",
+                "caption_lane_provenance_overrides_dense_source_context",
+            ]
+        elif id(track) in caption_lane_ids:
+            classification, confidence = "EDITOR_OVERLAY", 0.98
+            reasons = [
+                "sequential_screen_locked_caption_lane",
+                "caption_lane_geometry_overrides_upper_band_generic_role",
+            ]
         elif id(track) in dense_panel_ids:
             classification, confidence = "SOURCE_INTRINSIC", 0.98
             reasons = [
@@ -8914,6 +10116,13 @@ def classify_visual_text_provenance(
                 "repeated_source_ui_row",
                 "stable_fragment_family_near_dense_panel",
             ]
+        elif id(track) in panel_containment_ids:
+            classification, confidence = "SOURCE_INTRINSIC_PANEL", 0.97
+            reasons = [
+                "contained_by_source_ui_plane",
+                "temporally_overlapping_spatially_diverse_source_peers",
+                "source_plane_evidence_overrides_caption_shape",
+            ]
         elif role == "hardsub":
             classification, confidence = "EDITOR_OVERLAY", 0.99
             reasons = ["hardsub_line_geometry"]
@@ -8923,11 +10132,41 @@ def classify_visual_text_provenance(
                 "dense_source_ui_context_propagation",
                 "thin_label_with_proven_panel_peers",
             ]
+        elif (
+            locked
+            and role != "hardsub"
+            and width_frac <= 0.18
+            and height_frac <= 0.025
+            and int(track.hit_count) >= 3
+            and int(track.end_frame) - int(track.start_frame) + 1 >= 45
+        ):
+            # Long-lived compact values inside an app/device surface (for
+            # example a camera aperture modal) are source UI. Editor copy this
+            # small is ambiguous, so preservation is the fail-closed action.
+            classification, confidence = "SOURCE_INTRINSIC_PANEL", 0.94
+            reasons = [
+                "long_lived_compact_locked_ui_value",
+                "preserve_source_when_editor_provenance_is_ambiguous",
+            ]
         elif is_editor_card_anchor_track(
             track, frame_w=frame_w, frame_h=frame_h
         ):
-            classification, confidence = "EDITOR_OVERLAY", 0.97
-            reasons = ["wide_locked_editor_card_anchor"]
+            consensus_count = int(getattr(track, "_local_text_consensus_count", 0) or 0)
+            consensus_cjk = int(getattr(track, "_local_text_cjk_max", 0) or 0)
+            # Geometry alone is not enough for a compact/mid-face rectangle:
+            # hair, skin texture and jewellery are frequently screen-locked
+            # for a short epoch.  A wide anchor must have repeated local text
+            # evidence; otherwise preserve it as uncertain for review.
+            consensus_known = hasattr(track, "_local_text_consensus_count")
+            if (not consensus_known) or (consensus_count >= 2 and consensus_cjk >= 1):
+                classification, confidence = "EDITOR_OVERLAY", 0.97
+                reasons = ["wide_locked_editor_card_anchor", "multiframe_local_text_consensus"]
+            else:
+                classification, confidence = "UNCERTAIN", 0.50
+                reasons = [
+                    "wide_locked_geometry_without_multiframe_text_consensus",
+                    "preserve_source_when_editor_provenance_is_ambiguous",
+                ]
         elif id(track) in compact_source_ids:
             classification, confidence = "SOURCE_INTRINSIC", 0.96
             reasons = [
@@ -8960,6 +10199,24 @@ def classify_visual_text_provenance(
             "policy_version": VISUAL_TEXT_PROVENANCE_SCHEMA_VERSION,
             "reasons": reasons,
         }
+        if id(track) in editor_card_group_ids:
+            member_panel_boxes = [
+                editor_card_panel_boxes[id(member)]
+                for member in tracks
+                if id(member) in editor_card_group_ids
+                and id(member) in editor_card_panel_boxes
+                and _temporal_overlap_ratio(track, member) >= 0.65
+            ]
+            if member_panel_boxes:
+                output[id(track)]["editor_card_panel_box"] = [
+                    min(box[0] for box in member_panel_boxes),
+                    min(box[1] for box in member_panel_boxes),
+                    max(box[2] for box in member_panel_boxes),
+                    max(box[3] for box in member_panel_boxes),
+                ]
+                output[id(track)]["editor_card_panel_policy"] = (
+                    "solid_neutral_editor_card_group_v1"
+                )
     return output
 
 
@@ -9256,6 +10513,7 @@ def write_phase1_qa_artifacts(
     text_coverage: Mapping[str, Any] | None = None,
     effective_step: int = STEP,
     effective_pad: int = PADDING,
+    lightweight: bool = False,
 ) -> dict[str, Any]:
     """Write summary.json, suspects.json, before_after.json, and box overlays."""
     qa_dir.mkdir(parents=True, exist_ok=True)
@@ -9458,7 +10716,7 @@ def write_phase1_qa_artifacts(
             pass
 
     overlay_n = 0
-    for entry in timeline:
+    for entry in ([] if lightweight else timeline):
         text_id = str(entry.get("text_id") or "")
         coords = list(entry.get("box_coords") or [])
         if len(coords) < 4 or not text_id:
@@ -9514,17 +10772,19 @@ def write_phase1_qa_artifacts(
             dict(entry.get("visual_provenance") or {}).get("classification")
             or "UNCERTAIN"
         )
-        != "SOURCE_INTRINSIC"
+        not in {"SOURCE_INTRINSIC", "SOURCE_INTRINSIC_PANEL", "PLATFORM_UI"}
     ]
-    boundary_n = write_boundary_review_artifacts(
-        qa_dir=qa_dir,
-        timeline=boundary_timeline,
-        frame_cache=frame_cache,
-        source=source,
-        frame_count=frame_count,
-        frame_width=frame_width,
-        frame_height=frame_height,
-    )
+    boundary_n = 0
+    if not lightweight:
+        boundary_n = write_boundary_review_artifacts(
+            qa_dir=qa_dir,
+            timeline=boundary_timeline,
+            frame_cache=frame_cache,
+            source=source,
+            frame_count=frame_count,
+            frame_width=frame_width,
+            frame_height=frame_height,
+        )
     summary["boundary_overlays"] = boundary_n
     summary["boundary_crop_overlays"] = boundary_n
     summary["boundary_source_tracks_skipped"] = len(timeline) - len(
@@ -9584,6 +10844,8 @@ class MasterPhase1Extractor:
         centroid_merge_px: float = CENTROID_MERGE_PX,
         min_hits: int = MIN_HITS_TO_CONFIRM,
         on_progress: Callable[[str, int, int], None] | None = None,
+        analysis_engine: str = "v58_candidate",
+        candidate_window_payload: Mapping[str, Any] | None = None,
     ) -> None:
         self._detector = detector
         self._step = max(1, int(step))
@@ -9592,6 +10854,9 @@ class MasterPhase1Extractor:
         self._centroid_merge_px = float(centroid_merge_px)
         self._min_hits = max(1, int(min_hits))
         self._on_progress = on_progress
+        self._analysis_engine = str(analysis_engine or "v58_candidate")
+        self._event_scan = self._analysis_engine == EVENT_SCAN_ENGINE_VERSION
+        self._candidate_window_payload = dict(candidate_window_payload or {})
 
     def _ensure_detector(self) -> LocalTextDetector:
         if self._detector is None:
@@ -9616,7 +10881,12 @@ class MasterPhase1Extractor:
         """
         raw: list[DetectionHit] = []
         rejected = 0
-        for _name, roi_bgr, y_offset in roi_phase1_detect_preps(bgr):
+        detect_preps = roi_phase1_detect_preps(bgr)
+        # Completeness-first event mode intentionally keeps both CLAHE and
+        # stroke preparations. Coloured/low-contrast captions can be invisible
+        # to the stroke-only path; provenance runs after discovery and protects
+        # source panels without sacrificing detector recall.
+        for _name, roi_bgr, y_offset in detect_preps:
             roi_h, roi_w = int(roi_bgr.shape[0]), int(roi_bgr.shape[1])
             boxes = detector.detect(
                 roi_bgr,
@@ -9689,6 +10959,7 @@ class MasterPhase1Extractor:
         out_dir: str | Path,
     ) -> MasterPhase1Result:
         source = Path(video_path)
+        extract_started = time.perf_counter()
         dest = Path(out_dir)
         frames_dir = dest / "frames"
         qa_dir = dest / "qa"
@@ -9703,7 +10974,120 @@ class MasterPhase1Extractor:
         frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        source_width = int(width)
+        source_height = int(height)
+        analysis_scale = 1.0
+        if self._event_scan and max(width, height) > PHASE1_EVENT_ANALYSIS_LONG_EDGE:
+            analysis_scale = PHASE1_EVENT_ANALYSIS_LONG_EDGE / float(
+                max(width, height)
+            )
+            width = max(2, int(round(width * analysis_scale)))
+            height = max(2, int(round(height * analysis_scale)))
+
+        scan_reader: Any = cap
+        analysis_decode_backend = "opencv_source"
+        event_two_pass_decode = False
+        all_frame_proxy_size: list[int] | None = None
+        proxy_size = (
+            phase1_event_proxy_size(source_width, source_height)
+            if self._event_scan
+            else None
+        )
+        if proxy_size is not None:
+            probe_width, probe_height = proxy_size
+            try:
+                scan_reader = _FfmpegProxyFrameReader(
+                    source,
+                    width=probe_width,
+                    height=probe_height,
+                )
+            except (FileNotFoundError, OSError) as exc:
+                cap.release()
+                raise RuntimeError(
+                    "Official Analyze OCR requires the FFmpeg all-frame proxy; "
+                    f"proxy initialization failed: {exc}"
+                ) from exc
+            else:
+                cap.release()
+                event_two_pass_decode = True
+                all_frame_proxy_size = [probe_width, probe_height]
+                analysis_decode_backend = "ffmpeg_two_pass_selected_rawvideo"
+
+        def _analysis_frame(frame_bgr: np.ndarray) -> np.ndarray:
+            if (
+                not self._event_scan
+                or analysis_scale >= 0.999
+                or (
+                    int(frame_bgr.shape[1]) == int(width)
+                    and int(frame_bgr.shape[0]) == int(height)
+                )
+            ):
+                return frame_bgr
+            return cv2.resize(
+                frame_bgr,
+                (int(width), int(height)),
+                interpolation=cv2.INTER_AREA,
+            )
+
+        def _box_to_source(xyxy: Sequence[float]) -> list[float]:
+            if analysis_scale >= 0.999:
+                return [float(value) for value in xyxy[:4]]
+            sx = float(source_width) / max(1.0, float(width))
+            sy = float(source_height) / max(1.0, float(height))
+            return [
+                float(xyxy[0]) * sx,
+                float(xyxy[1]) * sy,
+                float(xyxy[2]) * sx,
+                float(xyxy[3]) * sy,
+            ]
+
+        def _hits_to_source(rows: Sequence[DetectionHit]) -> list[DetectionHit]:
+            if analysis_scale >= 0.999:
+                return list(rows)
+            return [
+                DetectionHit(
+                    frame_index=int(row.frame_index),
+                    box_xyxy=tuple(_box_to_source(row.box_xyxy)),
+                    sharpness=float(row.sharpness),
+                )
+                for row in rows
+            ]
         detector = self._ensure_detector()
+
+        audio_windows: list[CandidateWindow] = []
+        if self._event_scan:
+            for raw in list(self._candidate_window_payload.get("windows") or []):
+                if not isinstance(raw, Mapping):
+                    continue
+                sources = tuple(str(value) for value in list(raw.get("sources") or []))
+                if "AUDIO_GUIDED" not in sources:
+                    continue
+                start_ms = int(raw.get("start_ms") or 0)
+                end_ms = int(raw.get("end_ms") or start_ms)
+                if end_ms <= start_ms:
+                    continue
+                audio_windows.append(
+                    CandidateWindow(
+                        start_ms=start_ms,
+                        end_ms=end_ms,
+                        sources=sources,
+                        confidence=float(raw.get("confidence") or 0.0),
+                    )
+                )
+        duration_ms = max(
+            1,
+            int(round(max(1, frame_count) * 1000.0 / max(1.0, fps))),
+        )
+        event_scheduler = (
+            EventFrameScheduler(
+                fps=fps,
+                frame_count=max(1, frame_count),
+                duration_ms=duration_ms,
+                audio_windows=audio_windows,
+            )
+            if self._event_scan
+            else None
+        )
 
         coarse_hits: list[DetectionHit] = []
         phase_hits: list[DetectionHit] = []
@@ -9742,7 +11126,13 @@ class MasterPhase1Extractor:
                 if (
                     checkpoint.get("schema_version") == "phase1_scan_checkpoint_v2"
                     and str(checkpoint.get("scan_policy_version") or "")
-                    == TEMPORAL_SCAN_POLICY_VERSION
+                    == (
+                        EVENT_SCAN_POLICY_VERSION
+                        if self._event_scan
+                        else TEMPORAL_SCAN_POLICY_VERSION
+                    )
+                    and str(checkpoint.get("analysis_engine") or "v58_candidate")
+                    == self._analysis_engine
                     and int(checkpoint.get("source_size") or -1) == int(source_stat.st_size)
                     and int(checkpoint.get("source_mtime_ns") or -1) == int(source_stat.st_mtime_ns)
                     and int(checkpoint.get("frame_count") or -1) == int(frame_count)
@@ -9767,7 +11157,12 @@ class MasterPhase1Extractor:
         def _write_checkpoint(next_frame: int) -> None:
             payload = {
                 "schema_version": "phase1_scan_checkpoint_v2",
-                "scan_policy_version": TEMPORAL_SCAN_POLICY_VERSION,
+                "scan_policy_version": (
+                    EVENT_SCAN_POLICY_VERSION
+                    if self._event_scan
+                    else TEMPORAL_SCAN_POLICY_VERSION
+                ),
+                "analysis_engine": self._analysis_engine,
                 "source_size": int(source_stat.st_size),
                 "source_mtime_ns": int(source_stat.st_mtime_ns),
                 "frame_count": int(frame_count),
@@ -9808,80 +11203,244 @@ class MasterPhase1Extractor:
                 return False
             return fi >= phase_offset and (fi - phase_offset) % phase_stride == 0
 
-        # Pass 1: fixed STEP coarse scan + phase-offset probes.
-        try:
-            frame_index = 0
-            _report("phase1_scan", 0, frame_count or 1)
-            while True:
-                ok, bgr = cap.read()
-                if not ok or bgr is None:
-                    break
-                if width <= 0 or height <= 0:
-                    height, width = int(bgr.shape[0]), int(bgr.shape[1])
-                if self._step == 1:
-                    is_coarse, probe_reason = temporal_probe.inspect(
-                        bgr, frame_index=frame_index
-                    )
-                    lightweight_scanned_frames += 1
-                    temporal_probe_reasons[probe_reason] += 1
-                    if probe_reason in {"first_frame", "luma_transition", "edge_transition"}:
-                        temporal_transition_frames.add(frame_index)
-                else:
-                    is_coarse = frame_index % self._step == 0
-                    probe_reason = "legacy_fixed_step"
-                is_phase = (not is_coarse) and _is_phase_probe(frame_index)
-                is_residual_risk = frame_index in residual_risk_frames
-                if is_coarse or is_phase or is_residual_risk:
-                    scanned_frames.add(frame_index)
-                    frame_cache[frame_index] = bgr
-                    if frame_index < resume_frame:
-                        frame_index += 1
-                        if frame_index % progress_interval == 0:
-                            _report("phase1_resume_decode", frame_index, frame_count or frame_index)
-                        continue
-                    found, rejected = self._detect_frame_hits(
-                        bgr,
+        def _detect_selected_bgr(
+            bgr: np.ndarray,
+            *,
+            frame_index: int,
+            is_coarse: bool,
+            is_phase: bool,
+            is_residual_risk: bool,
+        ) -> None:
+            nonlocal geometry_rejected, residual_profile_boxes
+            analysis_bgr = _analysis_frame(bgr)
+            scanned_frames.add(frame_index)
+            frame_cache[frame_index] = analysis_bgr
+            if frame_index < resume_frame:
+                return
+            found, rejected = self._detect_frame_hits(
+                analysis_bgr,
+                frame_index=frame_index,
+                detector=detector,
+                frame_w=width,
+                frame_h=height,
+            )
+            geometry_rejected += rejected
+            if is_residual_risk:
+                residual_found, residual_rejected = (
+                    self._detect_frame_residual_profile_hits(
+                        analysis_bgr,
                         frame_index=frame_index,
                         detector=detector,
                         frame_w=width,
                         frame_h=height,
                     )
-                    geometry_rejected += rejected
-                    if is_residual_risk:
-                        residual_found, residual_rejected = (
-                            self._detect_frame_residual_profile_hits(
-                                bgr,
-                                frame_index=frame_index,
-                                detector=detector,
-                                frame_w=width,
-                                frame_h=height,
+                )
+                geometry_rejected += residual_rejected
+                residual_profile_boxes += len(residual_found)
+                found = merge_primary_and_residual_frame_hits(found, residual_found)
+            if is_coarse:
+                coarse_hits.extend(found)
+            elif is_phase:
+                phase_hits.extend(found)
+            else:
+                residual_risk_hits.extend(found)
+
+        def _event_selected_frames(
+            frame_indices: Sequence[int],
+        ):
+            ordered = sorted({int(value) for value in frame_indices})
+            for chunk_start in range(0, len(ordered), 80):
+                selected_chunk = ordered[chunk_start : chunk_start + 80]
+                selected_reader = _FfmpegProxyFrameReader(
+                    source,
+                    width=width,
+                    height=height,
+                    selected_frame_indices=selected_chunk,
+                )
+                try:
+                    for selected_index in selected_chunk:
+                        ok, selected_bgr = selected_reader.read()
+                        if not ok or selected_bgr is None:
+                            raise RuntimeError(
+                                "FFmpeg selected-frame decode ended before all event frames"
+                            )
+                        yield selected_index, selected_bgr
+                finally:
+                    selected_reader.release()
+
+        # Pass 1: schedule with a tiny all-frame proxy, then decode only selected
+        # frames at detector resolution. Legacy/V58 keeps the original one-pass
+        # OpenCV behavior.
+        try:
+            frame_index = 0
+            scan_phase = "phase1_event_scan" if self._event_scan else "phase1_scan"
+            _report(scan_phase, 0, frame_count or 1)
+            if event_scheduler is not None and event_two_pass_decode:
+                event_selected: list[tuple[int, bool]] = []
+                while True:
+                    ok, bgr = scan_reader.read()
+                    if not ok or bgr is None:
+                        break
+                    is_coarse, event_reasons = event_scheduler.inspect(
+                        bgr, frame_index=frame_index
+                    )
+                    lightweight_scanned_frames += 1
+                    for reason in event_reasons or ("stable",):
+                        temporal_probe_reasons[reason] += 1
+                    if any(
+                        reason in {
+                            "first_frame",
+                            "scene_change",
+                            "local_textness_change",
+                            "completeness_text_candidate",
+                        }
+                        for reason in event_reasons
+                    ):
+                        temporal_transition_frames.add(frame_index)
+                    if is_coarse:
+                        event_selected.append(
+                            (
+                                frame_index,
+                                frame_index in residual_risk_frames
+                                or "hard_textness_boundary" in event_reasons,
                             )
                         )
-                        geometry_rejected += residual_rejected
-                        residual_profile_boxes += len(residual_found)
-                        found = merge_primary_and_residual_frame_hits(
-                            found, residual_found
+                    frame_index += 1
+                    if frame_index % progress_interval == 0:
+                        _report(scan_phase, frame_index, frame_count or frame_index)
+                scan_reader.release()
+
+                _report("phase1_event_detect", 0, len(event_selected) or 1)
+                selected_done = 0
+                # FFmpeg's expression evaluator becomes unstable with a very
+                # large sum of eq(n, frame) terms on Windows. Bounded chunks
+                # keep command lines/parser memory small while still avoiding
+                # full-resolution BGR transfer for unselected frames.
+                residual_by_frame = dict(event_selected)
+                for selected_index, selected_bgr in _event_selected_frames(
+                    list(residual_by_frame)
+                ):
+                    _detect_selected_bgr(
+                        selected_bgr,
+                        frame_index=selected_index,
+                        is_coarse=True,
+                        is_phase=False,
+                        is_residual_risk=bool(residual_by_frame[selected_index]),
+                    )
+                    selected_done += 1
+                    if selected_done % progress_interval == 0:
+                        _report(
+                            "phase1_event_detect",
+                            selected_done,
+                            len(event_selected),
                         )
-                    if is_coarse:
-                        coarse_hits.extend(found)
-                    elif is_phase:
-                        phase_hits.extend(found)
+                    if selected_done % checkpoint_interval == 0:
+                        _write_checkpoint(selected_index + 1)
+                _report(
+                    "phase1_event_detect",
+                    selected_done,
+                    len(event_selected) or 1,
+                )
+            else:
+                while True:
+                    ok, bgr = scan_reader.read()
+                    if not ok or bgr is None:
+                        break
+                    if source_width <= 0 or source_height <= 0:
+                        source_height, source_width = int(bgr.shape[0]), int(bgr.shape[1])
+                        height, width = source_height, source_width
+                    if event_scheduler is not None:
+                        is_coarse, event_reasons = event_scheduler.inspect(
+                            bgr, frame_index=frame_index
+                        )
+                        lightweight_scanned_frames += 1
+                        for reason in event_reasons or ("stable",):
+                            temporal_probe_reasons[reason] += 1
+                        if any(
+                            reason in {
+                                "first_frame",
+                                "scene_change",
+                                "local_textness_change",
+                                "completeness_text_candidate",
+                            }
+                            for reason in event_reasons
+                        ):
+                            temporal_transition_frames.add(frame_index)
+                    elif self._step == 1:
+                        is_coarse, probe_reason = temporal_probe.inspect(
+                            bgr, frame_index=frame_index
+                        )
+                        lightweight_scanned_frames += 1
+                        temporal_probe_reasons[probe_reason] += 1
+                        if probe_reason in {"first_frame", "luma_transition", "edge_transition"}:
+                            temporal_transition_frames.add(frame_index)
                     else:
-                        residual_risk_hits.extend(found)
-                frame_index += 1
-                if frame_index % progress_interval == 0:
-                    _report("phase1_scan", frame_index, frame_count or frame_index)
-                if frame_index % checkpoint_interval == 0:
-                    _write_checkpoint(frame_index)
+                        is_coarse = frame_index % self._step == 0
+                    is_phase = (
+                        event_scheduler is None
+                        and (not is_coarse)
+                        and _is_phase_probe(frame_index)
+                    )
+                    is_residual_risk = (
+                        frame_index in residual_risk_frames
+                        or (
+                            event_scheduler is not None
+                            and "hard_textness_boundary" in event_reasons
+                        )
+                    ) and (is_coarse if event_scheduler is not None else True)
+                    if is_coarse or is_phase or is_residual_risk:
+                        _detect_selected_bgr(
+                            bgr,
+                            frame_index=frame_index,
+                            is_coarse=is_coarse,
+                            is_phase=is_phase,
+                            is_residual_risk=is_residual_risk,
+                        )
+                    frame_index += 1
+                    if frame_index % progress_interval == 0:
+                        _report(scan_phase, frame_index, frame_count or frame_index)
+                    if frame_index % checkpoint_interval == 0:
+                        _write_checkpoint(frame_index)
         finally:
-            cap.release()
+            scan_reader.release()
 
         if frame_count <= 0:
             frame_count = frame_index
         if frame_count <= 0:
             raise RuntimeError(f"No frames read from {source}")
-        _report("phase1_scan", frame_count, frame_count)
+        _report(scan_phase, frame_count, frame_count)
         _write_checkpoint(frame_count)
+
+        event_candidate_payload: dict[str, Any] = {}
+        if event_scheduler is not None:
+            event_candidate_payload = event_scheduler.payload(
+                scanned_frames=len(scanned_frames)
+            )
+            event_candidate_payload["audio_seed_sha256"] = str(
+                self._candidate_window_payload.get("seed_sha256") or ""
+            )
+            event_candidate_payload["source_transcript_sha256"] = str(
+                self._candidate_window_payload.get("source_transcript_sha256") or ""
+            )
+            event_candidate_payload["candidate_seed_mode"] = str(
+                self._candidate_window_payload.get("mode") or "VISUAL_ONLY"
+            )
+            event_candidate_payload["candidate_seed_segments_count"] = int(
+                self._candidate_window_payload.get("segments_count") or 0
+            )
+            event_candidate_payload["candidate_seed_audio_analysis_version"] = str(
+                self._candidate_window_payload.get("audio_analysis_version") or ""
+            )
+            event_candidate_payload["candidate_seed_audio_analysis_fingerprint"] = str(
+                self._candidate_window_payload.get("audio_analysis_fingerprint") or ""
+            )
+            event_candidate_payload["candidate_seed_vad_has_speech"] = (
+                self._candidate_window_payload.get("vad_has_speech")
+            )
+            (dest / f"{CANDIDATE_WINDOW_SCHEMA_VERSION}.json").write_text(
+                json.dumps(event_candidate_payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
 
         seed_hits = [*coarse_hits, *phase_hits, *residual_risk_hits]
 
@@ -9901,40 +11460,64 @@ class MasterPhase1Extractor:
             dense_candidates,
             already_scanned=sorted(scanned_frames),
             frame_count=frame_count,
+            max_heavy_ratio=(
+                event_dense_rescan_max_ratio(fps)
+                if self._event_scan
+                else PHASE1_DENSE_RESCAN_MAX_HEAVY_RATIO
+            ),
         )
         hits: list[DetectionHit] = list(seed_hits)
         if dense_needed:
-            cap2 = cv2.VideoCapture(str(source))
-            if not cap2.isOpened():
-                raise RuntimeError(f"Cannot reopen video for dense rescan: {source}")
-            try:
-                want = set(dense_needed)
-                fi = 0
-                dense_done = 0
-                _report("phase1_dense_rescan", 0, len(dense_needed))
-                while want:
-                    ok, bgr = cap2.read()
-                    if not ok or bgr is None:
-                        break
-                    if fi in want:
-                        scanned_frames.add(fi)
-                        frame_cache[fi] = bgr
-                        found, rejected = self._detect_frame_hits(
-                            bgr,
-                            frame_index=fi,
-                            detector=detector,
-                            frame_w=width,
-                            frame_h=height,
-                        )
-                        geometry_rejected += rejected
-                        hits.extend(found)
-                        want.discard(fi)
-                        dense_done += 1
-                        if dense_done % progress_interval == 0:
-                            _report("phase1_dense_rescan", dense_done, len(dense_needed))
-                    fi += 1
-            finally:
-                cap2.release()
+            want = set(dense_needed)
+            dense_done = 0
+            _report("phase1_dense_rescan", 0, len(dense_needed))
+            if self._event_scan and event_two_pass_decode:
+                for fi, analysis_bgr in _event_selected_frames(dense_needed):
+                    scanned_frames.add(fi)
+                    frame_cache[fi] = analysis_bgr
+                    found, rejected = self._detect_frame_hits(
+                        analysis_bgr,
+                        frame_index=fi,
+                        detector=detector,
+                        frame_w=width,
+                        frame_h=height,
+                    )
+                    geometry_rejected += rejected
+                    hits.extend(found)
+                    want.discard(fi)
+                    dense_done += 1
+                    if dense_done % progress_interval == 0:
+                        _report("phase1_dense_rescan", dense_done, len(dense_needed))
+            else:
+                cap2 = cv2.VideoCapture(str(source))
+                if not cap2.isOpened():
+                    raise RuntimeError(f"Cannot reopen video for dense rescan: {source}")
+                try:
+                    fi = 0
+                    while want:
+                        ok, bgr = cap2.read()
+                        if not ok or bgr is None:
+                            break
+                        if fi in want:
+                            analysis_bgr = _analysis_frame(bgr)
+                            scanned_frames.add(fi)
+                            frame_cache[fi] = analysis_bgr
+                            found, rejected = self._detect_frame_hits(
+                                analysis_bgr,
+                                frame_index=fi,
+                                detector=detector,
+                                frame_w=width,
+                                frame_h=height,
+                            )
+                            geometry_rejected += rejected
+                            hits.extend(found)
+                            want.discard(fi)
+                            dense_done += 1
+                            if dense_done % progress_interval == 0:
+                                _report("phase1_dense_rescan", dense_done, len(dense_needed))
+                        fi += 1
+                finally:
+                    cap2.release()
             _report("phase1_dense_rescan", len(dense_needed) - len(want), len(dense_needed))
 
         # Pass 3: bounded high-resolution recovery on dense UI/app anchors.
@@ -9954,47 +11537,87 @@ class MasterPhase1Extractor:
             sorted(small_text_candidates),
             already_scanned=sorted(scanned_frames),
             frame_count=frame_count,
+            max_heavy_ratio=(
+                event_dense_rescan_max_ratio(fps)
+                if self._event_scan
+                else PHASE1_DENSE_RESCAN_MAX_HEAVY_RATIO
+            ),
         )
         small_text_frames = sorted(
             set(small_text_new_frames)
             | {int(value) for value in small_text_candidates if int(value) in scanned_frames}
         )
+        small_text_frame_limit = max(
+            12,
+            min(
+                72,
+                int(
+                    np.ceil(
+                        max(1.0, duration_ms / 60_000.0)
+                        * PHASE1_SMALL_TEXT_MAX_ANCHORS_PER_MINUTE
+                    )
+                ),
+            ),
+        )
+        if self._event_scan and len(small_text_frames) > small_text_frame_limit:
+            positions = np.linspace(
+                0,
+                len(small_text_frames) - 1,
+                num=small_text_frame_limit,
+                dtype=np.int64,
+            )
+            small_text_frames = sorted(
+                {small_text_frames[int(position)] for position in positions}
+            )
         small_text_hits: list[DetectionHit] = []
         small_text_geometry_rejected = 0
         if small_text_frames:
-            cap3 = cv2.VideoCapture(str(source))
-            if not cap3.isOpened():
-                raise RuntimeError(f"Cannot reopen video for small-text recovery: {source}")
-            try:
-                want = set(small_text_frames)
-                fi = 0
-                done = 0
-                _report("phase1_small_text_recovery", 0, len(want))
-                while want:
-                    ok, bgr = cap3.read()
-                    if not ok or bgr is None:
-                        break
-                    if fi in want:
-                        scanned_frames.add(fi)
-                        frame_cache[fi] = bgr
-                        found, rejected = self._detect_frame_hits(
-                            bgr,
-                            frame_index=fi,
-                            detector=detector,
-                            frame_w=width,
-                            frame_h=height,
-                            long_edge=PHASE1_SMALL_TEXT_DET_LONG_EDGE,
-                            bin_thresh=PHASE1_SMALL_TEXT_DET_BIN_THRESH,
-                        )
-                        small_text_hits.extend(found)
-                        small_text_geometry_rejected += rejected
-                        want.discard(fi)
-                        done += 1
-                        if done % progress_interval == 0:
-                            _report("phase1_small_text_recovery", done, len(small_text_frames))
-                    fi += 1
-            finally:
-                cap3.release()
+            want = set(small_text_frames)
+            done = 0
+            _report("phase1_small_text_recovery", 0, len(want))
+
+            def _process_small_text_frame(fi: int, analysis_bgr: np.ndarray) -> None:
+                nonlocal small_text_geometry_rejected, done
+                scanned_frames.add(fi)
+                frame_cache[fi] = analysis_bgr
+                found, rejected = self._detect_frame_hits(
+                    analysis_bgr,
+                    frame_index=fi,
+                    detector=detector,
+                    frame_w=width,
+                    frame_h=height,
+                    long_edge=(
+                        max(width, height)
+                        if self._event_scan
+                        else PHASE1_SMALL_TEXT_DET_LONG_EDGE
+                    ),
+                    bin_thresh=PHASE1_SMALL_TEXT_DET_BIN_THRESH,
+                )
+                small_text_hits.extend(found)
+                small_text_geometry_rejected += rejected
+                want.discard(fi)
+                done += 1
+                if done % progress_interval == 0:
+                    _report("phase1_small_text_recovery", done, len(small_text_frames))
+
+            if self._event_scan and event_two_pass_decode:
+                for fi, analysis_bgr in _event_selected_frames(small_text_frames):
+                    _process_small_text_frame(fi, analysis_bgr)
+            else:
+                cap3 = cv2.VideoCapture(str(source))
+                if not cap3.isOpened():
+                    raise RuntimeError(f"Cannot reopen video for small-text recovery: {source}")
+                try:
+                    fi = 0
+                    while want:
+                        ok, bgr = cap3.read()
+                        if not ok or bgr is None:
+                            break
+                        if fi in want:
+                            _process_small_text_frame(fi, _analysis_frame(bgr))
+                        fi += 1
+                finally:
+                    cap3.release()
             _report(
                 "phase1_small_text_recovery",
                 len(small_text_frames) - len(want),
@@ -10014,9 +11637,18 @@ class MasterPhase1Extractor:
 
         postprocess_total = 15
         postprocess_stage = 0
+        postprocess_last_tick = time.perf_counter()
 
         def _postprocess_progress(stage: str) -> None:
-            nonlocal postprocess_stage
+            nonlocal postprocess_stage, postprocess_last_tick
+            now = time.perf_counter()
+            logger.info(
+                "master_phase1_stage_complete stage=%s elapsed_s=%.3f total_elapsed_s=%.3f",
+                stage,
+                now - postprocess_last_tick,
+                now - extract_started,
+            )
+            postprocess_last_tick = now
             postprocess_stage += 1
             _report(
                 f"phase1_postprocess_{stage}",
@@ -10025,6 +11657,21 @@ class MasterPhase1Extractor:
             )
 
         _postprocess_progress("coverage")
+
+        if event_scheduler is not None:
+            event_candidate_payload = event_scheduler.payload(
+                scanned_frames=len(scanned_frames)
+            )
+            event_candidate_payload["audio_seed_sha256"] = str(
+                self._candidate_window_payload.get("seed_sha256") or ""
+            )
+            event_candidate_payload["source_transcript_sha256"] = str(
+                self._candidate_window_payload.get("source_transcript_sha256") or ""
+            )
+            (dest / f"{CANDIDATE_WINDOW_SCHEMA_VERSION}.json").write_text(
+                json.dumps(event_candidate_payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
 
         logger.info(
             "master_phase1_scan coarse_hits=%s phase_hits=%s dense_extra_frames=%s "
@@ -10042,14 +11689,24 @@ class MasterPhase1Extractor:
         )
 
         coverage = build_text_frame_coverage(
-            hits,
+            _hits_to_source(hits),
             frame_count=frame_count,
-            frame_w=width,
-            frame_h=height,
+            frame_w=source_width,
+            frame_h=source_height,
             scanned_frames=sorted(scanned_frames),
         )
         coverage["temporal_scan"] = {
-            "policy_version": TEMPORAL_SCAN_POLICY_VERSION,
+            "policy_version": (
+                EVENT_SCAN_POLICY_VERSION
+                if self._event_scan
+                else TEMPORAL_SCAN_POLICY_VERSION
+            ),
+            "analysis_engine": self._analysis_engine,
+            "analysis_policy_version": (
+                EVENT_SCAN_POLICY_VERSION
+                if self._event_scan
+                else TEMPORAL_SCAN_POLICY_VERSION
+            ),
             "logical_step": int(self._step),
             "all_frame_lightweight_probes": int(lightweight_scanned_frames),
             "heavy_probe_frames": len(scanned_frames),
@@ -10070,6 +11727,8 @@ class MasterPhase1Extractor:
                 "budget": small_text_budget,
             },
         }
+        if event_candidate_payload:
+            coverage["temporal_scan"]["event_candidates"] = event_candidate_payload
         coverage_path = dest / "text_frame_coverage.json"
         coverage_path.write_text(
             json.dumps(coverage, ensure_ascii=False, indent=2),
@@ -10090,10 +11749,29 @@ class MasterPhase1Extractor:
             frame_count=frame_count,
             pad=self._pad,
             max_centroid_px=self._centroid_merge_px,
+            gap_max=(
+                event_track_merge_gap_frames(fps)
+                if self._event_scan
+                else MERGE_GAP_FRAMES
+            ),
             frame_w=width,
             frame_h=height,
         )
-        confirmed, dropped = confirm_tracks(merged, min_hits=self._min_hits)
+        provisional_single_frame_frames = (
+            list(
+                event_candidate_payload.get(
+                    "single_frame_retention_candidate_frames"
+                )
+                or []
+            )
+            if self._event_scan and event_candidate_payload
+            else []
+        )
+        confirmed, dropped = confirm_tracks(
+            merged,
+            min_hits=self._min_hits,
+            strong_single_frame_indices=provisional_single_frame_frames,
+        )
         _postprocess_progress("finalize_tracks")
         tracks, finalize_audit = finalize_confirmed_tracks(
             confirmed,
@@ -10101,13 +11779,69 @@ class MasterPhase1Extractor:
             frame_w=width,
             frame_h=height,
             min_hits=self._min_hits,
+            split_gap_max=(
+                SPLIT_GAP_FRAMES
+            ),
+            editor_split_gap_max=(
+                event_track_merge_gap_frames(fps) if self._event_scan else None
+            ),
+            strong_single_frame_indices=provisional_single_frame_frames,
         )
+        provisional_single_frame_set = {
+            int(value) for value in provisional_single_frame_frames
+        }
+        for track in tracks:
+            if (
+                int(track.hit_count) == 1
+                and any(
+                    int(value) in provisional_single_frame_set
+                    for value in track.hit_frames
+                )
+            ):
+                setattr(track, "_strong_single_frame_textness", True)
+                setattr(track, "_single_frame_retention_candidate", True)
         tracks, wide_ui_split_audit = split_wide_ui_tracks_by_ink_columns(
             tracks,
             frame_cache=frame_cache,
             frame_w=width,
             frame_h=height,
         )
+        for track in tracks:
+            if (
+                int(track.hit_count) == 1
+                and any(
+                    int(value) in provisional_single_frame_set
+                    for value in track.hit_frames
+                )
+            ):
+                setattr(track, "_strong_single_frame_textness", True)
+                setattr(track, "_single_frame_retention_candidate", True)
+        # Geometry/temporal provenance is intentionally evaluated before local
+        # recognition. Dense phone/app panels and scene-bound text are preserve-
+        # only; spending recognizer and editor refinement work on them is both
+        # slow and a source of accidental source-text removal.
+        early_provenance = classify_visual_text_provenance(
+            tracks,
+            frame_w=width,
+            frame_h=height,
+            text_audit={},
+            frame_cache=frame_cache,
+        )
+        early_protected_source: list[MergedTrack] = []
+        editor_or_uncertain_tracks: list[MergedTrack] = []
+        for track in tracks:
+            decision = dict(early_provenance.get(id(track)) or {})
+            if (
+                str(decision.get("classification") or "")
+                in {"SOURCE_INTRINSIC", "SOURCE_INTRINSIC_PANEL", "PLATFORM_UI"}
+                and float(decision.get("confidence") or 0.0) >= 0.96
+            ):
+                setattr(track, "_source_intrinsic_candidate", "early_geometry_provenance")
+                setattr(track, "_skip_editor_postprocess", True)
+                early_protected_source.append(track)
+            else:
+                editor_or_uncertain_tracks.append(track)
+        tracks = editor_or_uncertain_tracks
         _postprocess_progress("local_text_gate")
         recognizer = None
         try:
@@ -10131,11 +11865,19 @@ class MasterPhase1Extractor:
             source=source,
             preserve_source_candidates=True,
         )
+        tracks.extend(early_protected_source)
+        text_audit["early_source_partition"] = {
+            "policy": "geometry_temporal_provenance_before_local_recognizer_v1",
+            "protected_tracks": len(early_protected_source),
+            "recognizer_candidate_tracks": len(editor_or_uncertain_tracks),
+            "confidence_threshold": 0.96,
+        }
         preliminary_provenance = classify_visual_text_provenance(
             tracks,
             frame_w=width,
             frame_h=height,
             text_audit=text_audit,
+            frame_cache=frame_cache,
         )
         preliminary_counts: Counter[str] = Counter()
         for track in tracks:
@@ -10146,7 +11888,11 @@ class MasterPhase1Extractor:
                 or "UNCERTAIN"
             )
             preliminary_counts[classification] += 1
-            if classification == "SOURCE_INTRINSIC":
+            if classification in {
+                "SOURCE_INTRINSIC",
+                "SOURCE_INTRINSIC_PANEL",
+                "PLATFORM_UI",
+            }:
                 if not bool(getattr(track, "_source_intrinsic_candidate", None)):
                     setattr(
                         track,
@@ -10198,47 +11944,80 @@ class MasterPhase1Extractor:
             tracks, frame_w=width, frame_h=height
         )
         _postprocess_progress("content_segmentation")
-        tracks, content_audit = split_tracks_by_local_text_change(
-            tracks,
-            frame_cache=frame_cache,
-            frame_w=width,
-            frame_h=height,
-            recognizer=recognizer,
-            source=source,
-        )
+        if self._event_scan:
+            tracks, content_audit = split_tracks_by_visual_content_change(
+                tracks,
+                frame_cache=frame_cache,
+            )
+            content_audit["local_ocr_skipped"] = True
+        else:
+            tracks, content_audit = split_tracks_by_local_text_change(
+                tracks,
+                frame_cache=frame_cache,
+                frame_w=width,
+                frame_h=height,
+                recognizer=recognizer,
+                source=source,
+            )
         _postprocess_progress("content_reconcile")
-        tracks, content_reconcile_pre_audit = coalesce_tracks_by_local_text_content(
-            tracks,
-            frame_cache=frame_cache,
-            frame_w=width,
-            frame_h=height,
-            recognizer=recognizer,
-            source=source,
-        )
+        if self._event_scan:
+            content_reconcile_pre_audit = {
+                "method": "temporal_consensus_geometry_reconcile_v1",
+                "before_count": len(tracks),
+                "after_count": len(tracks),
+                "merged_tracks": 0,
+                "local_ocr_skipped": True,
+            }
+        else:
+            tracks, content_reconcile_pre_audit = coalesce_tracks_by_local_text_content(
+                tracks,
+                frame_cache=frame_cache,
+                frame_w=width,
+                frame_h=height,
+                recognizer=recognizer,
+                source=source,
+            )
         tracks = purge_redundant_hardsub_fragments(
             tracks, frame_w=width, frame_h=height
         )
-        tracks, content_boundary_audit = expand_tracks_by_local_text_continuity(
-            tracks,
-            frame_cache=frame_cache,
-            frame_count=frame_count,
-            frame_w=width,
-            frame_h=height,
-            recognizer=recognizer,
-            source=source,
-        )
-        _postprocess_progress("boundary_refinement")
-        boundary_audit: list[dict[str, Any]] = []
-        boundary_refined: list[MergedTrack] = []
-        for track in tracks:
-            refined, audit_row = refine_track_boundaries_by_template(
-                track,
+        if self._event_scan:
+            content_boundary_audit = {
+                "method": "event_boundary_evidence_v1",
+                "tracks": len(tracks),
+                "local_ocr_skipped": True,
+            }
+        else:
+            tracks, content_boundary_audit = expand_tracks_by_local_text_continuity(
+                tracks,
                 frame_cache=frame_cache,
                 frame_count=frame_count,
                 frame_w=width,
                 frame_h=height,
+                recognizer=recognizer,
                 source=source,
             )
+        _postprocess_progress("boundary_refinement")
+        boundary_audit: list[dict[str, Any]] = []
+        boundary_refined: list[MergedTrack] = []
+        for track in tracks:
+            if self._event_scan:
+                refined = track
+                audit_row = {
+                    "method": "event_hit_boundary_v1",
+                    "applied": False,
+                    "prior_span": [track.start_frame, track.end_frame],
+                    "refined_span": [track.start_frame, track.end_frame],
+                    "random_frame_reads_skipped": True,
+                }
+            else:
+                refined, audit_row = refine_track_boundaries_by_template(
+                    track,
+                    frame_cache=frame_cache,
+                    frame_count=frame_count,
+                    frame_w=width,
+                    frame_h=height,
+                    source=source,
+                )
             boundary_refined.append(refined)
             boundary_audit.append(audit_row)
         tracks, boundary_audit = purge_hardsub_shadows_by_boundary_audit(
@@ -10266,15 +12045,24 @@ class MasterPhase1Extractor:
         # content-safe overlap can become visible only after glyph tightening.
         # It must run before fragment purge so a continuation is unioned into
         # the host rather than dropped with its later end-frame evidence.
-        tracks, content_reconcile_post_audit = coalesce_tracks_by_local_text_content(
-            tracks,
-            frame_cache=frame_cache,
-            frame_w=width,
-            frame_h=height,
-            recognizer=recognizer,
-            source=source,
-            geometry_normalized=True,
-        )
+        if self._event_scan:
+            content_reconcile_post_audit = {
+                "method": "temporal_consensus_post_ink_v1",
+                "before_count": len(tracks),
+                "after_count": len(tracks),
+                "merged_tracks": 0,
+                "local_ocr_skipped": True,
+            }
+        else:
+            tracks, content_reconcile_post_audit = coalesce_tracks_by_local_text_content(
+                tracks,
+                frame_cache=frame_cache,
+                frame_w=width,
+                frame_h=height,
+                recognizer=recognizer,
+                source=source,
+                geometry_normalized=True,
+            )
         if int(content_reconcile_post_audit.get("merged_tracks") or 0) > 0:
             boundary_audit = []
             boundary_refined = []
@@ -10337,29 +12125,45 @@ class MasterPhase1Extractor:
             frame_h=height,
         )
         _postprocess_progress("residual_recovery")
-        tracks, residual_hardsub_recovery_audit = recover_residual_hardsub_tracks(
-            tracks,
-            hits,
-            frame_cache=frame_cache,
-            frame_count=frame_count,
-            frame_w=width,
-            frame_h=height,
-            recognizer=recognizer,
-            source=source,
-        )
-        tracks = purge_redundant_hardsub_fragments(
-            tracks, frame_w=width, frame_h=height
-        )
-        tracks, post_refinement_sparse_compact_audit = (
-            purge_unverified_sparse_compact_tracks_after_refinement(
+        if self._event_scan:
+            residual_hardsub_recovery_audit = {
+                "method": "event_candidate_residual_coverage_v1",
+                "before_count": len(tracks),
+                "after_count": len(tracks),
+                "local_ocr_skipped": True,
+            }
+        else:
+            tracks, residual_hardsub_recovery_audit = recover_residual_hardsub_tracks(
                 tracks,
+                hits,
                 frame_cache=frame_cache,
+                frame_count=frame_count,
                 frame_w=width,
                 frame_h=height,
                 recognizer=recognizer,
                 source=source,
             )
+        tracks = purge_redundant_hardsub_fragments(
+            tracks, frame_w=width, frame_h=height
         )
+        if self._event_scan:
+            post_refinement_sparse_compact_audit = {
+                "method": "provenance_fail_closed_sparse_guard_v1",
+                "before_count": len(tracks),
+                "after_count": len(tracks),
+                "local_ocr_skipped": True,
+            }
+        else:
+            tracks, post_refinement_sparse_compact_audit = (
+                purge_unverified_sparse_compact_tracks_after_refinement(
+                    tracks,
+                    frame_cache=frame_cache,
+                    frame_w=width,
+                    frame_h=height,
+                    recognizer=recognizer,
+                    source=source,
+                )
+            )
         tracks, nested_temporal_ui_fragment_audit = (
             purge_temporally_nested_ui_fragments(
                 tracks,
@@ -10444,6 +12248,547 @@ class MasterPhase1Extractor:
                 len(tracks),
             )
 
+        def _coverage_rows(
+            current_tracks: Sequence[MergedTrack],
+        ) -> list[dict[str, Any]]:
+            return [
+                {
+                    "text_id": f"sub_{index:02d}",
+                    "start_frame": int(track.start_frame),
+                    "end_frame": int(track.end_frame),
+                    "hit_frames": list(track.hit_frames),
+                    "box_coords": _box_to_source(track.box_coords),
+                }
+                for index, track in enumerate(current_tracks, start=1)
+            ]
+
+        boundary_dbnet_audit: dict[str, Any] = {
+            "policy_version": "endpoint_dbnet_closure_v1",
+            "candidate_frames": 0,
+            "decoded_frames": 0,
+            "detector_hits": 0,
+            "extended_tracks": 0,
+            "rows": [],
+        }
+        if self._event_scan and tracks:
+            # Coverage proxy is deliberately cheap but can miss dark/outlined
+            # labels on skin or fabric. Recheck only endpoints whose last/first
+            # DBNet hit is not adjacent to the semantic span. This is bounded
+            # (five frames per risky side) and never becomes an all-frame OCR
+            # pass.
+            endpoint_offsets = (1, 3, 6, 9)
+            endpoint_candidates: dict[int, list[tuple[int, str]]] = defaultdict(list)
+            for track in tracks:
+                hit_frames = sorted({int(value) for value in track.hit_frames})
+                if not hit_frames:
+                    continue
+                role = classify_ocr_box_role(
+                    track.box_coords, frame_w=width, frame_h=height
+                )
+                width_frac = max(1.0, float(track.box_coords[2]) - float(track.box_coords[0])) / max(1.0, float(width))
+                if role not in {"hardsub", "mid_label", "ui_chip", "generic"}:
+                    continue
+                if role != "hardsub" and width_frac < 0.10:
+                    continue
+                text_id = str(getattr(track, "text_id", "") or id(track))
+                if int(track.end_frame) - hit_frames[-1] > 0:
+                    for offset in endpoint_offsets:
+                        frame = int(track.end_frame) + int(offset)
+                        if frame < frame_count:
+                            endpoint_candidates[frame].append((id(track), "end"))
+                if hit_frames[0] - int(track.start_frame) > 0:
+                    for offset in endpoint_offsets:
+                        frame = int(track.start_frame) - int(offset)
+                        if frame >= 0:
+                            endpoint_candidates[frame].append((id(track), "start"))
+            selected_boundary_frames = sorted(endpoint_candidates)
+            boundary_dbnet_audit["candidate_frames"] = len(selected_boundary_frames)
+            if selected_boundary_frames:
+                track_by_object_id = {id(track): track for track in tracks}
+                boundary_hits: dict[int, list[DetectionHit]] = defaultdict(list)
+                for frame_index, boundary_bgr in _event_selected_frames(
+                    selected_boundary_frames
+                ):
+                    frame_cache[frame_index] = boundary_bgr
+                    scanned_frames.add(frame_index)
+                    found, rejected = self._detect_frame_hits(
+                        _analysis_frame(boundary_bgr),
+                        frame_index=frame_index,
+                        detector=detector,
+                        frame_w=width,
+                        frame_h=height,
+                    )
+                    geometry_rejected += rejected
+                    boundary_hits[frame_index].extend(found)
+                    boundary_dbnet_audit["decoded_frames"] += 1
+                    boundary_dbnet_audit["detector_hits"] += len(found)
+
+                for track in tracks:
+                    hit_frames = sorted({int(value) for value in track.hit_frames})
+                    if not hit_frames:
+                        continue
+                    matched_by_side: dict[str, list[DetectionHit]] = {"start": [], "end": []}
+                    for frame_index, hits_at_frame in boundary_hits.items():
+                        # The selected decode is shared for efficiency, but an
+                        # endpoint hit belongs only to the track/side that
+                        # scheduled that frame.  Ignoring this ownership lets
+                        # every track consume every other track's endpoint hit
+                        # and expands independent caption epochs across scenes.
+                        scheduled_sides = {
+                            str(side)
+                            for object_id, side in endpoint_candidates.get(
+                                frame_index, ()
+                            )
+                            if int(object_id) == id(track)
+                        }
+                        side = next(
+                            (
+                                value
+                                for value in ("start", "end")
+                                if value in scheduled_sides
+                            ),
+                            "",
+                        )
+                        if not side:
+                            continue
+                        for hit in hits_at_frame:
+                            hx0, hy0, hx1, hy1 = (float(value) for value in hit.box_xyxy)
+                            tx0, ty0, tx1, ty1 = (float(value) for value in track.box_coords)
+                            overlap = max(0.0, min(hx1, tx1) - max(hx0, tx0))
+                            shorter = max(1.0, min(hx1 - hx0, tx1 - tx0))
+                            hcy = (hy0 + hy1) * 0.5
+                            tcy = (ty0 + ty1) * 0.5
+                            if (
+                                overlap / shorter >= 0.35
+                                and abs(hcy - tcy) <= max(48.0, 0.08 * float(height))
+                            ):
+                                matched_by_side[side].append(hit)
+                    extension: dict[str, Any] = {}
+                    for side, side_hits in matched_by_side.items():
+                        by_frame = {int(hit.frame_index): hit for hit in side_hits}
+                        # Two independent endpoint observations prevent a
+                        # single scene edge from extending an editor track.
+                        if len(by_frame) < 2:
+                            continue
+                        ordered = sorted(by_frame)
+                        if side == "end":
+                            new_end = max(ordered)
+                            track.end_frame = max(int(track.end_frame), new_end)
+                        else:
+                            new_start = min(ordered)
+                            track.start_frame = min(int(track.start_frame), new_start)
+                        for hit in side_hits:
+                            track.hit_frames.append(int(hit.frame_index))
+                            track.hit_boxes.append(tuple(float(value) for value in hit.box_xyxy))
+                            track.hit_sharpness.append(float(hit.sharpness))
+                        extension[side] = [min(ordered), max(ordered)]
+                    if extension:
+                        track.hit_count = len(track.hit_frames)
+                        track.box_coords = stable_box_xyxy(track.hit_boxes, expansive=False)
+                        track.centroid = _box_centroid(track.box_coords)
+                        boundary_dbnet_audit["extended_tracks"] += 1
+                        boundary_dbnet_audit["rows"].append(
+                            {
+                                "text_id": str(getattr(track, "text_id", "") or ""),
+                                "extension": extension,
+                            }
+                        )
+            finalize_audit["endpoint_dbnet_closure"] = dict(boundary_dbnet_audit)
+
+        coverage_rows = _coverage_rows(tracks)
+        completeness_residual_audit: dict[str, Any] = {
+            "policy_version": "phase1_unassigned_text_discovery_v1",
+            "candidate_frames": 0,
+            "dbnet_frames": 0,
+            "dbnet_hits": 0,
+            "new_tracks": 0,
+            "second_closure": False,
+            "integration": {
+                "policy_version": "residual_append_preserve_authority_v1",
+                "authority_tracks_before": len(tracks),
+                "residual_tracks_before": 0,
+                "residual_tracks_after_coalesce": 0,
+                "tracks_after_append": len(tracks),
+                "authority_recoalesced": False,
+            },
+        }
+        if self._event_scan:
+            coverage_scale = PHASE1_COVERAGE_PROXY_LONG_EDGE / float(
+                max(1, max(source_width, source_height))
+            )
+            coverage_width = max(2, int(round(source_width * coverage_scale)))
+            coverage_height = max(2, int(round(source_height * coverage_scale)))
+
+            def _close_coverage(
+                rows: Sequence[Mapping[str, Any]],
+                *,
+                phase: str,
+            ) -> dict[str, Any]:
+                closure = CoverageTrackClosure(
+                    rows,
+                    source_width=source_width,
+                    source_height=source_height,
+                    fps=fps,
+                )
+                reader = _FfmpegProxyFrameReader(
+                    source,
+                    width=coverage_width,
+                    height=coverage_height,
+                )
+                coverage_index = 0
+                _report(phase, 0, frame_count or 1)
+                try:
+                    while True:
+                        ok, proxy_frame = reader.read()
+                        if not ok or proxy_frame is None:
+                            break
+                        closure.observe(proxy_frame, frame_index=coverage_index)
+                        coverage_index += 1
+                        if coverage_index % progress_interval == 0:
+                            _report(
+                                phase,
+                                coverage_index,
+                                frame_count or coverage_index,
+                            )
+                finally:
+                    reader.release()
+                if coverage_index != frame_count:
+                    raise RuntimeError(
+                        "Coverage closure frame count mismatch "
+                        f"({coverage_index} != {frame_count})"
+                    )
+                _report(phase, coverage_index, frame_count or 1)
+                return closure.finalize(frame_count=frame_count)
+
+            coverage_payload = _close_coverage(
+                coverage_rows,
+                phase="phase1_coverage_closure",
+            )
+            unassigned_frames = sorted(
+                {
+                    int(value)
+                    for value in list(
+                        coverage_payload.get("unassigned_candidate_frames") or []
+                    )
+                    if 0 <= int(value) < frame_count
+                }
+            )
+            completeness_residual_audit["candidate_frames"] = len(
+                unassigned_frames
+            )
+            # Allocate the bounded high-resolution pass per spatial-temporal
+            # residual epoch. A global frame linspace is unsafe here: generic
+            # texture can stay active all video and starve a short editor label.
+            discovery_frames: list[int] = []
+            discovery_schedule_audit: dict[str, Any] = {}
+            if unassigned_frames:
+                max_frames = max(
+                    24,
+                    min(180, int(np.ceil(duration_ms / 1000.0 * 2.0))),
+                )
+                (
+                    discovery_frames,
+                    discovery_schedule_audit,
+                ) = schedule_unassigned_discovery_frames(
+                    list(coverage_payload.get("unassigned_candidates") or []),
+                    fps=fps,
+                    duration_ms=duration_ms,
+                    max_frames=max_frames,
+                    boundary_frames=[
+                        boundary
+                        for raw in coverage_rows
+                        for boundary in (
+                            int(raw.get("start_frame") or 0),
+                            int(raw.get("end_frame") or 0),
+                        )
+                    ],
+                )
+                completeness_residual_audit["schedule"] = dict(
+                    discovery_schedule_audit
+                )
+
+            residual_discovery_hits: list[DetectionHit] = []
+            if discovery_frames:
+                edge_reserved_frame_set = {
+                    int(value)
+                    for value in list(
+                        discovery_schedule_audit.get("edge_reserved_frames")
+                        or []
+                    )
+                }
+                candidate_regions_by_frame: dict[int, list[dict[str, Any]]] = (
+                    defaultdict(list)
+                )
+                for raw_candidate in list(
+                    coverage_payload.get("unassigned_candidates") or []
+                ):
+                    if not isinstance(raw_candidate, Mapping):
+                        continue
+                    candidate_regions_by_frame[
+                        int(raw_candidate.get("frame_index") or 0)
+                    ].append(dict(raw_candidate.get("geometry") or {}))
+
+                def _matches_unassigned_region(hit: DetectionHit) -> bool:
+                    hx0, hy0, hx1, hy1 = (
+                        float(value) for value in hit.box_xyxy[:4]
+                    )
+                    hit_area = max(1.0, (hx1 - hx0) * (hy1 - hy0))
+                    hit_cx = 0.5 * (hx0 + hx1)
+                    hit_cy = 0.5 * (hy0 + hy1)
+                    for geometry in candidate_regions_by_frame.get(
+                        int(hit.frame_index), []
+                    ):
+                        gx0 = float(geometry.get("x") or 0.0) * width
+                        gy0 = float(geometry.get("y") or 0.0) * height
+                        gx1 = gx0 + float(geometry.get("width") or 0.0) * width
+                        gy1 = gy0 + float(geometry.get("height") or 0.0) * height
+                        intersection = max(0.0, min(hx1, gx1) - max(hx0, gx0)) * max(
+                            0.0, min(hy1, gy1) - max(hy0, gy0)
+                        )
+                        region_area = max(1.0, (gx1 - gx0) * (gy1 - gy0))
+                        if (
+                            intersection / min(hit_area, region_area) >= 0.25
+                            or gx0 <= hit_cx <= gx1
+                            and gy0 <= hit_cy <= gy1
+                        ):
+                            return True
+                    return False
+
+                _report(
+                    "phase1_unassigned_discovery",
+                    0,
+                    len(discovery_frames),
+                )
+                for done, (fi, analysis_bgr) in enumerate(
+                    _event_selected_frames(discovery_frames), start=1
+                ):
+                    scanned_frames.add(fi)
+                    frame_cache[fi] = analysis_bgr
+                    found, rejected = self._detect_frame_hits(
+                        analysis_bgr,
+                        frame_index=fi,
+                        detector=detector,
+                        frame_w=width,
+                        frame_h=height,
+                        long_edge=max(width, height),
+                        bin_thresh=PHASE1_SMALL_TEXT_DET_BIN_THRESH,
+                    )
+                    geometry_rejected += rejected
+                    residual_discovery_hits.extend(
+                        hit
+                        for hit in found
+                        if (
+                            _matches_unassigned_region(hit)
+                            # The proxy residual intentionally does not know
+                            # OCR and can miss a saturated/outlined intro or
+                            # outro title at its exact locus.  Edge frames have
+                            # an independently reserved high-resolution budget;
+                            # admit their DBNet boxes to the normal local-CJK
+                            # and provenance gates rather than requiring a
+                            # noisy proxy geometry match.  No edge hit becomes
+                            # authority from this exception alone.
+                            or int(hit.frame_index) in edge_reserved_frame_set
+                        )
+                        and not any(
+                            _residual_hit_covered_by_track(
+                                hit,
+                                track,
+                                frame_w=width,
+                                frame_h=height,
+                            )
+                            for track in tracks
+                        )
+                    )
+                    if done % progress_interval == 0:
+                        _report(
+                            "phase1_unassigned_discovery",
+                            done,
+                            len(discovery_frames),
+                        )
+                _report(
+                    "phase1_unassigned_discovery",
+                    len(discovery_frames),
+                    len(discovery_frames),
+                )
+
+            new_tracks: list[MergedTrack] = []
+            if residual_discovery_hits:
+                # Every discovery frame may provisionally carry a single
+                # DBNet hit into the local recognizer.  It becomes authority
+                # only after CJK recognition; otherwise a single hit is
+                # dropped. Multi-hit tracks remain governed by temporal
+                # consensus and do not need this exception.
+                provisional_residual_single_frames = list(discovery_frames)
+                residual_merged = merge_tracks_by_centroid(
+                    residual_discovery_hits,
+                    frame_count=frame_count,
+                    pad=self._pad,
+                    max_centroid_px=self._centroid_merge_px,
+                    gap_max=event_track_merge_gap_frames(fps),
+                    frame_w=width,
+                    frame_h=height,
+                )
+                residual_confirmed, _residual_dropped = confirm_tracks(
+                    residual_merged,
+                    min_hits=self._min_hits,
+                    strong_single_frame_indices=(
+                        provisional_residual_single_frames
+                    ),
+                )
+                new_tracks, _residual_finalize = finalize_confirmed_tracks(
+                    residual_confirmed,
+                    frame_count=frame_count,
+                    frame_w=width,
+                    frame_h=height,
+                    min_hits=self._min_hits,
+                    split_gap_max=SPLIT_GAP_FRAMES,
+                    editor_split_gap_max=event_track_merge_gap_frames(fps),
+                    strong_single_frame_indices=(
+                        provisional_residual_single_frames
+                    ),
+                )
+                provisional_residual_single_set = set(
+                    provisional_residual_single_frames
+                )
+                for track in new_tracks:
+                    if int(track.hit_count) == 1 and any(
+                        int(value) in provisional_residual_single_set
+                        for value in track.hit_frames
+                    ):
+                        setattr(track, "_strong_single_frame_textness", True)
+                        setattr(track, "_single_frame_retention_candidate", True)
+                new_tracks, residual_text_audit = filter_tracks_by_local_text(
+                    new_tracks,
+                    frame_cache=frame_cache,
+                    frame_w=width,
+                    frame_h=height,
+                    recognizer=recognizer,
+                    source=source,
+                    preserve_source_candidates=True,
+                )
+                completeness_residual_audit["local_text_gate"] = {
+                    "dropped": int(residual_text_audit.get("dropped") or 0),
+                    "kept": len(new_tracks),
+                }
+                new_tracks = apply_ink_aware_keyframes(
+                    new_tracks,
+                    frame_cache=frame_cache,
+                    frame_w=width,
+                    frame_h=height,
+                )
+                new_tracks = extend_hardsub_tracks_to_ink(
+                    new_tracks,
+                    frame_cache=frame_cache,
+                    frame_w=width,
+                    frame_h=height,
+                    source=source,
+                )
+                tracks, residual_integration_audit = (
+                    integrate_residual_tracks_without_recoalescing_authority(
+                    tracks,
+                    new_tracks,
+                    frame_w=width,
+                    frame_h=height,
+                    )
+                )
+                completeness_residual_audit["integration"] = dict(
+                    residual_integration_audit
+                )
+                tracks = purge_redundant_hardsub_fragments(
+                    tracks,
+                    frame_w=width,
+                    frame_h=height,
+                )
+                tracks.sort(
+                    key=lambda row: (
+                        int(row.start_frame),
+                        float(row.box_coords[1]),
+                        float(row.box_coords[0]),
+                    )
+                )
+                coverage_rows = _coverage_rows(tracks)
+                coverage_payload = _close_coverage(
+                    coverage_rows,
+                    phase="phase1_coverage_reclosure",
+                )
+                completeness_residual_audit["second_closure"] = True
+
+            completeness_residual_audit.update(
+                {
+                    "dbnet_frames": len(discovery_frames),
+                    "dbnet_hits": len(residual_discovery_hits),
+                    "new_tracks": len(new_tracks),
+                    "remaining_unassigned_candidate_frames": len(
+                        list(
+                            coverage_payload.get("unassigned_candidate_frames")
+                            or []
+                        )
+                    ),
+                }
+            )
+            finalize_audit["completeness_residual_discovery"] = dict(
+                completeness_residual_audit
+            )
+            if event_candidate_payload:
+                event_candidate_payload["coverage_unassigned_candidate_frames"] = list(
+                    coverage_payload.get("unassigned_candidate_frames") or []
+                )
+                event_candidate_payload["coverage_residual_dbnet_frames"] = list(
+                    discovery_frames
+                )
+                event_candidate_payload["coverage_residual_discovery"] = dict(
+                    completeness_residual_audit
+                )
+                (dest / f"{CANDIDATE_WINDOW_SCHEMA_VERSION}.json").write_text(
+                    json.dumps(
+                        event_candidate_payload,
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
+        else:
+            coverage_payload = {
+                "schema_version": COVERAGE_TRACK_SCHEMA_VERSION,
+                "policy_version": "legacy_static_geometry_projection",
+                "network_calls": 0,
+                "scanned_frames": 0,
+                "frame_count": int(frame_count),
+                "tracks": [
+                    {
+                        "text_id": str(row["text_id"]),
+                        "policy_version": "legacy_static_geometry_projection",
+                        "presence_ranges": [
+                            [int(row["start_frame"]), int(row["end_frame"])]
+                        ],
+                        "geometry_keyframes": [
+                            {
+                                "frame_index": int(row["start_frame"]),
+                                "geometry": {
+                                    "x": float(row["box_coords"][0])
+                                    / max(1, source_width),
+                                    "y": float(row["box_coords"][1])
+                                    / max(1, source_height),
+                                    "width": (
+                                        float(row["box_coords"][2])
+                                        - float(row["box_coords"][0])
+                                    )
+                                    / max(1, source_width),
+                                    "height": (
+                                        float(row["box_coords"][3])
+                                        - float(row["box_coords"][1])
+                                    )
+                                    / max(1, source_height),
+                                },
+                            }
+                        ],
+                        "confidence": 0.5,
+                        "fail_closed": False,
+                    }
+                    for row in coverage_rows
+                ],
+            }
+
         crops_dir = dest / "crops"
         crops_dir.mkdir(parents=True, exist_ok=True)
 
@@ -10453,7 +12798,30 @@ class MasterPhase1Extractor:
             frame_w=width,
             frame_h=height,
             text_audit=text_audit,
+            frame_cache=frame_cache,
         )
+        protected_source_ids = {id(track) for track in protected_source_candidates}
+        for track in tracks:
+            if id(track) not in protected_source_ids:
+                continue
+            decision = dict(provenance_by_track_id.get(id(track)) or {})
+            classification = str(decision.get("classification") or "")
+            if classification in {
+                "SOURCE_INTRINSIC",
+                "SOURCE_INTRINSIC_PANEL",
+                "PLATFORM_UI",
+            }:
+                continue
+            provenance_by_track_id[id(track)] = {
+                "classification": "UNCERTAIN",
+                "confidence": min(0.50, float(decision.get("confidence") or 0.50)),
+                "policy_version": VISUAL_TEXT_PROVENANCE_SCHEMA_VERSION,
+                "reasons": list(decision.get("reasons") or [])
+                + [
+                    "protected_by_pre_editor_source_partition",
+                    "preserve_source_pixels_until_proven_editor_overlay",
+                ],
+            }
         _postprocess_progress("timeline_assets")
         for i, track in enumerate(tracks, start=1):
             text_id = f"sub_{i:02d}"
@@ -10464,6 +12832,8 @@ class MasterPhase1Extractor:
             key_frame = frame_cache.get(track.best_frame_index)
             if key_frame is None:
                 key_frame = _read_frame(source, track.best_frame_index)
+                if key_frame is not None:
+                    key_frame = _analysis_frame(key_frame)
             if key_frame is not None:
                 cv2.imwrite(
                     str(abs_path), key_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 95]
@@ -10475,7 +12845,7 @@ class MasterPhase1Extractor:
                     start_frame=track.start_frame,
                     end_frame=track.end_frame,
                     fps=fps,
-                    box_coords=track.box_coords,
+                    box_coords=_box_to_source(track.box_coords),
                     best_keyframe_path=rel_path.replace("\\", "/"),
                     hit_count=track.hit_count,
                     crop_path=crop_rel.replace("\\", "/"),
@@ -10496,12 +12866,34 @@ class MasterPhase1Extractor:
             json.dumps(timeline, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        timeline_sha256 = hashlib.sha256(timeline_path.read_bytes()).hexdigest()
+        coverage_payload["master_timeline_ref"] = {
+            "path": timeline_path.name,
+            "sha256": timeline_sha256,
+        }
+        coverage_path = dest / "phase1_track_coverage_v2.json"
+        coverage_path.write_text(
+            json.dumps(coverage_payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
         provenance_rows = [
             {
                 "text_id": str(row.get("text_id") or ""),
                 **dict(row.get("visual_provenance") or {}),
             }
             for row in timeline
+        ]
+        protected_source_rows = [
+            {
+                "text_id": str(row.get("text_id") or ""),
+                "start_frame": row.get("start_frame"),
+                "end_frame": row.get("end_frame"),
+                "box_coords": list(row.get("box_coords") or []),
+                "visual_provenance": dict(row.get("visual_provenance") or {}),
+                "action": "PRESERVE_SOURCE_PIXELS",
+            }
+            for track, row in zip(tracks, timeline)
+            if id(track) in protected_source_ids
         ]
         provenance_counts = Counter(
             str(row.get("classification") or "UNCERTAIN")
@@ -10522,19 +12914,201 @@ class MasterPhase1Extractor:
             },
             "counts": dict(sorted(provenance_counts.items())),
             "tracks": provenance_rows,
+            "protected_source_tracks": protected_source_rows,
         }
         (dest / "visual_text_provenance_v2.json").write_text(
             json.dumps(provenance_payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        analysis_metrics: dict[str, Any] = {
+            "analysis_engine": self._analysis_engine,
+            "analysis_policy_version": (
+                EVENT_SCAN_POLICY_VERSION
+                if self._event_scan
+                else TEMPORAL_SCAN_POLICY_VERSION
+            ),
+            "network_calls": 0,
+            "frame_count": frame_count,
+            "source_frame_size": [source_width, source_height],
+            "analysis_frame_size": [width, height],
+            "analysis_scale": round(float(analysis_scale), 6),
+            "analysis_decode_backend": analysis_decode_backend,
+            "all_frame_proxy_size": all_frame_proxy_size,
+            "all_frame_proxy_frames": int(lightweight_scanned_frames),
+            "detector_frames": len(scanned_frames),
+            "detector_frame_ratio": round(
+                len(scanned_frames) / float(max(1, frame_count)), 6
+            ),
+            "detector_preprocess_calls_estimate": len(scanned_frames) * 2,
+            "tracks": len(timeline),
+            "provenance_counts": dict(sorted(provenance_counts.items())),
+            "protected_source_tracks": len(protected_source_candidates),
+            "coverage_policy_version": COVERAGE_TRACK_POLICY_VERSION,
+            "coverage_scanned_frames": int(
+                coverage_payload.get("scanned_frames") or 0
+            ),
+            "coverage_tracks": len(list(coverage_payload.get("tracks") or [])),
+            "coverage_unassigned_candidate_frames": len(
+                list(
+                    coverage_payload.get("unassigned_candidate_frames") or []
+                )
+            ),
+            "completeness_residual_discovery": dict(
+                completeness_residual_audit
+            ),
+            "elapsed_s": round(time.perf_counter() - extract_started, 3),
+            "fallback_used": False,
+        }
+        if event_candidate_payload:
+            analysis_metrics.update(
+                {
+                    "candidate_window_count": len(
+                        list(event_candidate_payload.get("windows") or [])
+                    ),
+                    "audio_window_count": int(
+                        event_candidate_payload.get("audio_window_count") or 0
+                    ),
+                    "candidate_seed_mode": str(
+                        event_candidate_payload.get("candidate_seed_mode")
+                        or "VISUAL_ONLY"
+                    ),
+                    "candidate_seed_segments_count": int(
+                        event_candidate_payload.get("candidate_seed_segments_count")
+                        or 0
+                    ),
+                    "candidate_seed_audio_analysis_version": str(
+                        event_candidate_payload.get(
+                            "candidate_seed_audio_analysis_version"
+                        )
+                        or ""
+                    ),
+                    "candidate_seed_audio_analysis_fingerprint": str(
+                        event_candidate_payload.get(
+                            "candidate_seed_audio_analysis_fingerprint"
+                        )
+                        or ""
+                    ),
+                    "candidate_seed_vad_has_speech": event_candidate_payload.get(
+                        "candidate_seed_vad_has_speech"
+                    ),
+                    "visual_trigger_count": int(
+                        event_candidate_payload.get("visual_trigger_count") or 0
+                    ),
+                    "reason_counts": dict(
+                        event_candidate_payload.get("reason_counts") or {}
+                    ),
+                }
+            )
+        if self._event_scan:
+            temporal_rows: list[dict[str, Any]] = []
+            coverage_by_id = {
+                str(row.get("text_id") or ""): dict(row)
+                for row in list(coverage_payload.get("tracks") or [])
+                if isinstance(row, Mapping) and str(row.get("text_id") or "")
+            }
+            for row in timeline:
+                hit_frames = sorted(
+                    {int(value) for value in list(row.get("hit_frames") or [])}
+                )
+                evidence_frames = []
+                if hit_frames:
+                    evidence_frames = list(
+                        dict.fromkeys(
+                            (
+                                hit_frames[0],
+                                hit_frames[len(hit_frames) // 2],
+                                int(row.get("best_frame_index") or hit_frames[0]),
+                                hit_frames[-1],
+                            )
+                        )
+                    )
+                crop_path = dest / str(row.get("crop_path") or "")
+                temporal_rows.append(
+                    {
+                        "text_id": str(row.get("text_id") or ""),
+                        "start_frame": int(row.get("start_frame") or 0),
+                        "end_frame": int(row.get("end_frame") or 0),
+                        "temporal_support": len(hit_frames),
+                        "evidence_frames": evidence_frames,
+                        "geometry_dispersion": dict(
+                            dict(row.get("boundary_evidence") or {}).get(
+                                "geometry_dispersion"
+                            )
+                            or {}
+                        ),
+                        "content_signature": (
+                            hashlib.sha256(crop_path.read_bytes()).hexdigest()
+                            if crop_path.is_file()
+                            else None
+                        ),
+                        "visual_provenance": dict(
+                            row.get("visual_provenance") or {}
+                        ),
+                        "coverage_authority": coverage_by_id.get(
+                            str(row.get("text_id") or ""), {}
+                        ),
+                    }
+                )
+            temporal_payload = {
+                "schema_version": "phase1_temporal_consensus_v1",
+                "engine_version": EVENT_SCAN_ENGINE_VERSION,
+                "master_timeline_ref": {
+                    "path": timeline_path.name,
+                    "sha256": timeline_sha256,
+                },
+                "tracks": temporal_rows,
+            }
+            (dest / "phase1_temporal_consensus_v1.json").write_text(
+                json.dumps(temporal_payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            event_timeline = {
+                "schema_version": "phase1_event_timeline_v25",
+                "engine_version": EVENT_SCAN_ENGINE_VERSION,
+                "master_timeline_ref": {
+                    "path": timeline_path.name,
+                    "sha256": timeline_sha256,
+                },
+                "tracks": timeline,
+                "coverage_ref": {
+                    "path": coverage_path.name,
+                    "sha256": hashlib.sha256(coverage_path.read_bytes()).hexdigest(),
+                    "schema_version": COVERAGE_TRACK_SCHEMA_VERSION,
+                },
+            }
+            (dest / "phase1_event_timeline_v25.json").write_text(
+                json.dumps(event_timeline, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            provenance_v3 = {
+                **provenance_payload,
+                "schema_version": "phase1_provenance_v3",
+                "engine_version": EVENT_SCAN_ENGINE_VERSION,
+                "allowed_classifications": [
+                    "EDITOR_OVERLAY",
+                    "SOURCE_INTRINSIC",
+                    "SOURCE_INTRINSIC_PANEL",
+                    "PLATFORM_UI",
+                    "UNKNOWN",
+                ],
+                "fail_closed": True,
+            }
+            (dest / "phase1_provenance_v3.json").write_text(
+                json.dumps(provenance_v3, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            (dest / "phase1_event_metrics.json").write_text(
+                json.dumps(analysis_metrics, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
         _postprocess_progress("qa_artifacts")
         summary = write_phase1_qa_artifacts(
             qa_dir=qa_dir,
             timeline=timeline,
             dropped=dropped,
             frame_count=frame_count,
-            frame_width=width,
-            frame_height=height,
+            frame_width=source_width,
+            frame_height=source_height,
             frames_dir=frames_dir,
             frame_cache=frame_cache,
             source=source,
@@ -10547,6 +13121,7 @@ class MasterPhase1Extractor:
             text_coverage=coverage,
             effective_step=self._step,
             effective_pad=self._pad,
+            lightweight=self._event_scan,
         )
         _postprocess_progress("complete")
         logger.info(
@@ -10569,11 +13144,13 @@ class MasterPhase1Extractor:
             timeline=timeline,
             fps=fps,
             frame_count=frame_count,
-            frame_width=width,
-            frame_height=height,
+            frame_width=source_width,
+            frame_height=source_height,
             timeline_path=timeline_path,
             frames_dir=frames_dir,
             qa_dir=qa_dir,
+            analysis_engine=self._analysis_engine,
+            analysis_metrics=analysis_metrics,
         )
         frame_cache.close()
         checkpoint_path.unlink(missing_ok=True)
@@ -11185,6 +13762,318 @@ def _ocr_crop_dual_polarity(
     return pick_best_ocr_text(accepted)
 
 
+def _recover_failed_ocr_tracks(
+    timeline: list[dict[str, Any]],
+    *,
+    source: Path | None,
+    boxes: Sequence[Sequence[float]],
+    roles: Sequence[str],
+    dump_dir: Path,
+    endpoint_url: str | None,
+    cache: OcrRecognitionCache | None,
+) -> None:
+    """Run one bounded local batch over only tracks missed by primary OCR."""
+    from src.media_pipeline.frame_sampling.phase2_local_recovery import (
+        PHASE2_HARDSUB_GEOMETRY_POLICY_VERSION,
+        PHASE2_LOCAL_RECOVERY_POLICY_VERSION,
+        RecoveryObservation,
+        choose_recovery_consensus,
+        crop_recovery_region,
+        decode_selected_frames,
+        hardsub_geometry_candidates,
+        recovery_frame_indices,
+        recovery_sharpness,
+        recovery_variants,
+    )
+
+    failed = [
+        index
+        for index, entry in enumerate(timeline)
+        if str(entry.get("ocr_source") or "") == "failed" and boxes[index]
+    ]
+    if not failed:
+        return
+    if source is None or not source.is_file():
+        for index in failed:
+            timeline[index]["ocr_recovery"] = {
+                "policy_version": PHASE2_LOCAL_RECOVERY_POLICY_VERSION,
+                "status": "SKIPPED_SOURCE_VIDEO_MISSING",
+            }
+        return
+
+    frames_by_track = {
+        index: recovery_frame_indices(timeline[index]) for index in failed
+    }
+    decoded = decode_selected_frames(
+        source,
+        [
+            frame_index
+            for indices in frames_by_track.values()
+            for frame_index in indices
+        ],
+    )
+
+    def _dominant_neighbor_box(index: int) -> tuple[list[float], str] | None:
+        """Return a strong overlapping caption geometry for a failed short track."""
+        entry = timeline[index]
+        try:
+            start = int(entry.get("start_frame") or 0)
+            end = int(entry.get("end_frame") or start)
+        except (TypeError, ValueError):
+            return None
+        span = max(1, end - start + 1)
+        frame_w = max(1.0, float(frame_cache_width or 1))
+        frame_h = max(1.0, float(frame_cache_height or 1))
+        ranked: list[tuple[tuple[Any, ...], list[float], str]] = []
+        for peer_index, peer in enumerate(timeline):
+            if peer_index == index:
+                continue
+            peer_text = str(
+                peer.get("ocr_text_raw")
+                or peer.get("ocr_text")
+                or peer.get("text")
+                or ""
+            ).strip()
+            if not peer_text:
+                continue
+            try:
+                peer_start = int(peer.get("start_frame") or 0)
+                peer_end = int(peer.get("end_frame") or peer_start)
+            except (TypeError, ValueError):
+                continue
+            overlap = max(0, min(end, peer_end) - max(start, peer_start) + 1)
+            if overlap / float(span) < 0.90 or peer_start > start or peer_end < end:
+                continue
+            peer_box = list(peer.get("box_coords") or [])
+            if len(peer_box) < 4:
+                continue
+            peer_width = max(1.0, float(peer_box[2]) - float(peer_box[0]))
+            peer_height = max(1.0, float(peer_box[3]) - float(peer_box[1]))
+            if peer_width / frame_w < 0.35 or peer_height / frame_h > 0.08:
+                continue
+            ranked.append(
+                (
+                    (
+                        int(peer.get("hit_count") or 0),
+                        peer_end - peer_start + 1,
+                        round(peer_width / frame_w, 4),
+                        round(overlap / float(span), 4),
+                    ),
+                    [float(value) for value in peer_box[:4]],
+                    str(peer.get("text_id") or ""),
+                )
+            )
+        if not ranked:
+            return None
+        _, box, text_id = max(ranked, key=lambda row: row[0])
+        return box, text_id
+
+    # These values are supplied by the caller's source raster contract.  The
+    # helper is kept local so recovery remains a bounded, read-only pass.
+    frame_cache_width = max(
+        [int(frame.shape[1]) for frame in decoded.values() if frame is not None] or [1]
+    )
+    frame_cache_height = max(
+        [int(frame.shape[0]) for frame in decoded.values() if frame is not None] or [1]
+    )
+    batch: list[dict[str, Any]] = []
+    meta: list[
+        tuple[int, int, str, float, tuple[float, float, float, float], float]
+    ] = []
+    geometry_candidate_counts: dict[int, int] = {}
+    for index in failed:
+        text_id = str(timeline[index].get("text_id") or f"sub_{index + 1:02d}")
+        for frame_index in frames_by_track[index]:
+            frame = decoded.get(frame_index)
+            if frame is None:
+                continue
+            use_geometry_recovery = str(roles[index] or "") == "hardsub"
+            candidates = (
+                hardsub_geometry_candidates(frame, boxes[index])
+                if use_geometry_recovery
+                else []
+            )
+            # Prefer a dominant neighbouring caption lane when Phase 1's box
+            # is a short, contained shadow.  Otherwise retain the immutable
+            # Phase-1 geometry and one local derived line as fallbacks.
+            neighbour = _dominant_neighbor_box(index)
+            if neighbour is not None:
+                neighbour_box, neighbour_id = neighbour
+                candidate_rows = [
+                    {
+                        "box_xyxy": neighbour_box,
+                        "score": 1.0,
+                        "source": "dominant_neighbor",
+                        "neighbor_text_id": neighbour_id,
+                    }
+                ]
+            else:
+                candidate_rows = [
+                    {"box_xyxy": [float(value) for value in boxes[index][:4]], "score": 0.0}
+                ]
+                # One derived line plus the immutable Phase-1 box keeps the
+                # recovery batch within the V25.1 input budget.
+                candidate_rows.extend(candidates[:1])
+            geometry_candidate_counts[index] = max(
+                geometry_candidate_counts.get(index, 0), len(candidate_rows)
+            )
+            for candidate_row in candidate_rows:
+                candidate_box = tuple(
+                    float(value) for value in candidate_row["box_xyxy"][:4]
+                )
+                crop = crop_recovery_region(frame, candidate_box)
+                if crop is None:
+                    continue
+                sharpness = recovery_sharpness(crop)
+                variants = recovery_variants(crop)
+                selected_variants = variants[:1]
+                if (
+                    len(frames_by_track[index]) == 1
+                    and frame_index == frames_by_track[index][0]
+                    and len(variants) >= 3
+                ):
+                    selected_variants.append(variants[2])
+                for variant, prepared in selected_variants:
+                    _dump_ocr_input(
+                        dump_dir,
+                        text_id=text_id,
+                        tag=(
+                            f"recovery_f{frame_index}_{variant}_"
+                            f"y{int(round(candidate_box[1]))}"
+                        ),
+                        image_bgr=prepared,
+                    )
+                    batch.append(
+                        {
+                            "prepared_jpeg": encode_ocr_jpeg(prepared),
+                            "original_box_coords": list(candidate_box),
+                        }
+                    )
+                    meta.append(
+                        (
+                            index,
+                            frame_index,
+                            variant,
+                            sharpness,
+                            candidate_box,
+                            float(candidate_row.get("score") or 0.0),
+                        )
+                    )
+
+    if endpoint_url is None and cache is None:
+        raw_results = _recognize_batch_sync(batch)
+    else:
+        raw_results = _recognize_batch_sync(
+            batch,
+            endpoint_url=endpoint_url,
+            cache=cache,
+        )
+    observations: dict[int, list[RecoveryObservation]] = {}
+    for (
+        index,
+        frame_index,
+        variant,
+        sharpness,
+        candidate_box,
+        geometry_score,
+    ), raw in zip(meta, raw_results):
+        kept = accept_ocr_text_for_role(str(raw or ""), role=roles[index])
+        if not kept:
+            continue
+        observations.setdefault(index, []).append(
+            RecoveryObservation(
+                track_index=index,
+                frame_index=frame_index,
+                variant=variant,
+                text=kept,
+                sharpness=sharpness,
+                box_xyxy=candidate_box,
+                geometry_score=geometry_score,
+            )
+        )
+
+    for index in failed:
+        entry = timeline[index]
+        text_id = str(entry.get("text_id") or f"sub_{index + 1:02d}")
+        result = choose_recovery_consensus(observations.get(index) or [])
+        audit = {
+            "policy_version": PHASE2_LOCAL_RECOVERY_POLICY_VERSION,
+            "attempted_frames": frames_by_track[index],
+            "decoded_frames": [
+                value for value in frames_by_track[index] if value in decoded
+            ],
+            "prepared_inputs": sum(1 for row in meta if row[0] == index),
+            "accepted_observations": len(observations.get(index) or []),
+            "geometry_candidates": int(geometry_candidate_counts.get(index, 0)),
+            "geometry_policy_version": PHASE2_HARDSUB_GEOMETRY_POLICY_VERSION,
+        }
+        if result is None:
+            entry["ocr_recovery"] = {**audit, "status": "UNRESOLVED"}
+            continue
+        text = str(result["text"])
+        selected_box = result.get("selected_box")
+        geometry_applied = bool(
+            str(roles[index] or "") == "hardsub"
+            and selected_box
+            and int(result.get("frame_support") or 0) >= 2
+            and int(result.get("geometry_observation_count") or 0) >= 2
+        )
+        if geometry_applied:
+            original_box = list(entry.get("box_coords") or [])[:4]
+            entry["box_coords"] = [float(value) for value in selected_box[:4]]
+            selected_frame_image = decoded.get(int(result.get("selected_frame") or -1))
+            corrected_crop = (
+                crop_recovery_region(selected_frame_image, entry["box_coords"])
+                if selected_frame_image is not None
+                else None
+            )
+            if corrected_crop is not None:
+                geometry_dir = dump_dir.parent / "geometry_recovery"
+                geometry_dir.mkdir(parents=True, exist_ok=True)
+                corrected_path = geometry_dir / f"{text_id}.jpg"
+                cv2.imwrite(
+                    str(corrected_path),
+                    corrected_crop,
+                    [int(cv2.IMWRITE_JPEG_QUALITY), 95],
+                )
+                entry["crop_path"] = corrected_path.relative_to(
+                    dump_dir.parent.parent
+                ).as_posix()
+            entry["geometry_recovery"] = {
+                "policy_version": PHASE2_HARDSUB_GEOMETRY_POLICY_VERSION,
+                "status": "LOCAL_DERIVED_TEMPORAL_CONSENSUS",
+                "original_box_coords": original_box,
+                "derived_box_coords": list(entry["box_coords"]),
+                "frame_support": int(result.get("frame_support") or 0),
+                "geometry_observation_count": int(
+                    result.get("geometry_observation_count") or 0
+                ),
+                "geometry_support": int(result.get("geometry_support") or 0),
+            }
+        else:
+            entry["geometry_recovery"] = {
+                "policy_version": PHASE2_HARDSUB_GEOMETRY_POLICY_VERSION,
+                "status": "UNRESOLVED_FAIL_CLOSED",
+                "candidate_count": int(geometry_candidate_counts.get(index, 0)),
+            }
+        entry["ocr_text"] = text
+        entry["ocr_source"] = "local_temporal_recovery"
+        entry["ocr_frame"] = int(result["selected_frame"])
+        entry["ocr_recovery"] = {
+            **audit,
+            **result,
+            "status": "RECOVERED_FOR_OPERATOR_REVIEW",
+        }
+        if is_ocr_suspect_mixed(text):
+            entry["ocr_suspect"] = True
+        logger.info(
+            "phase2_ocr_track_recovery_ok text_id=%s method=%s support=%s",
+            str(entry.get("text_id") or "?"),
+            result["method"],
+            result["frame_support"],
+        )
+
+
 def ocr_timeline_keyframes(
     timeline: list[dict[str, Any]],
     *,
@@ -11383,6 +14272,15 @@ def ocr_timeline_keyframes(
             text_id,
         )
 
+    _recover_failed_ocr_tracks(
+        timeline,
+        source=source,
+        boxes=boxes,
+        roles=roles,
+        dump_dir=dump_dir,
+        endpoint_url=endpoint_url,
+        cache=cache,
+    )
     return timeline
 
 

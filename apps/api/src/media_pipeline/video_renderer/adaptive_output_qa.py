@@ -25,6 +25,13 @@ from src.media_pipeline.video_renderer.phase4_approvals import (
 from src.media_pipeline.video_renderer.source_text_provenance import (
     is_editor_caption_track,
 )
+from src.media_pipeline.video_renderer.adaptive_video import (
+    active_tracks_for_frame,
+    dynamic_track_for_frame,
+)
+from src.media_pipeline.frame_sampling.coverage_track_closure import (
+    local_textness_mask,
+)
 
 
 OUTPUT_QA_SCHEMA_VERSION = "phase4_adaptive_output_qa_v1"
@@ -66,8 +73,21 @@ SOURCE_INTRINSIC_MATCHED_TEXTURE_MAX_AREA = 0.15
 SOURCE_INTRINSIC_MATCHED_TEXTURE_MAX_PIXEL_ASPECT = 1.60
 SOURCE_INTRINSIC_MATCHED_TEXTURE_MAX_MEAN_DELTA = 6.0
 SOURCE_INTRINSIC_MATCHED_TEXTURE_MAX_P95_DELTA = 16.0
-SOURCE_INTRINSIC_WIDE_TEXTURE_MAX_AREA = 0.001
-SOURCE_INTRINSIC_WIDE_TEXTURE_MAX_CONFIDENCE = 0.35
+# A single small glyph-sized OCR box can be a printed mark on jewellery,
+# packaging or a prop.  The regular matched-texture branch intentionally has
+# a larger area floor to stay conservative; this narrower branch admits only a
+# low/medium-confidence, source-matched glyph whose encoded pixels are proven
+# unchanged and which is outside every active editor authority.  High-
+# confidence source-matched captions remain blocking.
+SOURCE_INTRINSIC_SMALL_MATCHED_MIN_AREA = 0.0004
+SOURCE_INTRINSIC_SMALL_MATCHED_MAX_AREA = 0.003
+SOURCE_INTRINSIC_SMALL_MATCHED_MAX_CONFIDENCE = 0.80
+SOURCE_INTRINSIC_SMALL_MATCHED_MIN_GEOMETRY_OVERLAP = 0.80
+SOURCE_INTRINSIC_SMALL_MATCHED_MIN_AREA_SIMILARITY = 0.30
+SOURCE_INTRINSIC_SMALL_MATCHED_MAX_MEAN_DELTA = 6.0
+SOURCE_INTRINSIC_SMALL_MATCHED_MAX_P95_DELTA = 16.0
+SOURCE_INTRINSIC_WIDE_TEXTURE_MAX_AREA = 0.0045
+SOURCE_INTRINSIC_WIDE_TEXTURE_MAX_CONFIDENCE = 0.50
 SOURCE_INTRINSIC_WIDE_TEXTURE_MIN_PIXEL_ASPECT = 1.60
 SOURCE_INTRINSIC_WIDE_TEXTURE_MAX_PIXEL_ASPECT = 2.40
 RESIDUAL_SOURCE_TEXTURE_MIN_GEOMETRY_OVERLAP = 0.80
@@ -79,6 +99,30 @@ SOURCE_SCENE_EDITOR_OVERLAP_MAX_WIDTH = 0.08
 SOURCE_SCENE_EDITOR_OVERLAP_MAX_HEIGHT = 0.08
 SOURCE_SCENE_EDITOR_OVERLAP_MAX_MEAN_DELTA = 12.0
 SOURCE_SCENE_EDITOR_OVERLAP_MAX_P95_DELTA = 50.0
+SOURCE_INTRINSIC_OBJECT_PRINT_MAX_CHARS = 3
+SOURCE_INTRINSIC_OBJECT_PRINT_MIN_AREA = 0.005
+SOURCE_INTRINSIC_OBJECT_PRINT_MAX_AREA = 0.08
+SOURCE_INTRINSIC_OBJECT_PRINT_MAX_CONFIDENCE = 0.65
+# A locally encoded blur plate can occasionally collapse DBNet into one huge
+# low-confidence CJK box that spans the face/scene plus the actual caption
+# lane.  This is not residual text: the source OCR has no matching geometry,
+# and the box is far larger than any supported glyph row.  Keep this bound
+# narrow so ordinary captions can never enter it.
+BLUR_ONLY_COLLAPSED_PLATE_MIN_AREA = 0.20
+BLUR_ONLY_COLLAPSED_PLATE_MAX_CONFIDENCE = 0.75
+# Tiny one/two-glyph recognitions on a cover-only plate edge are compression
+# texture unless they survive neighboring-frame/source confirmation.  This
+# branch runs before temporal confirmation and only inside an active cover.
+BLUR_ONLY_PLATE_EDGE_MAX_AREA = 0.003
+BLUR_ONLY_PLATE_EDGE_MAX_CONFIDENCE = 0.40
+# Source/object texture outside the subtitle lane is preserved when source and
+# output pixels are effectively unchanged.  It must not become a request to
+# blur filmed objects merely because PP-OCR emits one glyph on their texture.
+SOURCE_INTRINSIC_OFF_LANE_TEXTURE_MAX_AREA = 0.002
+SOURCE_INTRINSIC_OFF_LANE_TEXTURE_MAX_CONFIDENCE = 0.70
+SOURCE_INTRINSIC_OFF_LANE_TEXTURE_MAX_Y = 0.65
+SOURCE_INTRINSIC_LARGE_LOW_CONF_TEXTURE_MAX_AREA = 0.30
+SOURCE_INTRINSIC_LARGE_LOW_CONF_TEXTURE_MAX_CONFIDENCE = 0.55
 
 
 class AdaptiveOutputQaError(RuntimeError):
@@ -234,6 +278,130 @@ def select_qa_frame_indices(
                 selected.add(value)
             if len(selected) >= limit:
                 break
+    return sorted(selected)
+
+
+def include_phase1_completeness_frames(
+    indices: Sequence[int],
+    *,
+    artifact_dir: str | Path,
+    decoded_frame_count: int,
+    max_added_frames: int = 96,
+) -> list[int]:
+    """Carry Phase-1 all-frame discovery evidence into encoded-output OCR QA.
+
+    The normal QA sampler is track-driven. A caption that never became a
+    render track could therefore remain invisible to it. OCR-V27.1 records
+    completeness candidates before track construction and retains
+    every strong one-frame boundary and representative frames from persistent
+    candidates for full-frame local CJK OCR after encode.
+    """
+
+    frame_count = max(0, int(decoded_frame_count))
+    selected = {
+        int(value) for value in indices if 0 <= int(value) < frame_count
+    }
+    if frame_count < 1 or max_added_frames < 1:
+        return sorted(selected)
+
+    qa_root = Path(artifact_dir).resolve()
+    candidate_path: Path | None = None
+    for parent in (qa_root, *qa_root.parents[:4]):
+        candidate = parent / "phase1_candidate_windows_v1.json"
+        if candidate.is_file():
+            candidate_path = candidate
+            break
+    if candidate_path is None:
+        return sorted(selected)
+    try:
+        payload = json.loads(candidate_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return sorted(selected)
+    if not isinstance(payload, Mapping):
+        return sorted(selected)
+    policy_version = str(payload.get("policy_version") or "")
+    if policy_version not in {
+        "audio_visual_temporal_policy_v9_completeness_first",
+        "audio_visual_temporal_policy_v10_cjk_single_frame_consensus",
+        "audio_visual_temporal_policy_v11_audio_authority_proxy_budget",
+        "audio_visual_temporal_policy_v12_epoch_complete_cover",
+    }:
+        return sorted(selected)
+
+    hard = {
+        int(value)
+        for value in list(payload.get("hard_textness_frames") or [])
+        if 0 <= int(value) < frame_count
+    }
+    single_frame_candidates = (
+        list(payload.get("single_frame_retention_candidate_frames") or [])
+        if policy_version
+        in {
+            "audio_visual_temporal_policy_v10_cjk_single_frame_consensus",
+            "audio_visual_temporal_policy_v11_audio_authority_proxy_budget",
+            "audio_visual_temporal_policy_v12_epoch_complete_cover",
+        }
+        else []
+    )
+    candidates = sorted(
+        {
+            int(value)
+            for value in (
+                list(payload.get("completeness_candidate_frames") or [])
+                + single_frame_candidates
+                + list(payload.get("coverage_unassigned_candidate_frames") or [])
+                + list(payload.get("coverage_residual_dbnet_frames") or [])
+            )
+            if 0 <= int(value) < frame_count
+        }
+    )
+    policy = dict(payload.get("policy") or {})
+    source_fps = max(1.0, float(payload.get("fps") or 30.0))
+    candidate_fps = max(
+        1.0, float(policy.get("completeness_sample_fps") or 6.0)
+    )
+    group_gap = max(1, int(round(source_fps / candidate_fps)) + 1)
+    groups: list[list[int]] = []
+    for frame in candidates:
+        if groups and frame <= groups[-1][-1] + group_gap:
+            groups[-1].append(frame)
+        else:
+            groups.append([frame])
+
+    # ``hard_textness_frames`` is a high-recall Phase-1 discovery stream, not
+    # an instruction to run heavyweight OCR on every positive proxy frame.
+    # Long caption videos can contain thousands of hard frames. Keep their
+    # temporal clusters represented, then enforce the same explicit budget as
+    # every other completeness source; full-timeline pixel QA still scans all
+    # frames independently below.
+    hard_groups: list[list[int]] = []
+    for frame in sorted(hard):
+        if hard_groups and frame <= hard_groups[-1][-1] + group_gap:
+            hard_groups[-1].append(frame)
+        else:
+            hard_groups.append([frame])
+    hard_representative = {
+        value
+        for group in hard_groups
+        for value in (group[0], group[len(group) // 2], group[-1])
+    }
+    representative: set[int] = set(hard_representative)
+    persistent_stride = max(1, int(round(source_fps * 0.5)))
+    for group in groups:
+        representative.update((group[0], group[-1], group[len(group) // 2]))
+        prior = group[0]
+        for frame in group[1:-1]:
+            if frame - prior >= persistent_stride:
+                representative.add(frame)
+                prior = frame
+
+    bounded = sorted(representative)
+    if len(bounded) > int(max_added_frames):
+        positions = np.linspace(
+            0, len(bounded) - 1, num=max(1, int(max_added_frames))
+        )
+        bounded = [bounded[int(round(position))] for position in positions]
+    selected.update(bounded)
     return sorted(selected)
 
 
@@ -522,9 +690,16 @@ def summarize_temporal_flicker_for_verdict(
     *,
     contract: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Exclude intentional caption on/off boundaries from flicker blocking."""
+    """Keep cover-active boundaries blocking; exclude only true on/off edges.
+
+    A caption content boundary is not a license for the plate to pulse.  It is
+    excluded only when neither side has an active concealment authority (the
+    intentional plate appearance/disappearance case). Transitions between two
+    overlapping/bridged tracks stay part of the flicker verdict.
+    """
 
     boundary_frames: set[int] = set()
+    cover_intervals: list[tuple[int, int]] = []
     full_lane_plate = False
     cover_aligned_caption = False
     for raw in list(contract.get("render_tracks") or []):
@@ -532,28 +707,70 @@ def summarize_temporal_flicker_for_verdict(
             continue
         policy = dict(raw.get("render_policy") or {})
         context = dict(policy.get("context") or {})
+        cover = dict(policy.get("cover") or {})
         is_caption = is_editor_caption_track(raw)
-        if not is_caption:
+        is_stylized_title = bool(
+            context.get("intro_stylized_title")
+            and str(cover.get("mask_mode") or "") == "stylized_components"
+        )
+        if not is_caption and not is_stylized_title:
             continue
         full_lane_plate = full_lane_plate or str(
-            dict(policy.get("cover") or {}).get("strategy") or ""
-        ) == "editor_caption_full_lane_plate"
+            cover.get("strategy") or ""
+        ) == "editor_caption_full_lane_plate" or str(
+            cover.get("geometry_mode") or ""
+        ) == "full_width_caption_lane"
         cover_aligned_caption = cover_aligned_caption or str(
             dict(policy.get("layout") or {}).get("mode") or ""
         ) == "cover_aligned"
-        for edge in (int(raw.get("start_frame") or 0), int(raw.get("end_frame") or 0)):
-            boundary_frames.update(range(max(0, edge - 1), edge + 2))
+        transition_hold_frames = max(
+            1,
+            int(
+                cover.get("transition_hold_frames")
+                or context.get("transition_hold_frames")
+                or 1
+            ),
+        )
+        cover_start = int(
+            raw.get("cover_start_frame") or raw.get("start_frame") or 0
+        )
+        cover_end = int(
+            raw.get("cover_end_frame") or raw.get("end_frame") or cover_start
+        )
+        cover_intervals.append(
+            (
+                max(0, cover_start - transition_hold_frames),
+                cover_end + transition_hold_frames,
+            )
+        )
+        for edge in (
+            cover_start,
+            cover_end,
+        ):
+            boundary_frames.update(
+                range(
+                    max(0, edge - transition_hold_frames),
+                    edge + transition_hold_frames + 1,
+                )
+            )
     annotated: list[dict[str, Any]] = []
     blocking_values: list[float] = []
     excluded_count = 0
     for raw in rows:
         row = dict(raw)
         frame_index = int(row.get("frame_index") or 0)
-        if frame_index in boundary_frames:
+        active_intervals = sum(
+            start <= frame_index <= end for start, end in cover_intervals
+        )
+        # When another authority is active at this boundary, the visible
+        # plate should stay stable and any extra delta remains a real failure.
+        if frame_index in boundary_frames and active_intervals <= 1:
             row["blocking_exclusion"] = "EXPECTED_EDITOR_CAPTION_BOUNDARY"
             excluded_count += 1
         else:
             blocking_values.append(float(row.get("extra_flicker_max") or 0.0))
+            if frame_index in boundary_frames:
+                row["blocking_boundary"] = "ACTIVE_COVER_TRANSITION"
         annotated.append(row)
     return {
         "max_extra_flicker": round(max(blocking_values, default=0.0), 4),
@@ -604,7 +821,6 @@ def classify_editor_caption_ocr_false_positives(
                 break
         return max(leading, trailing)
 
-    tracks = [dict(row) for row in list(contract.get("render_tracks") or []) if isinstance(row, Mapping)]
     kept: list[dict[str, Any]] = []
     excluded: list[dict[str, Any]] = []
     for raw in detections:
@@ -612,20 +828,21 @@ def classify_editor_caption_ocr_false_positives(
         frame_index = int(row.get("frame_index") or 0)
         detection_rect = _normalized_rect(row)
         matched: dict[str, Any] | None = None
-        for track in tracks:
-            if not (
-                int(track.get("start_frame") or 0)
-                <= frame_index
-                <= int(track.get("end_frame") or 0)
-            ):
-                continue
+        # The concealment authority can intentionally outlive the semantic
+        # subtitle span at a transition.  Query the same runtime-active tracks
+        # used by the renderer so OCR texture on the held plate edge is not
+        # misreported as residual CJK after the text span ends.
+        for track in active_tracks_for_frame(
+            contract,
+            frame_index,
+            source_frame_bgr=(source_frames or {}).get(frame_index),
+        ):
             policy = dict(track.get("render_policy") or {})
             cover = dict(dict(policy.get("cover") or {}).get("roi") or track.get("geometry") or {})
             layout = dict(dict(policy.get("layout") or {}).get("safe_area") or {})
             rois = [cover, layout, dict(track.get("geometry") or {})]
-            if any(
-                isinstance(roi, Mapping)
-                and _intersection_over_smaller(
+            roi_overlaps = [
+                _intersection_over_smaller(
                     detection_rect,
                     (
                         float(roi.get("x") or 0.0),
@@ -634,9 +851,17 @@ def classify_editor_caption_ocr_false_positives(
                         float(roi.get("y") or 0.0) + float(roi.get("height") or 0.0),
                     ),
                 )
-                >= 0.50
                 for roi in rois
-            ) and str(track.get("text_vi") or "").strip():
+                if isinstance(roi, Mapping)
+            ]
+            if (
+                any(value >= 0.50 for value in roi_overlaps)
+                or bool(track.get("cover_only"))
+                and any(value >= 0.25 for value in roi_overlaps)
+            ) and bool(
+                str(track.get("text_vi") or "").strip()
+                or track.get("cover_only")
+            ):
                 matched = track
                 break
         if matched is None:
@@ -661,6 +886,26 @@ def classify_editor_caption_ocr_false_positives(
             and patch_similarity["p95_abs_delta"]
             <= SOURCE_INTRINSIC_MATCHED_TEXTURE_MAX_P95_DELTA
         )
+        area = max(0.0, detection_rect[2] - detection_rect[0]) * max(
+            0.0, detection_rect[3] - detection_rect[1]
+        )
+        blur_only_plate_edge_texture = (
+            bool(matched.get("cover_only"))
+            and cjk_count <= 2
+            and (
+                float(row.get("confidence") or 0.0)
+                <= BLUR_ONLY_PLATE_EDGE_MAX_CONFIDENCE
+                or len(observed) < 4
+            )
+            and area <= BLUR_ONLY_PLATE_EDGE_MAX_AREA
+        )
+        blur_only_collapsed_plate = (
+            bool(matched.get("cover_only"))
+            and cjk_count == 1
+            and float(row.get("confidence") or 0.0)
+            <= BLUR_ONLY_COLLAPSED_PLATE_MAX_CONFIDENCE
+            and area >= BLUR_ONLY_COLLAPSED_PLATE_MIN_AREA
+        )
         if (
             cjk_count <= 2
             and cjk_edge_run < 2
@@ -676,16 +921,28 @@ def classify_editor_caption_ocr_false_positives(
                     "edge_cjk_run": cjk_edge_run,
                 }
             )
-        elif unchanged_caption_texture:
+        elif unchanged_caption_texture or blur_only_plate_edge_texture or blur_only_collapsed_plate:
             excluded.append(
                 {
                     **row,
-                    "classification": "EDITOR_CAPTION_TEXTURE_OCR_FALSE_POSITIVE",
+                    "classification": (
+                        "BLUR_ONLY_COLLAPSED_PLATE_OCR_FALSE_POSITIVE"
+                        if blur_only_collapsed_plate
+                        else "BLUR_ONLY_PLATE_EDGE_OCR_FALSE_POSITIVE"
+                        if blur_only_plate_edge_texture
+                        else "EDITOR_CAPTION_TEXTURE_OCR_FALSE_POSITIVE"
+                    ),
                     "matched_text_id": matched.get("text_id"),
-                    "source_render_patch": {
-                        key: round(value, 6)
-                        for key, value in patch_similarity.items()
-                    },
+                    **(
+                        {
+                            "source_render_patch": {
+                                key: round(value, 6)
+                                for key, value in patch_similarity.items()
+                            }
+                        }
+                        if patch_similarity is not None
+                        else {}
+                    ),
                 }
             )
         else:
@@ -705,6 +962,7 @@ def build_output_qa_verdict(
     final_audio_passed: bool = True,
     cover_layout_aligned: bool = True,
     timeline_edit_coverage: bool = True,
+    residual_stroke_removal: bool = True,
     protected_source_integrity: bool = True,
     flicker_limit: float = DEFAULT_MAX_EXTRA_FLICKER,
 ) -> dict[str, Any]:
@@ -720,6 +978,7 @@ def build_output_qa_verdict(
         "outside_cover_damage": not bool(outside_damage_blocked),
         "cover_layout_alignment": bool(cover_layout_aligned),
         "timeline_edit_coverage": bool(timeline_edit_coverage),
+        "residual_stroke_removal": bool(residual_stroke_removal),
         "protected_source_integrity": bool(protected_source_integrity),
         "final_audio": bool(final_audio_passed),
     }
@@ -898,24 +1157,21 @@ def allowed_edit_mask_for_frame(
         roi = raw.get("panel_roi")
         if start <= int(frame_index) <= end and isinstance(roi, Mapping):
             rectangles.append(roi)
-    for raw in list(contract.get("render_tracks") or []):
-        if not isinstance(raw, Mapping):
-            continue
+    for raw in active_tracks_for_frame(contract, int(frame_index)):
         start = int(raw.get("start_frame") or 0)
         end = int(raw.get("end_frame") or start)
-        if not start <= int(frame_index) <= end:
-            continue
         policy = dict(raw.get("render_policy") or {})
+        cover = dict(policy.get("cover") or {})
+        text_active = start <= int(frame_index) <= end
         context = dict(policy.get("context") or {})
         if bool(context.get("short_intro_full_frame_clean_plate_approved")):
             height, width = shape
             return np.full((height, width), 255, dtype=np.uint8)
-        cover = dict(policy.get("cover") or {})
         layout = dict(policy.get("layout") or {})
         cover_roi = cover.get("roi") or raw.get("geometry")
         if isinstance(cover_roi, Mapping):
             rectangles.append(cover_roi)
-        if str(raw.get("text_vi") or "").strip():
+        if text_active and str(raw.get("text_vi") or "").strip():
             safe_area = layout.get("safe_area")
             if isinstance(safe_area, Mapping):
                 rectangles.append(safe_area)
@@ -1024,10 +1280,46 @@ def scan_full_timeline_visual_authority(
         dict(row)
         for row in list(contract.get("protected_source_tracks") or [])
         if isinstance(row, Mapping)
+        and str(
+            dict(row.get("visual_provenance") or {}).get("classification") or ""
+        )
+        == "SOURCE_INTRINSIC"
+        and float(
+            dict(row.get("visual_provenance") or {}).get("confidence") or 0.0
+        )
+        >= 0.90
     ]
     missing_edit_frames: list[int] = []
+    residual_stroke_frames: list[int] = []
     protected_damage_frames: list[int] = []
     decoded = 0
+
+    def _visually_absent_noop(
+        source_frame: np.ndarray,
+        rendered_frame: np.ndarray,
+        track: Mapping[str, Any],
+        geometry: Mapping[str, Any],
+    ) -> bool:
+        """A persisted semantic epoch may span clean frames between labels.
+
+        The renderer intentionally does not blur those frames.  Treating an
+        unchanged ROI as a failure here made QA contradict the runtime
+        presence gate and falsely blocked otherwise correct output.
+        """
+        context = dict(dict(track.get("render_policy") or {}).get("context") or {})
+        if not context.get("caption_row") and not context.get("physical_presence_ranges"):
+            return False
+        ranges = []
+        for raw in list(context.get("physical_presence_ranges") or []):
+            if isinstance(raw, (list, tuple)) and len(raw) == 2:
+                ranges.append((int(raw[0]), int(raw[1])))
+        if ranges:
+            # This helper is called from the frame loop; the caller supplies
+            # the current index through a temporary field below.
+            current = int(track.get("_qa_frame_index") or -1)
+            if not any(start <= current <= end for start, end in ranges):
+                return True
+        return False
 
     def _roi_delta(
         source_frame: np.ndarray,
@@ -1051,6 +1343,177 @@ def scan_full_timeline_visual_authority(
             return 0.0
         return float(np.mean(cv2.absdiff(left, right), dtype=np.float64))
 
+    def _unchanged_textness_fraction(
+        source_frame: np.ndarray,
+        rendered_frame: np.ndarray,
+        track: Mapping[str, Any],
+        geometry: Mapping[str, Any],
+    ) -> tuple[float, int]:
+        height, width = source_frame.shape[:2]
+        x0 = max(0, min(width - 1, int(float(geometry.get("x") or 0.0) * width)))
+        y0 = max(0, min(height - 1, int(float(geometry.get("y") or 0.0) * height)))
+        x1 = max(
+            x0 + 1,
+            min(
+                width,
+                int(
+                    round(
+                        (
+                            float(geometry.get("x") or 0.0)
+                            + float(geometry.get("width") or 0.0)
+                        )
+                        * width
+                    )
+                ),
+            ),
+        )
+        y1 = max(
+            y0 + 1,
+            min(
+                height,
+                int(
+                    round(
+                        (
+                            float(geometry.get("y") or 0.0)
+                            + float(geometry.get("height") or 0.0)
+                        )
+                        * height
+                    )
+                ),
+            ),
+        )
+        source_roi = source_frame[y0:y1, x0:x1]
+        rendered_roi = rendered_frame[y0:y1, x0:x1]
+        if source_roi.size == 0 or rendered_roi.shape != source_roi.shape:
+            return 0.0, 0
+        gray = cv2.cvtColor(source_roi, cv2.COLOR_BGR2GRAY)
+        context = dict(
+            dict(track.get("render_policy") or {}).get("context") or {}
+        )
+        cover = dict(
+            dict(track.get("render_policy") or {}).get("cover") or {}
+        )
+        soft_reconstruction_cover = str(cover.get("strategy") or "") == (
+            "soft_reconstruction_plate_v1"
+        )
+        if bool(context.get("caption_row")) or soft_reconstruction_cover:
+            # Generic textness treats hair, garment weave and jewellery as
+            # glyph strokes, producing residual failures even when the source
+            # caption is visibly gone.  Caption rows use the same physical
+            # white-fill/dark-outline signature as the runtime presence gate.
+            channel_spread = np.max(source_roi, axis=2).astype(np.int16) - np.min(
+                source_roi, axis=2
+            ).astype(np.int16)
+            white_fill = (gray >= 172) & (channel_spread <= 92)
+            dark_outline = gray <= 105
+            outline_neighborhood = cv2.dilate(
+                dark_outline.astype(np.uint8),
+                cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)),
+                iterations=1,
+            ) > 0
+            textness = white_fill & outline_neighborhood
+            textness = cv2.dilate(
+                textness.astype(np.uint8),
+                np.ones((3, 3), dtype=np.uint8),
+                iterations=1,
+            ) > 0
+        else:
+            textness = local_textness_mask(gray) > 0
+        pixels = int(np.count_nonzero(textness))
+        if pixels < 12:
+            return 0.0, pixels
+        delta = np.max(
+            cv2.absdiff(source_roi, rendered_roi), axis=2
+        )
+        unchanged = int(np.count_nonzero((delta <= 8) & textness))
+        return unchanged / float(pixels), pixels
+
+    def _caption_glyph_signature(
+        source_frame: np.ndarray,
+        track: Mapping[str, Any],
+        geometry: Mapping[str, Any],
+    ) -> tuple[float, int]:
+        """Measure structured caption strokes, excluding generic texture.
+
+        A global textness mask sees fabric, hair and jewellery as glyphs.  For
+        a caption authority we require multiple similarly sized components on
+        one baseline, with a meaningful horizontal span.  This mirrors the
+        renderer's outlined-caption presence rule but uses a slightly wider
+        luminance/edge fallback for dark or compressed subtitle styles.
+        """
+        height, width = source_frame.shape[:2]
+        x0 = max(0, int((float(geometry.get("x") or 0.0) - 0.012) * width))
+        y0 = max(0, int((float(geometry.get("y") or 0.0) - 0.012) * height))
+        x1 = min(width, int((float(geometry.get("x") or 0.0) + float(geometry.get("width") or 0.0) + 0.012) * width))
+        y1 = min(height, int((float(geometry.get("y") or 0.0) + float(geometry.get("height") or 0.0) + 0.012) * height))
+        if x1 <= x0 or y1 <= y0:
+            return 0.0, 0
+        crop = source_frame[y0:y1, x0:x1]
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        spread = np.max(crop, axis=2).astype(np.int16) - np.min(crop, axis=2).astype(np.int16)
+        white = (gray >= 165) & (spread <= 105)
+        dark = gray <= 110
+        near_dark = cv2.dilate(
+            dark.astype(np.uint8),
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)),
+            iterations=1,
+        ) > 0
+        bright = white & near_dark
+        # Dark/solid subtitles have no white fill. Use a local edge response,
+        # but still constrain it to a single text row.
+        if int(np.count_nonzero(bright)) < 12:
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 4)).apply(gray)
+            edge = cv2.Canny(clahe, 48, 136)
+            bright = cv2.morphologyEx(
+                edge,
+                cv2.MORPH_CLOSE,
+                cv2.getStructuringElement(cv2.MORPH_RECT, (3, 1)),
+            ) > 0
+        count, _labels, stats, centroids = cv2.connectedComponentsWithStats(
+            bright.astype(np.uint8), connectivity=8
+        )
+        glyphs: list[tuple[float, float, int, int, int]] = []
+        crop_h, crop_w = crop.shape[:2]
+        for index in range(1, count):
+            cw = int(stats[index, cv2.CC_STAT_WIDTH])
+            ch = int(stats[index, cv2.CC_STAT_HEIGHT])
+            area = int(stats[index, cv2.CC_STAT_AREA])
+            if (
+                2 <= cw <= max(14, int(crop_w * 0.16))
+                and 3 <= ch <= max(14, int(crop_h * 0.92))
+                and area >= 4
+            ):
+                glyphs.append(
+                    (
+                        float(centroids[index][0]),
+                        float(centroids[index][1]),
+                        area,
+                        cw,
+                        ch,
+                    )
+                )
+        if len(glyphs) < 3:
+            return 0.0, len(glyphs)
+        baseline_bin = max(4, int(round(crop_h * 0.16)))
+        bins: dict[int, list[tuple[float, float, int, int, int]]] = {}
+        for glyph in glyphs:
+            bins.setdefault(int(round(glyph[1] / baseline_bin)), []).append(glyph)
+        best_fraction = 0.0
+        best_pixels = 0
+        expected_center = crop_h * 0.5
+        for values in bins.values():
+            if len(values) < 3:
+                continue
+            span = max(value[0] for value in values) - min(value[0] for value in values)
+            area = sum(value[2] for value in values)
+            center = sum(value[1] for value in values) / len(values)
+            if span < crop_w * 0.12 or area < 24 or abs(center - expected_center) > crop_h * 0.48:
+                continue
+            # Structured glyph density, not raw texture density.
+            best_pixels = max(best_pixels, int(area))
+            best_fraction = max(best_fraction, min(1.0, area / float(max(1, crop_w * max(1, crop_h)))))
+        return best_fraction, best_pixels
+
     try:
         frame_index = 0
         while True:
@@ -1066,22 +1529,82 @@ def scan_full_timeline_visual_authority(
             global_delta = float(
                 np.mean(cv2.absdiff(small_source, small_rendered), dtype=np.float64)
             )
-            active = [
-                row
-                for row in render_tracks
-                if int(row.get("start_frame") or 0)
-                <= frame_index
-                <= int(row.get("end_frame") or -1)
-            ]
+            active = active_tracks_for_frame(
+                contract,
+                frame_index,
+                source_frame_bgr=source_frame,
+            )
             if active:
-                deltas = [
-                    _roi_delta(source_frame, rendered_frame, dict(row.get("geometry") or {}))
+                for row in active:
+                    row["_qa_frame_index"] = frame_index
+                active_geometries = [
+                    dict(
+                        dict(
+                            dict(row.get("render_policy") or {}).get("cover") or {}
+                        ).get("roi")
+                        or row.get("geometry")
+                        or {}
+                    )
                     for row in active
                 ]
-                if deltas and min(deltas) <= max(2.0, global_delta + 0.85):
+                deltas = [
+                    _roi_delta(source_frame, rendered_frame, geometry)
+                    for geometry in active_geometries
+                ]
+                # ``active_tracks_for_frame`` has already applied observed
+                # glyph-presence gating to semantic lead/tail intervals.  A
+                # frame is missing an edit only when every active authority is
+                # effectively unchanged; using ``min`` mislabeled one
+                # unchanged semantic sibling even when another cover on the
+                # same frame was correctly rendered.
+                absent_noop = all(
+                    _visually_absent_noop(source_frame, rendered_frame, row, geometry)
+                    for row, geometry in zip(active, active_geometries)
+                )
+                glyph_evidence = [
+                    _caption_glyph_signature(source_frame, row, geometry)
+                    for row, geometry in zip(active, active_geometries)
+                    if bool(dict(dict(row.get("render_policy") or {}).get("context") or {}).get("caption_row"))
+                ]
+                has_caption_glyph_evidence = any(
+                    pixels >= 24 and fraction >= 0.002
+                    for fraction, pixels in glyph_evidence
+                )
+                if deltas and max(deltas) <= 2.0 and not absent_noop and (
+                    not glyph_evidence or has_caption_glyph_evidence
+                ):
                     missing_edit_frames.append(frame_index)
+                residual_entries = [
+                    (
+                        _unchanged_textness_fraction(
+                            source_frame, rendered_frame, row, geometry
+                        ),
+                        row,
+                        geometry,
+                    )
+                    for row, geometry in zip(active, active_geometries)
+                    if not bool(row.get("transition_hold_cover_only"))
+                    and not bool(
+                        dict(
+                            dict(row.get("render_policy") or {}).get("context")
+                            or {}
+                        ).get("stacked_caption_sibling_cover_extension")
+                    )
+                ]
+                if any(
+                    pixels >= 24 and fraction >= 0.30
+                    and not _visually_absent_noop(
+                        source_frame, rendered_frame, row, geometry
+                    )
+                    and (
+                        not bool(dict(dict(row.get("render_policy") or {}).get("context") or {}).get("caption_row"))
+                        or _caption_glyph_signature(source_frame, row, geometry)[1] >= 24
+                    )
+                    for (fraction, pixels), row, geometry in residual_entries
+                ):
+                    residual_stroke_frames.append(frame_index)
             active_protected = [
-                row
+                dynamic_track_for_frame(row, frame_index)
                 for row in protected_tracks
                 if int(row.get("start_frame") or 0)
                 <= frame_index
@@ -1104,9 +1627,11 @@ def scan_full_timeline_visual_authority(
         "status": (
             "BLOCKED"
             if missing_edit_frames or protected_damage_frames
+            or residual_stroke_frames
             else "PASS"
         ),
         "missing_edit_frames": missing_edit_frames,
+        "residual_stroke_frames": residual_stroke_frames,
         "protected_source_damage_frames": protected_damage_frames,
     }
 
@@ -1620,11 +2145,6 @@ def classify_source_intrinsic_edge_cjk(
         )
     blocking: list[dict[str, Any]] = []
     excluded: list[dict[str, Any]] = []
-    tracks = [
-        dict(row)
-        for row in list(contract.get("render_tracks") or [])
-        if isinstance(row, Mapping)
-    ]
     for raw in rendered_detections:
         row = dict(raw)
         frame_index = int(row.get("frame_index") or 0)
@@ -1635,13 +2155,12 @@ def classify_source_intrinsic_edge_cjk(
             or rect[0] >= 1.0 - SOURCE_INTRINSIC_EDGE_GUTTER
         )
         overlaps_authority = False
-        for track in tracks:
-            if not (
-                int(track.get("start_frame") or 0)
-                <= frame_index
-                <= int(track.get("end_frame") or 0)
-            ):
-                continue
+        runtime_tracks = active_tracks_for_frame(
+            contract,
+            frame_index,
+            source_frame_bgr=(source_frames or {}).get(frame_index),
+        )
+        for track in runtime_tracks:
             roi = dict(
                 dict(dict(track.get("render_policy") or {}).get("cover") or {}).get(
                     "roi"
@@ -1664,6 +2183,7 @@ def classify_source_intrinsic_edge_cjk(
         overlapping_source = False
         low_confidence_source_texture_match = False
         matched_source_texture = False
+        small_matched_source: dict[str, Any] | None = None
         for candidate in source_by_frame.get(frame_index, []):
             source_rect = _normalized_rect(candidate)
             source_overlap = _intersection_over_smaller(rect, source_rect)
@@ -1671,6 +2191,21 @@ def classify_source_intrinsic_edge_cjk(
                 overlapping_source = True
             source_chars = _cjk_chars(str(candidate.get("text") or ""))
             source_area_similarity = _rect_area_similarity(rect, source_rect)
+            if (
+                len(rendered_chars) == 1
+                and source_chars == rendered_chars
+                and source_overlap
+                >= SOURCE_INTRINSIC_SMALL_MATCHED_MIN_GEOMETRY_OVERLAP
+                and source_area_similarity
+                >= SOURCE_INTRINSIC_SMALL_MATCHED_MIN_AREA_SIMILARITY
+            ):
+                small_matched_source = {
+                    "text": candidate.get("text"),
+                    "confidence": candidate.get("confidence"),
+                    "geometry": candidate.get("geometry"),
+                    "geometry_overlap": round(source_overlap, 6),
+                    "geometry_area_similarity": round(source_area_similarity, 6),
+                }
             if (
                 len(rendered_chars) == 1
                 and source_chars == rendered_chars
@@ -1807,6 +2342,26 @@ def classify_source_intrinsic_edge_cjk(
             and patch_similarity["p95_abs_delta"]
             <= SOURCE_INTRINSIC_MATCHED_TEXTURE_MAX_P95_DELTA
         )
+        small_matched_unchanged_print = (
+            len(rendered_chars) == 1
+            and SOURCE_INTRINSIC_SMALL_MATCHED_MIN_AREA
+            <= area
+            <= SOURCE_INTRINSIC_SMALL_MATCHED_MAX_AREA
+            and small_matched_source is not None
+            # A render-side detector can become overconfident after codec
+            # sharpening.  Use the source-side confidence for provenance: a
+            # true source caption is high-confidence in the unmodified frame;
+            # a low-confidence source glyph that survives byte-for-byte is
+            # scene texture/printed decoration.
+            and float(small_matched_source.get("confidence") or 0.0)
+            <= SOURCE_INTRINSIC_SMALL_MATCHED_MAX_CONFIDENCE
+            and not overlaps_authority
+            and patch_similarity is not None
+            and patch_similarity["mean_abs_delta"]
+            <= SOURCE_INTRINSIC_SMALL_MATCHED_MAX_MEAN_DELTA
+            and patch_similarity["p95_abs_delta"]
+            <= SOURCE_INTRINSIC_SMALL_MATCHED_MAX_P95_DELTA
+        )
         wide_low_confidence_texture = (
             len(rendered_chars) == 1
             and area <= SOURCE_INTRINSIC_WIDE_TEXTURE_MAX_AREA
@@ -1822,6 +2377,49 @@ def classify_source_intrinsic_edge_cjk(
             and patch_similarity["p95_abs_delta"]
             <= SOURCE_INTRINSIC_MATCHED_TEXTURE_MAX_P95_DELTA
         )
+        object_print_unchanged = (
+            1
+            <= len(rendered_chars)
+            <= SOURCE_INTRINSIC_OBJECT_PRINT_MAX_CHARS
+            and SOURCE_INTRINSIC_OBJECT_PRINT_MIN_AREA
+            <= area
+            <= SOURCE_INTRINSIC_OBJECT_PRINT_MAX_AREA
+            and float(row.get("confidence") or 0.0)
+            <= SOURCE_INTRINSIC_OBJECT_PRINT_MAX_CONFIDENCE
+            and not overlaps_authority
+            and patch_similarity is not None
+            and patch_similarity["mean_abs_delta"]
+            <= SOURCE_INTRINSIC_MATCHED_TEXTURE_MAX_MEAN_DELTA
+            and patch_similarity["p95_abs_delta"]
+            <= SOURCE_INTRINSIC_MATCHED_TEXTURE_MAX_P95_DELTA
+        )
+        off_lane_source_texture = (
+            1 <= len(rendered_chars) <= 2
+            and area <= SOURCE_INTRINSIC_OFF_LANE_TEXTURE_MAX_AREA
+            and float(rect[1]) <= SOURCE_INTRINSIC_OFF_LANE_TEXTURE_MAX_Y
+            and float(row.get("confidence") or 0.0)
+            <= SOURCE_INTRINSIC_OFF_LANE_TEXTURE_MAX_CONFIDENCE
+            and not overlaps_authority
+            and patch_similarity is not None
+            and patch_similarity["mean_abs_delta"]
+            <= SOURCE_INTRINSIC_MATCHED_TEXTURE_MAX_MEAN_DELTA
+            and patch_similarity["p95_abs_delta"]
+            <= SOURCE_INTRINSIC_MATCHED_TEXTURE_MAX_P95_DELTA
+        )
+        large_low_confidence_source_texture = (
+            1 <= len(rendered_chars) <= 2
+            and SOURCE_INTRINSIC_MATCHED_TEXTURE_MIN_AREA
+            <= area
+            <= SOURCE_INTRINSIC_LARGE_LOW_CONF_TEXTURE_MAX_AREA
+            and float(row.get("confidence") or 0.0)
+            <= SOURCE_INTRINSIC_LARGE_LOW_CONF_TEXTURE_MAX_CONFIDENCE
+            and not overlaps_authority
+            and patch_similarity is not None
+            and patch_similarity["mean_abs_delta"]
+            <= SOURCE_INTRINSIC_MATCHED_TEXTURE_MAX_MEAN_DELTA
+            and patch_similarity["p95_abs_delta"]
+            <= SOURCE_INTRINSIC_MATCHED_TEXTURE_MAX_P95_DELTA
+        )
         if (
             is_tiny_texture_false_positive
             or is_low_confidence_texture_false_positive
@@ -1829,7 +2427,11 @@ def classify_source_intrinsic_edge_cjk(
             or large_unchanged_texture
             or edge_unchanged_texture
             or matched_unchanged_texture
+            or small_matched_unchanged_print
             or wide_low_confidence_texture
+            or object_print_unchanged
+            or off_lane_source_texture
+            or large_low_confidence_source_texture
         ):
             excluded.append(
                 {
@@ -1851,9 +2453,21 @@ def classify_source_intrinsic_edge_cjk(
                                         "matched_unchanged_scene_texture"
                                         if matched_unchanged_texture
                                         else (
-                                            "wide_low_confidence_texture"
-                                            if wide_low_confidence_texture
-                                            else "tiny_texture"
+                                        "small_matched_unchanged_source_print"
+                                        if small_matched_unchanged_print
+                                        else (
+                                        "wide_low_confidence_texture"
+                                        if wide_low_confidence_texture
+                                        else (
+                                        "object_print_unchanged"
+                                        if object_print_unchanged
+                                        else "off_lane_source_texture"
+                                        if off_lane_source_texture
+                                        else "large_low_confidence_source_texture"
+                                        if large_low_confidence_source_texture
+                                        else "tiny_texture"
+                                        )
+                                        )
                                         )
                                     )
                                 )
@@ -1864,6 +2478,11 @@ def classify_source_intrinsic_edge_cjk(
                         key: round(value, 6)
                         for key, value in patch_similarity.items()
                     },
+                    **(
+                        {"matched_source": small_matched_source}
+                        if small_matched_unchanged_print
+                        else {}
+                    ),
                 }
             )
         else:
@@ -1990,9 +2609,9 @@ def classify_temporally_unconfirmed_cjk(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Require a spatially stable neighboring-frame OCR confirmation.
 
-    A one-frame authority is kept blocking because no temporal evidence can
-    disprove it. All other single-frame recognitions remain auditable but do
-    not block unless the same CJK signature recurs at overlapping geometry.
+    Adjacent evidence increases confidence, but its absence can never clear a
+    decoded CJK frame. Source/provenance/Latin false-positive classifiers run
+    before this gate; every remaining single-frame CJK result is fail-closed.
     """
     confirmation_by_frame: dict[int, list[dict[str, Any]]] = {}
     for raw in confirmation_detections:
@@ -2114,6 +2733,71 @@ def classify_temporally_unconfirmed_cjk(
             )
             continue
 
+        # Paddle occasionally emits one low-confidence glyph on the feathered
+        # edge of a caption plate (the glyph is absent from both neighbours and
+        # from the source frame).  Treat only this tightly bounded case as a
+        # plate-edge texture false positive; confirmed CJK or anything with a
+        # source match remains fail-closed below.
+        caption_edge_texture = False
+        if (
+            len(chars) == 1
+            and float(row.get("confidence") or 0.0) <= 0.40
+            and max(0.0, rect[2] - rect[0]) * max(0.0, rect[3] - rect[1])
+            <= 0.0015
+            and source_match is None
+        ):
+            for track in tracks:
+                if not (
+                    int(track.get("start_frame") or 0)
+                    <= frame_index
+                    <= int(track.get("end_frame") or 0)
+                ):
+                    continue
+                # Blur-only output has no Vietnamese typography by design.
+                # The plate-edge false-positive gate is visual-cover logic,
+                # not text-render logic, so requiring ``text_vi`` incorrectly
+                # blocked clean cover-only previews on OCR-like plate texture.
+                if not is_editor_caption_track(track) or not bool(
+                    track.get("cover_only")
+                    or str(track.get("text_vi") or "").strip()
+                ):
+                    continue
+                roi = dict(
+                    dict(dict(track.get("render_policy") or {}).get("cover") or {}).get(
+                        "roi"
+                    )
+                    or {}
+                )
+                if not roi:
+                    continue
+                rx0 = float(roi.get("x") or 0.0)
+                ry0 = float(roi.get("y") or 0.0)
+                rx1 = rx0 + float(roi.get("width") or 0.0)
+                ry1 = ry0 + float(roi.get("height") or 0.0)
+                px0, py0 = max(0.0, rx0 - 0.02), max(0.0, ry0 - 0.02)
+                px1, py1 = min(1.0, rx1 + 0.02), min(1.0, ry1 + 0.02)
+                padded = {
+                    "x": px0,
+                    "y": py0,
+                    "width": max(0.0, px1 - px0),
+                    "height": max(0.0, py1 - py0),
+                }
+                if _intersection_over_smaller(rect, _normalized_rect({"geometry": padded})) < 0.10:
+                    continue
+                vertical_gap = max(0.0, ry0 - rect[3], rect[1] - ry1)
+                if vertical_gap <= 0.015:
+                    caption_edge_texture = True
+                    break
+        if caption_edge_texture:
+            excluded.append(
+                {
+                    **row,
+                    "classification": "EDITOR_CAPTION_EDGE_TEXTURE_FALSE_POSITIVE",
+                    "policy_version": "caption_plate_edge_single_frame_v1",
+                }
+            )
+            continue
+
         overlapping_spans: list[tuple[int, int]] = []
         for track in tracks:
             start = int(track.get("start_frame") or 0)
@@ -2151,12 +2835,11 @@ def classify_temporally_unconfirmed_cjk(
                 }
             )
             continue
-        excluded.append(
+        blocking.append(
             {
                 **row,
-                "classification": "TEMPORAL_OCR_SINGLE_FRAME_FALSE_POSITIVE",
                 "temporal_confirmation": {
-                    "status": "NOT_CONFIRMED_ON_ADJACENT_FRAME",
+                    "status": "SINGLE_FRAME_CJK_FAIL_CLOSED",
                     "checked_frames": [
                         neighbor
                         for neighbor in (frame_index - 1, frame_index + 1)
@@ -2208,6 +2891,11 @@ def collect_adaptive_output_qa(
     selected = select_qa_frame_indices(
         contract, motion_scores=motion_scores, limit=sample_limit
     )
+    selected = include_phase1_completeness_frames(
+        selected,
+        artifact_dir=root,
+        decoded_frame_count=len(motion_scores),
+    )
     selected = include_dense_ui_interval_frames(
         selected,
         contract,
@@ -2221,7 +2909,11 @@ def collect_adaptive_output_qa(
     anomaly_indices = sorted(
         {
             int(value)
-            for key in ("missing_edit_frames", "protected_source_damage_frames")
+            for key in (
+                "missing_edit_frames",
+                "residual_stroke_frames",
+                "protected_source_damage_frames",
+            )
             for value in list(timeline_authority.get(key) or [])
             if 0 <= int(value) < len(motion_scores)
         }
@@ -2468,6 +3160,9 @@ def collect_adaptive_output_qa(
         timeline_edit_coverage=not bool(
             timeline_authority.get("missing_edit_frames")
         ),
+        residual_stroke_removal=not bool(
+            timeline_authority.get("residual_stroke_frames")
+        ),
         protected_source_integrity=not bool(
             timeline_authority.get("protected_source_damage_frames")
         ),
@@ -2540,3 +3235,146 @@ def collect_adaptive_output_qa(
             ],
         },
     }
+
+
+def probe_encoded_video_packet_sha256(
+    media_path: str | Path,
+    *,
+    ffmpeg_binary: str = "ffmpeg",
+    run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> str:
+    """Hash only encoded video packets, independent of container audio."""
+
+    command = [
+        ffmpeg_binary,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        str(media_path),
+        "-map",
+        "0:v:0",
+        "-c",
+        "copy",
+        "-f",
+        "hash",
+        "-hash",
+        "sha256",
+        "-",
+    ]
+    completed = run(command, capture_output=True, text=True, check=False)
+    match = re.search(r"SHA256=([0-9a-fA-F]{64})", str(completed.stdout or ""))
+    if completed.returncode != 0 or match is None:
+        raise AdaptiveOutputQaError("Cannot hash encoded video packet authority")
+    return match.group(1).lower()
+
+
+def collect_reused_visual_output_qa(
+    preview_video: str | Path,
+    final_video: str | Path,
+    *,
+    preview_qa: Mapping[str, Any],
+    contract: Mapping[str, Any],
+    media_probe: Callable[[str | Path], Mapping[str, Any]] | None = None,
+    audio_quality_probe: Callable[[str | Path], Mapping[str, Any]] | None = None,
+    video_packet_probe: Callable[[str | Path], str] | None = None,
+) -> dict[str, Any]:
+    """Reuse PASS visual QA only when Final contains the exact preview packets."""
+
+    if str(preview_qa.get("status") or "") != "PASS" or list(
+        preview_qa.get("failed_checks") or []
+    ):
+        raise AdaptiveOutputQaError("Visual preview QA authority is not PASS")
+    preview = Path(preview_video)
+    final = Path(final_video)
+    if not preview.is_file() or not final.is_file():
+        raise AdaptiveOutputQaError("Preview or final output is missing")
+    packet_probe = video_packet_probe or probe_encoded_video_packet_sha256
+    preview_packet_hash = packet_probe(preview)
+    final_packet_hash = packet_probe(final)
+    packet_match = bool(preview_packet_hash == final_packet_hash)
+
+    if media_probe is None:
+        from src.media_pipeline.video_renderer.render_authority import (
+            probe_media_authority,
+        )
+
+        media_probe = probe_media_authority
+    preview_authority = dict(media_probe(preview))
+    final_authority = dict(media_probe(final))
+    preview_media = dict(preview_qa.get("media") or {})
+    expected_duration = float(
+        preview_media.get("source_duration_seconds")
+        or _duration_seconds(preview_authority)
+    )
+    final_duration = _duration_seconds(final_authority)
+    tolerance = float(
+        preview_media.get("duration_tolerance_seconds")
+        or max(0.08, expected_duration * 0.01)
+    )
+    duration_match = abs(final_duration - expected_duration) <= tolerance
+    expected_frames = int(
+        dict(contract.get("video") or {}).get("frame_count")
+        or preview_media.get("expected_frame_count")
+        or 0
+    )
+    final_frames = _frame_count(final_authority, expected_frames)
+    frame_count_match = bool(expected_frames > 0 and final_frames == expected_frames)
+    color_match, color_comparison = _color_authority_matches(
+        preview_authority, final_authority
+    )
+
+    probe = audio_quality_probe or probe_encoded_audio_quality
+    try:
+        raw_audio = dict(probe(final))
+        audio_qa = evaluate_audio_quality(
+            present=bool(raw_audio.get("present")),
+            audio_duration_seconds=raw_audio.get("audio_duration_seconds"),
+            expected_duration_seconds=final_duration,
+            integrated_lufs=raw_audio.get("integrated_lufs"),
+            true_peak_db=raw_audio.get("true_peak_db"),
+            measurement_complete=bool(raw_audio.get("measurement_complete")),
+            target_lufs=final_audio_target_lufs(contract),
+        )
+    except Exception as exc:
+        audio_qa = {
+            "status": "FAIL",
+            "failed_checks": ["audio_probe_failed"],
+            "error": type(exc).__name__,
+            "metrics": {},
+        }
+
+    reused = json.loads(json.dumps(dict(preview_qa), ensure_ascii=False, default=str))
+    checks = dict(reused.get("checks") or {})
+    checks.update(
+        {
+            "duration": duration_match,
+            "frame_count": frame_count_match,
+            "color_authority": color_match,
+            "final_audio": str(audio_qa.get("status") or "") == "PASS",
+            "visual_packet_authority": packet_match,
+        }
+    )
+    failed = [name for name, passed in checks.items() if not bool(passed)]
+    reused.update(
+        {
+            "status": "FAIL" if failed else "PASS",
+            "failed_checks": failed,
+            "checks": checks,
+            "media": {
+                **preview_media,
+                "rendered_duration_seconds": final_duration,
+                "rendered_frame_count": final_frames,
+                "color_authority": color_comparison,
+            },
+            "audio": audio_qa,
+            "visual_authority_reuse": {
+                "schema_version": "phase4_visual_qa_reuse_v1",
+                "status": "PASS" if packet_match else "FAIL",
+                "preview_video_packet_sha256": preview_packet_hash,
+                "final_video_packet_sha256": final_packet_hash,
+                "exact_packet_match": packet_match,
+            },
+        }
+    )
+    return reused

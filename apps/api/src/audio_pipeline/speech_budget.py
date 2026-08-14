@@ -10,8 +10,8 @@ from __future__ import annotations
 import math
 import re
 import statistics
+from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass
-from typing import Iterable
 
 
 DEFAULT_VI_UNITS_PER_SECOND = 4.5
@@ -60,6 +60,7 @@ class SpeechRateCalibration:
     units_per_second: float
     source: str
     sample_count: int
+    confidence: str = "low"
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -134,13 +135,22 @@ def assess_speech_budget(
     spoken_units = count_spoken_units(text)
     target_units = (speech_time_ms / 1000.0) * safe_rate
     tolerance = max(0.0, min(0.8, float(fit_tolerance)))
+    # Tolerance applies to the complete utterance, including punctuation
+    # pauses. The previous formula expanded speech time only and rounded up,
+    # so a line could be labelled ``fits_budget`` while its own estimated
+    # duration exceeded the slot by 12–15%.
+    maximum_total_ms = slot_ms * (1.0 + tolerance)
+    maximum_speech_seconds = max(0.0, (maximum_total_ms - pause_budget_ms) / 1000.0)
+    # Underfill is a review signal rather than a collision risk, so retain the
+    # tolerant floor used by Temporal TTS pause allocation.
     min_units = max(1, int(math.floor(target_units * (1.0 - tolerance))))
-    max_units = max(min_units, int(math.ceil(target_units * (1.0 + tolerance))))
+    max_units = max(min_units, int(math.floor(maximum_speech_seconds * safe_rate)))
+    estimated_duration = (spoken_units / safe_rate) + (pause_budget_ms / 1000.0)
 
     flags: list[str] = []
     if slot_ms < int(min_speech_ms):
         flags.append("slot_below_minimum_speech_time")
-    if spoken_units > max_units:
+    if spoken_units > max_units or estimated_duration * 1000.0 > maximum_total_ms:
         status = "too_long"
         flags.append("duration_rewrite_recommended")
     elif spoken_units < min_units:
@@ -148,7 +158,6 @@ def assess_speech_budget(
         flags.append("duration_underfilled_review")
     else:
         status = "fits_budget"
-    estimated_duration = (spoken_units / safe_rate) + (pause_budget_ms / 1000.0)
     requires_review = status != "fits_budget" or bool(flags)
     return SpeechBudgetAssessment(
         spoken_units=spoken_units,
@@ -184,13 +193,127 @@ def calibrate_units_per_second(
             units_per_second=round(float(default_units_per_second), 6),
             source="default_insufficient_samples",
             sample_count=len(rates),
+            confidence="low",
         )
-    value = max(2.5, min(8.0, float(statistics.median(rates))))
+    # Median absolute deviation rejects a bad provider-duration report without
+    # allowing one outlier to distort a voice profile. For tiny accepted sets,
+    # the median itself remains the most stable estimator.
+    median = float(statistics.median(rates))
+    deviations = [abs(value - median) for value in rates]
+    mad = float(statistics.median(deviations)) if deviations else 0.0
+    robust = (
+        [value for value in rates if abs(value - median) <= max(0.35, 3.0 * mad)]
+        if len(rates) >= 5
+        else rates
+    )
+    value = max(2.5, min(8.0, float(statistics.median(robust))))
+    confidence = "high" if len(robust) >= 12 else "medium" if len(robust) >= 5 else "low"
     return SpeechRateCalibration(
         units_per_second=round(value, 6),
-        source="calibrated_median",
-        sample_count=len(rates),
+        source="calibrated_robust_median",
+        sample_count=len(robust),
+        confidence=confidence,
     )
+
+
+def speech_rate_samples_from_metadata(
+    records: Iterable[Mapping[str, object]],
+    *,
+    provider_name: str,
+    voice_id: str,
+    speaking_rate: float,
+    model_id: str | None = None,
+    require_quality: bool = False,
+) -> list[SpeechRateSample]:
+    """Extract voice-specific observed rates from persisted TTS clip metadata."""
+
+    expected_provider = _normalized_provider_name(provider_name)
+    expected_voice = str(voice_id or "").casefold()
+    expected_rate = float(speaking_rate)
+    expected_model = str(model_id or "").strip().casefold()
+    samples: list[SpeechRateSample] = []
+    for metadata in records:
+        provider = metadata.get("provider") or {}
+        speech_budget = metadata.get("speech_budget") or {}
+        if not isinstance(provider, Mapping) or not isinstance(speech_budget, Mapping):
+            continue
+        if _normalized_provider_name(str(provider.get("provider") or "")) != expected_provider:
+            continue
+        if str(provider.get("voice_id") or "").casefold() != expected_voice:
+            continue
+        if expected_model and str(provider.get("model_id") or "").strip().casefold() != expected_model:
+            continue
+        if require_quality and not _calibration_quality_valid(provider):
+            continue
+        try:
+            sample_rate = float(provider.get("speaking_rate") or 1.0)
+            spoken_units = int(speech_budget.get("spoken_units") or 0)
+            duration_seconds = float(
+                speech_budget.get("observed_speech_duration_seconds")
+                or max(
+                    0.0,
+                    float(speech_budget.get("observed_audio_duration_seconds") or 0.0)
+                    - (float(speech_budget.get("pause_budget_ms") or 0.0) / 1000.0),
+                )
+            )
+        except (TypeError, ValueError):
+            continue
+        if abs(sample_rate - expected_rate) > 0.01:
+            continue
+        if spoken_units > 0 and duration_seconds > 0:
+            samples.append(
+                SpeechRateSample(
+                    spoken_units=spoken_units,
+                    duration_seconds=duration_seconds,
+                )
+            )
+    return samples
+
+
+def _calibration_quality_valid(provider: Mapping[str, object]) -> bool:
+    # Assets written before waveform QA was introduced remain usable as
+    # low-confidence compatibility samples. Any asset that does carry QA is
+    # held to the stricter validity contract below.
+    waveform_raw = provider.get("waveform_qa")
+    if waveform_raw is None:
+        return True
+    waveform = waveform_raw or {}
+    if not isinstance(waveform, Mapping) or not bool(waveform.get("valid_speech_audio")):
+        return False
+    warnings = {str(value) for value in list(waveform.get("warnings") or [])}
+    if warnings.intersection(
+        {"tts_waveform_near_silent", "tts_waveform_clipping_detected", "tts_waveform_dc_offset_detected"}
+    ):
+        return False
+    speech_budget = provider.get("speech_budget") or {}
+    if not isinstance(speech_budget, Mapping):
+        return False
+    quality_band = str(
+        provider.get("timing_quality_band")
+        or speech_budget.get("timing_quality_band")
+        or ""
+    )
+    if quality_band not in {"no_speed_adjustment", "natural_speed_adjustment"}:
+        return False
+    trim = provider.get("silence_trim") or {}
+    if isinstance(trim, Mapping):
+        try:
+            trimmed_ms = float(trim.get("trimmed_ms") or 0.0)
+            observed_seconds = float(
+                speech_budget.get("observed_audio_duration_seconds") or 0.0
+            )
+        except (TypeError, ValueError):
+            return False
+        if observed_seconds > 0 and trimmed_ms / (observed_seconds * 1000.0) > 0.20:
+            return False
+    return True
+
+
+def _normalized_provider_name(value: str) -> str:
+    raw = str(value or "").strip().casefold().replace("-", "_")
+    if raw in {"omnivoice_studio", "omnivoice"}:
+        return "omnivoice"
+    return raw
 
 
 def extract_protected_tokens(
@@ -206,7 +329,17 @@ def extract_protected_tokens(
         tokens.extend(match.group(0) for match in _NUMBER_RE.finditer(without_urls))
         if include_acronyms:
             tokens.extend(match.group(0) for match in _ACRONYM_RE.finditer(without_urls))
-        tokens.extend(match.group(0) for match in _UNIT_RE.finditer(without_urls))
+        for match in _UNIT_RE.finditer(without_urls):
+            token = match.group(0)
+            # A standalone ``g`` is a gram only when an ASCII number directly
+            # precedes it (for example ``100 g``). Camera/model spellings such
+            # as ``g 十 二``, ``G12`` and ``G7X3`` must remain normal source text.
+            if token.casefold() == "g" and not re.search(
+                r"\d(?:[.,]\d+)?\s*$",
+                without_urls[: match.start()],
+            ):
+                continue
+            tokens.append(token)
     unique: list[str] = []
     seen: set[str] = set()
     for token in tokens:

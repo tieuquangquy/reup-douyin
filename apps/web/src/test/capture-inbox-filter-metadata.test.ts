@@ -260,7 +260,7 @@ assert.equal(missingMetadataScore.reup_score_label, "Needs metadata");
 assert.equal(missingMetadataScore.reup_score_level, "needs_metadata");
 assert.equal(missingMetadataScore.reup_score_components.penalty, -30, "Penalty must clamp at -30");
 
-const staleItem = {
+const staleItem: CapturedItem = {
   ...baseItem,
   estimated_views_mid: 120_000,
   like_count: 5000,

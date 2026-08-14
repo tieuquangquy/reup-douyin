@@ -101,8 +101,8 @@ for (const [label, source] of surfaces) {
     // Studio media-tile surfaces: Operator shell + shared Ops primitives (not OpsItemCard lists).
     assert.match(source, /OpsConsolePage|OpsDetailPanel|OpsStatePanel/, `${label} must keep shared Ops Console primitives`);
   } else if (label === "Export Packages index") {
-    assert.match(source, /ops-export-page/, `${label} must use triage ops-export-page shell`);
-    assert.doesNotMatch(source, /OpsItemCard|OpsSummaryCards/, `${label} must leave legacy OpsItemCard / OpsSummaryCards`);
+    assert.match(source, /export-packages-page is-v4/, `${label} must use Dispatch bay export-packages shell`);
+    assert.doesNotMatch(source, /OpsItemCard|OpsSummaryCards|ops-export-page|export-packages-spectrum/, `${label} must leave legacy Ops / Drafts-clone chrome`);
   } else if (label === "Publish Handoffs index") {
     assert.match(source, /ops-handoffs-page/, `${label} must use triage ops-handoffs-page shell`);
     assert.doesNotMatch(source, /OpsItemCard|OpsSummaryCards/, `${label} must leave legacy OpsItemCard / OpsSummaryCards`);

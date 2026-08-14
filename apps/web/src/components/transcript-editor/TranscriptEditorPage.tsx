@@ -5,6 +5,7 @@ import { useT } from "../../lib/i18n";
 import { useAsyncAction } from "../../lib/useAsyncAction";
 import { useNotice } from "../shared/NoticeCenter";
 import { AsyncContentBoundary } from "../shared/AsyncContentBoundary";
+import { AsyncButton } from "../shared/AsyncButton";
 import {
   approveTranslationDraft,
   createAudioAnalysis,
@@ -17,6 +18,7 @@ import {
   fetchTranslationDraft,
   fetchTtsSummary,
   mergeTranscriptSegments,
+  approveSourceTranscript,
   rerunTranslationDraft,
   saveTranscriptDraft,
   splitTranscriptSegment
@@ -34,6 +36,7 @@ import {
 } from "../../lib/transcriptEditorState";
 import {
   fingerprintVietnameseDraft,
+  isSourceTranscriptReadyForTranslation,
   ttsViFingerprintStorageKey
 } from "../../lib/transcriptEditorPipeline";
 import {
@@ -45,7 +48,7 @@ import {
   pollAnalyzeJobUntilSettled,
   type AnalyzeJobPollResult
 } from "../../lib/transcriptEditorReanalyze";
-import type { AudioAnalysisSummaryResponse, EditableSegment, TranscriptEditorState, TranslationPreset } from "../../types/transcript-editor";
+import type { AudioAnalysisSummaryResponse, EditableSegment, TranscriptEditorState, TranslationDraftListResponse, TranslationPreset } from "../../types/transcript-editor";
 import { TranscriptActionBar } from "./TranscriptActionBar";
 import { TranscriptBeatRail } from "./TranscriptBeatRail";
 import { TranscriptEditorHeader } from "./TranscriptEditorHeader";
@@ -53,10 +56,13 @@ import { TranscriptFocusEditor } from "./TranscriptFocusEditor";
 import { TranscriptJobBusyBanner } from "./TranscriptJobBusyBanner";
 import { TranscriptInlineNotice, TRANSCRIPT_CANCELLED_NOTICE_AUTO_DISMISS_MS, TRANSCRIPT_SUCCESS_NOTICE_AUTO_DISMISS_MS } from "./TranscriptInlineNotice";
 import { TranscriptMediaPreview } from "./TranscriptMediaPreview";
+import { TranscriptTtsTemporalReport } from "./TranscriptTtsTemporalReport";
+import { TranscriptSourceReviewNotice } from "./TranscriptSourceReviewNotice";
 import {
   isNoDialogueAnalysisSummary,
   TranscriptEmptyState,
   TranscriptErrorState,
+  TranscriptLoadingState,
   TranscriptNoDialogueState
 } from "./TranscriptStates";
 import { UnsavedChangesGuard } from "./UnsavedChangesGuard";
@@ -78,9 +84,12 @@ export const TranscriptEditorPage = forwardRef<TranscriptEditorPageHandle, { sou
   const [reanalyzing, setReanalyzing] = useState(false);
   const [translating, setTranslating] = useState(false);
   const [synthesizingTts, setSynthesizingTts] = useState(false);
+  const [approvingSource, setApprovingSource] = useState(false);
   const [joinedTtsAssetId, setJoinedTtsAssetId] = useState<string | null>(null);
   const [ttsSourceFingerprint, setTtsSourceFingerprint] = useState<string | null>(null);
   const [ttsSummary, setTtsSummary] = useState<TtsSummaryResponse | null>(null);
+  const [translationRecipeVersion, setTranslationRecipeVersion] = useState<string | null>(null);
+  const [translationQualityContract, setTranslationQualityContract] = useState<TranslationDraftListResponse["quality_contract"]>(null);
   const [analyzeJobId, setAnalyzeJobId] = useState<string | null>(null);
   const [jobProgressPercent, setJobProgressPercent] = useState<number | null>(null);
   const [cancellingJob, setCancellingJob] = useState(false);
@@ -97,6 +106,20 @@ export const TranscriptEditorPage = forwardRef<TranscriptEditorPageHandle, { sou
   const [pauseRequestId, setPauseRequestId] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
 
+  const clearDownstreamAuthorityUi = useCallback(() => {
+    setTranslationRecipeVersion(null);
+    setTranslationQualityContract(null);
+    setTtsSummary(null);
+    setJoinedTtsAssetId(null);
+    setTtsSourceFingerprint(null);
+    ttsPendingFingerprintRef.current = null;
+    try {
+      sessionStorage.removeItem(ttsViFingerprintStorageKey(sourceVideoId));
+    } catch {
+      // Best effort; server-side current authority remains the source of truth.
+    }
+  }, [sourceVideoId]);
+
   const loadData = useCallback(async (mode: "initial" | "refresh" = "initial") => {
     if (mode === "initial") setLoading(true);
     setError(null);
@@ -106,30 +129,51 @@ export const TranscriptEditorPage = forwardRef<TranscriptEditorPageHandle, { sou
         fetchTranslationDraft(sourceVideoId),
         fetchAudioAnalysisSummary(sourceVideoId)
       ]);
-      const nextState = buildTranscriptEditorState(transcript, translation);
+      const rawState = buildTranscriptEditorState(transcript, translation);
+      const sourceTranscriptApproved = isSourceTranscriptReadyForTranslation(
+        rawState,
+        nextSummary.dialogue_phase
+      );
+      const translationMatchesCurrentTranscript = translation.segments.every((segment) =>
+        transcript.segments.some((source) => source.id === segment.transcript_segment_id)
+      );
+      const downstreamAuthorityValid = sourceTranscriptApproved && translationMatchesCurrentTranscript;
+      // Never paint a Translation/TTS projection that belongs to an older ASR
+      // run.  The backend invalidates it transactionally; this guard protects
+      // reconnects against a stale compatibility response as well.
+      const effectiveTranslation = downstreamAuthorityValid
+        ? translation
+        : { ...translation, segments: [], recipe_version: null, quality_contract: null };
+      const nextState = buildTranscriptEditorState(transcript, effectiveTranslation);
       setState(nextState);
       setSavedState(nextState);
       setSummary(nextSummary);
-      try {
-        const nextTtsSummary = await fetchTtsSummary(sourceVideoId);
-        setTtsSummary(nextTtsSummary);
-        setJoinedTtsAssetId(findJoinedTtsAssetId(nextTtsSummary));
-      } catch {
-        setTtsSummary(null);
-        setJoinedTtsAssetId(null);
-      }
-      try {
-        const storedFp = sessionStorage.getItem(ttsViFingerprintStorageKey(sourceVideoId));
-        setTtsSourceFingerprint(storedFp);
-      } catch {
-        setTtsSourceFingerprint(null);
+      if (!downstreamAuthorityValid || effectiveTranslation.segments.length === 0) {
+        clearDownstreamAuthorityUi();
+      } else {
+        setTranslationRecipeVersion(effectiveTranslation.recipe_version ?? null);
+        setTranslationQualityContract(effectiveTranslation.quality_contract ?? null);
+        try {
+          const nextTtsSummary = await fetchTtsSummary(sourceVideoId);
+          setTtsSummary(nextTtsSummary);
+          setJoinedTtsAssetId(findJoinedTtsAssetId(nextTtsSummary));
+        } catch {
+          setTtsSummary(null);
+          setJoinedTtsAssetId(null);
+        }
+        try {
+          const storedFp = sessionStorage.getItem(ttsViFingerprintStorageKey(sourceVideoId));
+          setTtsSourceFingerprint(storedFp);
+        } catch {
+          setTtsSourceFingerprint(null);
+        }
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : t("transcriptEditorPage.loadError"));
     } finally {
       if (mode === "initial") setLoading(false);
     }
-  }, [sourceVideoId, t]);
+  }, [clearDownstreamAuthorityUi, sourceVideoId, t]);
 
   useImperativeHandle(
     ref,
@@ -292,6 +336,7 @@ export const TranscriptEditorPage = forwardRef<TranscriptEditorPageHandle, { sou
 
   async function applySettledJob(kind: TranscriptActiveJobKind, settled: AnalyzeJobPollResult) {
     if (settled.outcome === "success") {
+      setError(null);
       if (kind === "tts") {
         const nextTtsSummary = await fetchTtsSummary(sourceVideoId);
         setTtsSummary(nextTtsSummary);
@@ -335,6 +380,7 @@ export const TranscriptEditorPage = forwardRef<TranscriptEditorPageHandle, { sou
         }
         return;
       }
+      clearDownstreamAuthorityUi();
       await loadData();
       setSuccessMessage(t("transcriptEditorPage.reanalyzeSuccess"));
       notify({ id: `transcript-reanalyze-${sourceVideoId}`, message: t("transcriptEditorPage.reanalyzeSuccess"), tone: "success" });
@@ -412,6 +458,10 @@ export const TranscriptEditorPage = forwardRef<TranscriptEditorPageHandle, { sou
   }
 
   async function translateLiteral(preset: TranslationPreset) {
+    if (!summary || !state || !isSourceTranscriptReadyForTranslation(state, summary.dialogue_phase)) {
+      setError(t("transcriptEditorPage.translateRequiresSourceApproval"));
+      return;
+    }
     if (state && hasUnsavedChanges(state) && !window.confirm(t("transcriptEditorPage.translateUnsavedConfirm"))) {
       return;
     }
@@ -435,6 +485,29 @@ export const TranscriptEditorPage = forwardRef<TranscriptEditorPageHandle, { sou
     }
   }
 
+  async function approveCurrentSourceTranscript() {
+    if (!state || !summary) return;
+    if (blockingWarnings.length > 0) {
+      setError(t("transcriptEditorPage.fixTimingErrors"));
+      return;
+    }
+    setApprovingSource(true);
+    setError(null);
+    try {
+      if (hasUnsavedChanges(state)) {
+        const payload = buildSavePayload(state);
+        if (payload.segments.length > 0) await saveTranscriptDraft(sourceVideoId, payload);
+      }
+      await approveSourceTranscript(sourceVideoId);
+      await loadData("refresh");
+      setSuccessMessage(t("transcriptEditorPage.sourceApprovalSuccess"));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t("transcriptEditorPage.sourceApprovalError"));
+    } finally {
+      setApprovingSource(false);
+    }
+  }
+
   async function generateTts() {
     if (!state) return;
     const filled = state.segments.filter((segment) => segment.translatedText.trim()).length;
@@ -443,8 +516,12 @@ export const TranscriptEditorPage = forwardRef<TranscriptEditorPageHandle, { sou
       return;
     }
     const hasDirtyDraft = hasUnsavedChanges(state);
-    if (hasDirtyDraft && !window.confirm(t("transcriptEditorPage.ttsUnsavedConfirm"))) return;
+    const forceRefresh = Boolean(joinedTtsAssetId);
+    // Generate TTS is idempotent and dirty rows are persisted immediately below
+    // before approval/job creation, so a blocking native dialog is unnecessary.
     ttsPendingFingerprintRef.current = fingerprintVietnameseDraft(state.segments);
+    setError(null);
+    setSuccessMessage(null);
     try {
       if (hasDirtyDraft) {
         const payload = buildSavePayload(state);
@@ -454,10 +531,13 @@ export const TranscriptEditorPage = forwardRef<TranscriptEditorPageHandle, { sou
       }
       const approval = await approveTranslationDraft(sourceVideoId);
       const jobId = approval.job_id;
-      if (jobId) {
+      // Approval can resume the first auto-pipeline TTS job. An explicit
+      // Regenerate command must always create a fresh force_refresh job instead
+      // of reattaching a historical/auto job returned by the checkpoint.
+      if (jobId && !forceRefresh) {
         await trackJob("tts", jobId);
       } else {
-        const created = await createTtsJob(sourceVideoId);
+        const created = await createTtsJob(sourceVideoId, { forceRefresh });
         await trackJob("tts", created.job_id);
       }
     } catch (err) {
@@ -475,7 +555,7 @@ export const TranscriptEditorPage = forwardRef<TranscriptEditorPageHandle, { sou
   if (loading) {
     return (
       <main className="transcript-editor">
-        <AsyncContentBoundary status="loading" skeletonVariant="detail" loadingLabel={t("transcriptEditorStates.loading")}>
+        <AsyncContentBoundary status="loading" skeleton={<TranscriptLoadingState />} loadingLabel={t("transcriptEditorStates.loading")}>
           {null}
         </AsyncContentBoundary>
       </main>
@@ -489,6 +569,17 @@ export const TranscriptEditorPage = forwardRef<TranscriptEditorPageHandle, { sou
     return <TranscriptEmptyState />;
   }
 
+  const sourceTranscriptApproved = isSourceTranscriptReadyForTranslation(state, summary?.dialogue_phase);
+  const explicitlyFlaggedSourceSegments = state.segments.filter((segment) =>
+    segment.difficultyFlags.some((flag) =>
+      ["needs_operator_review", "likely_mistranscribed", "asr_low_confidence"].includes(flag)
+    )
+  );
+  const sourceReviewSegments =
+    explicitlyFlaggedSourceSegments.length > 0
+      ? explicitlyFlaggedSourceSegments
+      : state.segments.filter((segment) => segment.status !== "APPROVED");
+
   return (
     <main className="transcript-editor">
       <UnsavedChangesGuard enabled={dirtyCount > 0 || jobBusy} />
@@ -500,14 +591,27 @@ export const TranscriptEditorPage = forwardRef<TranscriptEditorPageHandle, { sou
         reanalyzing={reanalyzing || asyncAction.isPending("reanalyze")}
         translating={translating || asyncAction.isPending("translate")}
         synthesizingTts={synthesizingTts || asyncAction.isPending("tts")}
+        approvingSource={approvingSource}
+        sourceTranscriptApproved={sourceTranscriptApproved}
         hasJoinedTts={Boolean(joinedTtsAssetId)}
         ttsSourceFingerprint={ttsSourceFingerprint}
+        audioRecipeVersion={summary?.audio_recipe_version}
+        translationRecipeVersion={translationRecipeVersion}
+        translationQualityContract={translationQualityContract}
         onSave={() => void asyncAction.run("save", saveDraft)}
         onDiscard={discardChanges}
         onTranslateLiteral={(preset) => void asyncAction.run("translate", () => translateLiteral(preset))}
         onReanalyze={(preset) => void asyncAction.run("reanalyze", () => reanalyzeAudio(preset))}
         onGenerateTts={() => void asyncAction.run("tts", generateTts)}
       />
+      {!sourceTranscriptApproved ? (
+        <TranscriptSourceReviewNotice
+          reviewSegmentIndexes={sourceReviewSegments.map((segment) => segment.segmentIndex)}
+          approving={approvingSource || asyncAction.isPending("approve-source")}
+          disabled={jobBusy || dirtyCount > 0 || blockingWarnings.length > 0}
+          onApprove={() => void asyncAction.run("approve-source", approveCurrentSourceTranscript)}
+        />
+      ) : null}
       {jobBusyKind ? (
         <div className="transcript-job-strip">
           <TranscriptJobBusyBanner
@@ -538,6 +642,7 @@ export const TranscriptEditorPage = forwardRef<TranscriptEditorPageHandle, { sou
         </TranscriptInlineNotice>
       ) : null}
       {error ? <TranscriptInlineNotice tone="error">{error}</TranscriptInlineNotice> : null}
+      <TranscriptTtsTemporalReport summary={ttsSummary} />
       <section
         className={`transcript-bench${jobBusy ? " is-job-busy" : ""}`}
         aria-busy={jobBusy}

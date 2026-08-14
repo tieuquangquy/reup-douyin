@@ -1,0 +1,26 @@
+{
+  "cases": [
+    {
+      "id": "replace-with-labelled-dialogue-clip",
+      "reference": {
+        "text": "你好 世界",
+        "intervals": [[0.4, 1.2], [1.8, 2.7]]
+      },
+      "prediction": {
+        "text": "你好 世界",
+        "intervals": [[0.4, 1.2], [1.8, 2.7]]
+      }
+    },
+    {
+      "id": "replace-with-labelled-music-only-clip",
+      "reference": {
+        "text": "",
+        "intervals": []
+      },
+      "prediction": {
+        "text": "",
+        "intervals": []
+      }
+    }
+  ]
+}

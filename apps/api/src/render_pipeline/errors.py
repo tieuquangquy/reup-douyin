@@ -15,6 +15,7 @@ class RenderPipelineErrorCode(StrEnum):
     OUTPUT_VALIDATION_FAILED = "output_validation_failed"
     PERSISTENCE_FAILED = "persistence_failed"
     QUALITY_REVIEW_REQUIRED = "quality_review_required"
+    TTS_AUTHORITY_INVALID = "tts_authority_invalid"
     PIPELINE_RECIPE_WORKFLOW_MISMATCH = "pipeline_recipe_workflow_mismatch"
 
 

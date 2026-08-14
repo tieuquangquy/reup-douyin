@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -61,6 +61,31 @@ class ContentAiConfig:
     local_confidence_threshold: float = 0.75
     temperature: float = 0.1
     max_output_tokens: int = 900
+
+
+def merge_content_ai_list_models_draft(saved: ContentAiConfig, payload: dict[str, Any]) -> ContentAiConfig:
+    """Merge worksheet draft credentials onto the stored runtime config for list-models."""
+    provider = str(payload.get("provider") if payload.get("provider") is not None else saved.provider or "auto")
+    provider = provider.strip().lower() or "auto"
+    if bool(payload.get("clear_api_key")):
+        api_key = None
+    elif payload.get("api_key") is None:
+        api_key = saved.api_key
+    else:
+        api_key = str(payload.get("api_key") or "").strip() or None
+    base_url = saved.base_url
+    if "base_url" in payload and payload.get("base_url") is not None:
+        base_url = str(payload.get("base_url") or "")
+    timeout_seconds = saved.timeout_seconds
+    if payload.get("timeout_seconds") is not None:
+        timeout_seconds = float(payload["timeout_seconds"])
+    return replace(
+        saved,
+        provider=provider,
+        api_key=api_key,
+        base_url=base_url,
+        timeout_seconds=timeout_seconds,
+    )
 
 
 class ContentAiSettingsError(ValueError):
@@ -176,6 +201,21 @@ class ContentAiSettingsService:
             raise ContentAiSettingsError("prompt_not_found")
         meta = dict(workspace.settings_json or {})
         meta[CONTENT_PROMPT_SETTINGS_KEY] = {"active_profile_id": prompt_id, "profiles": profiles}
+        self.workspace_settings._persist_workspace_settings(workspace, meta)
+        return self.get_public(workspace.id)
+
+    def delete_prompt(self, workspace_id: UUID | None, prompt_id: str) -> dict[str, Any]:
+        workspace = self.workspace_settings._resolve_workspace(workspace_id)
+        active_id, profiles = self._normalize_prompts((workspace.settings_json or {}).get(CONTENT_PROMPT_SETTINGS_KEY))
+        target = next((item for item in profiles if str(item.get("id")) == prompt_id), None)
+        if target is None:
+            raise ContentAiSettingsError("prompt_not_found")
+        if len(profiles) <= 1:
+            raise ContentAiSettingsError("prompt_last_remaining")
+        remaining = [item for item in profiles if str(item.get("id")) != prompt_id]
+        next_active = active_id if str(active_id) != prompt_id else str(remaining[0]["id"])
+        meta = dict(workspace.settings_json or {})
+        meta[CONTENT_PROMPT_SETTINGS_KEY] = {"active_profile_id": next_active, "profiles": remaining}
         self.workspace_settings._persist_workspace_settings(workspace, meta)
         return self.get_public(workspace.id)
 

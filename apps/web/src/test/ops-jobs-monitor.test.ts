@@ -10,6 +10,7 @@ const testDir = dirname(fileURLToPath(import.meta.url));
 const webSrc = resolve(testDir, "..");
 
 const page = readFileSync(resolve(webSrc, "components/ops-console/OpsJobsPage.tsx"), "utf8");
+const sharedPagination = readFileSync(resolve(webSrc, "components/shared/OperatorListPagination.tsx"), "utf8");
 const css = readFileSync(resolve(webSrc, "app/globals.css"), "utf8");
 const api = readFileSync(resolve(webSrc, "lib/api.ts"), "utf8");
 
@@ -87,13 +88,13 @@ assert.match(page, /deleteJob/, "Jobs must keep delete behavior");
 assert.match(page, /JobActionIcon/, "Row actions must retain icon controls");
 assert.match(page, /formatStatusLabel/, "Status pills must retain readable labels");
 assert.match(page, /ops-jobs-table__status-dot/, "Status pills must retain semantic color dots");
-assert.match(page, /function OpsJobsPagination/, "Jobs must use a dedicated numbered Pagination Dock");
-assert.match(page, /function paginationItems/, "Pagination Dock must build a bounded page-number window");
+assert.match(page, /OperatorListPagination/, "Jobs must use a dedicated numbered Pagination Dock");
+assert.match(sharedPagination, /function paginationItems|paginationItems\(/, "Pagination Dock must build a bounded page-number window");
 assert.match(page, /offset:\s*\(currentPage - 1\) \* pageSize/, "Jobs API offset must follow the selected page");
 assert.match(page, /params\.set\("page"[\s\S]*params\.set\("per_page"/, "Page and page size must sync to the URL");
-assert.match(page, /ops-jobs-pagination__size/, "Page size must use segmented controls");
-assert.match(page, /ops-jobs-pagination__numbers/, "Desktop pagination must expose direct page buttons");
-assert.match(page, /ops-jobs-pagination__compact/, "Mobile pagination must expose compact page context");
+assert.match(sharedPagination, /ops-jobs-pagination__size/, "Page size must use segmented controls");
+assert.match(sharedPagination, /ops-jobs-pagination__numbers/, "Desktop pagination must expose direct page buttons");
+assert.match(sharedPagination, /ops-jobs-pagination__compact/, "Mobile pagination must expose compact page context");
 assert.doesNotMatch(page, /OffsetLoadMoreFooter|variant="inline"|loadMore/, "Jobs must remove accumulated Load more pagination");
 assert.match(page, /ops-job-row-\$\{/, "Jobs must keep focusable row ids");
 

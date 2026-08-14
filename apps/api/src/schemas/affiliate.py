@@ -276,6 +276,7 @@ class AffiliateProductMatchQueueKpis(BaseModel):
     needs_review_count: int
     approved_count: int
     rejected_count: int
+    overridden_count: int
     stale_count: int
 
 

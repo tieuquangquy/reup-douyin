@@ -6,7 +6,48 @@ import type { AudioAnalysisSummaryResponse } from "../../types/transcript-editor
 
 export function TranscriptLoadingState() {
   const t = useT();
-  return <section className="state-panel skeleton">{t("transcriptEditorStates.loading")}</section>;
+  return (
+    <section className="transcript-loading" role="status" aria-busy="true" aria-live="polite">
+      <div className="transcript-loading__status">
+        <span className="transcript-loading__spinner" aria-hidden="true" />
+        <span>{t("transcriptEditorStates.loading")}</span>
+      </div>
+
+      <div className="transcript-loading__header" aria-hidden="true">
+        <span className="transcript-loading__pill is-back" />
+        <div className="transcript-loading__pipeline">
+          <span className="transcript-loading__step" />
+          <span className="transcript-loading__step" />
+          <span className="transcript-loading__step" />
+          <span className="transcript-loading__step is-active" />
+        </div>
+        <span className="transcript-loading__toolbar" />
+      </div>
+
+      <div className="transcript-loading__bench" aria-hidden="true">
+        <aside className="transcript-loading__side">
+          <span className="transcript-loading__media" />
+          <div className="transcript-loading__beats">
+            <span className="transcript-loading__beat" />
+            <span className="transcript-loading__beat" />
+            <span className="transcript-loading__beat" />
+            <span className="transcript-loading__beat" />
+            <span className="transcript-loading__beat" />
+            <span className="transcript-loading__beat" />
+          </div>
+        </aside>
+        <div className="transcript-loading__focus">
+          <span className="transcript-loading__line is-narrow" />
+          <span className="transcript-loading__line is-wide" />
+          <span className="transcript-loading__field" />
+          <span className="transcript-loading__line is-mid" />
+          <span className="transcript-loading__field is-tall" />
+          <span className="transcript-loading__line is-wide" />
+          <span className="transcript-loading__field is-tall" />
+        </div>
+      </div>
+    </section>
+  );
 }
 
 export function TranscriptEmptyState() {

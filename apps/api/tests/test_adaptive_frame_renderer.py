@@ -2,15 +2,22 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
 from src.media_pipeline.video_renderer.adaptive_render import (
     AdaptiveFrameRenderer,
     AdaptiveRenderBlocked,
+    _active_cover_components,
     _default_mask_builder,
+    _editor_blur_plate,
+    _soft_rounded_mask,
 )
-from src.media_pipeline.video_renderer.render_policy import plan_render_track
+from src.media_pipeline.video_renderer.render_policy import (
+    UNIFIED_EDITOR_COVER_STRATEGY,
+    plan_render_track,
+)
 
 
 def _font() -> Path:
@@ -52,6 +59,456 @@ def _mask_builder(frame: np.ndarray, track: dict) -> np.ndarray:
 
 
 class AdaptiveFrameRendererTests(unittest.TestCase):
+    def test_overlapping_epoch_tracks_become_one_cover_component(self) -> None:
+        first = _track(text_id="first", content_id="first_content")
+        second = _track(
+            text_id="second",
+            content_id="second_content",
+            geometry={"x": 0.20, "y": 0.79, "width": 0.72, "height": 0.055},
+            text_vi="Nhãn hai",
+        )
+        for row in (first, second):
+            row["cover_only"] = True
+            row["render_policy"]["cover"]["soft_cover_epoch_id"] = "epoch_1"
+            row["render_policy"]["context"]["soft_cover_epoch_id"] = "epoch_1"
+
+        components = _active_cover_components([first, second])
+
+        self.assertEqual(len(components), 1)
+        self.assertEqual(
+            set(components[0]["_cover_component_member_ids"]),
+            {"first", "second"},
+        )
+        self.assertTrue(
+            components[0]["render_policy"]["cover"]["component_union"]
+        )
+
+    def test_renderer_processes_overlapping_epoch_only_once(self) -> None:
+        frame = np.full((240, 400, 3), 90, dtype=np.uint8)
+        calls = 0
+
+        def counted(source: np.ndarray, track: dict) -> np.ndarray:
+            nonlocal calls
+            calls += 1
+            mask = np.zeros(source.shape[:2], dtype=np.uint8)
+            roi = track["render_policy"]["cover"]["roi"]
+            height, width = source.shape[:2]
+            mask[
+                int(roi["y"] * height) : int((roi["y"] + roi["height"]) * height),
+                int(roi["x"] * width) : int((roi["x"] + roi["width"]) * width),
+            ] = 255
+            return mask
+
+        first = _track(text_id="first", content_id="first_content", cover_only=True)
+        second = _track(
+            text_id="second",
+            content_id="second_content",
+            geometry={"x": 0.20, "y": 0.79, "width": 0.72, "height": 0.055},
+            text_vi="Nhãn hai",
+            cover_only=True,
+        )
+        for row in (first, second):
+            row["render_policy"]["cover"]["soft_cover_epoch_id"] = "epoch_1"
+            row["render_policy"]["context"]["soft_cover_epoch_id"] = "epoch_1"
+            row["render_policy"]["damage_budget"]["max_frame_change_fraction"] = 0.20
+        renderer = AdaptiveFrameRenderer(fontfile=_font(), mask_builder=counted)
+
+        _output, qa = renderer.render_frame(frame, [first, second], frame_index=10)
+
+        self.assertEqual(calls, 1)
+        self.assertEqual(len(qa["tracks"]), 2)
+        component = next(row for row in qa["tracks"] if row.get("cover_component"))
+        self.assertTrue(component["cover_component"]["processed_once"])
+
+    def test_epoch_component_uses_one_canonical_roi_across_transition(self) -> None:
+        first = _track(text_id="first", content_id="first_content", cover_only=True)
+        second = _track(
+            text_id="second",
+            content_id="second_content",
+            geometry={"x": 0.20, "y": 0.79, "width": 0.72, "height": 0.055},
+            text_vi="Nhãn hai",
+            cover_only=True,
+        )
+        for row in (first, second):
+            row["render_policy"]["cover"]["soft_cover_epoch_id"] = "epoch_1"
+            row["render_policy"]["context"]["soft_cover_epoch_id"] = "epoch_1"
+        renderer = AdaptiveFrameRenderer(fontfile=_font())
+        renderer.seed_cover_component_authority([first, second])
+
+        first_component = _active_cover_components(
+            [first], canonical_rois=renderer._cover_component_rois
+        )[0]
+        second_component = _active_cover_components(
+            [second], canonical_rois=renderer._cover_component_rois
+        )[0]
+
+        first_roi = first_component["render_policy"]["cover"]["roi"]
+        second_roi = second_component["render_policy"]["cover"]["roi"]
+        self.assertEqual(first_roi["y"], second_roi["y"])
+        self.assertEqual(first_roi["height"], second_roi["height"])
+        self.assertNotEqual(first_roi["width"], second_roi["width"])
+
+    def test_soft_mask_rounds_corners_and_feathers_inward(self) -> None:
+        mask = np.zeros((100, 180), dtype=np.uint8)
+        mask[25:75, 35:145] = 255
+
+        rounded, alpha, qa = _soft_rounded_mask(mask, glyph_height_px=40)
+
+        self.assertEqual(qa["mask_shape"], "rounded_inward_feather")
+        self.assertEqual(float(alpha[0, 0]), 0.0)
+        self.assertEqual(float(alpha[50, 90]), 1.0)
+        self.assertLess(float(alpha[25, 35]), 1.0)
+        self.assertLess(int(rounded[25, 35]), 255)
+
+    def test_unified_blur_plate_reduces_glyph_contrast_inside_mask_only(self) -> None:
+        frame = np.full((180, 320, 3), 90, dtype=np.uint8)
+        frame[70:110, 115:205] = 245
+        mask = np.zeros(frame.shape[:2], dtype=np.uint8)
+        mask[55:125, 90:230] = 255
+
+        output, qa = _editor_blur_plate(
+            frame,
+            mask,
+            frame_height_px=180,
+        )
+
+        self.assertEqual(qa["mode"], UNIFIED_EDITOR_COVER_STRATEGY)
+        self.assertEqual(qa["core_alpha"], 1.0)
+        self.assertLess(qa["residual_stroke_ratio"], 1.0)
+        self.assertLess(float(output[55:125, 90:230].std()), float(frame[55:125, 90:230].std()))
+        self.assertTrue(np.array_equal(output[:50], frame[:50]))
+
+    def test_epoch_style_locks_canonical_blur_height_across_tracks(self) -> None:
+        frame = np.full((240, 400, 3), 90, dtype=np.uint8)
+        frame[160:185, 100:300] = 240
+        first = _track(text_id="epoch_a")
+        second = _track(
+            text_id="epoch_b",
+            content_id="epoch_b_content",
+            geometry={"x": 0.10, "y": 0.60, "width": 0.20, "height": 0.035},
+            text_vi="Nhãn B",
+        )
+        for track in (first, second):
+            cover = track["render_policy"]["cover"]
+            context = track["render_policy"]["context"]
+            cover["soft_cover_epoch_id"] = "shared_epoch"
+            cover["canonical_glyph_height_fraction"] = 0.05
+            context["soft_cover_epoch_id"] = "shared_epoch"
+
+        renderer = AdaptiveFrameRenderer(fontfile=_font(), mask_builder=_mask_builder)
+        _output, qa = renderer.render_frame(frame, [first, second], frame_index=0)
+        heights = {
+            row["temporal"].get("canonical_glyph_height_px")
+            for row in qa["tracks"]
+            if row["temporal"].get("reconstruction_mode") == "stable_soft_blur"
+        }
+
+        self.assertLessEqual(len(heights), 1)
+        for row in qa["tracks"]:
+            aesthetic = dict(row["temporal"].get("aesthetic_qa") or {})
+            if aesthetic:
+                self.assertIn("boundary_seam_score", aesthetic)
+                self.assertIn("plate_uniformity_score", aesthetic)
+
+    def test_epoch_aesthetic_history_resets_across_inactive_frame_gap(self) -> None:
+        first_frame = np.full((180, 320, 3), 60, dtype=np.uint8)
+        later_frame = np.full((180, 320, 3), 180, dtype=np.uint8)
+        first_frame[120:150, 100:220] = 245
+        later_frame[120:150, 100:220] = 245
+        track = _track(
+            text_vi="Phụ đề",
+            geometry={"x": 0.20, "y": 0.62, "width": 0.60, "height": 0.18},
+        )
+        cover = track["render_policy"]["cover"]
+        context = track["render_policy"]["context"]
+        track["render_policy"]["damage_budget"]["max_frame_change_fraction"] = 0.20
+        cover["soft_cover_epoch_id"] = "shared_epoch"
+        context["soft_cover_epoch_id"] = "shared_epoch"
+
+        renderer = AdaptiveFrameRenderer(fontfile=_font())
+        renderer.render_frame(first_frame, [track], frame_index=1)
+        _output, qa = renderer.render_frame(later_frame, [track], frame_index=20)
+
+        aesthetic = qa["tracks"][0]["temporal"]["aesthetic_qa"]
+        self.assertEqual(aesthetic["temporal_flicker_score"], 0.0)
+        self.assertEqual(aesthetic["plate_uniformity_score"], 0.0)
+
+    def test_spatial_reconstruction_damage_falls_back_to_stable_blur(self) -> None:
+        frame = np.full((240, 400, 3), 90, dtype=np.uint8)
+        frame[155:185, 110:290] = 240
+        track = _track(
+            text_id="spatial_damage",
+            text_vi="",
+            cover_only=True,
+            kind="ui",
+            roles=["ui"],
+            geometry={"x": 0.25, "y": 0.62, "width": 0.50, "height": 0.16},
+        )
+        track["render_policy"]["damage_budget"][
+            "max_frame_change_fraction"
+        ] = 0.20
+        cover = track["render_policy"]["cover"]
+        context = track["render_policy"]["context"]
+        context["effective_kind"] = "ui"
+        cover["soft_cover_epoch_id"] = "damage_epoch"
+        context["soft_cover_epoch_id"] = "damage_epoch"
+
+        bad_spatial = np.zeros((1, 1, 3), dtype=np.uint8)
+
+        def destructive(source: np.ndarray, _mask: np.ndarray) -> np.ndarray:
+            output = source.copy()
+            output[:, :] = bad_spatial
+            return output
+
+        # Keep aesthetic QA neutral so this regression reaches the damage
+        # budget branch.  A separate test owns the earlier aesthetic fallback.
+        with patch(
+            "src.media_pipeline.video_renderer.adaptive_render._smooth_surface_plate",
+            side_effect=destructive,
+        ), patch(
+            "src.media_pipeline.video_renderer.adaptive_render._cover_aesthetic_metrics",
+            return_value={
+                "boundary_seam_score": 0.0,
+                "temporal_flicker_score": 0.0,
+                "background_color_drift": 0.0,
+            },
+        ):
+            _output, qa = AdaptiveFrameRenderer(fontfile=_font()).render_frame(
+                frame, [track], frame_index=0
+            )
+
+        row = qa["tracks"][0]
+        self.assertEqual(row["status"], "PASS")
+        self.assertEqual(
+            row["temporal"]["reconstruction_mode"], "stable_soft_blur"
+        )
+        self.assertEqual(
+            row["temporal"]["damage_fallback_from"],
+            "spatial_surface_reconstruction",
+        )
+
+    def test_failed_epoch_reference_does_not_reactivate_and_pulse(self) -> None:
+        frame = np.full((220, 360, 3), 85, dtype=np.uint8)
+        frame[145:178, 105:255] = 245
+        track = _track(
+            text_vi="Phụ đề",
+            geometry={"x": 0.20, "y": 0.62, "width": 0.60, "height": 0.16},
+        )
+        cover = track["render_policy"]["cover"]
+        context = track["render_policy"]["context"]
+        track["render_policy"]["damage_budget"]["max_frame_change_fraction"] = 0.20
+        cover["soft_cover_epoch_id"] = "shared_epoch"
+        context["soft_cover_epoch_id"] = "shared_epoch"
+
+        renderer = AdaptiveFrameRenderer(fontfile=_font())
+        renderer.seed_epoch_reference("shared_epoch", frame.copy())
+        fallback = frame.copy()
+        fallback[:, :] = 88
+        recovered = frame.copy()
+        with patch.object(
+            renderer.temporal,
+            "clean",
+            side_effect=[
+                (fallback, {"mode": "spatial_fallback"}),
+                (recovered, {"mode": "static_plate"}),
+            ],
+        ) as clean:
+            renderer.render_frame(frame, [track], frame_index=1)
+            _output, qa = renderer.render_frame(frame, [track], frame_index=2)
+
+        self.assertEqual(clean.call_count, 1)
+        self.assertEqual(
+            qa["tracks"][0]["temporal"]["reconstruction_mode"],
+            "stable_soft_blur",
+        )
+
+    def test_unified_blur_plate_accepts_already_flattened_low_energy_roi(self) -> None:
+        # A preceding overlapping full-plate track can leave only a tiny
+        # high-frequency residue.  Ratio-to-source is undefined in that case;
+        # the absolute output-energy guard should accept the unreadable ROI.
+        frame = np.full((180, 320, 3), 90, dtype=np.uint8)
+        pattern = ((np.indices((100, 200)).sum(axis=0) % 2) * 3).astype(np.uint8)
+        frame[40:140, 60:260] += pattern[:, :, None]
+        mask = np.zeros(frame.shape[:2], dtype=np.uint8)
+        mask[40:140, 60:260] = 255
+
+        _output, qa = _editor_blur_plate(
+            frame,
+            mask,
+            frame_height_px=180,
+        )
+
+        self.assertEqual(qa["status"], "PASS")
+        self.assertTrue(qa["absolute_low_energy_pass"])
+        self.assertFalse(qa["adaptive_retry"])
+
+    def test_unified_blur_plate_accepts_sparse_texture_after_glyph_removal(self) -> None:
+        # Isolated background texture can keep mean Laplacian energy above the
+        # flat-surface threshold even though no connected/readable glyph field
+        # remains. The structural guard measures edge occupancy, not one noisy
+        # scalar, and must accept that general moving-background case.
+        frame = np.full((180, 320, 3), 74, dtype=np.uint8)
+        mask = np.zeros(frame.shape[:2], dtype=np.uint8)
+        mask[70:125, 70:250] = 255
+        frame[82:108, 105:215] = 245
+        # Sparse, high-frequency source texture around/under the caption.
+        for x in range(76, 246, 19):
+            frame[72:124:17, x : x + 1] = 135
+
+        _output, qa = _editor_blur_plate(
+            frame,
+            mask,
+            frame_height_px=180,
+            profile={
+                "max_output_stroke_energy": 0.01,
+                "max_source_stroke_energy_for_absolute_pass": 0.01,
+                "max_residual_stroke_ratio": 0.01,
+                "max_structural_residual_ratio": 1.0,
+            },
+        )
+
+        self.assertEqual(qa["status"], "PASS")
+        self.assertTrue(qa["structural_low_energy_pass"])
+        self.assertLessEqual(
+            qa["output_strong_stroke_fraction"],
+            qa["max_output_strong_stroke_fraction"],
+        )
+
+    def test_fully_overlapping_full_plate_track_reuses_prior_concealment(self) -> None:
+        frame = np.full((180, 320, 3), 90, dtype=np.uint8)
+        frame[70:110, 115:205] = 245
+        first = _track(
+            text_id="first_cover",
+            geometry={"x": 0.28, "y": 0.39, "width": 0.44, "height": 0.12},
+            kind="hardsub",
+            roles=["hardsub"],
+            text_vi="510 kcal",
+        )
+        second = dict(first)
+        second["text_id"] = "second_cover"
+        second["content_id"] = "content_second"
+
+        renderer = AdaptiveFrameRenderer(fontfile=_font())
+        rendered, qa = renderer.render_frame(frame, [first, second], frame_index=0)
+
+        self.assertEqual(qa["status"], "PASS")
+        second_qa = next(row for row in qa["tracks"] if row["text_id"] == "second_cover")
+        self.assertEqual(second_qa["temporal"]["mode"], "covered_by_prior_track")
+        self.assertTrue(np.any(rendered != frame))
+
+    def test_high_overlap_low_energy_transition_does_not_false_block(self) -> None:
+        frame = np.full((180, 320, 3), 90, dtype=np.uint8)
+        first = _track(
+            text_id="transition_a",
+            geometry={"x": 0.20, "y": 0.40, "width": 0.40, "height": 0.10},
+        )
+        second = _track(
+            text_id="transition_b",
+            content_id="content_b",
+            geometry={"x": 0.25, "y": 0.40, "width": 0.40, "height": 0.10},
+        )
+        calls = 0
+
+        def fake_blur(source: np.ndarray, _mask: np.ndarray, **_kwargs: object):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return source.copy(), {
+                    "status": "PASS",
+                    "source_stroke_energy": 80.0,
+                    "output_stroke_energy": 2.0,
+                    "residual_stroke_ratio": 0.025,
+                }
+            return source.copy(), {
+                "status": "BLOCKED",
+                "source_stroke_energy": 7.0,
+                "output_stroke_energy": 2.5,
+                "residual_stroke_ratio": 0.55,
+            }
+
+        renderer = AdaptiveFrameRenderer(fontfile=_font())
+        with patch(
+            "src.media_pipeline.video_renderer.adaptive_render._editor_blur_plate",
+            side_effect=fake_blur,
+        ):
+            _rendered, qa = renderer.render_frame(
+                frame, [first, second], frame_index=0
+            )
+
+        second_qa = next(
+            row for row in qa["tracks"] if row["text_id"] == "transition_b"
+        )
+        self.assertEqual(second_qa["status"], "PASS")
+        self.assertTrue(second_qa["temporal"]["overlap_low_energy_pass"])
+
+    def test_high_confidence_source_region_is_carved_from_cover_and_text(self) -> None:
+        frame = np.full((180, 320, 3), 90, dtype=np.uint8)
+        frame[72:90, 112:208] = 230
+        track = _track(
+            text_id="editor_over_source",
+            geometry={"x": 0.35, "y": 0.40, "width": 0.30, "height": 0.10},
+            text_vi="Nhãn tiếng Việt",
+        )
+        protected = {
+            "text_id": "phone_print",
+            "geometry": {"x": 0.35, "y": 0.40, "width": 0.30, "height": 0.10},
+            "visual_provenance": {
+                "classification": "SOURCE_INTRINSIC",
+                "confidence": 0.98,
+            },
+        }
+
+        renderer = AdaptiveFrameRenderer(fontfile=_font())
+        rendered, qa = renderer.render_frame(
+            frame,
+            [track],
+            frame_index=0,
+            protected_source_regions=[protected],
+        )
+
+        self.assertTrue(np.array_equal(rendered[72:90, 112:208], frame[72:90, 112:208]))
+        row = qa["tracks"][0]
+        self.assertGreater(row["mask"]["protected_source_carve_pixels"], 0)
+        self.assertEqual(
+            row["text_render_suppressed"],
+            "protected_source_geometry_conflict",
+        )
+
+    def test_fully_protected_false_cover_is_a_source_preserving_noop(self) -> None:
+        frame = np.full((180, 320, 3), 90, dtype=np.uint8)
+        track = _track(
+            text_id="false_editor_detection",
+            geometry={"x": 0.35, "y": 0.40, "width": 0.12, "height": 0.05},
+            text_vi="",
+            cover_only=True,
+        )
+        cover_roi = dict(track["render_policy"]["cover"]["roi"])
+        protected = {
+            "text_id": "intrinsic_object_detail",
+            "geometry": cover_roi,
+            "visual_provenance": {
+                "classification": "SOURCE_INTRINSIC",
+                "confidence": 0.98,
+            },
+        }
+
+        rendered, qa = AdaptiveFrameRenderer(fontfile=_font()).render_frame(
+            frame,
+            [track],
+            frame_index=0,
+            protected_source_regions=[protected],
+        )
+
+        self.assertTrue(np.array_equal(rendered, frame))
+        row = qa["tracks"][0]
+        self.assertEqual(row["status"], "PASS")
+        self.assertEqual(row["temporal"]["mode"], "protected_source_noop")
+        self.assertEqual(
+            row["mask"]["source_authority_precedence"],
+            "fully_protected_source_intrinsic",
+        )
+        self.assertEqual(row["damage"]["metrics"]["changed_fraction"], 0.0)
+
     def test_dense_layout_authority_reuses_only_non_overlapping_slots(self) -> None:
         renderer = AdaptiveFrameRenderer(fontfile=_font(), mask_builder=_mask_builder)
         tracks = [
@@ -334,7 +791,7 @@ class AdaptiveFrameRendererTests(unittest.TestCase):
         _output, qa = renderer.render_frame(frame, [track])
         self.assertNotEqual(qa["tracks"][0]["mask"]["fallback"], "reference_plate")
 
-    def test_ephemeral_intro_title_keeps_unified_spatial_cover(self) -> None:
+    def test_ephemeral_intro_title_keeps_unified_blur_cover(self) -> None:
         frame = np.full((300, 500, 3), 130, dtype=np.uint8)
 
         def filled(source: np.ndarray, track: dict) -> np.ndarray:
@@ -364,7 +821,8 @@ class AdaptiveFrameRendererTests(unittest.TestCase):
             qa["tracks"][0]["mask"]["fallback"], "full_roi_plate"
         )
         self.assertEqual(
-            qa["tracks"][0]["temporal"]["mode"], "spatial_telea_r9"
+            qa["tracks"][0]["temporal"]["reconstruction_mode"],
+            "stable_soft_blur",
         )
 
     def test_dense_caption_panel_is_allowed_inside_its_damage_budget(self) -> None:

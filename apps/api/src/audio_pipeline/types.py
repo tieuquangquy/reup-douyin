@@ -7,7 +7,12 @@ from uuid import UUID
 from src.enums import MediaAssetType
 
 
-AUDIO_ANALYSIS_VERSION = "AUDIO_ANALYSIS_V1"
+# V5 keeps Target Speech as soft acoustic evidence, runs one high-recall primary
+# ASR path, selectively verifies only uncertain spans, and applies a global
+# dialogue decoder before any unit can become a DialogueBeat.
+AUDIO_ANALYSIS_VERSION = "AUDIO_ANALYSIS_V5"
+AUDIO_ANALYSIS_RECIPE_VERSION = "audio-analysis-v5-selective-dialogue-validation1"
+AUTHORITY_MANIFEST_SCHEMA_VERSION = "audio-analysis-authority-manifest-v1"
 
 
 class TranslationPreset(StrEnum):
@@ -33,6 +38,10 @@ class ResolvedAudioInput:
     storage_key: str
     source_video_duration_seconds: float | None
     source_caption: str | None = None
+    # SHA of the bytes that were actually resolved.  Older test doubles and
+    # legacy rows may not provide it, so the field is optional and appended.
+    source_checksum_sha256: str | None = None
+    canonicalized: bool = False
 
 
 @dataclass(frozen=True)
@@ -110,3 +119,40 @@ class AudioAnalysisResult:
     asset_count: int
     flags_summary: dict[str, int]
     manifest: dict
+    metrics: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class AudioAnalysisAuthorityManifest:
+    """Hash-bound contract consumed by translation, TTS and render stages."""
+
+    schema_version: str
+    analysis_version: str
+    analysis_fingerprint: str
+    source_audio_checksum_sha256: str | None
+    canonical_audio_checksum_sha256: str | None
+    transcript_sha256: str
+    target_speech_authority_sha256: str
+    semantic_dialogue_authority_sha256: str | None
+    dialogue_quality_complete: bool
+    semantic_translation_ready: bool
+    machine_approval_state: str
+    operator_review_required: bool
+    translation_ready: bool
+
+    def to_dict(self) -> dict:
+        return {
+            "schema_version": self.schema_version,
+            "analysis_version": self.analysis_version,
+            "analysis_fingerprint": self.analysis_fingerprint,
+            "source_audio_checksum_sha256": self.source_audio_checksum_sha256,
+            "canonical_audio_checksum_sha256": self.canonical_audio_checksum_sha256,
+            "transcript_sha256": self.transcript_sha256,
+            "target_speech_authority_sha256": self.target_speech_authority_sha256,
+            "semantic_dialogue_authority_sha256": self.semantic_dialogue_authority_sha256,
+            "dialogue_quality_complete": self.dialogue_quality_complete,
+            "semantic_translation_ready": self.semantic_translation_ready,
+            "machine_approval_state": self.machine_approval_state,
+            "operator_review_required": self.operator_review_required,
+            "translation_ready": self.translation_ready,
+        }

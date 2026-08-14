@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -13,7 +13,7 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from src.db.bootstrap import ensure_default_workspace
 from src.models.foundation import Workspace
-from src.tts_pipeline.runtime_snapshot import merge_runtime, normalize_runtime
+from src.tts_pipeline.runtime_snapshot import merge_runtime, normalize_runtime, scope_runtime_to_provider
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +39,7 @@ _ALLOWED_TTS_PROVIDERS = frozenset(
         "edge",
         "vieneu",
         "google",
+        "google_gemini",
         "azure",
         "elevenlabs",
         "openai",
@@ -54,6 +55,7 @@ _ALLOWED_TTS_FALLBACKS = frozenset(
         "edge",
         "vieneu",
         "google",
+        "google_gemini",
         "azure",
         "elevenlabs",
         "openai",
@@ -94,6 +96,50 @@ def mask_secret(value: str) -> str:
     return f"••••{text[-4:]}"
 
 
+def _google_service_account_context(profile_id: str) -> str:
+    identifier = str(profile_id or "default").strip() or "default"
+    return f"tts-google-service-account:{identifier}"
+
+
+def _encrypt_google_service_account(value: str, profile_id: str) -> str:
+    from src.core.settings import get_settings
+    from src.publish.services.platform_credential_key_store import (
+        PlatformCredentialKeyStoreError,
+        resolve_platform_credential_key_ref,
+    )
+    from src.publish.services.platform_secret_envelope import PlatformSecretEnvelope, PlatformSecretEnvelopeError
+
+    try:
+        key_ref = resolve_platform_credential_key_ref(get_settings(), create_local=True)
+        return PlatformSecretEnvelope(key_ref=key_ref).encrypt(
+            value,
+            context=_google_service_account_context(profile_id),
+        )
+    except (PlatformCredentialKeyStoreError, PlatformSecretEnvelopeError) as exc:
+        raise ValueError("google_service_account_encryption_unavailable") from exc
+
+
+def _decrypt_google_service_account(value: str, profile_id: str) -> str | None:
+    if not value:
+        return None
+    from src.core.settings import get_settings
+    from src.publish.services.platform_credential_key_store import (
+        PlatformCredentialKeyStoreError,
+        resolve_platform_credential_key_ref,
+    )
+    from src.publish.services.platform_secret_envelope import PlatformSecretEnvelope
+
+    try:
+        key_ref = resolve_platform_credential_key_ref(get_settings(), create_local=False)
+        return PlatformSecretEnvelope(key_ref=key_ref).decrypt(
+            value,
+            context=_google_service_account_context(profile_id),
+        )
+    except PlatformCredentialKeyStoreError:
+        logger.warning("tts_google_credential_key_unavailable", extra={"profile_id": profile_id})
+        return None
+
+
 @dataclass
 class TranslationAiConfig:
     """Internal Translation AI connection (includes raw api_key)."""
@@ -118,7 +164,11 @@ class TtsAiConfig:
     speaking_rate: float = 1.0
     language_code: str = "vi"
     model_id: str = ""
-    api_key: str | None = None
+    api_key: str | None = field(default=None, repr=False)
+    credential_mode: str = "api_key"
+    google_service_account_json: str | None = field(default=None, repr=False)
+    google_service_account_email: str = ""
+    google_service_account_project_id: str = ""
     base_url: str = ""
     timeout_seconds: float = 120.0
     fallback_provider: str = "none"
@@ -1024,11 +1074,54 @@ class WorkspaceSettingsService:
         )
 
     def get_tts_ai(self, workspace_id: UUID | None) -> TtsAiConfig:
+        _profile_id, _profile_name, config = self.get_active_tts_ai_profile(
+            workspace_id
+        )
+        return config
+
+    def get_active_tts_ai_profile(
+        self, workspace_id: UUID | None
+    ) -> tuple[str, str, TtsAiConfig]:
+        """Internal active setup identity plus raw synthesis configuration."""
+
         workspace = self._resolve_workspace(workspace_id)
         raw = (workspace.settings_json or {}).get(TTS_AI_KEY)
         _active_id, profiles = self._normalize_tts_profiles(raw)
         active = self._find_tts_profile(profiles, _active_id) or profiles[0]
-        return self._parse_tts_ai(active)
+        return (
+            str(active.get("id") or _active_id),
+            str(active.get("name") or DEFAULT_TTS_PROFILE_NAME),
+            self._parse_tts_ai(active),
+        )
+
+    def get_enabled_tts_ai_profile(
+        self, workspace_id: UUID | None
+    ) -> tuple[str, str, TtsAiConfig]:
+        """Return the one setup visibly On, independent of a legacy active pointer.
+
+        Production synthesis treats the overview On switch as its authority. A
+        stale ``active_profile_id`` must never make an Off setup authoritative,
+        while multiple On rows are ambiguous and therefore fail closed.
+        """
+
+        workspace = self._resolve_workspace(workspace_id)
+        raw = (workspace.settings_json or {}).get(TTS_AI_KEY)
+        _active_id, profiles = self._normalize_tts_profiles(raw)
+        enabled_profiles = [
+            profile
+            for profile in profiles
+            if bool(self._parse_tts_ai(profile).enabled)
+        ]
+        if not enabled_profiles:
+            raise ValueError("tts_active_setup_required")
+        if len(enabled_profiles) != 1:
+            raise ValueError("tts_multiple_active_setups")
+        enabled = enabled_profiles[0]
+        return (
+            str(enabled.get("id") or ""),
+            str(enabled.get("name") or DEFAULT_TTS_PROFILE_NAME),
+            self._parse_tts_ai(enabled),
+        )
 
     def get_tts_ai_public(self, workspace_id: UUID | None) -> dict[str, Any]:
         from src.tts_pipeline.provider_factory import light_tts_import_ready
@@ -1041,7 +1134,17 @@ class WorkspaceSettingsService:
         key = (cfg.api_key or "").strip()
         source = "workspace_db" if cfg.enabled else "env"
         options = dict(cfg.options_json or {})
+        try:
+            from src.tts_pipeline.http_connector import redact_http_connector_options
+
+            options = redact_http_connector_options(options)
+        except Exception:  # noqa: BLE001 - public serialization must remain resilient
+            # Fail closed: a redaction regression must never turn into a raw
+            # options/connector disclosure on a public settings endpoint.
+            logger.warning("tts_public_options_redaction_failed")
+            options = {}
         options.pop("runtime", None)  # authority lives on top-level runtime
+        public_runtime = normalize_runtime(cfg.runtime)
         profile_summaries = [
             self._tts_profile_summary(p, active_id=str(active.get("id") or active_id)) for p in profiles
         ]
@@ -1054,6 +1157,10 @@ class WorkspaceSettingsService:
             "model_id": cfg.model_id,
             "api_key_set": bool(key),
             "api_key_masked": mask_secret(key),
+            "credential_mode": cfg.credential_mode,
+            "google_service_account_set": bool(cfg.google_service_account_json),
+            "google_service_account_email": cfg.google_service_account_email,
+            "google_service_account_project_id": cfg.google_service_account_project_id,
             "base_url": cfg.base_url,
             "timeout_seconds": cfg.timeout_seconds,
             "fallback_provider": cfg.fallback_provider,
@@ -1062,7 +1169,7 @@ class WorkspaceSettingsService:
             "device": cfg.device,
             "cli_binary": cfg.cli_binary,
             "options_json": options,
-            "runtime": normalize_runtime(cfg.runtime),
+            "runtime": public_runtime,
             "live_import_ok": light_tts_import_ready(cfg.provider),
             "source": source,
             "active_profile_id": str(active.get("id") or active_id),
@@ -1085,7 +1192,15 @@ class WorkspaceSettingsService:
         cfg = self._parse_tts_ai(target)
         key = (cfg.api_key or "").strip()
         options = dict(cfg.options_json or {})
+        try:
+            from src.tts_pipeline.http_connector import redact_http_connector_options
+
+            options = redact_http_connector_options(options)
+        except Exception:  # noqa: BLE001 - public serialization must remain resilient
+            logger.warning("tts_public_profile_options_redaction_failed")
+            options = {}
         options.pop("runtime", None)
+        public_runtime = normalize_runtime(cfg.runtime)
         profile_summaries = [
             self._tts_profile_summary(p, active_id=str(active.get("id") or active_id)) for p in profiles
         ]
@@ -1098,6 +1213,10 @@ class WorkspaceSettingsService:
             "model_id": cfg.model_id,
             "api_key_set": bool(key),
             "api_key_masked": mask_secret(key),
+            "credential_mode": cfg.credential_mode,
+            "google_service_account_set": bool(cfg.google_service_account_json),
+            "google_service_account_email": cfg.google_service_account_email,
+            "google_service_account_project_id": cfg.google_service_account_project_id,
             "base_url": cfg.base_url,
             "timeout_seconds": cfg.timeout_seconds,
             "fallback_provider": cfg.fallback_provider,
@@ -1106,7 +1225,7 @@ class WorkspaceSettingsService:
             "device": cfg.device,
             "cli_binary": cfg.cli_binary,
             "options_json": options,
-            "runtime": normalize_runtime(cfg.runtime),
+            "runtime": public_runtime,
             "live_import_ok": light_tts_import_ready(cfg.provider),
             "source": "workspace_db" if cfg.enabled else "env",
             "active_profile_id": str(active.get("id") or active_id),
@@ -1133,14 +1252,26 @@ class WorkspaceSettingsService:
     def set_tts_ai_profile_enabled(
         self, workspace_id: UUID | None, profile_id: str, *, enabled: bool
     ) -> dict[str, Any]:
-        """Toggle workspace override for one setup from the overview list."""
+        """Make one setup the exclusive On authority, or turn it Off.
+
+        The overview switch represents production authority, not an independent
+        per-row feature flag. Turning a row On therefore activates it and turns
+        every other setup Off in the same database transaction.
+        """
         workspace = self._resolve_workspace(workspace_id)
         meta = dict(workspace.settings_json or {})
         active_id, profiles = self._normalize_tts_profiles(meta.get(TTS_AI_KEY))
         target = self._find_tts_profile(profiles, profile_id)
         if target is None:
             raise ValueError("profile_not_found")
-        target["enabled"] = bool(enabled)
+        if bool(enabled):
+            for profile in profiles:
+                profile["enabled"] = str(profile.get("id") or "") == str(
+                    target.get("id") or ""
+                )
+            active_id = str(target["id"])
+        else:
+            target["enabled"] = False
         meta[TTS_AI_KEY] = {"active_profile_id": active_id, "profiles": profiles}
         self._persist_workspace_settings(workspace, meta)
         return target
@@ -1314,6 +1445,49 @@ class WorkspaceSettingsService:
                 cleaned_key = str(incoming).strip()
                 api_key = cleaned_key or None
 
+        from src.tts_pipeline.google_cloud_credentials import (
+            GOOGLE_CREDENTIAL_MODE_ADC,
+            GOOGLE_CREDENTIAL_MODE_OAUTH_TOKEN,
+            GOOGLE_CREDENTIAL_MODE_SERVICE_ACCOUNT,
+            default_google_http_connector_options,
+            normalize_google_credential_mode,
+            validate_google_service_account_json,
+        )
+
+        credential_mode = normalize_google_credential_mode(
+            payload.get("credential_mode", existing.credential_mode),
+            provider=provider,
+        )
+        # Gemini can run either through the AI Studio API-key endpoint or the
+        # billed Vertex AI endpoint.  Keep Google Cloud credential fields for
+        # both slugs so a Vertex profile can use the same service-account
+        # boundary as Google Cloud TTS.
+        google_cloud_credential_provider = provider in {"google", "google_gemini"}
+        if not google_cloud_credential_provider:
+            credential_mode = "api_key"
+        profile_id = str(profile.get("id") or "default")
+        encrypted_service_account = str(profile.get("google_service_account_encrypted") or "").strip()
+        service_account_email = existing.google_service_account_email
+        service_account_project_id = existing.google_service_account_project_id
+        clear_service_account = bool(payload.get("clear_google_service_account")) or not google_cloud_credential_provider
+        incoming_service_account = payload.get("google_service_account_json")
+        if clear_service_account:
+            encrypted_service_account = ""
+            service_account_email = ""
+            service_account_project_id = ""
+        elif incoming_service_account is not None and str(incoming_service_account).strip():
+            metadata = validate_google_service_account_json(str(incoming_service_account))
+            encrypted_service_account = _encrypt_google_service_account(
+                metadata.normalized_json,
+                profile_id,
+            )
+            service_account_email = metadata.client_email
+            service_account_project_id = metadata.project_id
+        if credential_mode in {GOOGLE_CREDENTIAL_MODE_SERVICE_ACCOUNT, GOOGLE_CREDENTIAL_MODE_ADC}:
+            api_key = None
+        elif google_cloud_credential_provider and credential_mode != GOOGLE_CREDENTIAL_MODE_OAUTH_TOKEN:
+            api_key = None
+
         try:
             timeout = float(payload.get("timeout_seconds") if payload.get("timeout_seconds") is not None else 120.0)
         except (TypeError, ValueError) as exc:
@@ -1336,22 +1510,51 @@ class WorkspaceSettingsService:
         else:
             raise ValueError("invalid_options_json")
         options.pop("runtime", None)
+        if provider == "google":
+            options = default_google_http_connector_options(
+                options,
+                language_code=str(payload.get("language_code") or "vi").strip() or "vi",
+            )
+            from src.tts_pipeline.google_cloud_credentials import GOOGLE_CLOUD_TTS_BASE_URL
 
-        runtime = normalize_runtime(existing.runtime)
+            persisted_base_url = GOOGLE_CLOUD_TTS_BASE_URL
+        else:
+            persisted_base_url = str(payload.get("base_url") or "").strip()
+        if "http_connector" in options:
+            try:
+                from src.tts_pipeline.http_connector import normalize_http_connector_options
+
+                # Validate before persisting. The manifest is declarative;
+                # malformed paths/templates must not reach a worker.
+                options = normalize_http_connector_options(options)
+            except ValueError as exc:
+                raise ValueError(f"invalid_http_connector:{str(exc)[:300]}") from exc
+
+        runtime = scope_runtime_to_provider(existing.runtime, provider)
         if isinstance(payload.get("runtime"), dict):
-            runtime = normalize_runtime(payload.get("runtime"))
+            runtime = scope_runtime_to_provider(payload.get("runtime"), provider)
+
+        voice_id = str(payload.get("voice_id") or "").strip()
+        if provider == "google_gemini":
+            from src.tts_pipeline.catalog import normalize_gemini_voice_id
+
+            voice_id = normalize_gemini_voice_id(voice_id) or "Kore"
 
         next_enabled = bool(existing.enabled) if preserve_enabled else bool(payload.get("enabled"))
         profile.update(
             {
                 "enabled": next_enabled,
                 "provider": provider,
-                "voice_id": str(payload.get("voice_id") or "").strip(),
+                "voice_id": voice_id,
                 "speaking_rate": speaking_rate,
                 "language_code": str(payload.get("language_code") or "vi").strip() or "vi",
                 "model_id": str(payload.get("model_id") or "").strip(),
                 "api_key": api_key or "",
-                "base_url": str(payload.get("base_url") or "").strip(),
+                "credential_mode": credential_mode,
+                "google_service_account_encrypted": encrypted_service_account,
+                "google_service_account_email": service_account_email,
+                "google_service_account_project_id": service_account_project_id,
+                "base_url": persisted_base_url,
                 "timeout_seconds": timeout,
                 "fallback_provider": fallback,
                 "fallback_voice_id": str(payload.get("fallback_voice_id") or "").strip(),
@@ -1425,6 +1628,10 @@ class WorkspaceSettingsService:
             "model_id": cfg.model_id,
             "api_key_set": bool(key),
             "api_key_masked": mask_secret(key),
+            "credential_mode": cfg.credential_mode,
+            "google_service_account_set": bool(cfg.google_service_account_json),
+            "google_service_account_email": cfg.google_service_account_email,
+            "google_service_account_project_id": cfg.google_service_account_project_id,
             "base_url": cfg.base_url,
             "timeout_seconds": cfg.timeout_seconds,
             "fallback_provider": cfg.fallback_provider,
@@ -1475,6 +1682,10 @@ class WorkspaceSettingsService:
             "language_code": "vi",
             "model_id": "",
             "api_key": "",
+            "credential_mode": "api_key",
+            "google_service_account_encrypted": "",
+            "google_service_account_email": "",
+            "google_service_account_project_id": "",
             "base_url": "",
             "timeout_seconds": 120.0,
             "fallback_provider": "none",
@@ -1544,23 +1755,46 @@ class WorkspaceSettingsService:
         except (TypeError, ValueError):
             speaking_rate = 1.0
         key = str(raw.get("api_key") or "").strip()
+        from src.tts_pipeline.google_cloud_credentials import normalize_google_credential_mode
+
+        profile_id = str(raw.get("id") or "default")
+        credential_mode = normalize_google_credential_mode(
+            raw.get("credential_mode"),
+            provider=provider,
+        )
+        encrypted_service_account = str(raw.get("google_service_account_encrypted") or "").strip()
+        google_service_account_json = _decrypt_google_service_account(
+            encrypted_service_account,
+            profile_id,
+        )
         options_raw = raw.get("options_json")
         options = dict(options_raw) if isinstance(options_raw, dict) else {}
         options.pop("runtime", None)
-        runtime = normalize_runtime(raw.get("runtime"))
+        runtime = scope_runtime_to_provider(raw.get("runtime"), provider)
         if not runtime.get("last_install") and not runtime.get("last_probe"):
             # Legacy: runtime nested under options_json
             nested = options_raw.get("runtime") if isinstance(options_raw, dict) else None
             if isinstance(nested, dict):
-                runtime = normalize_runtime(nested)
+                runtime = scope_runtime_to_provider(nested, provider)
+        voice_id = str(raw.get("voice_id") or "").strip()
+        if provider == "google_gemini":
+            from src.tts_pipeline.catalog import normalize_gemini_voice_id
+
+            voice_id = normalize_gemini_voice_id(voice_id) or "Kore"
         return TtsAiConfig(
             enabled=bool(raw.get("enabled")),
             provider=provider,
-            voice_id=str(raw.get("voice_id") or "").strip(),
+            voice_id=voice_id,
             speaking_rate=speaking_rate,
             language_code=str(raw.get("language_code") or "vi").strip() or "vi",
             model_id=str(raw.get("model_id") or "").strip(),
             api_key=key or None,
+            credential_mode=credential_mode,
+            google_service_account_json=google_service_account_json,
+            google_service_account_email=str(raw.get("google_service_account_email") or "").strip(),
+            google_service_account_project_id=str(
+                raw.get("google_service_account_project_id") or ""
+            ).strip(),
             base_url=str(raw.get("base_url") or "").strip(),
             timeout_seconds=timeout,
             fallback_provider=fallback,

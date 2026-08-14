@@ -1,0 +1,143 @@
+{
+  "schema_version": "analyze_ocr_recipe_lock_v1",
+  "status": "LOCKED_AS_OFFICIAL_DEFAULT",
+  "locked_at": "2026-08-13T00:00:00+07:00",
+  "operator_id": "ocr_v29_epoch_complete_cover",
+  "release_label": "OCR-V29",
+  "phase1": {
+    "analysis_engine": "audio_visual_temporal_v1",
+    "analysis_policy_version": "audio_visual_temporal_policy_v12_epoch_complete_cover",
+    "decode_backend": "ffmpeg_two_pass_selected_rawvideo",
+    "detector_budget_policy": "audio_authority_outside_completeness_adaptive",
+    "all_frame_proxy_long_edge": 512,
+    "coverage_proxy_long_edge": 384,
+    "audio_sample_fps": 4.0,
+    "visual_completeness_sample_fps": 2.0,
+    "heartbeat_fps": 0.5,
+    "burst_sample_fps": 8.0,
+    "burst_duration_ms": 420,
+    "visual_trigger_cooldown_ms": 900,
+    "max_detector_fps": 4.5,
+    "completeness_inside_audio_windows": false,
+    "ordinary_textness_cooldown_bypass": false,
+    "hard_textness_budget_bypass": true,
+    "dual_preprocess_detection": true,
+    "unassigned_text_discovery": true,
+    "source_geometry_required": true,
+    "authority_artifact": "phase1_track_coverage_v2.json",
+    "authority_v3_6_full_duration": false,
+    "provenance_fail_closed": true,
+    "protected_classes": [
+      "SOURCE_INTRINSIC",
+      "SOURCE_INTRINSIC_PANEL",
+      "PLATFORM_UI"
+    ],
+    "compatibility_artifact": "master_timeline.json",
+    "coverage_policy_version": "coverage_first_track_closure_v3_epoch_budget",
+    "frame_exact_presence_required": true,
+    "per_frame_geometry_required": true,
+    "single_frame_detector_budget_bypass": true,
+    "detector_candidates_are_retention_authority": false,
+    "single_frame_retention_authority": "local_cjk_or_temporal_consensus",
+    "blank_hardsub_directional_texture_guard": true,
+    "post_track_residual_dbnet_pass": true,
+    "encoded_output_unassigned_cjk_gate": true,
+    "audio_authority": {
+      "source": "current_transcript_segments",
+      "bind_audio_analysis_version": true,
+      "bind_audio_analysis_fingerprint": true,
+      "bind_vad_has_speech": true,
+      "speech_without_usable_timing": "fail_closed_reanalyze_audio",
+      "verified_no_dialogue_mode": "VISUAL_ONLY"
+    },
+    "unassigned_discovery_budget_policy": "spatial_temporal_epoch_budget_v1",
+    "oriented_glyph_envelope": true,
+    "dense_source_ui_hardsub_exclusion": true
+  },
+  "phase2": {
+    "provider": "local",
+    "network_calls_allowed": 0,
+    "geometry_authority": "phase1_meta_source_raster",
+    "output_artifact": "phase2_ocr_timeline.json",
+    "overwrite_master_timeline": false,
+    "approval_policy": "exact_operator_review",
+    "content_authority": {
+      "recipe_version": "semantic-hardsub-cue-authority-v1",
+      "schema_version": "semantic_hardsub_cues_v1",
+      "contract_schema_version": "phase2_ocr_timeline_v3_semantic_cues",
+      "handoff_schema_version": "phase2_handoff_v2_semantic_cues",
+      "review_input_schema_version": "phase2_review_input_v2_semantic_cues",
+      "dialogue_text_authority": "current_asr_token_timeline",
+      "dialogue_render_authority": "approved_translation_segment",
+      "missing_provenance_policy": "uncertain_fail_closed",
+      "caption_ai_dialogue_fragments_allowed": false
+    },
+    "local_recovery": {
+      "policy_version": "phase2_local_temporal_recovery_v1",
+      "hardsub_geometry_policy_version": "phase2_hardsub_geometry_recovery_v1",
+      "max_frames_per_failed_track": 2,
+      "max_prepared_inputs_per_run": 12,
+      "repeated_short_ui_fail_closed": true
+    },
+    "coverage_authority": "phase1_track_coverage_v2.json",
+    "frame_geometry_passthrough": true
+  },
+  "frontend_contract": {
+    "button": "Advanced -> Re-analyze OCR",
+    "durable_job_type": "ANALYZE_OCR",
+    "required_analysis_engine": "audio_visual_temporal_v1",
+    "worker_execution": true,
+    "inline_http_processing": false,
+    "telemetry": [
+      "analysis_mode",
+      "audio_window_count",
+      "visual_trigger_count",
+      "all_frame_proxy_size",
+      "detector_frame_count",
+      "analysis_elapsed_s"
+    ]
+  },
+  "evidence": {
+    "promotion_basis": "LOCAL_REGRESSION_AND_OPERATOR_REPORTED_FAILURE_REMEDIATION",
+    "metrics": {
+      "network_calls": 0,
+      "scheduler_contract_passed": true,
+      "audio_completeness_dedup_contract_passed": true,
+      "ordinary_texture_cooldown_contract_passed": true,
+      "single_frame_hard_boundary_contract_passed": true,
+      "vertical_720p_proxy_contract_passed": true,
+      "audio_authority_fail_closed_contract_passed": true,
+      "focused_tests_passed": 235,
+      "provenance_hardsub_exclusion_passed": true,
+      "spatial_temporal_epoch_budget_passed": true,
+      "oriented_glyph_envelope_passed": true,
+      "cover_component_union_passed": true,
+      "active_transition_flicker_gate_passed": true
+    },
+    "operator_decision": {
+      "batch_regression": "SKIPPED_BY_OPERATOR",
+      "accepted_as_official_default": true,
+      "frontend_validation": "PENDING_V29_RERUN"
+    }
+  },
+  "claims": {
+    "official_frontend_default": true,
+    "network_calls_allowed": 0,
+    "local_only_ocr": true,
+    "source_editor_provenance_enabled": true,
+    "universal_video_support": false,
+    "batch_regression_completed": false,
+    "frame_exact_track_closure": true,
+    "single_frame_cjk_fail_closed": true,
+    "semantic_hardsub_authority_enabled": true,
+    "audio_guided_temporal_authority_enabled": true,
+    "visual_completeness_outside_audio_only": true,
+    "no_silent_visual_only_fallback_for_speech": true,
+    "no_silent_unassigned_cjk": true,
+    "spatial_temporal_discovery_budget": true,
+    "oriented_glyph_envelope": true,
+    "single_pass_cover_component_union": true,
+    "active_transition_flicker_blocking": true
+  },
+  "recipe_sha256": "ded7e4691f6aee4efc5cffd25682ba3c9d676a40e213d57d32f1d98ca1190d28"
+}

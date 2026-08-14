@@ -205,6 +205,7 @@ def _load_remediation_review_fossils(
         if isinstance(row, Mapping) and str(row.get("content_id") or "")
     }
     additive_groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    additive_groups_by_geometry: dict[str, set[tuple[str, str]]] = {}
     approved_localization_rows = [
         (raw, False) for raw in list(remediation.get("approved_occurrences") or [])
     ] + [
@@ -231,9 +232,46 @@ def _load_remediation_review_fossils(
                 "Residual remediation translation fossil is not operator-approved"
             )
         additive_groups.setdefault(key, []).append(row)
+        raw_geometry = (
+            row.get("geometry_override")
+            if requires_operator_review
+            else row.get("occurrence")
+        )
+        geometry = dict(raw_geometry or {})
+        text_id = str(
+            geometry.get("target_text_id")
+            if requires_operator_review
+            else geometry.get("text_id")
+            or ""
+        )
+        if text_id:
+            additive_groups_by_geometry.setdefault(text_id, set()).add(key)
 
     fossils: dict[str, dict[str, Any]] = {}
     matched_additive: set[tuple[str, str]] = set()
+    # A residual occurrence can be the exact geometry of an approved dialogue
+    # hard-sub. In that case Phase 2 intentionally routes it to deterministic
+    # semantic-dialogue rendering rather than the visual translation queue.
+    # Treat the DB-approved dialogue translation as the stronger authority and
+    # do not require a second, conflicting Phase-3 visual approval.
+    for raw in list(handoff.get("deterministic_items") or []):
+        if not isinstance(raw, Mapping):
+            continue
+        item = dict(raw)
+        semantic = dict(item.get("semantic_hardsub") or {})
+        translation = dict(semantic.get("translation_authority") or {})
+        if (
+            str(semantic.get("classification") or "") != "DIALOGUE_HARDSUB"
+            or not bool(semantic.get("translation_ready"))
+            or not str(semantic.get("vi_text_authority") or "").strip()
+            or str(translation.get("translation_status") or "").upper()
+            != "APPROVED"
+        ):
+            continue
+        for geometry_ref in list(item.get("geometry_refs") or []):
+            matched_additive.update(
+                additive_groups_by_geometry.get(str(geometry_ref), set())
+            )
     translate_items = [
         dict(row)
         for row in list(handoff.get("translate_items") or [])
@@ -243,11 +281,24 @@ def _load_remediation_review_fossils(
         content_id = str(item.get("content_id") or "")
         zh_approved = str(item.get("zh_approved") or "")
         carry = carry_rows.get(content_id)
+        if carry is not None and str(carry.get("zh_approved") or "") != zh_approved:
+            shifted_matches = [
+                dict(row)
+                for row in carry_rows.values()
+                if str(row.get("zh_approved") or "") == zh_approved
+                and str(row.get("vi_text_candidate") or "").strip()
+            ]
+            shifted_vi = {
+                str(row.get("vi_text_candidate") or "").strip()
+                for row in shifted_matches
+            }
+            # Additive Phase 2 occurrences can renumber projection ids.
+            # Rebind only through the exact approved Chinese fossil and a
+            # single unambiguous Vietnamese candidate. A newly added object
+            # may reuse an old projection id, in which case its explicit
+            # additive fossil below is the authority.
+            carry = shifted_matches[0] if shifted_matches and len(shifted_vi) == 1 else None
         if carry is not None:
-            if str(carry.get("zh_approved") or "") != zh_approved:
-                raise Phase3RunnerError(
-                    f"Translation carry-forward content drift detected for {content_id}"
-                )
             candidate = str(carry.get("vi_text_candidate") or "").strip()
             reused_matches = [
                 key
@@ -265,8 +316,13 @@ def _load_remediation_review_fossils(
                 key for key in additive_groups if key[0] == zh_approved
             ]
             if len(matches) != 1:
+                detail = (
+                    "content drift detected"
+                    if content_id in carry_rows
+                    else "translation fossil is missing"
+                )
                 raise Phase3RunnerError(
-                    f"Remediation translation fossil is missing for {content_id}"
+                    f"Remediation {detail} for {content_id}"
                 )
             key = matches[0]
             matched_additive.add(key)

@@ -7,14 +7,23 @@ from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
 import pytest
+from fastapi import HTTPException
 
+from src.api.routes.audio_analysis import approve_source_video_translation_draft
 from src.api.routes.ocr import OcrCreateRequest, _summary_response, create_ocr_job
-from src.enums import MediaAssetStatus, MediaAssetType
+from src.enums import MediaAssetStatus, MediaAssetType, TranscriptSegmentStatus
+from src.schemas.audio_analysis import ApproveTranslationDraftRequest
 from src.services.quality_localization_service import (
     QUALITY_WORKFLOW_VERSION,
     QualityLocalizationError,
     QualityLocalizationService,
+    _matching_active_residual_remediation,
     _phase1_watchdog_timeout_seconds,
+    _residual_translation_input_sha256,
+)
+from scripts.materialize_phase2_residual_remediation import (
+    _sha256_json as remediation_sha256,
+    activate_cumulative_remediation,
 )
 
 
@@ -25,6 +34,32 @@ class _CreateService:
     def create_ocr_job(self, request):
         self.request = request
         return SimpleNamespace(id=uuid4(), status="QUEUED")
+
+
+def test_matching_active_residual_remediation_resumes_same_proposal(tmp_path) -> None:
+    proposal_sha = "a" * 64
+    delta = {
+        "status": "OCR_RESIDUAL_REMEDIATION_APPROVED",
+        "proposal_ref": {"proposal_sha256": proposal_sha},
+        "authority_refs": {},
+        "approved_occurrences": [],
+        "approved_geometry_overrides": [],
+    }
+    delta["remediation_sha256"] = remediation_sha256(delta)
+    active_path, _ = activate_cumulative_remediation(
+        root_dir=tmp_path,
+        delta=delta,
+    )
+
+    assert _matching_active_residual_remediation(
+        tmp_path, proposal_sha256=proposal_sha
+    ) == active_path
+    assert (
+        _matching_active_residual_remediation(
+            tmp_path, proposal_sha256="b" * 64
+        )
+        is None
+    )
 
 
 def test_phase1_watchdog_allows_long_postprocess_without_weakening_scan_timeout() -> None:
@@ -69,6 +104,28 @@ def test_frontend_ocr_route_forces_quality_workflow_and_master_phase1() -> None:
     assert service.request.clean_hardsub is True
 
 
+def test_frontend_ocr_route_rejects_repeated_analysis_at_translation_gate() -> None:
+    source_video_id = uuid4()
+    service = MagicMock()
+    service.db = MagicMock()
+    with patch(
+        "src.api.routes.ocr.QualityLocalizationService"
+    ) as quality_service:
+        quality_service.return_value.summary.return_value = {
+            "requires_dialogue_translation_approval": True,
+            "dialogue_translation_blocked_count": 86,
+        }
+        with pytest.raises(HTTPException) as exc_info:
+            create_ocr_job(
+                OcrCreateRequest(source_video_id=source_video_id),
+                service=service,
+            )
+
+    assert exc_info.value.status_code == 409
+    assert "re-analysis is not required" in str(exc_info.value.detail)
+    service.create_ocr_job.assert_not_called()
+
+
 def test_frontend_ocr_summary_exposes_visual_provenance_counts() -> None:
     source_video_id = uuid4()
 
@@ -82,12 +139,234 @@ def test_frontend_ocr_summary_exposes_visual_provenance_counts() -> None:
             },
             "protected_source_tracks": 11,
             "provenance_artifact_path": "visual_text_provenance_v2.json",
+            "analysis_mode": "AUDIO_GUIDED_VISUAL",
+            "audio_window_count": 4,
+            "visual_trigger_count": 9,
+            "all_frame_proxy_size": [288, 512],
         }
     )
 
     assert response.provenance_counts["SOURCE_INTRINSIC"] == 11
     assert response.protected_source_tracks == 11
     assert response.provenance_artifact_path == "visual_text_provenance_v2.json"
+    assert response.analysis_mode == "AUDIO_GUIDED_VISUAL"
+    assert response.audio_window_count == 4
+    assert response.visual_trigger_count == 9
+    assert response.all_frame_proxy_size == [288, 512]
+
+
+def test_summary_exposes_dialogue_translation_blocker_instead_of_phase2_ready(
+    tmp_path,
+) -> None:
+    source_id = uuid4()
+    source = SimpleNamespace(id=source_id, metadata_json={})
+    db = MagicMock()
+    db.get.return_value = source
+    db.scalar.return_value = None
+    service = QualityLocalizationService(
+        db,
+        storage=SimpleNamespace(root=tmp_path.resolve()),
+    )
+    root = tmp_path / "run"
+    root.mkdir()
+    (root / "phase2_meta.json").write_text(
+        json.dumps(
+            {
+                "tracks": 12,
+                "content_objects": 7,
+                "ready_for_phase3": False,
+                "handoff_status": "HANDOFF_BLOCKED",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (root / "phase2_review_queue.json").write_text(
+        json.dumps({"content_objects": []}), encoding="utf-8"
+    )
+    (root / "phase2_handoff_preview.json").write_text(
+        json.dumps(
+            {
+                "status": "HANDOFF_BLOCKED",
+                "blocked_reasons": [
+                    "semantic_dialogue_translation_unapproved:ocr_content_001",
+                    "semantic_dialogue_translation_unapproved:ocr_content_002",
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with patch.object(service, "active_root", return_value=root):
+        summary = service.summary(source_id)
+
+    assert summary["workflow_stage"] == "WAITING_DIALOGUE_TRANSLATION_APPROVAL"
+    assert summary["requires_dialogue_translation_approval"] is True
+    assert summary["dialogue_translation_blocked_count"] == 2
+    assert summary["phase2_content_object_count"] == 7
+    response = _summary_response(
+        {"source_video_id": str(source_id), **summary}
+    )
+    assert response.dialogue_translation_blocked_count == 2
+
+
+def test_translation_approval_enqueues_cache_first_ocr_resume() -> None:
+    source_id = uuid4()
+    resume_job_id = uuid4()
+    db = MagicMock()
+    with (
+        patch(
+            "src.api.routes.audio_analysis.TranscriptEditService"
+        ) as transcript_service,
+        patch(
+            "src.services.reup_pipeline_orchestrator.ReupPipelineOrchestrator"
+        ) as orchestrator,
+        patch(
+            "src.services.quality_localization_service.QualityLocalizationService"
+        ) as quality_service,
+        patch(
+            "src.ocr_pipeline.services.ocr_service.OcrPipelineService"
+        ) as ocr_service,
+    ):
+        transcript_service.return_value.approve_translation_draft.return_value = {
+            "approved_segments": 20,
+            "binding_sha256": "a" * 64,
+        }
+        orchestrator.return_value.resume_translation_approved_items.return_value = (
+            0,
+            None,
+        )
+        quality_service.return_value.summary.return_value = {
+            "requires_dialogue_translation_approval": True
+        }
+        ocr_service.return_value.create_ocr_job.return_value = SimpleNamespace(
+            id=resume_job_id
+        )
+
+        response = approve_source_video_translation_draft(
+            source_id,
+            ApproveTranslationDraftRequest(),
+            db,
+        )
+
+    assert response.ocr_resume_job_id == resume_job_id
+    request = ocr_service.return_value.create_ocr_job.call_args.args[0]
+    assert request.workflow_action == "resume_dialogue_translation"
+    assert request.force_refresh is False
+    assert request.use_master_phase1 is True
+    db.commit.assert_called_once()
+
+
+def test_phase1_candidate_seed_binds_current_audio_authority(tmp_path) -> None:
+    source_id = uuid4()
+    rows = [
+        SimpleNamespace(
+            segment_index=0,
+            start_ms=500,
+            end_ms=1_500,
+            confidence=0.94,
+            status=TranscriptSegmentStatus.APPROVED,
+            text="你好",
+            analysis_version="AUDIO_ANALYSIS_V5_RUN_9",
+        ),
+        SimpleNamespace(
+            segment_index=1,
+            start_ms=1_500,
+            end_ms=2_000,
+            confidence=0.80,
+            status=TranscriptSegmentStatus.REJECTED,
+            text="rejected",
+            analysis_version="AUDIO_ANALYSIS_V5_RUN_9",
+        ),
+        SimpleNamespace(
+            segment_index=2,
+            start_ms=2_000,
+            end_ms=2_000,
+            confidence=0.80,
+            status=TranscriptSegmentStatus.DRAFT,
+            text="invalid timing",
+            analysis_version="AUDIO_ANALYSIS_V5_RUN_9",
+        ),
+    ]
+    db = SimpleNamespace(
+        scalars=lambda _query: SimpleNamespace(all=lambda: rows)
+    )
+    service = QualityLocalizationService(
+        db,
+        storage=SimpleNamespace(root=tmp_path.resolve()),
+    )
+    source = SimpleNamespace(
+        id=source_id,
+        duration_seconds=3.0,
+        metadata_json={
+            "has_speech": True,
+            "vad": {"has_speech": True},
+            "audio_analysis_cache": {
+                "analysis_version": "AUDIO_ANALYSIS_V5_RUN_9",
+                "fingerprint": "audio-fingerprint",
+            },
+        },
+    )
+
+    path, payload = service._build_phase1_candidate_seed(
+        source=source,
+        root_hint=tmp_path,
+        job_id=uuid4(),
+    )
+
+    assert path.is_file()
+    assert payload["mode"] == "AUDIO_GUIDED_VISUAL"
+    assert payload["vad_has_speech"] is True
+    assert payload["audio_analysis_version"] == "AUDIO_ANALYSIS_V5_RUN_9"
+    assert payload["audio_analysis_fingerprint"] == "audio-fingerprint"
+    assert payload["segments_count"] == 1
+    assert payload["rejected_segments_count"] == 1
+    assert payload["invalid_segments_count"] == 1
+    assert payload["windows"]
+
+
+def test_phase1_candidate_seed_fails_closed_when_speech_has_no_timing(tmp_path) -> None:
+    service = QualityLocalizationService(
+        SimpleNamespace(
+            scalars=lambda _query: SimpleNamespace(all=lambda: [])
+        ),
+        storage=SimpleNamespace(root=tmp_path.resolve()),
+    )
+    source = SimpleNamespace(
+        id=uuid4(),
+        duration_seconds=3.0,
+        metadata_json={"has_speech": True, "vad": {"has_speech": True}},
+    )
+
+    with pytest.raises(QualityLocalizationError, match="re-run Analyze Audio"):
+        service._build_phase1_candidate_seed(
+            source=source,
+            root_hint=tmp_path,
+            job_id=uuid4(),
+        )
+
+
+def test_phase1_candidate_seed_allows_verified_no_dialogue_visual_only(tmp_path) -> None:
+    service = QualityLocalizationService(
+        SimpleNamespace(
+            scalars=lambda _query: SimpleNamespace(all=lambda: [])
+        ),
+        storage=SimpleNamespace(root=tmp_path.resolve()),
+    )
+    source = SimpleNamespace(
+        id=uuid4(),
+        duration_seconds=3.0,
+        metadata_json={"has_speech": False, "vad": {"has_speech": False}},
+    )
+
+    _, payload = service._build_phase1_candidate_seed(
+        source=source,
+        root_hint=tmp_path,
+        job_id=uuid4(),
+    )
+
+    assert payload["mode"] == "VISUAL_ONLY"
+    assert payload["vad_has_speech"] is False
+    assert payload["windows"] == []
 
 
 def test_quality_summary_requires_audio_mix_approval_after_visual_approval(tmp_path) -> None:
@@ -145,6 +424,10 @@ def test_quality_summary_exposes_hash_bound_residual_review_state(tmp_path) -> N
         ),
         encoding="utf-8",
     )
+    (tmp_path / "phase4_render_input_preview.json").write_text(
+        json.dumps({"video": {"frame_width": 720, "frame_height": 1280}}),
+        encoding="utf-8",
+    )
     triage = service.summary(source_id)
     assert triage["workflow_stage"] == "WAITING_RESIDUAL_TRIAGE"
     assert triage["residual_review_objects"] == [
@@ -156,6 +439,39 @@ def test_quality_summary_exposes_hash_bound_residual_review_state(tmp_path) -> N
             "image_path": "qa/residual/frame_000012.jpg",
         }
     ]
+    translation_input_sha256 = _residual_translation_input_sha256(
+        triage["residual_review_objects"],
+        authority_sha256=triage["residual_authority_sha256"],
+    )
+    (tmp_path / "phase2_residual_translation_suggestions.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "phase2_residual_translation_suggestions_v2",
+                "status": "SUGGESTION_ONLY",
+                "operator_approval_written": False,
+                "residual_authority_sha256": triage["residual_authority_sha256"],
+                "input_sha256": translation_input_sha256,
+                "suggestions": [
+                    {
+                        "ocr_text": "source residual",
+                        "ocr_text_corrected": "corrected residual",
+                        "vi_text_suggested": "bản dịch còn sót",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    translated = service.summary(source_id)
+    assert translated["residual_translation_status"] == "READY"
+    assert translated["residual_translation_input_sha256"] == translation_input_sha256
+    assert translated["residual_translation_suggestion_count"] == 1
+    assert translated["residual_review_objects"][0][
+        "ocr_text_corrected_suggested"
+    ] == "corrected residual"
+    assert translated["residual_review_objects"][0]["vi_text_suggested"] == (
+        "bản dịch còn sót"
+    )
 
     (tmp_path / "phase2_residual_remediation_proposal_frontend.json").write_text(
         json.dumps(
@@ -170,6 +486,193 @@ def test_quality_summary_exposes_hash_bound_residual_review_state(tmp_path) -> N
     assert proposal["workflow_stage"] == "WAITING_RESIDUAL_REVIEW"
     assert proposal["residual_proposal_sha256"] == "a" * 64
     assert proposal["residual_proposal_objects"][0]["remediation_id"] == "rem_001"
+
+
+def test_residual_translation_job_batches_and_caches_current_authority(tmp_path) -> None:
+    source_id = uuid4()
+    workspace_id = uuid4()
+    job_id = uuid4()
+    authority_sha256 = "a" * 64
+    residual_rows = [
+        {"content_id": "residual_001", "frame_index": 10, "text": "耐看气质妆"},
+        {"content_id": "residual_002", "frame_index": 20, "text": "教程"},
+    ]
+    input_sha256 = _residual_translation_input_sha256(
+        residual_rows,
+        authority_sha256=authority_sha256,
+    )
+    owner_job = SimpleNamespace(
+        payload_json={
+            "residual_authority_sha256": authority_sha256,
+            "residual_translation_input_sha256": input_sha256,
+        }
+    )
+    source = SimpleNamespace(
+        id=source_id,
+        workspace_id=workspace_id,
+        metadata_json={},
+    )
+    db = SimpleNamespace(
+        get=lambda _model, _id: owner_job,
+        flush=lambda: None,
+        commit=lambda: None,
+    )
+    service = QualityLocalizationService(
+        db,
+        storage=SimpleNamespace(root=tmp_path.resolve()),
+    )
+    service._source = lambda _source_id: source  # type: ignore[method-assign]
+    service.active_root = lambda _source_id: tmp_path.resolve()  # type: ignore[method-assign]
+    service.summary = lambda _source_id: {  # type: ignore[method-assign]
+        "workflow_stage": "WAITING_RESIDUAL_TRIAGE",
+        "residual_authority_sha256": authority_sha256,
+        "residual_review_objects": residual_rows,
+    }
+    translated_rows = [
+        {
+            "ocr_text": "耐看气质妆",
+            "ocr_text_corrected": "耐看气质妆",
+            "vi_text_suggested": "Trang điểm thanh lịch",
+        },
+        {
+            "ocr_text": "教程",
+            "ocr_text_corrected": "教程",
+            "vi_text_suggested": "Hướng dẫn",
+        },
+    ]
+
+    with patch(
+        "src.services.quality_auto_policy.translate_residual_texts",
+        return_value=translated_rows,
+    ) as translate:
+        service.run_residual_review(
+            source_video_id=source_id,
+            job_id=job_id,
+            action="suggest_residual_translation",
+            suggestions=None,
+            proposal_sha256=None,
+            operator_id="frontend_operator",
+        )
+
+    translate.assert_called_once()
+    artifact = json.loads(
+        (tmp_path / "phase2_residual_translation_suggestions.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert artifact["status"] == "SUGGESTION_ONLY"
+    assert artifact["operator_approval_written"] is False
+    assert artifact["residual_authority_sha256"] == authority_sha256
+    assert artifact["input_sha256"] == input_sha256
+    assert artifact["suggestions"] == translated_rows
+
+    with patch(
+        "src.services.quality_auto_policy.translate_residual_texts"
+    ) as translate_again:
+        service.run_residual_review(
+            source_video_id=source_id,
+            job_id=job_id,
+            action="suggest_residual_translation",
+            suggestions=None,
+            proposal_sha256=None,
+            operator_id="frontend_operator",
+        )
+    translate_again.assert_not_called()
+
+
+def test_quality_summary_prioritizes_current_encoded_output_residual(tmp_path) -> None:
+    source_id = uuid4()
+    source = SimpleNamespace(id=source_id, workspace_id=uuid4(), metadata_json={})
+    service = QualityLocalizationService(
+        SimpleNamespace(scalar=lambda _query: None),
+        storage=SimpleNamespace(root=tmp_path.resolve()),
+    )
+    service._source = lambda _source_id: source  # type: ignore[method-assign]
+    service.active_root = lambda _source_id: tmp_path.resolve()  # type: ignore[method-assign]
+    (tmp_path / "phase4_preflight_meta.json").write_text(
+        json.dumps({"status": "READY_FOR_PHASE4", "final_render_gate": "READY_FOR_FINAL_RENDER", "residual_cjk": {"detections": []}}),
+        encoding="utf-8",
+    )
+    render_input = tmp_path / "phase4_render_input.json"
+    render_input.write_text(json.dumps({"status": "READY_FOR_PHASE4"}), encoding="utf-8")
+    preview = tmp_path / "phase4_adaptive_visual_preview.mp4"
+    preview.write_bytes(b"encoded-preview")
+    (tmp_path / "phase4_adaptive_render_meta.json").write_text(
+        json.dumps({
+            "status": "VISUAL_PREVIEW_QA_FAILED",
+            "output_qa_status": "FAIL",
+            "output_qa_failed_checks": ["residual_cjk"],
+            "phase4_input_sha256": hashlib.sha256(render_input.read_bytes()).hexdigest(),
+            "output_video_sha256": hashlib.sha256(preview.read_bytes()).hexdigest(),
+            "artifacts": {"video": preview.name},
+        }),
+        encoding="utf-8",
+    )
+    (tmp_path / "qa").mkdir()
+    (tmp_path / "qa" / "phase4_adaptive_visual_preview_output_qa.json").write_text(
+        json.dumps({
+            "status": "FAIL",
+            "failed_checks": ["residual_cjk"],
+            "residual_cjk": {
+                "complete": True,
+                "detections": [{"frame_index": 77, "text": "中文", "confidence": 0.8}],
+            },
+        }),
+        encoding="utf-8",
+    )
+    summary = service.summary(source_id)
+    assert summary["workflow_stage"] == "WAITING_RESIDUAL_TRIAGE"
+    assert summary["encoded_output_qa_current"] is True
+    assert summary["residual_authority_source"] == "encoded_visual_preview_output_qa"
+    assert summary["residual_review_objects"][0]["frame_index"] == 77
+
+
+def test_quality_summary_handles_blocked_preflight_without_final_render_input(
+    tmp_path,
+) -> None:
+    source_id = uuid4()
+    source = SimpleNamespace(id=source_id, workspace_id=uuid4(), metadata_json={})
+    service = QualityLocalizationService(
+        SimpleNamespace(scalar=lambda _query: None),
+        storage=SimpleNamespace(root=tmp_path.resolve()),
+    )
+    service._source = lambda _source_id: source  # type: ignore[method-assign]
+    service.active_root = lambda _source_id: tmp_path.resolve()  # type: ignore[method-assign]
+    (tmp_path / "phase4_preflight_meta.json").write_text(
+        json.dumps(
+            {
+                "status": "PHASE4_PREFLIGHT_BLOCKED",
+                "final_render_gate": "BLOCKED_VISUAL_RESIDUAL_CJK",
+                "residual_cjk": {
+                    "complete": True,
+                    "detections": [
+                        {"frame_index": 42, "text": "中文", "confidence": 0.9}
+                    ],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "phase4_adaptive_render_meta.json").write_text(
+        json.dumps(
+            {
+                "status": "VISUAL_PREVIEW_QA_FAILED",
+                "output_qa_status": "FAIL",
+                "output_qa_failed_checks": ["residual_cjk"],
+                "phase4_input_sha256": "f" * 64,
+                "output_video_sha256": "e" * 64,
+                "artifacts": {"video": "phase4_adaptive_visual_preview.mp4"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "phase4_adaptive_visual_preview.mp4").write_bytes(b"stale-preview")
+
+    summary = service.summary(source_id)
+
+    assert summary["workflow_stage"] == "WAITING_RESIDUAL_TRIAGE"
+    assert summary["encoded_output_qa_current"] is False
+    assert summary["residual_authority_source"] == "phase4_preflight"
 
 
 def test_quality_summary_accepts_verified_no_dialogue_audio_gate(tmp_path) -> None:
@@ -278,7 +781,7 @@ def test_quality_summary_falls_back_to_closed_phase3_timeline_for_preview_retry(
     assert summary["translation_objects"][0]["vi_text_candidate"] == "Bản đã duyệt"
 
 
-def test_phase1_retry_reuses_only_hash_bound_v58_authority(tmp_path) -> None:
+def test_phase1_retry_reuses_only_hash_bound_temporal_authority(tmp_path) -> None:
     service = object.__new__(QualityLocalizationService)
     source = tmp_path / "source.mp4"
     source.write_bytes(b"source-video")
@@ -288,12 +791,33 @@ def test_phase1_retry_reuses_only_hash_bound_v58_authority(tmp_path) -> None:
         '{"schema_version":"visual_text_provenance_v2","tracks":[]}',
         encoding="utf-8",
     )
+    (tmp_path / "phase1_candidate_windows_v1.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "phase1_event_metrics.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "phase1_track_coverage_v2.json").write_text(
+        '{"schema_version":"phase1_track_coverage_v2","tracks":[]}',
+        encoding="utf-8",
+    )
 
-    service._record_phase1_authority(tmp_path, source)
-    assert service._phase1_is_reusable(tmp_path, source) is True
+    service._record_phase1_authority(
+        tmp_path,
+        source,
+        analysis_engine="audio_visual_temporal_v1",
+        candidate_seed_sha256="seed",
+    )
+    assert service._phase1_is_reusable(
+        tmp_path,
+        source,
+        analysis_engine="audio_visual_temporal_v1",
+        candidate_seed_sha256="seed",
+    ) is True
 
     (tmp_path / "master_timeline.json").write_text("[{\"changed\": true}]", encoding="utf-8")
-    assert service._phase1_is_reusable(tmp_path, source) is False
+    assert service._phase1_is_reusable(
+        tmp_path,
+        source,
+        analysis_engine="audio_visual_temporal_v1",
+        candidate_seed_sha256="seed",
+    ) is False
 
 
 def test_preview_retry_reuses_media_asset_when_storage_key_is_unchanged(tmp_path) -> None:

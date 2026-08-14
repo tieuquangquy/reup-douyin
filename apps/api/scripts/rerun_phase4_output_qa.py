@@ -14,6 +14,7 @@ from src.media_pipeline.video_renderer.adaptive_output_qa import (
     AdaptiveOutputQaError,
     build_local_residual_ocr_provider,
     collect_adaptive_output_qa,
+    collect_reused_visual_output_qa,
     classify_source_scene_protected_cjk,
     summarize_temporal_flicker_for_verdict,
 )
@@ -130,22 +131,63 @@ def rerun_output_qa(root_dir: str | Path) -> dict[str, Any]:
     )
     qa_path = root / "qa" / f"{output_stem}_output_qa.json"
     prior_qa_hash = _sha256_file(qa_path) if qa_path.is_file() else None
-    provider = build_local_residual_ocr_provider()
     residual_false_positive_approval = (
         load_residual_cjk_false_positive_approval(
             root_dir=root,
             contract=contract,
         )
     )
-    output_qa = collect_adaptive_output_qa(
-        source,
-        output,
-        contract=contract,
-        artifact_dir=qa_dir,
-        ocr_provider=provider,
-        require_final_audio=not visual_preview,
-        residual_false_positive_approval=residual_false_positive_approval,
+    preview_path = root / "phase4_adaptive_visual_preview.mp4"
+    preview_qa_path = (
+        root / "qa" / "phase4_adaptive_visual_preview_output_qa.json"
     )
+    visual_approval_path = root / "phase4_visual_approval.json"
+    audio_rebind = (
+        _load_object(audio_rebind_path) if audio_rebind_path.is_file() else {}
+    )
+    preview_qa = (
+        _load_object(preview_qa_path) if preview_qa_path.is_file() else {}
+    )
+    visual_approval = (
+        _load_object(visual_approval_path)
+        if visual_approval_path.is_file()
+        else {}
+    )
+    preview_hash = _sha256_file(preview_path) if preview_path.is_file() else ""
+    can_reuse_preview_qa = bool(
+        not visual_preview
+        and is_valid_audio_only_rebind(
+            audio_rebind,
+            rendered_input_sha256=str(
+                audio_rebind.get("old_phase4_input_sha256") or ""
+            ),
+            current_input_sha256=current_input_sha256,
+            current_remediation_ref=visual_remediation_ref or {},
+        )
+        and str(visual_approval.get("status") or "") == "VISUAL_APPROVED"
+        and preview_hash
+        == str(dict(visual_approval.get("video_ref") or {}).get("sha256") or "")
+        and str(preview_qa.get("status") or "") == "PASS"
+        and not list(preview_qa.get("failed_checks") or [])
+    )
+    if can_reuse_preview_qa:
+        output_qa = collect_reused_visual_output_qa(
+            preview_path,
+            output,
+            preview_qa=preview_qa,
+            contract=contract,
+        )
+    else:
+        provider = build_local_residual_ocr_provider()
+        output_qa = collect_adaptive_output_qa(
+            source,
+            output,
+            contract=contract,
+            artifact_dir=qa_dir,
+            ocr_provider=provider,
+            require_final_audio=not visual_preview,
+            residual_false_positive_approval=residual_false_positive_approval,
+        )
     _write_json_atomic(qa_path, output_qa)
     passed = str(output_qa.get("status") or "") == "PASS"
     meta["status"] = (
@@ -164,6 +206,7 @@ def rerun_output_qa(root_dir: str | Path) -> dict[str, Any]:
         "reason": "output_qa_policy_update_without_render_change",
         "prior_qa_sha256": prior_qa_hash,
         "current_qa_sha256": _sha256_file(qa_path),
+        "visual_authority_reused": can_reuse_preview_qa,
     }
     _write_json_atomic(meta_path, meta)
     return meta

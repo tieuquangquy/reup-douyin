@@ -4,6 +4,8 @@ import base64
 import logging
 import json
 import os
+import shutil
+import subprocess
 import threading
 import time
 from collections.abc import Callable
@@ -11,6 +13,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
 from src.core.settings import get_settings
@@ -26,13 +29,21 @@ DOUYIN_BROWSER_LOGIN_URL = "https://www.douyin.com/"
 
 @dataclass(frozen=True)
 class PlaywrightAwemeDownloadResult:
-    content: bytes
+    content: bytes | None
     play_url: str
     format_id: str
     watermark_free: bool
+    watermark_authority: str | None = None
     height: int | None = None
+    width: int | None = None
+    bitrate: int | None = None
+    codec: str | None = None
+    fps: float | None = None
+    hdr: bool | None = None
     author_handle: str | None = None
     author_display_name: str | None = None
+    local_path: str | None = None
+    size_bytes: int | None = None
 
 
 AUTHENTICATED_COOKIE_NAMES = {
@@ -559,6 +570,12 @@ class DouyinBrowserContextRegistry:
                 return True
         return False
 
+    def has_active_context_for_account(self, account_connection_id: UUID) -> bool:
+        record = self._record_for_account(account_connection_id)
+        if record is None or record.status != "active":
+            return False
+        return self._ensure_usable(record).status == "active"
+
     @staticmethod
     def _is_recoverable_download_context_loss(reason: str | None, exc: BaseException | None = None) -> bool:
         if reason and (
@@ -641,6 +658,12 @@ class DouyinBrowserContextRegistry:
         account_connection_id: UUID | None = None,
         timeout_ms: int = 90_000,
         allow_context_recovery: bool = True,
+        destination_path: str | Path | None = None,
+        on_progress: Callable[[int, int | None], None] | None = None,
+        quality_profile: str = "balanced_processing",
+        target_long_edge: int = 1920,
+        preferred_candidate_url: str | None = None,
+        preferred_format_id: str | None = None,
     ) -> "PlaywrightAwemeDownloadResult":
         with self._playwright_op_lock:
             return self._download_aweme_video_locked(
@@ -649,7 +672,67 @@ class DouyinBrowserContextRegistry:
                 account_connection_id=account_connection_id,
                 timeout_ms=timeout_ms,
                 allow_context_recovery=allow_context_recovery,
+                destination_path=destination_path,
+                on_progress=on_progress,
+                quality_profile=quality_profile,
+                target_long_edge=target_long_edge,
+                preferred_candidate_url=preferred_candidate_url,
+                preferred_format_id=preferred_format_id,
             )
+
+    def discover_aweme_video(
+        self,
+        *,
+        aweme_id: str,
+        page_url: str | None = None,
+        account_connection_id: UUID | None = None,
+        timeout_ms: int = 30_000,
+        quality_profile: str = "balanced_processing",
+        target_long_edge: int = 1920,
+    ) -> list["RankedPlayUrl"]:
+        """Return playback candidates from the detail payload without transfer."""
+        from src.downloaders.playwright_douyin_video_resolver import (
+            _candidate_sort_key,
+            extract_play_urls_from_aweme_payload,
+        )
+
+        with self._playwright_op_lock:
+            record = self._record_for_account(account_connection_id) if account_connection_id else None
+            if record is None:
+                with self._lock:
+                    active = [item for item in self._records.values() if item.status == "active"]
+                record = active[0] if active else None
+            if record is None:
+                raise DownloadError(
+                    DownloadErrorCode.RESOLVE_FAILED,
+                    "No active Douyin Playwright browser context for metadata discovery",
+                )
+            state = self._ensure_usable(record)
+            if state.status != "active":
+                raise DownloadError(
+                    DownloadErrorCode.RESOLVE_FAILED,
+                    f"Douyin Playwright context is not usable: {state.reason or state.status}",
+                )
+            page = record.page
+            self._ensure_page_on_douyin_home(page=page, timeout_ms=timeout_ms)
+            payload = self._fetch_aweme_detail_via_page(page=page, aweme_id=aweme_id)
+            payloads = [payload] if isinstance(payload, dict) else []
+            candidates: list["RankedPlayUrl"] = []
+            seen: set[str] = set()
+            for node in payloads:
+                for item in extract_play_urls_from_aweme_payload(node):
+                    if item.url not in seen:
+                        seen.add(item.url)
+                        candidates.append(item)
+            candidates.sort(
+                key=lambda item: _candidate_sort_key(
+                    item,
+                    quality_profile=quality_profile,
+                    target_long_edge=target_long_edge,
+                ),
+                reverse=True,
+            )
+            return candidates
 
     def _download_aweme_video_locked(
         self,
@@ -659,6 +742,12 @@ class DouyinBrowserContextRegistry:
         account_connection_id: UUID | None = None,
         timeout_ms: int = 90_000,
         allow_context_recovery: bool = True,
+        destination_path: str | Path | None = None,
+        on_progress: Callable[[int, int | None], None] | None = None,
+        quality_profile: str = "balanced_processing",
+        target_long_edge: int = 1920,
+        preferred_candidate_url: str | None = None,
+        preferred_format_id: str | None = None,
     ) -> "PlaywrightAwemeDownloadResult":
         from src.downloaders.playwright_douyin_video_resolver import (
             _candidate_sort_key,
@@ -670,6 +759,11 @@ class DouyinBrowserContextRegistry:
         from src.downloaders.source_video_filename import parse_height_from_format_label
 
         record = self._record_for_account(account_connection_id) if account_connection_id else None
+        if record is None and account_connection_id is not None:
+            raise DownloadError(
+                DownloadErrorCode.RESOLVE_FAILED,
+                "No active Douyin Playwright context for the selected account",
+            )
         if record is None:
             with self._lock:
                 active = [item for item in self._records.values() if item.status == "active"]
@@ -691,6 +785,12 @@ class DouyinBrowserContextRegistry:
                         account_connection_id=recovered.account_connection_id or account_connection_id,
                         timeout_ms=timeout_ms,
                         allow_context_recovery=False,
+                        destination_path=destination_path,
+                        on_progress=on_progress,
+                        quality_profile=quality_profile,
+                        target_long_edge=target_long_edge,
+                        preferred_candidate_url=preferred_candidate_url,
+                        preferred_format_id=preferred_format_id,
                     )
             raise DownloadError(
                 DownloadErrorCode.RESOLVE_FAILED,
@@ -715,8 +815,39 @@ class DouyinBrowserContextRegistry:
                         continue
                     seen.add(item.url)
                     ranked.append(item)
-            ranked.sort(key=_candidate_sort_key, reverse=True)
+            ranked.sort(
+                key=lambda item: _candidate_sort_key(
+                    item,
+                    quality_profile=quality_profile,
+                    target_long_edge=target_long_edge,
+                ),
+                reverse=True,
+            )
             return ranked
+
+        def _wait_for_clean_candidate_after_navigation() -> None:
+            """Poll response captures and leave as soon as a clean URL exists.
+
+            The previous unconditional 2.5 second sleep was paid on every page
+            fallback even when the detail response arrived immediately. Keep the
+            same upper budget for slow pages, but make the common path adaptive.
+            """
+            raw_budget = getattr(
+                get_settings(),
+                "douyin_playwright_media_settle_timeout_ms",
+                2_500,
+            )
+            try:
+                budget_ms = max(0, min(int(timeout_ms), int(raw_budget)))
+            except (TypeError, ValueError):
+                budget_ms = min(int(timeout_ms), 2_500)
+            waited_ms = 0
+            while waited_ms < budget_ms:
+                if any(item.watermark_free for item in _merge_candidates(captured_payloads)):
+                    return
+                step_ms = min(200, budget_ms - waited_ms)
+                page.wait_for_timeout(step_ms)
+                waited_ms += step_ms
 
         def _on_response(response) -> None:
             try:
@@ -738,6 +869,18 @@ class DouyinBrowserContextRegistry:
                 captured_payloads.append(detail)
 
             ranked_candidates = _merge_candidates(captured_payloads)
+            if preferred_candidate_url or preferred_format_id:
+                preferred = next(
+                    (
+                        item
+                        for item in ranked_candidates
+                        if item.url == preferred_candidate_url
+                        or item.format_label == preferred_format_id
+                    ),
+                    None,
+                )
+                if preferred is not None:
+                    ranked_candidates = [preferred] + [item for item in ranked_candidates if item.url != preferred.url]
             has_no_logo = any(item.watermark_free for item in ranked_candidates)
 
             # Escalate to full video navigation only when detail API lacks no-logo candidates.
@@ -748,7 +891,7 @@ class DouyinBrowserContextRegistry:
                 try:
                     try:
                         page.goto(target_url, wait_until="domcontentloaded", timeout=timeout_ms)
-                        page.wait_for_timeout(2500)
+                        _wait_for_clean_candidate_after_navigation()
                         html = page.content()
                     except Exception as exc:
                         if allow_context_recovery and self._is_recoverable_download_context_loss(None, exc):
@@ -761,6 +904,12 @@ class DouyinBrowserContextRegistry:
                                     account_connection_id=recovered.account_connection_id or account_connection_id,
                                     timeout_ms=timeout_ms,
                                     allow_context_recovery=False,
+                                    destination_path=destination_path,
+                                    on_progress=on_progress,
+                                    quality_profile=quality_profile,
+                                    target_long_edge=target_long_edge,
+                                    preferred_candidate_url=preferred_candidate_url,
+                                    preferred_format_id=preferred_format_id,
                                 )
                         raise
                     render_data = parse_render_data_aweme(html)
@@ -781,14 +930,41 @@ class DouyinBrowserContextRegistry:
                     "Playwright could not extract a Douyin media URL from the logged-in browser session",
                 )
 
-            try:
-                content, play_url, format_id, watermark_free = self._download_ranked_media_bytes(
+            def _transfer(candidates: list) -> tuple[bytes | None, str | None, int, str, str, bool]:
+                if on_progress is not None:
+                    on_progress(0, None)
+                if destination_path is not None:
+                    local_path, size_bytes, selected_url, selected_format, selected_clean = (
+                        self._download_ranked_media_to_file(
+                            page=page,
+                            candidates=candidates,
+                            user_agent=record.user_agent or "",
+                            proxy_url=record.proxy_url,
+                            timeout_ms=timeout_ms,
+                            destination_path=destination_path,
+                            on_progress=on_progress,
+                            quality_profile=quality_profile,
+                            target_long_edge=target_long_edge,
+                            preferred_candidate_url=preferred_candidate_url,
+                            preferred_format_id=preferred_format_id,
+                        )
+                    )
+                    return None, local_path, size_bytes, selected_url, selected_format, selected_clean
+                selected_content, selected_url, selected_format, selected_clean = self._download_ranked_media_bytes(
                     page=page,
-                    candidates=ranked_candidates,
+                    candidates=candidates,
                     user_agent=record.user_agent or "",
                     timeout_ms=timeout_ms,
+                    on_progress=on_progress,
+                    quality_profile=quality_profile,
                 )
+                return selected_content, None, len(selected_content), selected_url, selected_format, selected_clean
+
+            try:
+                content, local_path, size_bytes, play_url, format_id, watermark_free = _transfer(ranked_candidates)
             except DownloadError as download_exc:
+                if download_exc.code == DownloadErrorCode.CANCELLED:
+                    raise
                 if used_goto or download_exc.code != DownloadErrorCode.DOWNLOAD_FAILED:
                     raise
                 # Detail-API URLs may be stale; one escalate to video page for fresher no-logo candidates.
@@ -801,7 +977,7 @@ class DouyinBrowserContextRegistry:
                 page.on("response", _on_response)
                 try:
                     page.goto(target_url, wait_until="domcontentloaded", timeout=timeout_ms)
-                    page.wait_for_timeout(2500)
+                    _wait_for_clean_candidate_after_navigation()
                     html = page.content()
                     render_data = parse_render_data_aweme(html)
                     if render_data:
@@ -816,24 +992,38 @@ class DouyinBrowserContextRegistry:
                         pass
                 if not ranked_candidates:
                     raise download_exc
-                content, play_url, format_id, watermark_free = self._download_ranked_media_bytes(
-                    page=page,
-                    candidates=ranked_candidates,
-                    user_agent=record.user_agent or "",
-                    timeout_ms=timeout_ms,
-                )
+                content, local_path, size_bytes, play_url, format_id, watermark_free = _transfer(ranked_candidates)
 
             record.last_used_at = datetime.now(UTC)
             author_handle, author_display_name = extract_author_identity_from_aweme_payloads(captured_payloads)
+            selected_candidate = next(
+                (
+                    candidate
+                    for candidate in ranked_candidates
+                    if candidate.url == play_url or candidate.format_label == format_id
+                ),
+                None,
+            )
             height = parse_height_from_format_label(format_id)
+            if selected_candidate is not None:
+                height = selected_candidate.height or height
+            width = selected_candidate.width if selected_candidate is not None else None
+            bitrate = selected_candidate.bitrate if selected_candidate is not None else None
+            codec = selected_candidate.codec if selected_candidate is not None else None
+            fps = selected_candidate.fps if selected_candidate is not None else None
+            hdr = selected_candidate.hdr if selected_candidate is not None else None
             logger.info(
                 "playwright_aweme_download_completed",
                 extra={
                     "aweme_id": aweme_id,
-                    "bytes": len(content),
+                    "bytes": size_bytes,
                     "format_id": format_id,
                     "watermark_free": watermark_free,
                     "height": height,
+                    "width": width,
+                    "codec": codec,
+                    "fps": fps,
+                    "hdr": hdr,
                     "resolve_path": resolve_path,
                     "used_goto": used_goto,
                     "play_url_host": play_url.split("/")[2] if "://" in play_url else None,
@@ -845,9 +1035,19 @@ class DouyinBrowserContextRegistry:
                 play_url=play_url,
                 format_id=format_id,
                 watermark_free=watermark_free,
+                watermark_authority=(
+                    "verified_playback_provenance" if watermark_free else "explicit_watermarked"
+                ),
                 height=height,
+                width=width,
+                bitrate=bitrate,
+                codec=codec,
+                fps=fps,
+                hdr=hdr,
                 author_handle=author_handle,
                 author_display_name=author_display_name,
+                local_path=local_path,
+                size_bytes=size_bytes,
             )
         except Exception:
             if used_goto:
@@ -885,6 +1085,135 @@ class DouyinBrowserContextRegistry:
             )
             return None
 
+    def _download_ranked_media_to_file(
+        self,
+        *,
+        page,
+        candidates: list["RankedPlayUrl"],
+        user_agent: str,
+        proxy_url: str | None = None,
+        timeout_ms: int,
+        destination_path: str | Path,
+        on_progress: Callable[[int, int | None], None] | None = None,
+        quality_profile: str = "balanced_processing",
+        target_long_edge: int = 1920,
+    ) -> tuple[str, int, str, str, bool]:
+        """Prefer a bounded-memory CDN transfer, retaining browser-body as fallback."""
+        from src.downloaders.http import HttpAssetDownloader
+        from src.downloaders.playwright_douyin_video_resolver import _candidate_sort_key
+
+        settings = get_settings()
+        allow_watermarked = bool(
+            getattr(settings, "douyin_download_allow_watermarked_fallback", False)
+        )
+        ordered = sorted(
+            candidates,
+            key=lambda item: _candidate_sort_key(
+                item,
+                quality_profile=quality_profile,
+                target_long_edge=target_long_edge,
+            ),
+            reverse=True,
+        )
+        allowed = [item for item in ordered if item.watermark_free]
+        if allow_watermarked:
+            allowed.extend(item for item in ordered if not item.watermark_free)
+        if not allowed:
+            raise DownloadError(
+                DownloadErrorCode.DOWNLOAD_FAILED,
+                "No no-logo candidates available for streamed Playwright transfer",
+            )
+
+        try:
+            cookies = list(page.context.cookies() or [])
+        except Exception:
+            cookies = []
+        destination = Path(destination_path).resolve()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        downloader = HttpAssetDownloader(
+            timeout_seconds=max(30, int(timeout_ms / 1000)),
+            max_bytes=_configured_download_max_bytes(settings),
+        )
+        for attempt, candidate in enumerate(allowed, start=1):
+            headers = {
+                "Referer": "https://www.douyin.com/",
+                "Origin": "https://www.douyin.com",
+                "User-Agent": user_agent or "",
+                "Accept": "*/*",
+            }
+            # Browser cookies are credentials.  Only forward cookies whose
+            # domain/path actually match the selected CDN URL.
+            cookie_header = cookie_header_for_url(cookies, candidate.url)
+            if cookie_header:
+                headers["Cookie"] = cookie_header
+            candidate_path = destination.with_name(
+                f".{destination.stem}.candidate-{attempt}{destination.suffix or '.mp4'}"
+            )
+            try:
+                downloaded = downloader.fetch_to_file(
+                    candidate.url,
+                    candidate_path,
+                    resume=True,
+                    headers=headers,
+                    proxy_url=proxy_url,
+                    on_progress=on_progress,
+                )
+                if not downloaded.local_path or not Path(downloaded.local_path).is_file():
+                    continue
+                if not _file_has_video_stream(Path(downloaded.local_path)):
+                    Path(downloaded.local_path).unlink(missing_ok=True)
+                    logger.warning(
+                        "playwright_media_stream_candidate_not_video",
+                        extra={"attempt": attempt, "source": candidate.source},
+                    )
+                    continue
+                os.replace(Path(downloaded.local_path), destination)
+                size_bytes = destination.stat().st_size
+                logger.info(
+                    "playwright_media_stream_candidate_succeeded",
+                    extra={
+                        "attempt": attempt,
+                        "source": candidate.source,
+                        "watermark_free": candidate.watermark_free,
+                        "height": candidate.height,
+                        "bytes": size_bytes,
+                    },
+                )
+                return (
+                    str(destination),
+                    size_bytes,
+                    candidate.url,
+                    candidate.format_label,
+                    candidate.watermark_free,
+                )
+            except DownloadError as exc:
+                if exc.code == DownloadErrorCode.CANCELLED:
+                    raise
+                logger.warning(
+                    "playwright_media_stream_candidate_failed",
+                    extra={
+                        "attempt": attempt,
+                        "source": candidate.source,
+                        "error_code": str(exc.code),
+                    },
+                )
+
+        # Some CDN URLs require Playwright's browser-owned request context. Keep
+        # this compatibility path, but only after direct streaming candidates fail.
+        content, play_url, format_id, watermark_free = self._download_ranked_media_bytes(
+            page=page,
+            candidates=ordered,
+            user_agent=user_agent,
+            timeout_ms=timeout_ms,
+            allow_watermarked_fallback=allow_watermarked,
+            on_progress=on_progress,
+            quality_profile=quality_profile,
+        )
+        temp = destination.with_suffix(destination.suffix + ".part")
+        temp.write_bytes(content)
+        os.replace(temp, destination)
+        return str(destination), destination.stat().st_size, play_url, format_id, watermark_free
+
     def _download_ranked_media_bytes(
         self,
         *,
@@ -893,6 +1222,9 @@ class DouyinBrowserContextRegistry:
         user_agent: str,
         timeout_ms: int,
         allow_watermarked_fallback: bool | None = None,
+        on_progress: Callable[[int, int | None], None] | None = None,
+        quality_profile: str = "balanced_processing",
+        target_long_edge: int = 1920,
     ) -> tuple[bytes, str, str, bool]:
         """Download CDN bytes: prefer no-logo; watermarked only when explicitly allowed."""
         from src.core.settings import get_settings
@@ -903,7 +1235,15 @@ class DouyinBrowserContextRegistry:
                 getattr(get_settings(), "douyin_download_allow_watermarked_fallback", False)
             )
 
-        ordered = sorted(candidates, key=_candidate_sort_key, reverse=True)
+        ordered = sorted(
+            candidates,
+            key=lambda item: _candidate_sort_key(
+                item,
+                quality_profile=quality_profile,
+                target_long_edge=target_long_edge,
+            ),
+            reverse=True,
+        )
         no_logo = [item for item in ordered if item.watermark_free]
         watermarked = [item for item in ordered if not item.watermark_free]
         phases: list[tuple[str, list[RankedPlayUrl]]] = []
@@ -927,17 +1267,30 @@ class DouyinBrowserContextRegistry:
         }
         last_status: int | None = None
         attempted = 0
+        max_bytes = _configured_download_max_bytes(get_settings())
         for phase_name, phase_candidates in phases:
             for candidate in phase_candidates:
                 attempted += 1
                 play_url = candidate.url
+                if on_progress is not None:
+                    on_progress(0, None)
                 try:
                     response = page.context.request.get(play_url, headers=headers, timeout=timeout_ms)
                     status = int(getattr(response, "status", 0) or 0)
                     last_status = status
                     if status < 400:
+                        content_length = _positive_header_int(
+                            getattr(response, "headers", None),
+                            "content-length",
+                        )
+                        if content_length is not None and content_length > max_bytes:
+                            logger.warning(
+                                "playwright_media_download_candidate_too_large",
+                                extra={"attempt": attempted, "bytes": content_length},
+                            )
+                            continue
                         content = response.body()
-                        if content:
+                        if content and len(content) <= max_bytes:
                             logger.info(
                                 "playwright_media_download_candidate_succeeded",
                                 extra={
@@ -974,7 +1327,12 @@ class DouyinBrowserContextRegistry:
                         },
                     )
 
-                in_page = self._fetch_cdn_bytes_in_page(page=page, play_url=play_url, timeout_ms=timeout_ms)
+                in_page = self._fetch_cdn_bytes_in_page(
+                    page=page,
+                    play_url=play_url,
+                    timeout_ms=timeout_ms,
+                    max_bytes=max_bytes,
+                )
                 if in_page:
                     logger.info(
                         "playwright_media_download_in_page_succeeded",
@@ -1000,11 +1358,19 @@ class DouyinBrowserContextRegistry:
             f"Playwright media download HTTP {last_status or 'failed'} after {attempted} candidate(s)",
         )
 
-    def _fetch_cdn_bytes_in_page(self, *, page, play_url: str, timeout_ms: int) -> bytes | None:
+    def _fetch_cdn_bytes_in_page(
+        self,
+        *,
+        page,
+        play_url: str,
+        timeout_ms: int,
+        max_bytes: int | None = None,
+    ) -> bytes | None:
+        bounded_max = max(1, int(max_bytes or 2_000_000_000))
         try:
             payload = page.evaluate(
                 """
-                async ({ url, timeoutMs }) => {
+                async ({ url, timeoutMs, maxBytes }) => {
                   const controller = new AbortController();
                   const timeoutId = setTimeout(() => controller.abort("timeout"), timeoutMs);
                   try {
@@ -1021,7 +1387,14 @@ class DouyinBrowserContextRegistry:
                     if (!response.ok) {
                       return { ok: false, status: response.status };
                     }
+                    const declared = Number(response.headers.get("content-length") || 0);
+                    if (declared > maxBytes) {
+                      return { ok: false, status: response.status, tooLarge: true };
+                    }
                     const buffer = await response.arrayBuffer();
+                    if (buffer.byteLength > maxBytes) {
+                      return { ok: false, status: response.status, tooLarge: true };
+                    }
                     const bytes = new Uint8Array(buffer);
                     let binary = "";
                     const chunk = 0x8000;
@@ -1039,7 +1412,11 @@ class DouyinBrowserContextRegistry:
                   }
                 }
                 """,
-                {"url": play_url, "timeoutMs": max(1_000, int(timeout_ms))},
+                {
+                    "url": play_url,
+                    "timeoutMs": max(1_000, int(timeout_ms)),
+                    "maxBytes": bounded_max,
+                },
             )
         except Exception as exc:
             logger.warning(
@@ -1056,6 +1433,8 @@ class DouyinBrowserContextRegistry:
         try:
             content = base64.b64decode(encoded)
         except Exception:
+            return None
+        if len(content) > bounded_max:
             return None
         return content or None
 
@@ -2195,6 +2574,54 @@ def has_authenticated_douyin_cookies(cookies: list[dict]) -> bool:
     return bool(names.intersection(AUTHENTICATED_COOKIE_NAMES))
 
 
+def _file_has_video_stream(path: Path) -> bool:
+    binary = shutil.which("ffprobe")
+    if binary is None:
+        # DownloadService owns the fail-closed authority when ffprobe is absent;
+        # do not convert a host configuration issue into candidate exhaustion here.
+        return True
+    try:
+        completed = subprocess.run(
+            [
+                binary,
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=codec_type,width,height",
+                "-of",
+                "json",
+                str(path),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=20,
+            shell=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if completed.returncode != 0:
+        return False
+    try:
+        payload = json.loads(completed.stdout or "{}")
+    except json.JSONDecodeError:
+        return False
+    streams = payload.get("streams") if isinstance(payload, dict) else None
+    if not isinstance(streams, list):
+        return False
+    for stream in streams:
+        if not isinstance(stream, dict) or stream.get("codec_type") != "video":
+            continue
+        try:
+            if int(stream.get("width") or 0) > 0 and int(stream.get("height") or 0) > 0:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
 def cookie_header_from_playwright_cookies(cookies: list[dict]) -> str:
     pairs: list[tuple[str, str]] = []
     for cookie in cookies:
@@ -2207,6 +2634,68 @@ def cookie_header_from_playwright_cookies(cookies: list[dict]) -> str:
             continue
         pairs.append((name, value))
     return "; ".join(f"{name}={value}" for name, value in sorted(pairs))
+
+
+def cookie_header_for_url(cookies: list[dict], url: str) -> str:
+    """Build a cookie header using normal domain/path matching for one URL.
+
+    The older helper intentionally returns all Douyin cookies for browser
+    bootstrap.  Media CDN transfers need stricter matching so a session cookie
+    is never sent to an unrelated host.
+    """
+    parsed = urlparse((url or "").strip())
+    host = (parsed.hostname or "").lower().rstrip(".")
+    path = parsed.path or "/"
+    secure = parsed.scheme.lower() == "https"
+    pairs: list[tuple[str, str]] = []
+    for cookie in cookies:
+        domain = str(cookie.get("domain", "")).strip().lower().lstrip(".").rstrip(".")
+        name = str(cookie.get("name", "")).strip()
+        value = str(cookie.get("value", ""))
+        cookie_path = str(cookie.get("path", "/") or "/")
+        if not host or not domain or not name or not value:
+            continue
+        if not (host == domain or host.endswith(f".{domain}")):
+            continue
+        normalized_cookie_path = cookie_path if cookie_path.startswith("/") else f"/{cookie_path}"
+        if normalized_cookie_path != "/":
+            if not path.startswith(normalized_cookie_path):
+                continue
+            if not (
+                path == normalized_cookie_path
+                or normalized_cookie_path.endswith("/")
+                or path[len(normalized_cookie_path) :].startswith("/")
+            ):
+                continue
+        if cookie.get("secure") and not secure:
+            continue
+        pairs.append((name, value))
+    return "; ".join(f"{name}={value}" for name, value in sorted(pairs))
+
+
+def _positive_header_int(headers: object, name: str) -> int | None:
+    if headers is None:
+        return None
+    try:
+        raw = headers.get(name)  # type: ignore[attr-defined]
+    except Exception:
+        return None
+    try:
+        value = int(str(raw or "").strip())
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _configured_download_max_bytes(settings: object) -> int:
+    raw = getattr(settings, "douyin_download_max_bytes", 2_000_000_000)
+    if isinstance(raw, bool) or not isinstance(raw, (int, float, str)):
+        return 2_000_000_000
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return 2_000_000_000
+    return value if value > 0 else 2_000_000_000
 
 
 def ensure_windows_playwright_event_loop_policy() -> None:

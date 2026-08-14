@@ -122,6 +122,97 @@ class AwemePlayUrlExtractionTests(unittest.TestCase):
         self.assertIsNone(select_preferred_play_url([]))
         self.assertIsNone(select_preferred_play_candidate([]))
 
+    def test_source_master_prefers_4k_while_balanced_keeps_configured_target(self) -> None:
+        payload = {
+            "video": {
+                "bit_rate": [
+                    {
+                        "bit_rate": 8_000_000,
+                        "play_addr": {
+                            "url_list": ["https://cdn.example/target.mp4"],
+                            "height": 1080,
+                            "width": 1920,
+                        },
+                    },
+                    {
+                        "bit_rate": 20_000_000,
+                        "play_addr": {
+                            "url_list": ["https://cdn.example/master.mp4"],
+                            "height": 2160,
+                            "width": 3840,
+                        },
+                    },
+                ]
+            }
+        }
+        candidates = extract_play_urls_from_aweme_payload(payload)
+        balanced = select_preferred_play_candidate(candidates, target_long_edge=1920)
+        master = select_preferred_play_candidate(candidates, quality_profile="source_master")
+        assert balanced is not None and master is not None
+        self.assertEqual(balanced.url, "https://cdn.example/target.mp4")
+        self.assertEqual(master.url, "https://cdn.example/master.mp4")
+
+    def test_prefers_render_compatible_1080_h264_over_4k_hevc(self) -> None:
+        payload = {
+            "video": {
+                "bit_rate": [
+                    {
+                        "bit_rate": 20_000_000,
+                        "is_bytevc1": 1,
+                        "play_addr": {
+                            "url_list": ["https://cdn.example/4k-hevc.mp4"],
+                            "height": 2160,
+                            "width": 3840,
+                        },
+                    },
+                    {
+                        "bit_rate": 8_000_000,
+                        "is_bytevc1": 0,
+                        "codec": "h264",
+                        "play_addr": {
+                            "url_list": ["https://cdn.example/1080-h264.mp4"],
+                            "height": 1080,
+                            "width": 1920,
+                        },
+                    },
+                ]
+            }
+        }
+        candidate = select_preferred_play_candidate(extract_play_urls_from_aweme_payload(payload))
+        self.assertIsNotNone(candidate)
+        assert candidate is not None
+        self.assertEqual(candidate.url, "https://cdn.example/1080-h264.mp4")
+
+    def test_portrait_1080x1920_outranks_720x1280(self) -> None:
+        payload = {
+            "video": {
+                "bit_rate": [
+                    {
+                        "bit_rate": 3_000_000,
+                        "codec": "h264",
+                        "play_addr": {
+                            "url_list": ["https://cdn.example/portrait-720.mp4"],
+                            "height": 1280,
+                            "width": 720,
+                        },
+                    },
+                    {
+                        "bit_rate": 6_000_000,
+                        "codec": "h264",
+                        "play_addr": {
+                            "url_list": ["https://cdn.example/portrait-1080.mp4"],
+                            "height": 1920,
+                            "width": 1080,
+                        },
+                    },
+                ]
+            }
+        }
+        candidate = select_preferred_play_candidate(extract_play_urls_from_aweme_payload(payload))
+        self.assertIsNotNone(candidate)
+        assert candidate is not None
+        self.assertEqual(candidate.url, "https://cdn.example/portrait-1080.mp4")
+
 
 class PrimaryFetcherCookieStoreFirstTests(unittest.TestCase):
     def test_douyin_page_uses_yt_dlp_before_playwright_when_fallback_allowed(self) -> None:

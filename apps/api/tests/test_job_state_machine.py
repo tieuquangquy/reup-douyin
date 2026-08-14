@@ -41,7 +41,7 @@ class JobStateMachineTests(unittest.TestCase):
     def test_retry_cancel_resume_helpers(self) -> None:
         self.assertTrue(can_retry_job(JobStatus.FAILED, attempts=1, max_attempts=3))
         self.assertTrue(can_retry_job(JobStatus.RETRYABLE, attempts=1, max_attempts=3))
-        self.assertFalse(can_retry_job(JobStatus.FAILED, attempts=3, max_attempts=3))
+        self.assertTrue(can_retry_job(JobStatus.FAILED, attempts=3, max_attempts=3))
         self.assertFalse(can_retry_job(JobStatus.FAILED, attempts=1, max_attempts=3, retryable=False))
 
         self.assertTrue(can_cancel_job(JobStatus.RUNNING))
@@ -58,4 +58,3 @@ class JobStateMachineTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

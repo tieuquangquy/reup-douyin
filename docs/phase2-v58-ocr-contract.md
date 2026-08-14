@@ -1,5 +1,9 @@
 # Phase 2 v58 OCR contract
 
+> The detector/geometry foundation remains valid, but exact-string content
+> grouping has been superseded by the Semantic Hard-sub Cue Authority. See
+> [`semantic-hardsub-cue-authority.md`](./semantic-hardsub-cue-authority.md).
+
 **Status:** OCR checkpoint approved on the local candidate; translation is next.  
 **Input authority:** read-only Phase 1 `master_timeline.json` + SHA-256.  
 **Geometry policy:** Phase 2 must not modify `box_coords`, `start_frame`, or `end_frame`.  

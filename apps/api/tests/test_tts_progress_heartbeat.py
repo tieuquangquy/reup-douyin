@@ -11,7 +11,13 @@ from uuid import uuid4
 
 from src.tts_pipeline.errors import TtsPipelineError
 from src.tts_pipeline.services.tts_service import TtsPipelineService
-from src.tts_pipeline.types import TtsProviderInput, TtsProviderOutput, TtsRequest, VoiceConfig
+from src.tts_pipeline.types import (
+    TranslationInputSegment,
+    TtsProviderInput,
+    TtsProviderOutput,
+    TtsRequest,
+    VoiceConfig,
+)
 
 
 class _FakeProvider:
@@ -40,21 +46,29 @@ class TtsProgressHeartbeatTests(unittest.TestCase):
         source_id = uuid4()
         workspace_id = uuid4()
         segments = [
-            SimpleNamespace(
+            TranslationInputSegment(
                 translation_segment_id=uuid4(),
+                transcript_segment_id=uuid4(),
+                source_video_id=source_id,
                 segment_index=0,
                 translated_text="Một",
                 duration_budget_ms=500,
                 start_ms=0,
                 end_ms=500,
+                translation_version=1,
+                translation_preset="literal_safe",
             ),
-            SimpleNamespace(
+            TranslationInputSegment(
                 translation_segment_id=uuid4(),
+                transcript_segment_id=uuid4(),
+                source_video_id=source_id,
                 segment_index=1,
                 translated_text="Hai",
                 duration_budget_ms=500,
                 start_ms=500,
                 end_ms=1000,
+                translation_version=1,
+                translation_preset="literal_safe",
             ),
         ]
         progress: list[tuple[str, int | None]] = []
@@ -78,8 +92,22 @@ class TtsProgressHeartbeatTests(unittest.TestCase):
             patch.object(service, "_mark_previous_outputs_non_current"),
             patch.object(service, "_persist_asset", return_value=MagicMock()),
             patch.object(service.db, "rollback"),
+            patch(
+                "src.tts_pipeline.services.tts_service.bind_active_tts_profile_authority",
+                return_value={
+                    "schema_version": "tts_active_profile_authority_v1",
+                    "provider": "fake",
+                    "model_id": "",
+                    "voice_id": "v",
+                    "config_fingerprint": "a" * 64,
+                },
+            ),
         ):
-            load_sv.return_value = SimpleNamespace(id=source_id, workspace_id=workspace_id)
+            load_sv.return_value = SimpleNamespace(
+                id=source_id,
+                workspace_id=workspace_id,
+                duration_seconds=1.0,
+            )
             resolver_cls.return_value.resolve.return_value = segments
             with self.assertRaises(TtsPipelineError):
                 service.run_pipeline(
@@ -87,8 +115,8 @@ class TtsProgressHeartbeatTests(unittest.TestCase):
                     on_progress=on_progress,
                 )
 
-        self.assertEqual(progress[0], ("synthesize_segment", 0))
-        self.assertEqual(progress[1], ("synthesize_segment", 45))
+        self.assertEqual(progress[0], ("repair_dialogue_timeline", 1))
+        self.assertEqual(progress[1], ("synthesize_segment|1|1", 0))
 
 
 if __name__ == "__main__":

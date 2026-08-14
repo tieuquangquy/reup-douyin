@@ -21,6 +21,7 @@ from src.core.settings import get_settings
 from src.db.session import get_session_factory
 from src.analytics.services.publication_metric_cadence_service import PublicationMetricCadenceService
 from src.services.artifact_retention import sweep_reclaimable_artifacts
+from src.downloaders.download_staging import cleanup_stale_staging
 from src.services.job_heartbeat import JobHeartbeat
 from src.services.job_runner import JobRunner, StepHandlerRegistry
 
@@ -140,6 +141,14 @@ class LocalPollingWorker:
             return
         self._last_artifact_sweep_at = now
         try:
+            staging_freed = cleanup_stale_staging(
+                ttl_seconds=float(getattr(get_settings(), "douyin_download_staging_ttl_hours", 24.0) or 24.0) * 3600
+            )
+            if staging_freed:
+                logger.info(
+                    "worker_reclaimed_download_staging",
+                    extra={"worker_id": self.worker_id, "bytes_reclaimed": staging_freed},
+                )
             with get_session_factory()() as db:
                 freed = sweep_reclaimable_artifacts(db)
             if freed:
@@ -184,10 +193,15 @@ class LocalPollingWorker:
                 extra={"worker_id": self.worker_id},
             )
 
-    def _release_locks_after_failure(self) -> None:
+    def _release_locks_after_failure(self, exc: Exception) -> None:
         try:
             with get_session_factory()() as db:
-                released = JobRunner(db, handlers=self.handlers).release_orphaned_locks(self.worker_id)
+                released = JobRunner(
+                    db, handlers=self.handlers
+                ).release_failed_execution_locks(
+                    self.worker_id,
+                    error_type=type(exc).__name__,
+                )
             if released:
                 logger.warning(
                     "worker_released_locks_after_failure",
@@ -246,12 +260,12 @@ class LocalPollingWorker:
                 self.maybe_sweep_artifacts()
                 self.maybe_dispatch_metric_schedules()
                 did_work = self.run_once(message)
-            except Exception:
+            except Exception as exc:
                 logger.exception("worker_run_once_failed", extra={"worker_id": self.worker_id})
                 did_work = False
                 # The job this worker was executing is still RUNNING in the database.
-                # Requeue it now so a single crash cannot block the download slot.
-                self._release_locks_after_failure()
+                # Requeue it now without claiming that the still-live worker restarted.
+                self._release_locks_after_failure(exc)
             if not did_work and self.broker is None:
                 time.sleep(self.poll_interval_seconds)
         logger.info("worker_stopped", extra={"worker_id": self.worker_id})

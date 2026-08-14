@@ -50,6 +50,13 @@ def is_plausible_text_cover_segment(seg: OverlaySegment) -> bool:
     height = float(getattr(seg, "height", 0.0) or 0.0)
     if width <= 0.0 or height <= 0.0:
         return False
+    # Finalized subtitle/title covers intentionally span most of the source
+    # line. They already crossed OCR geometry/text gates, so the compact
+    # UI-chip area cap must not silently skip legitimate hard-subs.
+    if kind == "hardsub":
+        return width <= 0.98 and height <= 0.18
+    if kind == "title":
+        return width <= 0.92 and height <= 0.20 and (width * height) <= 0.16
     if width > MAX_TEXT_COVER_WIDTH:
         return False
     if (width * height) > MAX_TEXT_COVER_AREA:

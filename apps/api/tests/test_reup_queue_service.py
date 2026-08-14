@@ -35,6 +35,9 @@ class FakeDb:
     def add(self, item):
         self.added.append(item)
 
+    def get(self, _model, _job_id):
+        return None
+
     def commit(self):
         self.committed = True
 
@@ -121,7 +124,7 @@ class ReupQueueServiceTests(unittest.TestCase):
         analyze_job_id = uuid4()
 
         class _FakeAnalysis:
-            def create_analysis_job(self, request, *, idempotency_key=None):
+            def create_analysis_job(self, request, *, idempotency_key=None, commit=True):
                 return SimpleNamespace(id=analyze_job_id, job_type="ANALYZE_AUDIO")
 
         updated = ReupQueueService(fake_db, audio_analysis_service=_FakeAnalysis()).apply_action(

@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from src.main import app
 from src.api.routes.capture_inbox import get_capture_inbox_service
 from src.api.routes.douyin_extension import get_douyin_extension_capture_service
+from src.core.auth import AuthenticatedPrincipal, get_current_principal
 from src.enums import CapturedItemStatus
 from src.schemas.capture_inbox import CaptureSessionCountsResponse
 
@@ -58,6 +59,15 @@ def _full_modal_harvest_payload(**item_overrides):
 
 
 class DouyinExtensionRouteTests(unittest.TestCase):
+    def setUp(self) -> None:
+        principal = AuthenticatedPrincipal(
+            subject="operator@local.test",
+            workspace_id=uuid4(),
+            roles=("operator",),
+            audience="reup-douyin-operator",
+        )
+        app.dependency_overrides[get_current_principal] = lambda: principal
+
     def tearDown(self) -> None:
         app.dependency_overrides.clear()
 
@@ -622,10 +632,19 @@ class DouyinExtensionRouteTests(unittest.TestCase):
         recorded = {}
 
         class StubService:
-            def verify_items_by_external_ids(self, *, aweme_ids, source_video_external_ids, capture_session_id=None, limit=100):
+            def verify_items_by_external_ids(
+                self,
+                *,
+                aweme_ids,
+                source_video_external_ids,
+                capture_session_id=None,
+                profile_url=None,
+                limit=100,
+            ):
                 recorded["aweme_ids"] = aweme_ids
                 recorded["source_video_external_ids"] = source_video_external_ids
                 recorded["capture_session_id"] = capture_session_id
+                recorded["profile_url"] = profile_url
                 recorded["limit"] = limit
                 return [
                     SimpleNamespace(

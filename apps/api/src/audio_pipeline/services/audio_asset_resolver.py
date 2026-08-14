@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from src.audio_pipeline.errors import AudioAnalysisError, AudioAnalysisErrorCode
 from src.audio_pipeline.services.asset_selection import choose_audio_input_asset
 from src.audio_pipeline.types import ResolvedAudioInput
-from src.enums import MediaAssetStatus
+from src.enums import MediaAssetStatus, MediaAssetType
 from src.models.ingestion import SourceVideo
 from src.models.media import MediaAsset
 from src.storage.base import StorageBackend
@@ -36,6 +36,16 @@ class AudioAssetResolver:
                 f"Asset file is missing from storage: {asset.storage_key}",
             )
 
+        checksum = (asset.checksum_sha256 or "").strip() or None
+        if checksum is None:
+            # Legacy assets may predate checksums.  Hash once at the storage
+            # boundary so downstream cache keys still describe real bytes.
+            metadata = self.storage.metadata(asset.storage_key)
+            checksum = metadata.checksum_sha256
+            if checksum:
+                asset.checksum_sha256 = checksum
+                self.db.flush()
+
         return source_video, ResolvedAudioInput(
             source_video_id=source_video.id,
             input_asset_id=asset.id,
@@ -43,6 +53,8 @@ class AudioAssetResolver:
             storage_key=asset.storage_key,
             source_video_duration_seconds=source_video.duration_seconds,
             source_caption=source_video.caption,
+            source_checksum_sha256=checksum,
+            canonicalized=asset.asset_type == MediaAssetType.SOURCE_AUDIO_EXTRACT,
         )
 
     def _current_assets(self, source_video_id: UUID) -> list[MediaAsset]:

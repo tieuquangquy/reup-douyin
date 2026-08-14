@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 
 from src.core.settings import get_settings
-from src.downloaders.errors import DownloadErrorCode
+from src.downloaders.errors import DownloadErrorCode, DownloadFailureReason
 
 
 class DownloadFailureClass(StrEnum):
@@ -33,6 +33,21 @@ _TERMINAL_MARKERS = (
     "no download url",
     "missing aweme",
     "asset content is empty",
+    "ffprobe is unavailable",
+    "cannot be validated",
+    "media_probe_unavailable",
+    "no usable video stream",
+    "non-video content type",
+    "playlist requires",
+    "manifest requires",
+    "hls/dash manifest",
+    "exceeds configured limit",
+    "unsupported media",
+    "photo/slideshow",
+    "selected douyin account is missing",
+    "invalid douyin account binding",
+    "http 404",
+    "http 410",
 )
 
 _TRANSIENT_MARKERS = (
@@ -53,9 +68,31 @@ _TRANSIENT_MARKERS = (
 )
 
 
-def classify_download_failure(error_code: str | None, error_message: str | None) -> DownloadFailureClass:
+def classify_download_failure(
+    error_code: str | None,
+    error_message: str | None,
+    *,
+    reason: str | None = None,
+) -> DownloadFailureClass:
     code = str(error_code or "").strip().lower()
     message = str(error_message or "").strip().lower()
+    structured_reason = str(reason or "").strip().lower()
+
+    if structured_reason == DownloadFailureReason.AUTH_EXPIRED.value:
+        return DownloadFailureClass.AUTH
+    if structured_reason in {
+        DownloadFailureReason.NO_CLEAN_STREAM.value,
+        DownloadFailureReason.UNSUPPORTED_POST_TYPE.value,
+        DownloadFailureReason.MEDIA_CORRUPT.value,
+    }:
+        return DownloadFailureClass.TERMINAL
+    if structured_reason in {
+        DownloadFailureReason.SIGNED_URL_EXPIRED.value,
+        DownloadFailureReason.EXTRACTOR_DRIFT.value,
+        DownloadFailureReason.NETWORK_TRANSIENT.value,
+        DownloadFailureReason.CHALLENGE_BLOCKED.value,
+    }:
+        return DownloadFailureClass.TRANSIENT
 
     if code in {
         DownloadErrorCode.MISSING_SOURCE_URL,

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect } from "react";
+import type { ReactNode } from "react";
 import { useT } from "../../lib/i18n";
 
 type NoticeTone = "success" | "cancelled" | "error";
@@ -13,7 +14,7 @@ export const TRANSCRIPT_CANCELLED_NOTICE_AUTO_DISMISS_MS = 6000;
 
 type Props = {
   tone: NoticeTone;
-  children: string;
+  children: ReactNode;
   onDismiss?: () => void;
   autoDismissMs?: number;
 };
@@ -64,7 +65,7 @@ export function TranscriptInlineNotice({ tone, children, onDismiss, autoDismissM
       <span className="transcript-inline-notice__icon" aria-hidden="true">
         <NoticeIcon tone={tone} />
       </span>
-      <p className="transcript-inline-notice__message">{children}</p>
+      <div className="transcript-inline-notice__message">{children}</div>
       {onDismiss ? (
         <button
           type="button"

@@ -10,6 +10,7 @@ from src.tts_pipeline.runtime_snapshot import (
     detect_already_satisfied,
     merge_runtime,
     normalize_runtime,
+    scope_runtime_to_provider,
 )
 
 
@@ -40,6 +41,15 @@ class TtsRuntimeSnapshotTests(unittest.TestCase):
 
     def test_normalize_empty(self) -> None:
         self.assertEqual(normalize_runtime(None), {"last_install": None, "last_probe": None})
+
+    def test_scope_runtime_drops_probe_from_another_provider(self) -> None:
+        runtime = {
+            "last_install": {"ok": True, "package": "google-auth"},
+            "last_probe": {"ok": True, "provider": "google", "catalog": {"voices": []}},
+        }
+        scoped = scope_runtime_to_provider(runtime, "google_gemini")
+        self.assertIsNone(scoped["last_probe"])
+        self.assertEqual(scoped["last_install"]["package"], "google-auth")
 
     def test_build_last_install_flags_reinstall(self) -> None:
         row = build_last_install(

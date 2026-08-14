@@ -45,6 +45,18 @@ _TERMINAL_MARKERS = (
     "invalid ",
     "no audio stream",
     "no transcript",
+    "residual matches existing phase-1 geometry",
+    "residual geometry overlap target",
+    "requires a translation suggestion",
+    "residual ocr authority changed",
+    "residual translation input changed",
+    "residual ocr candidate drift detected",
+    "residual visual override authority is stale",
+    "residual anchor is not confirmed in source ocr",
+    "residual source ocr window is ambiguous",
+    "source confirmation failed",
+    "is blocked before phase 3",
+    "expressive_feature_not_applied",
 )
 
 _TRANSIENT_MARKERS = (
@@ -86,6 +98,11 @@ _TERMINAL_CODE_MARKERS = (
 )
 
 _TERMINAL_PROVIDER_MARKERS = (
+    "http_402",
+    "http 402",
+    "payment required",
+    "insufficient credit",
+    "insufficient balance",
     "http_401",
     "http 401",
     "http_403",
@@ -175,6 +192,21 @@ def pipeline_failure_operator_message(
 ) -> str:
     base = (error_message or "Pipeline step failed").strip()
     if failure_class == PipelineFailureClass.TERMINAL:
+        provider_billing = any(
+            marker in base.lower()
+            for marker in (
+                "http_402",
+                "http 402",
+                "payment required",
+                "insufficient credit",
+                "insufficient balance",
+            )
+        )
+        if provider_billing:
+            return (
+                f"{base} [terminal · provider billing/credit required]. "
+                "Update the active provider balance, then use Retry; automatic retry is disabled."
+            )
         return f"{base} [terminal · needs manual check]. Retrying will not help — inspect the item's inputs."
     if will_retry:
         return f"{base} [transient · auto-retry scheduled]."

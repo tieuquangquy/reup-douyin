@@ -19,7 +19,10 @@ from scripts.rebind_phase3_approvals_after_residual_remediation import (
     rebind_approvals,
     stage_unapproved_placeholders,
 )
-from scripts.run_phase2_only import _remediation_approvals
+from scripts.run_phase2_only import (
+    _apply_operator_approved_residual_text_authority,
+    _remediation_approvals,
+)
 
 
 def _carry() -> dict:
@@ -41,6 +44,60 @@ def _carry() -> dict:
 
 
 class ResidualRemediationMaterializationTests(unittest.TestCase):
+    def test_operator_approved_additive_text_overrides_reocr_and_asr_drift(self) -> None:
+        approved = "我整理出来76款"
+        rows = _apply_operator_approved_residual_text_authority(
+            [
+                {
+                    "text_id": "p2r_225ce684642a",
+                    "ocr_text_raw": "我整理出来了六款",
+                    "semantic_hardsub": {
+                        "text_authority": "我整理出来了六款",
+                        "alignment": {"score": 0.91},
+                    },
+                }
+            ],
+            {
+                "p2r_225ce684642a": {
+                    "remediation_id": "p2r_225ce684642a",
+                    "occurrence": {"text_id": "p2r_225ce684642a"},
+                    "ocr_text_approved": approved,
+                    "operator_review": {"proposal_sha256": "a" * 64},
+                }
+            },
+        )
+
+        semantic = rows[0]["semantic_hardsub"]
+        self.assertEqual(semantic["canonical_text_authority"], approved)
+        self.assertEqual(semantic["text_authority"], approved)
+        self.assertEqual(semantic["ocr_text_observed"], "我整理出来了六款")
+        self.assertEqual(
+            semantic["operator_approved_text_authority"]["proposal_sha256"],
+            "a" * 64,
+        )
+
+    def test_geometry_only_override_does_not_replace_existing_text_authority(self) -> None:
+        rows = _apply_operator_approved_residual_text_authority(
+            [
+                {
+                    "text_id": "sub_08",
+                    "ocr_text_raw": "source candidate",
+                    "semantic_hardsub": {"text_authority": "existing authority"},
+                }
+            ],
+            {
+                "sub_08": {
+                    "geometry_override": {"target_text_id": "sub_08"},
+                    "ocr_text_approved": "operator text",
+                }
+            },
+        )
+
+        self.assertEqual(
+            rows[0]["semantic_hardsub"]["text_authority"],
+            "existing authority",
+        )
+
     def test_cumulative_generation_preserves_immutable_parent(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -191,8 +248,10 @@ class ResidualRemediationMaterializationTests(unittest.TestCase):
                     "ocr_text_approved": "170克",
                     "vi_text_approved": "170 g",
                     "operator_review": {
+                        "decision": "APPROVE",
                         "reviewer": "operator",
                         "reviewed_at": "2026-07-28T01:00:00+00:00",
+                        "proposal_sha256": "a" * 64,
                     },
                 }
             },
@@ -341,8 +400,10 @@ class ResidualRemediationMaterializationTests(unittest.TestCase):
                     "vi_text_approved": "kcal/kJ",
                     "accepted_candidate_signatures": [],
                     "operator_review": {
+                        "decision": "APPROVE",
                         "reviewer": "operator",
                         "reviewed_at": "2026-07-28T01:00:00+00:00",
+                        "proposal_sha256": "a" * 64,
                     },
                     "visual_override": {
                         "policy_version": "phase2_operator_visual_override_v1",
@@ -371,6 +432,71 @@ class ResidualRemediationMaterializationTests(unittest.TestCase):
                 None,
             )
 
+    def test_hash_bound_visual_override_accepts_empty_supplemental_candidate(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source.jpg"
+            crop = root / "crop.jpg"
+            source.write_bytes(b"source")
+            crop.write_bytes(b"crop")
+            approved = "耐看气质妆"
+            contract = {
+                "track_enrichments": [
+                    {"text_id": "p2r_empty", "content_id": "ocr_content_001"}
+                ],
+                "content_objects": [
+                    {
+                        "content_id": "ocr_content_001",
+                        "ocr_text_candidate": "",
+                        "review_input_sha256": "d" * 64,
+                    }
+                ],
+            }
+            authority = {
+                "p2r_empty": {
+                    "ocr_text_approved": approved,
+                    "vi_text_approved": "Trang điểm khí chất",
+                    "accepted_candidate_signatures": [approved],
+                    "operator_review": {
+                        "decision": "APPROVE",
+                        "reviewer": "operator",
+                        "reviewed_at": "2026-08-11T01:00:00+00:00",
+                        "proposal_sha256": "a" * 64,
+                    },
+                    "visual_override": {
+                        "policy_version": "phase2_operator_visual_override_v1",
+                        "batch_decision_proposal_sha256": "a" * 64,
+                        "cluster_evidence_sha256": "b" * 64,
+                        "approved_source_text_sha256": hashlib.sha256(
+                            approved.encode("utf-8")
+                        ).hexdigest(),
+                        "source_frame_ref": {
+                            "path": source.name,
+                            "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                        },
+                        "crop_ref": {
+                            "path": crop.name,
+                            "sha256": hashlib.sha256(crop.read_bytes()).hexdigest(),
+                        },
+                    },
+                }
+            }
+
+            approvals = _remediation_approvals(contract, authority, root=root)
+
+            self.assertEqual(approvals["ocr_content_001"]["decision"], "EDIT")
+            self.assertEqual(
+                approvals["ocr_content_001"]["ocr_text_approved"], approved
+            )
+
+            authority["p2r_empty"]["visual_override"]["crop_ref"]["sha256"] = (
+                "0" * 64
+            )
+            with self.assertRaisesRegex(
+                RuntimeError, "Residual OCR candidate drift detected"
+            ):
+                _remediation_approvals(contract, authority, root=root)
+
     def test_visual_override_rejects_candidate_with_different_numeric_shape(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -397,8 +523,10 @@ class ResidualRemediationMaterializationTests(unittest.TestCase):
                     "vi_text_approved": "Cơm gà",
                     "accepted_candidate_signatures": [],
                     "operator_review": {
+                        "decision": "APPROVE",
                         "reviewer": "operator",
                         "reviewed_at": "2026-07-28T01:00:00+00:00",
+                        "proposal_sha256": "a" * 64,
                     },
                     "visual_override": {
                         "policy_version": "phase2_operator_visual_override_v1",
@@ -448,8 +576,10 @@ class ResidualRemediationMaterializationTests(unittest.TestCase):
                     "vi_text_approved": "Bữa phụ sáng",
                     "accepted_candidate_signatures": ["加", approved],
                     "operator_review": {
+                        "decision": "APPROVE",
                         "reviewer": "operator",
                         "reviewed_at": "2026-07-29T13:33:21+00:00",
+                        "proposal_sha256": "a" * 64,
                     },
                     "visual_override": {
                         "policy_version": "phase2_operator_visual_override_v1",
@@ -698,6 +828,117 @@ class Phase3AdditiveApprovalRebindTests(unittest.TestCase):
             self.assertEqual(audit["counts"]["remediation_approved"], 2)
             self.assertEqual(audit["counts"]["remediation_content_groups"], 1)
             self.assertEqual(audit["counts"]["reused_existing_content_groups"], 0)
+
+    def test_rebind_duplicate_text_occurrences_to_distinct_geometry_groups(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._fixture(root)
+            remediation_path = root / "phase2_residual_remediation.json"
+            remediation = json.loads(remediation_path.read_text(encoding="utf-8"))
+            remediation.pop("remediation_sha256")
+            remediation["approved_occurrences"] = [
+                {
+                    "remediation_id": f"p2r_same_{index}",
+                    "occurrence": {"text_id": f"p2r_same_{index}"},
+                    "ocr_text_approved": "same zh",
+                    "vi_text_approved": "same vi",
+                    "localization": {"mode": "translation_review_required"},
+                    "operator_review": {
+                        "decision": "APPROVE",
+                        "reviewer": "operator",
+                        "reviewed_at": "2026-07-29T00:00:00+00:00",
+                    },
+                }
+                for index in range(2)
+            ]
+            remediation["remediation_sha256"] = remediation_hash(remediation)
+            remediation_path.write_text(json.dumps(remediation), encoding="utf-8")
+            queue_path = root / "phase3_review_queue.json"
+            queue = json.loads(queue_path.read_text(encoding="utf-8"))
+            queue["content_objects"].extend(
+                [
+                    {
+                        "content_id": f"ocr_content_00{index + 2}",
+                        "geometry_refs": [f"p2r_same_{index}"],
+                        "zh_approved": "same zh",
+                        "vi_text_candidate": "same vi",
+                        "review_input_sha256": str(index + 1) * 64,
+                    }
+                    for index in range(2)
+                ]
+            )
+            queue_path.write_text(json.dumps(queue), encoding="utf-8")
+
+            audit = rebind_approvals(root)
+            approvals = json.loads(
+                (root / "phase3_approvals.json").read_text(encoding="utf-8")
+            )
+
+            self.assertEqual(audit["counts"]["remediation_approved"], 2)
+            additive_ids = {
+                row["content_id"]
+                for row in approvals["approvals"]
+                if row["content_id"] != "ocr_content_001"
+            }
+            self.assertEqual(
+                additive_ids,
+                {"ocr_content_002", "ocr_content_003"},
+            )
+
+    def test_rebind_excludes_cover_only_transition_from_translation(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._fixture(root)
+            remediation_path = root / "phase2_residual_remediation.json"
+            remediation = json.loads(remediation_path.read_text(encoding="utf-8"))
+            remediation.pop("remediation_sha256")
+            remediation["approved_occurrences"] = [
+                {
+                    "remediation_id": "p2r_transition",
+                    "occurrence": {"text_id": "p2r_transition"},
+                    "ocr_text_approved": "福",
+                    "vi_text_approved": "Phúc",
+                    "localization": {"mode": "translation_review_required"},
+                    "operator_review": {
+                        "decision": "APPROVE",
+                        "reviewer": "operator",
+                        "reviewed_at": "2026-07-29T00:00:00+00:00",
+                    },
+                }
+            ]
+            remediation["remediation_sha256"] = remediation_hash(remediation)
+            remediation_path.write_text(json.dumps(remediation), encoding="utf-8")
+            handoff_path = root / "phase2_handoff.json"
+            handoff_path.write_text(
+                json.dumps(
+                    {
+                        "status": "READY_FOR_PHASE3",
+                        "cover_only_items": [
+                            {
+                                "geometry_refs": ["p2r_transition"],
+                                "reason": "semantic_transition_noise",
+                                "semantic_hardsub": {
+                                    "classification": "TRANSITION_NOISE",
+                                    "action": "COVER_ONLY_TRANSITION",
+                                },
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            queue_path = root / "phase3_review_queue.json"
+            queue = json.loads(queue_path.read_text(encoding="utf-8"))
+            queue["phase2_handoff_ref"] = {
+                "path": handoff_path.name,
+                "sha256": hashlib.sha256(handoff_path.read_bytes()).hexdigest(),
+            }
+            queue_path.write_text(json.dumps(queue), encoding="utf-8")
+
+            audit = rebind_approvals(root)
+
+            self.assertEqual(audit["counts"]["cover_only_geometry_rows"], 1)
+            self.assertEqual(audit["counts"]["rebound"], 1)
 
     def test_rebind_reuses_existing_approved_content_for_new_geometry(self) -> None:
         with TemporaryDirectory() as tmp:

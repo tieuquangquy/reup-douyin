@@ -8,6 +8,11 @@ import unittest
 from dataclasses import dataclass
 
 from src.audio_pipeline.services.translation_draft_builder import TranslationDraftBuilder
+from src.audio_pipeline.translation_llm import (
+    DurationConstrainedTranslationProvider,
+    FixedLlmClient,
+    OpenAiCompatibleHttpClient,
+)
 from src.audio_pipeline.types import TranscriptDraftSegment, TranslationDraftSegment, TranslationPreset
 
 
@@ -63,6 +68,79 @@ def _beats(n: int) -> list[TranscriptDraftSegment]:
 
 
 class TranslationParallelTests(unittest.TestCase):
+    def test_openai_compatible_timeout_is_normalized_without_endpoint_details(self) -> None:
+        def timeout_open(_request, timeout=None):
+            del timeout
+            raise TimeoutError("The read operation timed out")
+
+        client = OpenAiCompatibleHttpClient(
+            api_key="test-secret",
+            model="test-model",
+            base_url="https://provider.invalid/v1",
+            opener=timeout_open,
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"^openai_compatible_timeout:TimeoutError$",
+        ):
+            client.complete("translate")
+
+    def test_batch_wraps_non_runtime_provider_failure_as_unavailable(self) -> None:
+        class TimeoutClient:
+            provider_name = "timeout_client"
+
+            def complete(self, _prompt: str) -> str:
+                raise TimeoutError("read timed out")
+
+        provider = DurationConstrainedTranslationProvider(
+            primary=TimeoutClient(),
+            fallback=None,
+            allow_machine_translate_recovery=False,
+            max_rewrite_rounds=0,
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"^translation_provider_unavailable:read timed out$",
+        ):
+            provider.translate_batch(
+                [
+                    {
+                        "id": "0",
+                        "source_text": "source",
+                        "duration_budget_seconds": 1.0,
+                        "source_confidence": 0.9,
+                    }
+                ],
+                preset=TranslationPreset.LITERAL_SAFE,
+            )
+
+    def test_duration_provider_batches_beats_in_one_llm_call(self) -> None:
+        client = FixedLlmClient(
+            responses=[
+                '[{"id":"0","vi":"Câu một"},{"id":"1","vi":"Câu hai"},'
+                '{"id":"2","vi":"Câu ba"}]'
+            ]
+        )
+        provider = DurationConstrainedTranslationProvider(
+            primary=client,
+            allow_machine_translate_recovery=False,
+            max_rewrite_rounds=0,
+        )
+
+        rows = TranslationDraftBuilder(provider).build(
+            _beats(3),
+            preset=TranslationPreset.LITERAL_SAFE,
+            batch_size=8,
+        )
+
+        self.assertEqual(client.call_count, 1)
+        self.assertEqual([row.translated_text for row in rows], ["Câu một", "Câu hai", "Câu ba"])
+        self.assertTrue(
+            all(row.metadata["translation_batch"]["status"] == "batch_hit" for row in rows)
+        )
+
     def test_parallel_build_preserves_order_and_uses_concurrency(self) -> None:
         provider = _SlowProvider(delay_seconds=0.15)
         builder = TranslationDraftBuilder(provider)

@@ -9,7 +9,6 @@ remaining unchanged during a long run.
 from __future__ import annotations
 
 import logging
-import json
 from pathlib import Path
 from typing import Any
 
@@ -101,35 +100,6 @@ def load_bound_recipe_authority(reference: dict[str, Any]) -> LockedRecipeAuthor
     return authority
 
 
-def load_bound_recipe_tts(item_or_reference: Any) -> dict[str, Any]:
-    """Return the TTS authority from an already-bound immutable recipe."""
-
-    from src.services.reup_pipeline_meta import meta_dict
-
-    reference = (
-        item_or_reference
-        if isinstance(item_or_reference, dict)
-        else meta_dict(item_or_reference).get(RECIPE_LOCK_REF_KEY)
-    )
-    if not isinstance(reference, dict) or not reference:
-        raise RuntimeRecipeError("Item has no immutable pipeline recipe binding")
-    path = versioned_recipe_path(reference)
-    load_bound_recipe_authority(reference)
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeRecipeError("Bound pipeline recipe JSON is unreadable") from exc
-    if not isinstance(payload, dict):
-        raise RuntimeRecipeError("Bound pipeline recipe must contain an object")
-    recipe = dict(payload.get("tts") or {})
-    if str(recipe.get("authority") or "") != "e2e_render_prep_manifests_v1":
-        raise RuntimeRecipeError("Bound pipeline recipe has no verified TTS runtime authority")
-    required = ("provider", "voice_id", "speaking_rate", "runtime_config_sha256")
-    if any(not str(recipe.get(key) or "").strip() for key in required):
-        raise RuntimeRecipeError("Bound pipeline recipe TTS authority is incomplete")
-    return recipe
-
-
 def bind_item_to_current_recipe(item: Any, *, release_label: str = DEFAULT_RELEASE_LABEL) -> dict[str, Any]:
     """Bind an auto queue item once; subsequent retries must reuse this identity."""
 
@@ -175,6 +145,11 @@ def bind_job_to_item_recipe(job: Any, item: Any) -> dict[str, Any]:
     payload = dict(getattr(job, "payload_json", None) or {})
     payload[RECIPE_LOCK_REF_KEY] = reference
     job.payload_json = payload
+    from src.services.analyze_ocr_recipe import (
+        bind_job_to_official_analyze_ocr_recipe,
+    )
+
+    bind_job_to_official_analyze_ocr_recipe(job)
     assert_job_recipe_workflow_contract(job)
     return reference
 
@@ -205,6 +180,16 @@ def assert_job_recipe_workflow_contract(job: Any) -> None:
     release = str(reference.get("release_label") or "")
     job_type_raw = getattr(job, "job_type", "")
     job_type = job_type_raw.value if hasattr(job_type_raw, "value") else str(job_type_raw)
+    if job_type == "ANALYZE_OCR":
+        from src.services.analyze_ocr_recipe import (
+            AnalyzeOcrRecipeError,
+            assert_job_analyze_ocr_recipe,
+        )
+
+        try:
+            assert_job_analyze_ocr_recipe(job)
+        except AnalyzeOcrRecipeError as exc:
+            raise RuntimeRecipeError(f"Official Analyze OCR recipe rejected job: {exc}") from exc
     if release == DEFAULT_RELEASE_LABEL and job_type in _QUALITY_JOB_TYPES:
         workflow = str(payload.get("workflow_version") or "")
         if workflow != QUALITY_WORKFLOW_VERSION:
@@ -227,4 +212,9 @@ def bind_job_to_current_recipe(
     payload = dict(getattr(job, "payload_json", None) or {})
     payload[RECIPE_LOCK_REF_KEY] = reference
     job.payload_json = payload
+    from src.services.analyze_ocr_recipe import (
+        bind_job_to_official_analyze_ocr_recipe,
+    )
+
+    bind_job_to_official_analyze_ocr_recipe(job)
     return reference

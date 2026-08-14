@@ -53,7 +53,9 @@ class JobService:
         priority: int = 0,
         max_attempts: int = 3,
         context_json: dict | None = None,
+        metadata_json: dict | None = None,
         scheduled_at: datetime | None = None,
+        commit: bool = True,
     ) -> Job:
         workspace = None
         if workspace_id is None:
@@ -73,13 +75,36 @@ class JobService:
             priority=priority,
             max_attempts=max_attempts,
             context_json=context_json,
+            metadata_json=metadata_json,
             scheduled_at=scheduled_at,
         )
+        if job_type in {
+            JobType.DOWNLOAD_VIDEO,
+            JobType.ANALYZE_AUDIO,
+            JobType.BUILD_TRANSLATION_DRAFT,
+            JobType.SYNTHESIZE_TTS,
+            JobType.ANALYZE_OCR,
+            JobType.RENDER_PREVIEW,
+            JobType.RENDER_FINAL,
+        }:
+            # One binding point covers manual frontend actions and the Reup Queue
+            # orchestrator. Product services cannot accidentally enqueue a core
+            # stage without recording the exact runtime that the worker must use.
+            from src.services.frontend_core_runtime import (
+                bind_job_to_frontend_runtime,
+            )
+
+            bind_job_to_frontend_runtime(job)
         self.db.add(job)
-        self.db.commit()
-        self.db.refresh(job)
+        if commit:
+            self.db.commit()
+            self.db.refresh(job)
+        else:
+            # Queue orchestration binds the new job to its item in the same unit
+            # of work, closing the race where a worker could finish an unlinked job.
+            self.db.flush()
         logger.info("job_created", extra={"job_id": str(job.id), "job_type": job.job_type})
-        return self.get_job(job.id)
+        return self.get_job(job.id) if commit else job
 
     def list_jobs(
         self,
@@ -202,6 +227,8 @@ class JobService:
         job = self.get_job(job_id)
         if not can_retry_job(job.status, job.attempts, job.max_attempts, job.retryable):
             raise ValueError("Job is not retryable")
+        if job.status == JobStatus.FAILED and job.attempts >= job.max_attempts:
+            job.max_attempts = int(job.attempts) + 1
         self.transition_job(job, JobStatus.QUEUED)
         job.error_code = None
         job.error_message = None

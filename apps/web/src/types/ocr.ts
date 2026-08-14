@@ -15,6 +15,7 @@ export type OcrCreateResponse = {
   job_id: string;
   status: string;
   source_video_id: string;
+  runtime_version: string;
 };
 
 export type OcrSummaryResponse = {
@@ -33,7 +34,9 @@ export type OcrSummaryResponse = {
   workflow_stage?:
     | "NOT_STARTED"
     | "PHASE2_READY"
+    | "PHASE2_BLOCKED"
     | "WAITING_OCR_REVIEW"
+    | "WAITING_DIALOGUE_TRANSLATION_APPROVAL"
     | "PHASE3_PREPARING"
     | "WAITING_TRANSLATION_REVIEW"
     | "READY_FOR_VISUAL_PREVIEW"
@@ -48,6 +51,23 @@ export type OcrSummaryResponse = {
   artifact_run_id?: string | null;
   phase1_tracks?: number;
   phase2_model_version?: string | null;
+  phase2_content_object_count?: number;
+  phase2_handoff_status?: string;
+  phase2_blocked_reasons?: string[];
+  dialogue_translation_blocked_count?: number;
+  requires_dialogue_translation_approval?: boolean;
+  local_recovery_summary?: {
+    policy_version?: string;
+    attempted_tracks?: number;
+    recovered_tracks?: number;
+    promoted_source_ui_tracks?: number;
+    editor_candidates_recovered?: number;
+    unresolved_tracks?: number;
+    prepared_inputs?: number;
+    decoded_frames?: number;
+    geometry_tracks_derived?: number;
+    geometry_tracks_fail_closed?: number;
+  };
   provenance_counts?: Record<string, number>;
   protected_source_tracks?: number;
   provenance_artifact_path?: string | null;
@@ -91,6 +111,8 @@ export type OcrSummaryResponse = {
     confidence?: number;
     geometry?: { x?: number; y?: number; width?: number; height?: number };
     image_path?: string | null;
+    ocr_text_corrected_suggested?: string;
+    vi_text_suggested?: string;
   }>;
   residual_proposal_objects?: Array<{
     remediation_id?: string;
@@ -103,4 +125,30 @@ export type OcrSummaryResponse = {
     evidence?: Record<string, unknown>;
   }>;
   residual_proposal_sha256?: string | null;
+  residual_authority_sha256?: string | null;
+  residual_translation_status?: "NOT_REQUIRED" | "NOT_STARTED" | "STALE" | "PARTIAL" | "READY" | string;
+  residual_translation_input_sha256?: string | null;
+  residual_translation_suggestion_count?: number;
+  residual_normalization?: {
+    version?: string;
+    raw_detection_count?: number;
+    temporal_content_count?: number;
+    review_content_count?: number;
+    protected_source_content_count?: number;
+    deduplicated_frame_rows?: number;
+  };
+  analysis_engine?: string | null;
+  analysis_recipe_release?: string | null;
+  analysis_recipe_sha256?: string | null;
+  pipeline_recipe_release?: string | null;
+  pipeline_recipe_sha256?: string | null;
+  analysis_metrics?: Record<string, unknown>;
+  analysis_mode?: "AUDIO_GUIDED_VISUAL" | "VISUAL_ONLY" | string | null;
+  audio_window_count?: number;
+  visual_trigger_count?: number;
+  all_frame_proxy_size?: [number, number] | null;
+  candidate_window_count?: number;
+  detector_frame_count?: number;
+  analysis_elapsed_s?: number | null;
+  analysis_fallback_used?: boolean;
 };

@@ -63,6 +63,14 @@ class Job(BaseModel):
         order_by="JobStep.step_order",
     )
 
+    @property
+    def workflow_action(self) -> str | None:
+        """Public display discriminator for multiplexed durable job types."""
+
+        value = dict(self.payload_json or {}).get("workflow_action")
+        normalized = str(value or "").strip()
+        return normalized or None
+
 
 class JobStep(BaseModel):
     __tablename__ = "job_steps"

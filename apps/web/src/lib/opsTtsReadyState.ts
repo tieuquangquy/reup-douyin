@@ -1,5 +1,7 @@
 /** TTS Ops readiness chip: session signals + persisted runtime → operator-facing state. */
 
+import type { TtsAiCatalog } from "./api";
+
 export type TtsReadyState = "unchecked" | "not_installed" | "installed" | "ready" | "failed";
 
 export type TtsReadySignal = {
@@ -9,7 +11,7 @@ export type TtsReadySignal = {
 
 export type TtsPersistedRuntime = {
   last_install?: { ok?: boolean; detail?: string; already_satisfied?: boolean } | null;
-  last_probe?: { ok?: boolean; detail?: string; provider?: string } | null;
+  last_probe?: { ok?: boolean; detail?: string; provider?: string; catalog?: unknown } | null;
 } | null;
 
 export function detailLooksLikeNotInstalled(detail: string): boolean {
@@ -77,37 +79,38 @@ export function ttsReadyLabelKey(state: TtsReadyState): string {
   return "opsTtsAi.readyUnchecked";
 }
 
-export function catalogFromRuntime(runtime: TtsPersistedRuntime): {
-  source: string;
-  voices: { id: string; label: string }[];
-  styles: string[];
-  models: string[];
-  default_voice_id: string;
-  warning: string;
-  sample_rate?: number | null;
-  backends?: string[];
-} | null {
-  const catalog = (runtime?.last_probe as { catalog?: unknown } | null | undefined)?.catalog;
+export function catalogFromRuntime(
+  runtime: TtsPersistedRuntime,
+  expectedProvider = ""
+): TtsAiCatalog | null {
+  const probe = runtime?.last_probe as { provider?: string; catalog?: unknown } | null | undefined;
+  const expected = expectedProvider.trim().toLowerCase();
+  const observed = (probe?.provider || "").trim().toLowerCase();
+  if (expected && observed !== expected) return null;
+  const catalog = probe?.catalog;
   if (!catalog || typeof catalog !== "object") return null;
-  const row = catalog as {
-    source?: string;
-    voices?: { id: string; label: string }[];
-    styles?: string[];
-    models?: string[];
-    default_voice_id?: string;
-    warning?: string;
-    sample_rate?: number | null;
-    backends?: string[];
-  };
-  if (!Array.isArray(row.voices) || row.voices.length === 0) return null;
+  const row = catalog as Partial<TtsAiCatalog>;
+  const voices = Array.isArray(row.voices) ? row.voices : [];
+  const models = Array.isArray(row.models) ? row.models : [];
+  const modelOptions = Array.isArray(row.model_options) ? row.model_options : [];
+  const languages = Array.isArray(row.languages) ? row.languages : [];
+  if (!voices.length && !models.length && !modelOptions.length && !languages.length && !row.discovery) {
+    return null;
+  }
   return {
     source: row.source || "none",
-    voices: row.voices,
+    voices,
     styles: Array.isArray(row.styles) ? row.styles : [],
-    models: Array.isArray(row.models) ? row.models : [],
+    models,
+    model_options: modelOptions,
+    languages,
     default_voice_id: row.default_voice_id || "",
+    default_model_id: row.default_model_id || "",
+    default_language_code: row.default_language_code || "",
+    discovery: row.discovery || null,
     warning: row.warning || "",
     sample_rate: row.sample_rate ?? null,
-    backends: Array.isArray(row.backends) ? row.backends : []
+    backends: Array.isArray(row.backends) ? row.backends : [],
+    capabilities: row.capabilities || null
   };
 }

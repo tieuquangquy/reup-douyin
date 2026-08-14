@@ -54,6 +54,7 @@ export type ReupQueueBatchActionRequest = {
   note?: string | null;
   target_platform?: PublishTargetPlatform | null;
   pipeline_mode?: string | null;
+  expected_stage_versions?: Record<string, string> | null;
 };
 
 export type ExportPackageCreateRequest = {

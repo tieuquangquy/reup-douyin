@@ -9,7 +9,7 @@ from src.enums import JobStatus, TranscriptSegmentStatus
 
 
 class VoiceConfigRequest(BaseModel):
-    voice_id: str = "vi-VN-HoaiMyNeural"
+    voice_id: str = "instruct:vi_female_north"
     language_code: str = "vi"
     speaking_rate: float = 1.0
 
@@ -18,12 +18,14 @@ class TtsCreateRequest(BaseModel):
     source_video_id: UUID
     voice_config: VoiceConfigRequest = VoiceConfigRequest()
     force_refresh: bool = False
+    expected_stage_version: str | None = None
 
 
 class TtsCreateResponse(BaseModel):
     job_id: UUID
     status: JobStatus
     source_video_id: UUID
+    runtime_version: str
 
 
 class SubtitleSegmentResponse(BaseModel):
@@ -59,6 +61,8 @@ class SubtitleListResponse(BaseModel):
 class TtsClipFitResponse(BaseModel):
     asset_id: str
     translation_segment_id: str | None = None
+    translation_segment_ids: list[str] = []
+    member_segment_indices: list[int] = []
     fit_status: str | None = None
     fit_ratio: float | None = None
     duration_seconds: float | None = None
@@ -79,4 +83,6 @@ class TtsSummaryResponse(BaseModel):
     warnings: list[str]
     clips: list[TtsClipFitResponse] = []
     timing_fit_summary: TtsTimingFitSummaryResponse = TtsTimingFitSummaryResponse()
+    temporal: dict | None = None
+    temporal_artifacts: list[dict] = []
     assets: list[dict]

@@ -41,6 +41,7 @@ class ArtifactSweepTests(unittest.TestCase):
 
         with (
             patch("runtime.get_session_factory", return_value=FakeSessionFactory()),
+            patch("runtime.cleanup_stale_staging", return_value=0),
             patch("runtime.sweep_reclaimable_artifacts", return_value=0) as sweep,
         ):
             worker.maybe_sweep_artifacts(now=1_000.0, interval_seconds=900)
@@ -52,6 +53,7 @@ class ArtifactSweepTests(unittest.TestCase):
 
         with (
             patch("runtime.get_session_factory", return_value=FakeSessionFactory()),
+            patch("runtime.cleanup_stale_staging", return_value=0),
             patch("runtime.sweep_reclaimable_artifacts", return_value=0) as sweep,
         ):
             worker.maybe_sweep_artifacts(now=1_000.0, interval_seconds=900)
@@ -64,6 +66,7 @@ class ArtifactSweepTests(unittest.TestCase):
 
         with (
             patch("runtime.get_session_factory", return_value=FakeSessionFactory()),
+            patch("runtime.cleanup_stale_staging", return_value=0),
             patch("runtime.sweep_reclaimable_artifacts", return_value=0) as sweep,
         ):
             worker.maybe_sweep_artifacts(now=1_000.0, interval_seconds=900)
@@ -76,9 +79,27 @@ class ArtifactSweepTests(unittest.TestCase):
 
         with (
             patch("runtime.get_session_factory", return_value=FakeSessionFactory()),
+            patch("runtime.cleanup_stale_staging", return_value=0),
             patch("runtime.sweep_reclaimable_artifacts", side_effect=RuntimeError("db gone")),
         ):
             worker.maybe_sweep_artifacts(now=1_000.0, interval_seconds=900)
+
+    def test_download_staging_sweep_uses_configured_ttl(self) -> None:
+        worker = self._worker()
+        settings = MagicMock(
+            douyin_download_staging_ttl_hours=6.0,
+            artifact_retention_sweep_interval_seconds=900,
+        )
+
+        with (
+            patch("runtime.get_settings", return_value=settings),
+            patch("runtime.get_session_factory", return_value=FakeSessionFactory()),
+            patch("runtime.cleanup_stale_staging", return_value=0) as cleanup,
+            patch("runtime.sweep_reclaimable_artifacts", return_value=0),
+        ):
+            worker.maybe_sweep_artifacts(now=1_000.0, interval_seconds=900)
+
+        cleanup.assert_called_once_with(ttl_seconds=21_600.0)
 
     def test_the_poll_loop_calls_it(self) -> None:
         worker = self._worker()

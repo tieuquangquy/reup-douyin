@@ -12,11 +12,14 @@ from src.media_pipeline.frame_sampling.master_phase1_extractor import (
     classify_ocr_box_role,
     timeline_to_ocr_payload,
 )
+from src.media_pipeline.frame_sampling.phase2_local_recovery import (
+    PHASE2_LOCAL_RECOVERY_POLICY_VERSION,
+)
 
-PHASE2_SCHEMA_VERSION = "phase2_ocr_timeline_v2"
-PHASE2_PREPROCESSING_VERSION = "phase2_ocr_prep_v2_normalized_fallback"
-PHASE2_HANDOFF_SCHEMA_VERSION = "phase2_handoff_v1"
-PHASE2_REVIEW_INPUT_SCHEMA_VERSION = "phase2_review_input_v1"
+PHASE2_SCHEMA_VERSION = "phase2_ocr_timeline_v3_semantic_cues"
+PHASE2_PREPROCESSING_VERSION = "phase2_ocr_prep_v3_local_temporal_recovery"
+PHASE2_HANDOFF_SCHEMA_VERSION = "phase2_handoff_v2_semantic_cues"
+PHASE2_REVIEW_INPUT_SCHEMA_VERSION = "phase2_review_input_v2_semantic_cues"
 PHASE2_DUPLICATE_TRANSITION_POLICY_VERSION = (
     "operator_approved_touching_text_v1"
 )
@@ -173,6 +176,7 @@ def content_review_input_sha256(
             "provenance_classifications": list(
                 content.get("provenance_classifications") or []
             ),
+            "semantic_hardsub": dict(content.get("semantic_hardsub") or {}),
         }
     )
 
@@ -325,6 +329,9 @@ def build_phase2_contract(
     supplemental_occurrences: Sequence[Mapping[str, Any]] = (),
     geometry_overrides: Mapping[str, Mapping[str, Any]] | None = None,
     protected_source_tracks: Sequence[Mapping[str, Any]] = (),
+    phase1_coverage_ref: Mapping[str, Any] | None = None,
+    semantic_hardsub_summary: Mapping[str, Any] | None = None,
+    fps: float = 30.0,
     frame_width: int = 1920,
     frame_height: int = 1080,
 ) -> dict[str, Any]:
@@ -337,24 +344,53 @@ def build_phase2_contract(
 
     for index, raw in enumerate(timeline):
         text_id = str(raw.get("text_id") or f"sub_{index + 1:02d}")
-        candidate = str(
+        observed_candidate = str(
             raw.get("ocr_text_raw")
             or raw.get("ocr_text")
             or raw.get("text")
             or ""
         ).strip()
+        semantic_hardsub = dict(raw.get("semantic_hardsub") or {})
+        candidate = str(
+            semantic_hardsub.get("canonical_text_authority")
+            or semantic_hardsub.get("text_authority")
+            or observed_candidate
+        ).strip()
         normalized = _normalize_content_text(candidate)
         visual_provenance = dict(raw.get("visual_provenance") or {})
         provenance_class = str(
-            visual_provenance.get("classification") or "EDITOR_OVERLAY"
+            semantic_hardsub.get("classification")
+            or visual_provenance.get("classification")
+            or "UNCERTAIN"
         )
+        cue_id = str(semantic_hardsub.get("cue_id") or "").strip()
         grouping_key = (
-            f"{provenance_class}:text:{normalized}"
-            if normalized
-            else f"{provenance_class}:failed:{text_id}"
+            f"semantic:{cue_id}"
+            if cue_id
+            else (
+                f"{provenance_class}:text:{normalized}"
+                if normalized
+                else f"{provenance_class}:failed:{text_id}"
+            )
         )
         if grouping_key not in grouped:
             content_id = f"ocr_content_{len(group_order) + 1:03d}"
+            semantic_content = {
+                "schema_version": semantic_hardsub.get("schema_version"),
+                "recipe_version": semantic_hardsub.get("recipe_version"),
+                "cue_id": cue_id or None,
+                "classification": provenance_class,
+                "action": semantic_hardsub.get("action"),
+                "canonical_text_authority": candidate or None,
+                "vi_text_authority": semantic_hardsub.get("vi_text_authority"),
+                "translation_ready": bool(
+                    semantic_hardsub.get("translation_ready")
+                ),
+                "translation_authority": dict(
+                    semantic_hardsub.get("translation_authority") or {}
+                ),
+                "alignment": dict(semantic_hardsub.get("alignment") or {}),
+            }
             grouped[grouping_key] = {
                 "content_id": content_id,
                 "geometry_refs": [],
@@ -371,6 +407,7 @@ def build_phase2_contract(
                 "ready_for_translation": False,
                 "localization": parse_localization_policy(candidate),
                 "operator_review": None,
+                "semantic_hardsub": semantic_content,
             }
             group_order.append(grouping_key)
         content = grouped[grouping_key]
@@ -386,7 +423,10 @@ def build_phase2_contract(
                 "boundary_path": f"qa/boundaries/{text_id}.jpg",
                 "start_frame": raw.get("start_frame"),
                 "end_frame": raw.get("end_frame"),
+                "start_ms": semantic_hardsub.get("start_ms"),
+                "end_ms": semantic_hardsub.get("end_ms"),
                 "visual_provenance": visual_provenance,
+                "semantic_hardsub": semantic_hardsub,
             }
         )
         coords = list(raw.get("box_coords") or [])
@@ -402,17 +442,25 @@ def build_phase2_contract(
         )
         if role not in content["roles"]:
             content["roles"].append(role)
-        if candidate and candidate not in content["ocr_text_raw_candidates"]:
-            content["ocr_text_raw_candidates"].append(candidate)
+        if (
+            observed_candidate
+            and observed_candidate not in content["ocr_text_raw_candidates"]
+        ):
+            content["ocr_text_raw_candidates"].append(observed_candidate)
         track_rows.append(
             {
                 "text_id": text_id,
                 "content_id": content["content_id"],
                 "ocr_source": raw.get("ocr_source"),
                 "ocr_frame": raw.get("ocr_frame"),
-                "ocr_text_raw": candidate,
+                "ocr_text_raw": observed_candidate,
+                "ocr_text_authority": candidate,
                 "ocr_role": role,
+                "ocr_recovery": dict(raw.get("ocr_recovery") or {}),
+                "geometry_recovery": dict(raw.get("geometry_recovery") or {}),
                 "visual_provenance": visual_provenance,
+                "coverage_authority": dict(raw.get("coverage_authority") or {}),
+                "semantic_hardsub": semantic_hardsub,
             }
         )
 
@@ -420,7 +468,73 @@ def build_phase2_contract(
     for key in group_order:
         content = grouped[key]
         content_id = str(content["content_id"])
-        if llm_suggestions and llm_suggestions.get(content_id):
+        semantic = dict(content.get("semantic_hardsub") or {})
+        if semantic and semantic_hardsub_summary:
+            semantic["semantic_authority_sha256"] = str(
+                semantic_hardsub_summary.get("authority_sha256") or ""
+            ) or None
+            semantic["dialogue_authority_ref"] = dict(
+                semantic_hardsub_summary.get("dialogue_authority_ref") or {}
+            )
+            content["semantic_hardsub"] = semantic
+        semantic_class = str(semantic.get("classification") or "")
+        semantic_action = str(semantic.get("action") or "")
+        semantic_locked = semantic_class == "DIALOGUE_HARDSUB" or (
+            semantic_action
+            in {"COVER_ONLY_TRANSITION", "COVER_ONLY_DIALOGUE_EPOCH"}
+        )
+        if semantic_action in {
+            "COVER_ONLY_TRANSITION",
+            "COVER_ONLY_DIALOGUE_EPOCH",
+        }:
+            content["ocr_text_approved"] = str(
+                semantic.get("canonical_text_authority")
+                or content.get("ocr_text_candidate")
+                or ""
+            ).strip() or None
+            content["review_status"] = "OCR_APPROVED"
+            content["review_required"] = False
+            content["ready_for_translation"] = False
+            content["localization"] = {
+                "mode": "cover_only",
+                "translation_input": "",
+                "render_text_suggested": None,
+                "protected_values": [],
+                "unit_tokens": [],
+                "authority": (
+                    "approved_dialogue_translation"
+                    if semantic_action == "COVER_ONLY_DIALOGUE_EPOCH"
+                    else "semantic_transition_noise"
+                ),
+            }
+        elif semantic_class == "DIALOGUE_HARDSUB":
+            authority_text = str(
+                semantic.get("canonical_text_authority")
+                or content.get("ocr_text_candidate")
+                or ""
+            ).strip()
+            vi_authority = str(semantic.get("vi_text_authority") or "").strip()
+            content["ocr_text_approved"] = authority_text or None
+            content["vi_text_approved"] = vi_authority or None
+            content["review_status"] = "OCR_APPROVED"
+            content["review_required"] = False
+            content["ready_for_translation"] = False
+            content["localization"] = {
+                "mode": (
+                    "semantic_dialogue" if vi_authority
+                    else "semantic_dialogue_pending"
+                ),
+                "translation_input": "",
+                "render_text_suggested": vi_authority or None,
+                "protected_values": [],
+                "unit_tokens": [],
+                "authority": "approved_dialogue_translation",
+            }
+        if (
+            not semantic_locked
+            and llm_suggestions
+            and llm_suggestions.get(content_id)
+        ):
             content["ocr_text_llm_suggested"] = str(
                 llm_suggestions[content_id]
             ).strip()
@@ -429,7 +543,11 @@ def build_phase2_contract(
             phase1_sha256=phase1_sha256,
         )
         content["review_input_sha256"] = review_input_sha256
-        approval = _approval_for(approvals, content_id)
+        approval = (
+            {}
+            if semantic_locked
+            else _approval_for(approvals, content_id)
+        )
         decision = str(approval.get("decision") or "").upper()
         approval_review_hash = str(
             approval.get("review_input_sha256") or ""
@@ -511,23 +629,47 @@ def build_phase2_contract(
     stale_n = sum(
         1 for item in content_objects if item["review_status"] == "OCR_REVIEW_STALE"
     )
+    semantic_dialogue_pending_n = sum(
+        1
+        for item in content_objects
+        if str(dict(item.get("localization") or {}).get("mode") or "")
+        == "semantic_dialogue_pending"
+    )
     if unresolved == 0:
         review_status = "OCR_APPROVED"
     elif stale_n:
         review_status = "OCR_REVIEW_STALE"
     else:
         review_status = "NEEDS_OCR_REVIEW"
+    recovery_rows = [
+        dict(row.get("ocr_recovery") or {})
+        for row in track_rows
+        if dict(row.get("ocr_recovery") or {})
+    ]
     contract = {
         "schema_version": PHASE2_SCHEMA_VERSION,
         "phase1_ref": {
             "path": phase1_path.name,
             "sha256": phase1_sha256,
         },
+        "phase1_coverage_ref": (
+            dict(phase1_coverage_ref) if phase1_coverage_ref else None
+        ),
         "provider": {
             "mode": str(provider_mode),
             "model_version": str(model_version),
             "preprocessing_version": str(preprocessing_version),
         },
+        "timeline": {
+            "fps": float(fps),
+            "frame_width": int(frame_width),
+            "frame_height": int(frame_height),
+        },
+        "semantic_hardsub_summary": (
+            dict(semantic_hardsub_summary)
+            if semantic_hardsub_summary
+            else None
+        ),
         "track_enrichments": track_rows,
         "content_objects": content_objects,
         "protected_source_tracks": [
@@ -539,12 +681,36 @@ def build_phase2_contract(
             "approved": approved_n,
             "rejected_ui": rejected_ui_n,
             "stale": stale_n,
+            "semantic_dialogue_pending": semantic_dialogue_pending_n,
             "unresolved": unresolved,
             "status": review_status,
         },
         "duplicate_transition_summary": {
             "policy_version": PHASE2_DUPLICATE_TRANSITION_POLICY_VERSION,
             "merged_content_objects": merged_transition_count,
+        },
+        "local_recovery_summary": {
+            "policy_version": PHASE2_LOCAL_RECOVERY_POLICY_VERSION,
+            "attempted_tracks": len(recovery_rows),
+            "recovered_tracks": sum(
+                str(row.get("status") or "")
+                == "RECOVERED_FOR_OPERATOR_REVIEW"
+                for row in recovery_rows
+            ),
+            "unresolved_tracks": sum(
+                str(row.get("status") or "") == "UNRESOLVED"
+                for row in recovery_rows
+            ),
+            "prepared_inputs": sum(
+                int(row.get("prepared_inputs") or 0) for row in recovery_rows
+            ),
+            "decoded_frames": len(
+                {
+                    int(frame)
+                    for row in recovery_rows
+                    for frame in list(row.get("decoded_frames") or [])
+                }
+            ),
         },
     }
     if phase1_geometry_review_ref:
@@ -598,7 +764,11 @@ def _enriched_timeline(
                 "ocr_role": track.get("ocr_role"),
                 "ocr_source": track.get("ocr_source"),
                 "ocr_frame": track.get("ocr_frame"),
+                "ocr_recovery": dict(track.get("ocr_recovery") or {}),
+                "geometry_recovery": dict(track.get("geometry_recovery") or {}),
+                "semantic_hardsub": dict(track.get("semantic_hardsub") or {}),
                 "ocr_text_raw": track.get("ocr_text_raw"),
+                "ocr_text_authority": track.get("ocr_text_authority"),
                 "ocr_text_candidate": content.get("ocr_text_candidate"),
                 "ocr_text_llm_suggested": content.get(
                     "ocr_text_llm_suggested"
@@ -656,6 +826,15 @@ def build_phase2_handoff(
     translate_items: list[dict[str, Any]] = []
     deterministic_items: list[dict[str, Any]] = []
     cover_only_items: list[dict[str, Any]] = []
+    # Phase 1 remains immutable.  Empty short temporal-shadow tracks are
+    # intentionally suppressed by Phase 2, so carry the suppression audit as
+    # an explicit handoff boundary instead of making Phase 4 infer missing ids.
+    recovery_summary = dict(contract.get("local_recovery_summary") or {})
+    suppressed_shadow_items = [
+        dict(row)
+        for row in list(recovery_summary.get("temporal_shadow_audit") or [])
+        if isinstance(row, Mapping) and str(row.get("shadow_text_id") or "")
+    ]
     preserved_source_items: list[dict[str, Any]] = [
         dict(row)
         for row in list(contract.get("protected_source_tracks") or [])
@@ -672,6 +851,9 @@ def build_phase2_handoff(
         localization = dict(raw.get("localization") or {})
         mode = str(localization.get("mode") or "")
         status = str(raw.get("review_status") or "")
+        semantic = dict(raw.get("semantic_hardsub") or {})
+        semantic_class = str(semantic.get("classification") or "")
+        semantic_action = str(semantic.get("action") or "")
         base = {
             "content_id": content_id,
             "geometry_refs": geometry_refs,
@@ -688,6 +870,7 @@ def build_phase2_handoff(
             "duplicate_transition_canonicalization": raw.get(
                 "duplicate_transition_canonicalization"
             ),
+            "semantic_hardsub": semantic,
         }
         for text_id in geometry_refs:
             if text_id in geometry_map:
@@ -707,6 +890,42 @@ def build_phase2_handoff(
             continue
         if status != "OCR_APPROVED":
             blocked_reasons.append(f"unapproved_content:{content_id}")
+            continue
+        if semantic_action in {
+            "COVER_ONLY_TRANSITION",
+            "COVER_ONLY_DIALOGUE_EPOCH",
+        }:
+            cover_only_items.append(
+                {
+                    **base,
+                    "reason": (
+                        "approved_dialogue_non_display_epoch"
+                        if semantic_action == "COVER_ONLY_DIALOGUE_EPOCH"
+                        else "semantic_transition_noise"
+                    ),
+                }
+            )
+            continue
+        if semantic_class == "DIALOGUE_HARDSUB":
+            render_text = str(
+                raw.get("vi_text_approved")
+                or semantic.get("vi_text_authority")
+                or ""
+            ).strip()
+            if mode == "semantic_dialogue_pending" or not render_text:
+                blocked_reasons.append(
+                    f"semantic_dialogue_translation_unapproved:{content_id}"
+                )
+                continue
+            deterministic_items.append(
+                {
+                    **base,
+                    "render_text": render_text,
+                    "protected_values": [],
+                    "unit_tokens": [],
+                    "authority": "approved_dialogue_translation",
+                }
+            )
             continue
         if mode == "deterministic":
             render_text = str(raw.get("vi_text_approved") or "").strip()
@@ -766,6 +985,11 @@ def build_phase2_handoff(
     }
     mapped_refs = set(geometry_map)
     for missing in sorted(track_refs - mapped_refs - preserved_refs):
+        if missing in {
+            str(row.get("shadow_text_id") or "")
+            for row in suppressed_shadow_items
+        }:
+            continue
         blocked_reasons.append(f"missing_geometry_ref:{missing}")
     for unexpected in sorted(mapped_refs - track_refs):
         blocked_reasons.append(f"unexpected_geometry_ref:{unexpected}")
@@ -782,6 +1006,9 @@ def build_phase2_handoff(
             "phase1_geometry_review_ref"
         ),
         "residual_remediation_ref": contract.get("residual_remediation_ref"),
+        "semantic_hardsub_summary": contract.get(
+            "semantic_hardsub_summary"
+        ),
         "phase2_ref": {
             "path": phase2_path.name,
             "sha256": sha256_file(phase2_path),
@@ -794,12 +1021,14 @@ def build_phase2_handoff(
             "deterministic_items": len(deterministic_items),
             "cover_only_items": len(cover_only_items),
             "preserved_source_items": len(preserved_source_items),
+            "suppressed_shadow_items": len(suppressed_shadow_items),
             "geometry_refs": len(geometry_map),
         },
         "translate_items": translate_items,
         "deterministic_items": deterministic_items,
         "cover_only_items": cover_only_items,
         "preserved_source_items": preserved_source_items,
+        "suppressed_shadow_items": suppressed_shadow_items,
         "geometry_map": geometry_map,
     }
 
@@ -843,6 +1072,9 @@ def write_phase2_artifacts(
             "residual_remediation_ref": contract.get(
                 "residual_remediation_ref"
             ),
+            "semantic_hardsub_summary": contract.get(
+                "semantic_hardsub_summary"
+            ),
             "review_summary": contract.get("review_summary"),
             "content_objects": review_queue,
         },
@@ -857,6 +1089,9 @@ def write_phase2_artifacts(
             ),
             "residual_remediation_ref": contract.get(
                 "residual_remediation_ref"
+            ),
+            "semantic_hardsub_summary": contract.get(
+                "semantic_hardsub_summary"
             ),
             "content_objects": approved,
         },
@@ -922,6 +1157,9 @@ def write_phase2_artifacts(
             "phase1_geometry_review_ref"
         ),
         "residual_remediation_ref": contract.get("residual_remediation_ref"),
+        "semantic_hardsub_summary": contract.get(
+            "semantic_hardsub_summary"
+        ),
         "review_summary": contract.get("review_summary"),
     }
     _write_json_atomic(preview_path, preview_payload)

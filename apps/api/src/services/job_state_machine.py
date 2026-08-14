@@ -65,7 +65,12 @@ def validate_step_transition(from_status: JobStepStatus, to_status: JobStepStatu
 
 
 def can_retry_job(status: JobStatus, attempts: int, max_attempts: int, retryable: bool = True) -> bool:
-    return retryable and status in {JobStatus.FAILED, JobStatus.RETRYABLE} and attempts < max_attempts
+    if not retryable or status not in {JobStatus.FAILED, JobStatus.RETRYABLE}:
+        return False
+    # RETRYABLE is an automatic scheduling state and stays within its budget.
+    # FAILED is terminal for automation, but an explicit operator retry may
+    # grant one additional attempt after the original budget is exhausted.
+    return status == JobStatus.FAILED or attempts < max_attempts
 
 
 def can_cancel_job(status: JobStatus) -> bool:

@@ -29,11 +29,19 @@ Case-specific continuation, such as a phone disappearing and reappearing later, 
 
 ## Caption residual handling
 
-The default editor-overlay lane uses one cover style for captions, compact labels and titles: `editor_overlay_spatial_telea_full_roi_v1`. Every approved editor track is cleaned independently on each source frame with `spatial_telea_r9` over the complete approved cover ROI. The renderer does not reuse static plates, optical-flow plates or glyph-only masks in this lane. This keeps texture and edge treatment consistent when adjacent labels have different OCR roles. `SOURCE_SCENE_TEXT` remains outside the lane and its pixels are preserved.
+The default editor-overlay lane now uses `soft_reconstruction_plate_v1`, documented in [soft-reconstruction-cover-v1.md](soft-reconstruction-cover-v1.md). Related caption/UI/title tracks share a style epoch while keeping their individual approved ROI. Reconstruction is attempted in this order: aligned temporal clean reference, bounded spatial surface reconstruction where eligible, then stable resolution-aware soft blur. A failed clean reference is disabled for the remainder of the epoch so the output cannot pulse between reconstruction modes. Rounded masks and feathering stay inside the approved damage authority. Cover-only boundary frames still prevent single-frame Chinese flashes without extending Vietnamese text timing. `SOURCE_SCENE_TEXT` remains outside the lane and its pixels are preserved.
 
 For every editor overlay, cover and text are now one authority lane: `cover_aligned` uses the approved cover ROI as the placement anchor and never falls back to the dense responsive grid. UI typography may expand locally around the same center when Vietnamese needs more width than the Chinese source; it cannot move to another lane. The cover remains bounded by the track damage budget. Short titles keep their expanded, shadow-covering ROI but use the same spatial Telea method as every other editor overlay.
 
 Encoded-output QA scans editor-caption epochs at a bounded 10-fps cadence in addition to transition samples. OCR detections that are mostly Latin Vietnamese with at most two CJK characters are retained as evidence but classified as an editor-caption OCR false positive only when their geometry and text similarity match the approved Vietnamese track. Caption on/off boundary frames are reported but excluded from flicker blocking; stable-frame flicker remains fail-closed.
+
+Per-frame encoded detections are not translation objects. The product boundary groups
+them into stable temporal content using frame adjacency, geometry overlap and OCR-text
+consensus, while preserving every raw detection in Output QA for remediation geometry.
+A temporal object that overlaps a current `PRESERVE_SOURCE_PIXELS` authority is removed
+from localization review. Translation reuses approved Phase-3 authority when the text
+match is strong, then uses small provider batches with per-text cache/resume. Provider
+failure cannot discard completed batches or force Analyze OCR to run again.
 
 The validated v22.64 boundary correction keeps this distinction intact: when a
 top editor note crosses a scene cut, a narrow hash-bound cover-only component

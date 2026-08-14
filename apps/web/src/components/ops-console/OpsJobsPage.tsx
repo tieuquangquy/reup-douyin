@@ -20,6 +20,7 @@ import { TopbarRefreshButton } from "../app-shell/TopbarRefreshButton";
 import { OpsState, statusTone, type OpsTone } from "./OpsShared";
 import { AsyncButton } from "../shared/AsyncButton";
 import { AsyncContentBoundary } from "../shared/AsyncContentBoundary";
+import { OperatorListPagination } from "../shared/OperatorListPagination";
 import { useNotice } from "../shared/NoticeCenter";
 
 const JOBS_PAGE_SIZE_DEFAULT = 50;
@@ -59,6 +60,26 @@ function formatJobTypeLabel(jobType: string): string {
     .filter(Boolean)
     .map((part) => part.charAt(0) + part.slice(1).toLowerCase())
     .join(" ");
+}
+
+function formatJobWorkLabel(job: Job): string {
+  if (job.workflow_action === "suggest_residual_translation") return "Residual Translation";
+  if (job.workflow_action === "build_residual_proposal") return "Residual Proposal";
+  if (job.workflow_action === "approve_residual_proposal") return "Residual Approval";
+  if (job.workflow_action === "auto_residual_remediation") return "Residual Remediation";
+  return formatJobTypeLabel(job.job_type);
+}
+
+function formatJobStepLabel(job: Job): string {
+  if (
+    job.workflow_action === "suggest_residual_translation"
+    && job.current_step_key === "render_preview"
+  ) {
+    return "Translate residual OCR";
+  }
+  return job.current_step_key
+    ? formatJobTypeLabel(job.current_step_key)
+    : "";
 }
 
 function formatTableDateTime(value: string | null | undefined): string {
@@ -425,7 +446,7 @@ function JobStepTrace({ job, labels }: { job: Job; labels: Record<string, string
   const steps = [...job.steps].sort((left, right) => left.step_order - right.step_order);
   return (
     <div className="ops-jobs-v2-trace">
-      <header><strong>{labels.trace}</strong><span>{formatJobTypeLabel(job.job_type)} · #{job.id.slice(0, 8)}</span></header>
+      <header><strong>{labels.trace}</strong><span>{formatJobWorkLabel(job)} · #{job.id.slice(0, 8)}</span></header>
       {steps.length > 0 ? <div>{steps.map((step, index) => (
         <section className={`is-${step.status.toLowerCase().replace(/_/g, "-")}`} key={step.id}>
           <i>{String(index + 1).padStart(2, "0")}</i>
@@ -434,100 +455,6 @@ function JobStepTrace({ job, labels }: { job: Job; labels: Record<string, string
         </section>
       ))}</div> : <p>{labels.noSteps}</p>}
     </div>
-  );
-}
-
-function paginationItems(currentPage: number, totalPages: number): Array<number | string> {
-  if (totalPages <= 7) return Array.from({ length: totalPages }, (_, index) => index + 1);
-  if (currentPage <= 4) return [1, 2, 3, 4, 5, "ellipsis-right", totalPages];
-  if (currentPage >= totalPages - 3) {
-    return [1, "ellipsis-left", totalPages - 4, totalPages - 3, totalPages - 2, totalPages - 1, totalPages];
-  }
-  return [1, "ellipsis-left", currentPage - 1, currentPage, currentPage + 1, "ellipsis-right", totalPages];
-}
-
-function PaginationArrow({ direction }: { direction: "previous" | "next" }) {
-  return (
-    <svg className="ops-jobs-pagination__arrow" viewBox="0 0 20 20" aria-hidden="true">
-      <path d={direction === "previous" ? "m12 5-5 5 5 5" : "m8 5 5 5-5 5"} />
-    </svg>
-  );
-}
-
-function OpsJobsPagination({
-  currentPage,
-  totalCount,
-  pageSize,
-  pageSizeOptions,
-  busy,
-  onPageChange,
-  onPageSizeChange,
-  labels,
-}: {
-  currentPage: number;
-  totalCount: number;
-  pageSize: number;
-  pageSizeOptions: readonly number[];
-  busy: boolean;
-  onPageChange: (page: number) => void;
-  onPageSizeChange: (pageSize: number) => void;
-  labels: Record<string, string>;
-}) {
-  const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
-  const safePage = Math.min(currentPage, totalPages);
-  const start = totalCount > 0 ? (safePage - 1) * pageSize + 1 : 0;
-  const end = Math.min(safePage * pageSize, totalCount);
-  const items = paginationItems(safePage, totalPages);
-  return (
-    <nav className="ops-jobs-pagination" aria-label={labels.pagination}>
-      <div className="ops-jobs-pagination__size" role="group" aria-label={labels.perPage}>
-        <span>{labels.perPage}</span>
-        <div>
-          {pageSizeOptions.map((option) => (
-            <button
-              type="button"
-              className={option === pageSize ? "is-active" : ""}
-              aria-pressed={option === pageSize}
-              disabled={busy}
-              key={option}
-              onClick={() => onPageSizeChange(option)}
-            >
-              {option}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      <div className="ops-jobs-pagination__pages">
-        <button type="button" className="ops-jobs-pagination__nav" aria-label={labels.previous} disabled={busy || safePage <= 1} onClick={() => onPageChange(safePage - 1)}>
-          <PaginationArrow direction="previous" />
-        </button>
-        <div className="ops-jobs-pagination__numbers">
-          {items.map((item) => typeof item === "number" ? (
-            <button
-              type="button"
-              className={item === safePage ? "is-active" : ""}
-              aria-current={item === safePage ? "page" : undefined}
-              aria-label={`${labels.page} ${item}`}
-              disabled={busy}
-              key={item}
-              onClick={() => onPageChange(item)}
-            >
-              {item}
-            </button>
-          ) : <span key={item} aria-hidden="true">…</span>)}
-        </div>
-        <span className="ops-jobs-pagination__compact">{labels.page} {safePage} / {totalPages}</span>
-        <button type="button" className="ops-jobs-pagination__nav" aria-label={labels.next} disabled={busy || safePage >= totalPages} onClick={() => onPageChange(safePage + 1)}>
-          <PaginationArrow direction="next" />
-        </button>
-      </div>
-
-      <p className="ops-jobs-pagination__range">
-        <strong>{start.toLocaleString("en-US")}–{end.toLocaleString("en-US")}</strong>
-        <span>/ {totalCount.toLocaleString("en-US")} {labels.jobs}</span>
-      </p>
-    </nav>
   );
 }
 
@@ -1007,7 +934,7 @@ export function OpsJobsPage() {
                     const canRetry =
                       job.retryable &&
                       (job.status === "FAILED" || job.status === "RETRYABLE") &&
-                      job.attempts < job.max_attempts;
+                      (job.status === "FAILED" || job.attempts < job.max_attempts);
                     const canCancel = job.status !== "COMPLETED" && job.status !== "CANCELLED";
                     const canResume = job.status === "WAITING_FOR_REVIEW";
                     return (
@@ -1055,10 +982,10 @@ export function OpsJobsPage() {
                           </td>
                           <td>
                             <span className={`ops-jobs-table__type tone-${typeTone}`} title={job.job_type}>
-                              {formatJobTypeLabel(job.job_type)}
+                              {formatJobWorkLabel(job)}
                             </span>
                             <span className="ops-jobs-table__step" title={job.current_step_key ?? undefined}>
-                              {job.current_step_key ? formatJobTypeLabel(job.current_step_key) : t("opsJobs.noCurrentStep")}
+                              {formatJobStepLabel(job) || t("opsJobs.noCurrentStep")}
                             </span>
                           </td>
                           <td>
@@ -1153,7 +1080,7 @@ export function OpsJobsPage() {
         )}
 
         {totalCount > 0 && jobs.length > 0 ? (
-          <OpsJobsPagination
+          <OperatorListPagination
             busy={request.refreshing}
             currentPage={currentPage}
             labels={{
@@ -1162,7 +1089,7 @@ export function OpsJobsPage() {
               previous: t("opsJobs.previousPage"),
               next: t("opsJobs.nextPage"),
               page: t("opsJobs.page"),
-              jobs: t("opsJobs.jobsNoun"),
+              noun: t("opsJobs.jobsNoun"),
             }}
             onPageChange={handlePageChange}
             onPageSizeChange={handlePageSizeChange}

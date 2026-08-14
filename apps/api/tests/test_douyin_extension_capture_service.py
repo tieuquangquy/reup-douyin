@@ -5,7 +5,7 @@ from unittest.mock import Mock, patch
 from uuid import uuid4
 
 from src.adapters.types import IngestSummary
-from src.enums import CapturedItemStatus, CrawlSessionStatus, IntakeEvaluationStatus, SourcePlatformEnum
+from src.enums import CandidateStatus, CapturedItemStatus, CrawlSessionStatus, IntakeEvaluationStatus, SourcePlatformEnum
 from src.models.capture_inbox import CapturedItem, CaptureSession
 from src.schemas.capture_inbox import CaptureInboxAdvancedFilterRequest, CapturedItemResponse
 from src.schemas.douyin_extension import (
@@ -2219,12 +2219,26 @@ class DouyinExtensionCaptureServiceTests(unittest.TestCase):
         self.assertEqual(promoted_video_payload["share_count_text"], "12")
         self.assertEqual(promoted_video_payload["favorite_count"], 8)
         self.assertEqual(promoted_video_payload["favorite_count_text"], "8")
-        self.assertEqual(promoted_video_payload["engagement_score"], 0.42)
-        self.assertEqual(promoted_video_payload["engagement_rate_basis"], "estimated_views_mid")
-        self.assertEqual(promoted_video_payload["reup_score"], 87)
-        self.assertEqual(promoted_video_payload["reup_score_label"], "High fit")
-        self.assertEqual(promoted_video_payload["reup_score_components"], {"engagement": 42})
-        self.assertEqual(promoted_video_payload["reup_score_reasons"], ["Strong engagement"])
+        # Canonical engagement_score is total captured interactions; the
+        # normalized ratio remains available separately as engagement_rate.
+        self.assertEqual(promoted_video_payload["engagement_score"], 1265)
+        self.assertEqual(promoted_video_payload["engagement_rate_basis"], "existing")
+        self.assertEqual(promoted_video_payload["reup_score"], 30)
+        self.assertEqual(promoted_video_payload["reup_score_label"], "Needs metadata")
+        self.assertEqual(
+            set(promoted_video_payload["reup_score_components"]),
+            {
+                "performance",
+                "engagement",
+                "virality_retention",
+                "duration_fit",
+                "recency",
+                "metadata_quality",
+                "penalty",
+                "outlier_bonus",
+            },
+        )
+        self.assertIn("Needs metadata", promoted_video_payload["reup_score_reasons"])
         self.assertEqual(promoted_video_payload["review_board_status"], "pending_review")
         self.assertEqual(promoted_video_payload["review_status"], "pending_review")
         self.assertEqual(promoted_video_payload["decision_status"], "pending_review")
@@ -2291,8 +2305,19 @@ class DouyinExtensionCaptureServiceTests(unittest.TestCase):
         )
         session = SimpleNamespace(id=uuid4(), submitted_profile_url="https://www.douyin.com/user/example")
         source_video = SimpleNamespace(id=source_video_id, metadata_json={}, raw_payload_json={}, source_url=item.source_url, caption="Stale fixture", posted_at=None, duration_seconds=None)
-        candidate = SimpleNamespace(id=candidate_id, source_video_id=source_video_id, metadata_json={"reup_score": 21.1}, score=21.1)
-        db = SimpleNamespace(get=Mock(return_value=None), scalar=Mock(side_effect=[source_video, candidate]), flush=Mock())
+        candidate = SimpleNamespace(
+            id=candidate_id,
+            source_video_id=source_video_id,
+            status=CandidateStatus.SHORTLISTED,
+            source_video=source_video,
+            metadata_json={"reup_score": 21.1},
+            score=21.1,
+        )
+        db = SimpleNamespace(
+            get=Mock(return_value=None),
+            scalar=Mock(side_effect=[source_video, candidate, item]),
+            flush=Mock(),
+        )
         service = CaptureInboxService(db)
 
         duplicates = service._sync_existing_review_board_promotions(session, [item])

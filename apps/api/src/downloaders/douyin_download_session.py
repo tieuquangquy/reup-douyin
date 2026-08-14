@@ -12,6 +12,7 @@ from src.downloaders.douyin_browser_download_cookies import (
     browser_export_to_session_cookie,
     resolve_browser_download_cookies,
 )
+from src.downloaders.errors import DownloadError, DownloadErrorCode
 from src.enums import DouyinAccountConnectionStatus
 from src.services.douyin_account_service import DouyinAccountError, DouyinAccountService
 
@@ -36,8 +37,16 @@ def _session_from_browser_export(export: BrowserDownloadCookieExport) -> DouyinD
     )
 
 
-def _default_or_active_account(db: Session, workspace_id: UUID):
+def _default_or_active_account(db: Session, workspace_id: UUID, account_connection_id: UUID | None = None):
     service = DouyinAccountService(db)
+    if account_connection_id is not None:
+        try:
+            account = service.get_account(account_connection_id)
+        except DouyinAccountError:
+            return service, None
+        if getattr(account, "workspace_id", None) != workspace_id:
+            return service, None
+        return service, account
     account = service.default_account(workspace_id=workspace_id)
     if account is None:
         active_accounts = service.list_accounts(
@@ -53,6 +62,7 @@ def resolve_douyin_download_session(
     workspace_id: UUID,
     *,
     prefer_browser: bool | None = None,
+    account_connection_id: UUID | None = None,
 ) -> DouyinDownloadSession:
     settings = get_settings()
     use_browser_first = (
@@ -60,11 +70,16 @@ def resolve_douyin_download_session(
     )
     browser_only = prefer_browser is True
 
-    browser_export = resolve_browser_download_cookies(db, workspace_id)
+    browser_export = resolve_browser_download_cookies(db, workspace_id, account_connection_id)
     if use_browser_first and browser_export is not None:
         return _session_from_browser_export(browser_export)
 
-    service, account = _default_or_active_account(db, workspace_id)
+    service, account = _default_or_active_account(db, workspace_id, account_connection_id)
+    if account_connection_id is not None and account is None:
+        raise DownloadError(
+            DownloadErrorCode.RESOLVE_FAILED,
+            "Selected Douyin account is missing or belongs to another workspace",
+        )
     has_browser_profile = account is not None and account_has_browser_profile(account)
 
     # When a browser profile is configured and we prefer browser cookies, do not

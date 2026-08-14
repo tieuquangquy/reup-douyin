@@ -103,12 +103,11 @@ class CoverStrokePadTests(unittest.TestCase):
 
 
 class Phase1RoiCoverageTests(unittest.TestCase):
-    def test_roi_includes_upper_mid_content_not_only_lower_third(self) -> None:
+    def test_v34_roi_covers_the_full_frame(self) -> None:
         """Nutrition / mid-card copy often sits above y=0.35 — ROI must see it."""
         from src.media_pipeline.frame_sampling.master_phase1_extractor import ROI_Y0
 
-        self.assertLessEqual(ROI_Y0, 0.15)
-        self.assertGreaterEqual(ROI_Y0, 0.05)
+        self.assertEqual(ROI_Y0, 0.0)
 
 
 if __name__ == "__main__":

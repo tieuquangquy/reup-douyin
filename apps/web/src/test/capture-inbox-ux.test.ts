@@ -37,6 +37,12 @@ const session = (id: string, createdAt: string): CaptureSession => ({
   failed_item_count: 0,
   started_at: createdAt,
   finished_at: createdAt,
+  diagnostics_json: null,
+  metadata_json: null,
+  raw_summary_json: null,
+  result_summary_json: null,
+  error_code: null,
+  error_message: null,
   created_at: createdAt,
   updated_at: createdAt
 });

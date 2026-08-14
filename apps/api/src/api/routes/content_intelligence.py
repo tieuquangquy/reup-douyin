@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Literal
 from uuid import UUID
 
@@ -18,6 +19,7 @@ from src.content_intelligence.services.content_ai_classifier import (
 from src.content_intelligence.services.content_ai_settings_service import (
     ContentAiSettingsError,
     ContentAiSettingsService,
+    merge_content_ai_list_models_draft,
 )
 from src.core.auth import AuthenticatedPrincipal, get_current_principal
 from src.db.session import get_db_session
@@ -32,6 +34,8 @@ from src.schemas.content_intelligence import (
     ContentClassificationRunResponse,
     ContentAiConfigResponse,
     ContentAiConfigUpdateRequest,
+    ContentAiModelsRequest,
+    ContentAiModelsResponse,
     ContentAiPromptCreateRequest,
     ContentAiPromptProfile,
     ContentAiPromptUpdateRequest,
@@ -46,6 +50,7 @@ from src.schemas.jobs import JobResponse
 
 
 router = APIRouter(tags=["content-intelligence"])
+logger = logging.getLogger(__name__)
 
 
 def require_content_principal(
@@ -132,6 +137,31 @@ def test_content_ai_config(
         raise _settings_error(exc) from exc
 
 
+@router.post("/content-intelligence/ai-config/models", response_model=ContentAiModelsResponse)
+def list_content_ai_models(
+    request: ContentAiModelsRequest,
+    service: ContentAiSettingsService = Depends(get_content_ai_settings),
+    principal: AuthenticatedPrincipal = Depends(require_content_principal),
+) -> ContentAiModelsResponse:
+    try:
+        saved, _prompt = service.get_runtime(principal.workspace_id)
+    except ContentAiSettingsError as exc:
+        raise _settings_error(exc) from exc
+    config = merge_content_ai_list_models_draft(saved, request.model_dump())
+    ok, models, detail = ContentAiClassifier().list_models(config)
+    provider = ContentAiClassifier._resolve_provider(config)
+    logger.info(
+        "content_ai_list_models",
+        extra={
+            "workspace_id": str(principal.workspace_id),
+            "provider": provider,
+            "ok": ok,
+            "model_count": len(models),
+        },
+    )
+    return ContentAiModelsResponse(ok=ok, provider=provider, models=models, detail=detail)
+
+
 @router.get("/content-intelligence/prompts", response_model=list[ContentAiPromptProfile])
 def list_content_ai_prompts(
     service: ContentAiSettingsService = Depends(get_content_ai_settings),
@@ -187,6 +217,23 @@ def activate_content_ai_prompt(
         return ContentAiConfigResponse.model_validate(service.activate_prompt(principal.workspace_id, prompt_id))
     except ContentAiSettingsError as exc:
         raise _settings_error(exc) from exc
+
+
+@router.delete("/content-intelligence/prompts/{prompt_id}", response_model=ContentAiConfigResponse)
+def delete_content_ai_prompt(
+    prompt_id: str,
+    service: ContentAiSettingsService = Depends(get_content_ai_settings),
+    principal: AuthenticatedPrincipal = Depends(require_content_principal),
+) -> ContentAiConfigResponse:
+    try:
+        payload = service.delete_prompt(principal.workspace_id, prompt_id)
+    except ContentAiSettingsError as exc:
+        raise _settings_error(exc) from exc
+    logger.info(
+        "content_ai_prompt_deleted",
+        extra={"workspace_id": str(principal.workspace_id), "prompt_id": prompt_id},
+    )
+    return ContentAiConfigResponse.model_validate(payload)
 
 
 @router.get("/content-topics", response_model=TopicCategoryListResponse)

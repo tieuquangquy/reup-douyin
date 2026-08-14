@@ -61,6 +61,7 @@ def calculate_job_progress(steps: Sequence[object]) -> dict[str, int | str | Non
 
 
 def apply_job_progress(job: object) -> None:
+    previous_progress = clamp_percent(getattr(job, "progress_percent", 0) or 0)
     progress = calculate_job_progress(list(job.steps))
     job.total_steps = progress["total_steps"]
     job.completed_steps = progress["completed_steps"]
@@ -70,5 +71,15 @@ def apply_job_progress(job: object) -> None:
     if job.status == JobStatus.CANCELLED:
         job.progress_percent = 0
         return
-    job.progress_percent = progress["progress_percent"]
-
+    calculated = int(progress["progress_percent"])
+    # Analyze Audio has legacy placeholder steps for API compatibility, while
+    # its real work reports resolve/VAD/ASR/persist subphases from one handler.
+    # When that authority is present, those placeholders must not make the UI
+    # jump to ~77% before FunASR even starts.
+    metadata = dict(getattr(job, "metadata_json", None) or {})
+    if metadata.get("progress_authority") == "audio_subphase" and job.status == JobStatus.RUNNING:
+        calculated = clamp_percent(metadata.get("subphase_percent", 0) or 0)
+    # Long-running subphases may commit their heartbeat through a nested
+    # service and later refresh the parent step from an older ORM snapshot.
+    # Never let such a refresh make a live job appear to move backwards.
+    job.progress_percent = max(previous_progress, calculated) if job.status == JobStatus.RUNNING else calculated

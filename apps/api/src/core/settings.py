@@ -14,6 +14,10 @@ class Settings(BaseSettings):
     # Content-addressed controlled-pilot recipe used by Reup Queue auto runs.
     # Empty means the repository's docs/pipeline-recipes current pointer.
     pipeline_recipe_lock_path: str = ""
+    # Independent content-addressed authority for the frontend Analyze OCR path.
+    # Keeping it separate avoids rewriting the immutable whole-pipeline recipe
+    # when only the local OCR scheduler/provenance policy is promoted.
+    analyze_ocr_recipe_lock_path: str = ""
     log_level: str = "INFO"
     douyin_enable_live_fetch: bool = False
     douyin_user_agent: str = (
@@ -24,15 +28,50 @@ class Settings(BaseSettings):
     douyin_session_cookie: str | None = None
     douyin_proxy_url: str | None = None
     douyin_fetch_timeout_seconds: float = 15.0
+    # Hard guard against challenge/HTML or unexpectedly huge CDN payloads filling local disk.
+    douyin_download_max_bytes: int = 2_000_000_000
+    douyin_download_quality_profile: str = "balanced_processing"
+    douyin_download_target_long_edge: int = 1920
+    douyin_download_staging_ttl_hours: float = 24.0
+    # Canonical managed transfer directory. Keep this separate from
+    # LOCAL_STORAGE_ROOT so an incomplete download can never appear in a
+    # MediaAsset manifest. Empty uses the repository's download_staging_v2.
+    douyin_download_staging_dir: str | None = None
+    # Recent unchanged local assets use stat/probe metadata for a fast cache hit;
+    # SHA-256 + ffprobe are still repeated after this interval or any stat change.
+    douyin_download_cache_deep_verify_interval_hours: float = 24.0
     douyin_fetch_max_videos: int = 50
     douyin_yt_dlp_enabled: bool = True
     douyin_yt_dlp_binary: str = "yt-dlp"
-    douyin_yt_dlp_format: str = "bestvideo*+bestaudio/best"
-    douyin_yt_dlp_timeout_seconds: int = 180
+    douyin_yt_dlp_format: str = (
+        "bestvideo*[height<=1920][vcodec!*=hevc][vcodec!*=av01]+bestaudio/"
+        "bestvideo*[height<=1920]+bestaudio/best[height<=1920]/best"
+    )
+    douyin_yt_dlp_timeout_seconds: int = 900
+    # The first cookie-backed attempt is only a cheap fast path.  Escalate to
+    # Playwright instead of letting it block the queue for the full long-video budget.
+    douyin_yt_dlp_fast_path_timeout_seconds: int = 90
+    # Abort an unproductive yt-dlp attempt early. The total timeout remains the
+    # hard ceiling; these budgets only apply before the first byte and while a
+    # transfer has stopped advancing (not during the final merge).
+    douyin_yt_dlp_first_byte_timeout_seconds: int = 45
+    douyin_yt_dlp_stall_timeout_seconds: int = 90
+    # Fast path: a cookie-backed yt-dlp transfer is cheaper than opening/navigating
+    # Chromium; strict no-logo validation still gates the result before persistence.
+    douyin_download_prefer_yt_dlp_fast_path: bool = True
     douyin_yt_dlp_prefer_browser_cookies: bool = True
     douyin_download_cookie_store_dir: str | None = None
     douyin_playwright_download_enabled: bool = True
     douyin_playwright_download_timeout_ms: int = 90_000
+    # Maximum wait after navigation for a no-logo detail response. The resolver
+    # polls and exits early as soon as a usable candidate appears.
+    douyin_playwright_media_settle_timeout_ms: int = 2_500
+    # Once yt-dlp already produced a verified clean fallback, browser escalation
+    # is opportunistic and must not consume the full 255-second bridge budget.
+    douyin_download_quality_escalation_timeout_seconds: int = 45
+    # Deprecated compatibility alias. New deployments should use
+    # DOUYIN_DOWNLOAD_STAGING_DIR; the staging helper still accepts this alias
+    # for existing local profiles.
     douyin_playwright_download_staging_dir: str | None = None
     # When cookie-store yt-dlp fails, auto-open Playwright for download fallback.
     # Headless=True keeps Chromium in background (no operator window).
@@ -83,8 +122,10 @@ class Settings(BaseSettings):
     douyin_secret_encryption_key_ref: str | None = None
     # Hard cap for batch START_PROCESSING / START_AUTO (Playwright download path). Soft ceiling ~100.
     reup_queue_start_processing_batch_limit: int = 30
-    # Max DOWNLOAD_VIDEO jobs RUNNING per workspace at once (Start-auto queue storm guard).
-    download_video_max_concurrent_running: int = 1
+    # Two network-bound downloads may run in parallel. Browser-owned transfers
+    # remain serialized by the Playwright registry, while yt-dlp/direct CDN work
+    # can use both local worker processes.
+    download_video_max_concurrent_running: int = 2
     # Requeue RUNNING jobs older than N seconds (hung register_assets / ~71% guard). None = auto.
     download_video_stale_running_seconds: int | None = None
     # Lock age without a heartbeat before a RUNNING job is treated as dead, per job type.
@@ -135,7 +176,10 @@ class Settings(BaseSettings):
     gpu_max_concurrent_running: int = 1
     # Running-job caps per workspace for the stages that saturate one machine.
     analyze_audio_max_concurrent_running: int = 1
-    synthesize_tts_max_concurrent_running: int = 2
+    # A single local OmniVoice model owns the GPU/VRAM. Serializing jobs avoids
+    # duplicate model pressure and makes duration calibration deterministic.
+    synthesize_tts_max_concurrent_running: int = 1
+    build_translation_draft_max_concurrent_running: int = 1
     analyze_ocr_max_concurrent_running: int = 1
     render_final_max_concurrent_running: int = 1
     metrics_collection_max_concurrent_running: int = 2
@@ -205,9 +249,22 @@ class Settings(BaseSettings):
     # Audio analysis / localization (free stack). See docs/localization-reup-pipeline-design.md.
     # STT: funasr (default) or caption. FunASR requires optional `funasr` package + model download.
     audio_stt_provider: str = "funasr"
-    # Hard cap for FunASR AutoModel load+generate (includes first ModelScope download).
-    # On timeout, ANALYZE_AUDIO falls back to segmented caption STT.
-    audio_funasr_timeout_seconds: float = 900.0
+    # Inference cap after the local model worker is warm.  Model download/load
+    # has its own longer first-run budget below.
+    audio_funasr_timeout_seconds: float = 180.0
+    audio_funasr_warmup_timeout_seconds: float = 900.0
+    # Long media is transcribed in resumable local chunks.  Successful chunk
+    # checkpoints are content-identity keyed under local storage.
+    audio_funasr_chunk_seconds: float = 60.0
+    audio_funasr_chunk_overlap_seconds: float = 1.5
+    audio_funasr_device: str = "auto"
+    audio_analysis_cache_max_bytes: int = 5_000_000_000
+    audio_analysis_cache_min_age_hours: float = 24.0
+    # Pinned local AudioSet evidence for Target Speech V1. Runtime never
+    # downloads a model; the checksum-verified ONNX asset lives under the local
+    # storage model cache unless an explicit path is configured.
+    audio_event_yamnet_enabled: bool = True
+    audio_event_yamnet_model_path: str = ""
     # Translation: auto | gemini | qwen | placeholder
     audio_translation_provider: str = "auto"
     gemini_api_key: str | None = None
@@ -228,12 +285,12 @@ class Settings(BaseSettings):
     # TTS: workspace Ops active profile is authority for Generate TTS; these are env fallbacks.
     # Providers: auto | edge | vieneu | google | azure | elevenlabs | openai |
     # openai_compatible | http_custom | cli | placeholder
-    audio_tts_provider: str = "auto"
-    audio_tts_voice_id: str = "vi-VN-HoaiMyNeural"
+    audio_tts_provider: str = "omnivoice"
+    audio_tts_voice_id: str = "instruct:vi_female_north"
     audio_tts_speaking_rate: float = 1.0
     audio_tts_api_key: str | None = None
     audio_tts_base_url: str = ""
-    audio_tts_model_id: str = ""
+    audio_tts_model_id: str = "k2-fsa/OmniVoice"
     audio_tts_fallback_provider: str = "none"
     audio_tts_fallback_voice_id: str = ""
     audio_tts_local_backend: str = "auto"

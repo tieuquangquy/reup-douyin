@@ -87,6 +87,7 @@ SynthesizeAudioFn = Callable[..., tuple[bytes, float]]
 
 _MODEL_LOCK = threading.Lock()
 _MODEL_CACHE: dict[str, Any] = {}
+_INFERENCE_LOCKS: dict[str, threading.Lock] = {}
 
 
 def resolve_omnivoice_model_id(model_id: str | None) -> str:
@@ -145,15 +146,14 @@ def _engine_supported_for_k2(model_id: str) -> bool:
 
 def _wav_bytes_from_tensor(audio: Any, sample_rate: int) -> tuple[bytes, float]:
     import numpy as np
-    import torch
 
     if hasattr(audio, "detach"):
         tensor = audio.detach().cpu().float()
+        samples = tensor.numpy()
     else:
-        tensor = torch.as_tensor(audio).float()
-    if tensor.ndim > 1:
-        tensor = tensor.squeeze()
-    samples = tensor.numpy()
+        samples = np.asarray(audio, dtype=np.float32)
+    if samples.ndim > 1:
+        samples = samples.squeeze()
     if samples.dtype != np.float32:
         samples = samples.astype(np.float32)
     # Clamp and convert to int16 PCM
@@ -197,7 +197,14 @@ def _get_or_load_model(*, model_id: str, device: str) -> Any:
         dtype = torch.float16 if device in {"cuda", "mps"} else torch.float32
         model = OmniVoice.from_pretrained(model_id, device_map=device, dtype=dtype)
         _MODEL_CACHE[key] = model
+        _INFERENCE_LOCKS.setdefault(key, threading.Lock())
         return model
+
+
+def _model_inference_lock(*, model_id: str, device: str) -> threading.Lock:
+    key = f"{model_id}|{device}"
+    with _MODEL_LOCK:
+        return _INFERENCE_LOCKS.setdefault(key, threading.Lock())
 
 
 class OmniVoiceTtsProvider:
@@ -217,6 +224,50 @@ class OmniVoiceTtsProvider:
         self.model_id = resolve_omnivoice_model_id(model_id)
         self.device = (device or "auto").strip().lower() or "auto"
         self.options = dict(options or {})
+
+    @property
+    def preferred_batch_size(self) -> int:
+        """Choose throughput batch size from real accelerator headroom.
+
+        OmniVoice is autoregressive; on a 4 GB GTX 1650 a batch of four fills
+        VRAM but is slower than sequential generation. Keep batching for cards
+        with enough memory to benefit and fail conservative elsewhere.
+        """
+
+        try:
+            import torch
+
+            device = _resolve_device(self.device)
+            if device != "cuda" or not torch.cuda.is_available():
+                return 1
+            total_gb = float(torch.cuda.get_device_properties(0).total_memory) / (1024**3)
+            if total_gb >= 10.0:
+                return 4
+            if total_gb >= 6.0:
+                return 2
+        except Exception:
+            return 1
+        return 1
+
+    def warmup(self) -> dict[str, Any]:
+        """Make the persistent worker process the single warm model owner."""
+
+        if self._synthesize_audio is not None:
+            return {"status": "injected_runtime", "model_id": self.model_id}
+        model_id = resolve_omnivoice_model_id(self.model_id)
+        if not _engine_supported_for_k2(model_id):
+            return {"status": "unsupported_engine", "model_id": model_id}
+        device = _resolve_device(self.device)
+        key = f"{model_id}|{device}"
+        with _MODEL_LOCK:
+            was_warm = key in _MODEL_CACHE
+        _get_or_load_model(model_id=model_id, device=device)
+        return {
+            "status": "already_warm" if was_warm else "loaded",
+            "model_id": model_id,
+            "device": device,
+            "owner": "persistent_worker_process",
+        }
 
     def synthesize(self, request: TtsProviderInput) -> TtsProviderOutput:
         text = (request.text or "").strip()
@@ -287,6 +338,88 @@ class OmniVoiceTtsProvider:
             warnings=warnings,
         )
 
+    def synthesize_batch(
+        self,
+        requests: list[TtsProviderInput],
+    ) -> list[TtsProviderOutput]:
+        """Generate a bounded batch in one model call.
+
+        OmniVoice accepts list-valued inputs.  Keeping batching here (provider
+        boundary) lets the pipeline remain provider-agnostic and fall back to
+        the normal per-clip path for test doubles or custom adapters.
+        """
+
+        if not requests:
+            return []
+        if self._synthesize_audio is not None:
+            return [self.synthesize(request) for request in requests]
+        first = requests[0]
+        model_id = resolve_omnivoice_model_id(self.model_id)
+        if not _engine_supported_for_k2(model_id):
+            return [self.synthesize(request) for request in requests]
+        device = _resolve_device(self.device)
+        model = _get_or_load_model(model_id=model_id, device=device)
+        sample_rate = int(getattr(model, "sampling_rate", None) or DEFAULT_SAMPLE_RATE)
+        texts = [(request.text or "").strip() for request in requests]
+        if any(not text for text in texts):
+            raise TtsPipelineError(TtsPipelineErrorCode.TTS_PROVIDER_FAILED, "OmniVoice batch contains empty text")
+        languages = [
+            (request.language_code or request.voice_config.language_code or "vi").strip() or "vi"
+            for request in requests
+        ]
+        instructs = [resolve_omnivoice_instruct(request.voice_config.voice_id) for request in requests]
+        speeds = [
+            max(0.5, min(2.0, float(request.voice_config.speaking_rate or 1.0)))
+            for request in requests
+        ]
+        logger.info(
+            "omnivoice_synthesize_batch",
+            extra={"model_id": model_id, "device": device, "batch_size": len(requests)},
+        )
+        try:
+            with _model_inference_lock(model_id=model_id, device=device):
+                audios = model.generate(
+                    text=texts,
+                    language=languages,
+                    instruct=instructs,
+                    speed=speeds,
+                )
+        except Exception as exc:
+            raise TtsPipelineError(
+                TtsPipelineErrorCode.TTS_PROVIDER_FAILED,
+                f"OmniVoice batch TTS failed: {exc}",
+            ) from exc
+        if not isinstance(audios, (list, tuple)) or len(audios) != len(requests):
+            raise TtsPipelineError(
+                TtsPipelineErrorCode.TTS_PROVIDER_FAILED,
+                "OmniVoice batch returned an unexpected audio count",
+            )
+        outputs: list[TtsProviderOutput] = []
+        for request, audio in zip(requests, audios, strict=True):
+            audio_bytes, duration_seconds = _wav_bytes_from_tensor(audio, sample_rate)
+            if not audio_bytes.startswith(b"RIFF"):
+                raise TtsPipelineError(TtsPipelineErrorCode.TTS_PROVIDER_FAILED, "OmniVoice batch returned invalid WAV")
+            voice_id = request.voice_config.voice_id
+            outputs.append(
+                TtsProviderOutput(
+                    audio_bytes=audio_bytes,
+                    duration_seconds=duration_seconds,
+                    mime_type="audio/wav",
+                    file_extension="wav",
+                    provider_metadata={
+                        "provider": self.provider_name,
+                        "voice_id": voice_id,
+                        "instruct": resolve_omnivoice_instruct(voice_id) or "",
+                        "speaking_rate": float(request.voice_config.speaking_rate),
+                        "model_id": model_id,
+                        "language": request.language_code or "vi",
+                        "batch_size": len(requests),
+                    },
+                    warnings=[],
+                )
+            )
+        return outputs
+
     def _synthesize_via_omnivoice(
         self,
         *,
@@ -320,7 +453,8 @@ class OmniVoiceTtsProvider:
             "omnivoice_synthesize",
             extra={"model_id": model_id, "device": device, "has_instruct": bool(instruct)},
         )
-        audios = model.generate(**kwargs)
+        with _model_inference_lock(model_id=model_id, device=device):
+            audios = model.generate(**kwargs)
         if not audios:
             raise TtsPipelineError(
                 TtsPipelineErrorCode.TTS_PROVIDER_FAILED,
@@ -332,3 +466,4 @@ class OmniVoiceTtsProvider:
 def reset_omnivoice_model_cache_for_tests() -> None:
     with _MODEL_LOCK:
         _MODEL_CACHE.clear()
+        _INFERENCE_LOCKS.clear()

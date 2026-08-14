@@ -1,14 +1,153 @@
 /** TTS Ops provider taxonomy + local install recipes (UI authority). */
 
-import type { TtsAiCatalog } from "./api";
+import type {
+  TtsAiCatalog,
+  TtsAiCatalogLanguage,
+  TtsAiCatalogModel,
+  TtsAiCatalogVoice
+} from "./api";
 
 export type TtsProviderKind = "local" | "cloud" | "http" | "system";
+
+export type TtsCatalogSelection = {
+  languageCode?: string;
+  modelId?: string;
+  voiceId?: string;
+};
+
+function normalizedCatalogValue(value: string | null | undefined): string {
+  return (value || "").trim().toLowerCase();
+}
+
+function normalizedCatalogId(value: string | null | undefined): string {
+  return (value || "").trim();
+}
+
+function catalogListIncludes(values: string[] | null | undefined, selected: string): boolean {
+  const wanted = normalizedCatalogId(selected);
+  if (!wanted || !values?.length) return true;
+  return values.some((value) => normalizedCatalogId(value) === wanted);
+}
+
+function catalogLanguageMatches(candidate: string, selected: string): boolean {
+  const left = normalizedCatalogValue(candidate).replace(/_/g, "-");
+  const right = normalizedCatalogValue(selected).replace(/_/g, "-");
+  if (!left || !right) return true;
+  return left === right || left.startsWith(`${right}-`) || right.startsWith(`${left}-`);
+}
+
+function catalogLanguagesInclude(values: string[] | null | undefined, selected: string): boolean {
+  const wanted = normalizedCatalogValue(selected);
+  if (!wanted || !values?.length) return true;
+  return values.some((value) => catalogLanguageMatches(value, wanted));
+}
+
+/** Normalize the additive rich model catalog with the legacy `models: string[]` contract. */
+export function ttsCatalogModelOptions(catalog: TtsAiCatalog | null | undefined): TtsAiCatalogModel[] {
+  if (!catalog) return [];
+  const byId = new Map<string, TtsAiCatalogModel>();
+  for (const option of catalog.model_options || []) {
+    const id = (option.id || "").trim();
+    if (!id || byId.has(id)) continue;
+    byId.set(id, { ...option, id, label: (option.label || id).trim() || id });
+  }
+  for (const raw of catalog.models || []) {
+    const id = (raw || "").trim();
+    if (!id || byId.has(id)) continue;
+    byId.set(id, { id, label: id });
+  }
+  return [...byId.values()];
+}
+
+/** Use explicit languages first, then enrich partial catalogs from model/voice metadata. */
+export function ttsCatalogLanguageOptions(
+  catalog: TtsAiCatalog | null | undefined
+): TtsAiCatalogLanguage[] {
+  if (!catalog) return [];
+  const byCode = new Map<string, TtsAiCatalogLanguage>();
+  for (const option of catalog.languages || []) {
+    const code = (option.code || "").trim();
+    if (!code) continue;
+    const key = normalizedCatalogValue(code);
+    if (!byCode.has(key)) byCode.set(key, { code, label: (option.label || code).trim() || code });
+  }
+  const inferred = [
+    ...(catalog.voices || []).flatMap((voice) => voice.languages || []),
+    ...ttsCatalogModelOptions(catalog).flatMap((model) => model.languages || [])
+  ];
+  for (const raw of inferred) {
+    const code = (raw || "").trim();
+    const key = normalizedCatalogValue(code);
+    if (code && !byCode.has(key)) byCode.set(key, { code, label: code });
+  }
+  return [...byCode.values()];
+}
+
+export function filterTtsCatalogModels(
+  catalog: TtsAiCatalog | null | undefined,
+  selection: TtsCatalogSelection
+): TtsAiCatalogModel[] {
+  const models = ttsCatalogModelOptions(catalog);
+  const selectedVoice = (catalog?.voices || []).find(
+    (voice) => normalizedCatalogId(voice.id) === normalizedCatalogId(selection.voiceId)
+  );
+  return models.filter((model) => {
+    if (!catalogLanguagesInclude(model.languages, selection.languageCode || "")) return false;
+    if (selectedVoice && !catalogListIncludes(model.voices, selectedVoice.id)) return false;
+    if (selectedVoice && !catalogListIncludes(selectedVoice.models, model.id)) return false;
+    return true;
+  });
+}
+
+export function filterTtsCatalogVoices(
+  catalog: TtsAiCatalog | null | undefined,
+  selection: TtsCatalogSelection
+): TtsAiCatalogVoice[] {
+  const voices = catalog?.voices || [];
+  const selectedModel = ttsCatalogModelOptions(catalog).find(
+    (model) => normalizedCatalogId(model.id) === normalizedCatalogId(selection.modelId)
+  );
+  return voices.filter((voice) => {
+    if (!catalogLanguagesInclude(voice.languages, selection.languageCode || "")) return false;
+    if (selectedModel && !catalogListIncludes(voice.models, selectedModel.id)) return false;
+    if (selectedModel && !catalogListIncludes(selectedModel.voices, voice.id)) return false;
+    return true;
+  });
+}
+
+export function filterTtsCatalogLanguages(
+  catalog: TtsAiCatalog | null | undefined,
+  selection: TtsCatalogSelection
+): TtsAiCatalogLanguage[] {
+  const languages = ttsCatalogLanguageOptions(catalog);
+  const selectedVoice = (catalog?.voices || []).find(
+    (voice) => normalizedCatalogId(voice.id) === normalizedCatalogId(selection.voiceId)
+  );
+  const selectedModel = ttsCatalogModelOptions(catalog).find(
+    (model) => normalizedCatalogId(model.id) === normalizedCatalogId(selection.modelId)
+  );
+  return languages.filter((language) => {
+    if (
+      selectedVoice?.languages?.length &&
+      !selectedVoice.languages.some((code) => catalogLanguageMatches(code, language.code))
+    ) {
+      return false;
+    }
+    if (
+      selectedModel?.languages?.length &&
+      !selectedModel.languages.some((code) => catalogLanguageMatches(code, language.code))
+    ) {
+      return false;
+    }
+    return true;
+  });
+}
 
 export const TTS_KIND_ORDER: TtsProviderKind[] = ["local", "cloud", "http", "system"];
 
 export const TTS_PROVIDERS_BY_KIND: Record<TtsProviderKind, readonly string[]> = {
   local: ["edge", "vieneu", "omnivoice", "cli", "custom"],
-  cloud: ["google", "azure", "elevenlabs", "openai"],
+  cloud: ["google", "google_gemini", "azure", "elevenlabs", "openai"],
   http: ["openai_compatible", "http_custom"],
   system: ["auto", "placeholder"]
 };
@@ -18,6 +157,7 @@ export const TTS_FALLBACK_PROVIDERS = [
   "edge",
   "vieneu",
   "google",
+  "google_gemini",
   "azure",
   "elevenlabs",
   "openai",
@@ -109,6 +249,46 @@ export const OMNIVOICE_CURATED_MODELS = [
   "confucius4-tts"
 ] as const;
 
+export const GEMINI_TTS_MODELS = [
+  "gemini-2.5-flash-tts",
+  "gemini-2.5-pro-tts",
+  "gemini-2.5-flash-preview-tts",
+  "gemini-2.5-pro-preview-tts"
+] as const;
+
+export const GEMINI_TTS_VOICES = [
+  ["Zephyr", "Zephyr · bright"], ["Puck", "Puck · upbeat"],
+  ["Charon", "Charon · informative"], ["Kore", "Kore · firm"],
+  ["Fenrir", "Fenrir · excitable"], ["Leda", "Leda · youthful"],
+  ["Orus", "Orus · firm"], ["Aoede", "Aoede · breezy"],
+  ["Callirrhoe", "Callirrhoe · easy-going"], ["Autonoe", "Autonoe · bright"],
+  ["Enceladus", "Enceladus · breathy"], ["Iapetus", "Iapetus · clear"],
+  ["Umbriel", "Umbriel · easy-going"], ["Algieba", "Algieba · smooth"],
+  ["Despina", "Despina · smooth"], ["Erinome", "Erinome · clear"],
+  ["Algenib", "Algenib · gravelly"], ["Rasalgethi", "Rasalgethi · informative"],
+  ["Laomedeia", "Laomedeia · upbeat"], ["Achernar", "Achernar · soft"],
+  ["Alnilam", "Alnilam · firm"], ["Schedar", "Schedar · even"],
+  ["Gacrux", "Gacrux · mature"], ["Pulcherrima", "Pulcherrima · forward"],
+  ["Achird", "Achird · friendly"], ["Zubenelgenubi", "Zubenelgenubi · casual"],
+  ["Vindemiatrix", "Vindemiatrix · gentle"], ["Sadachbia", "Sadachbia · lively"],
+  ["Sadaltager", "Sadaltager · knowledgeable"], ["Sulafat", "Sulafat · warm"]
+] as const;
+
+export function canonicalizeGeminiVoiceId(value: string | null | undefined): string {
+  const text = (value || "").trim();
+  if (!text) return "";
+  const byLower = new Map(GEMINI_TTS_VOICES.map(([id]) => [id.toLowerCase(), id]));
+  const direct = byLower.get(text.toLowerCase());
+  if (direct) return direct;
+  const marker = "-chirp3-hd-";
+  const lowered = text.toLowerCase();
+  const markerIndex = lowered.lastIndexOf(marker);
+  if (markerIndex >= 0) {
+    return byLower.get(text.slice(markerIndex + marker.length).trim().toLowerCase()) || "";
+  }
+  return "";
+}
+
 /** Models currently backed by a real reup-douyin synthesize adapter. */
 export const OMNIVOICE_SUPPORTED_MODELS = ["k2-fsa/OmniVoice"] as const;
 
@@ -152,6 +332,41 @@ export function resolveTtsCatalogForProvider(
   provider: string,
   persistedCatalog: TtsAiCatalog | null | undefined
 ): TtsAiCatalog | null {
+  if (provider.trim().toLowerCase() === "google_gemini") {
+    const voiceIds = GEMINI_TTS_VOICES.map(([id]) => id);
+    return {
+      source: persistedCatalog?.source === "provider" ? "provider" : "curated",
+      voices: GEMINI_TTS_VOICES.map(([id, label]) => ({
+        id,
+        label,
+        languages: ["vi-VN"],
+        models: [...GEMINI_TTS_MODELS],
+        capabilities: ["expressive", "single_speaker"]
+      })),
+      styles: [],
+      models: [...GEMINI_TTS_MODELS],
+      model_options: GEMINI_TTS_MODELS.map((id) => ({
+        id,
+        label: id,
+        languages: ["vi-VN"],
+        voices: voiceIds,
+        capabilities: ["audio", "expressive_tts"]
+      })),
+      languages: [{ code: "vi-VN", label: "Tiếng Việt (Việt Nam)" }],
+      default_voice_id: "Kore",
+      default_model_id: "gemini-2.5-flash-tts",
+      default_language_code: "vi-VN",
+      warning: persistedCatalog?.warning || "",
+      discovery: persistedCatalog?.discovery || null,
+      sample_rate: persistedCatalog?.sample_rate ?? null,
+      backends: [],
+      capabilities: persistedCatalog?.capabilities || {
+        voice: true,
+        model: true,
+        api_key: true
+      }
+    };
+  }
   if (!isOmnivoiceProvider(provider)) return persistedCatalog ?? null;
 
   const persistedVoices = persistedCatalog?.voices?.length ? persistedCatalog.voices : null;
@@ -308,13 +523,13 @@ export function getTtsFieldCapabilities(
     };
   } else if (mode === "cli") {
     base = { ...EMPTY_CAPS, voice: true, cli_binary: true };
-  } else if (["google", "azure", "elevenlabs", "openai"].includes(mode)) {
+  } else if (["google", "google_gemini", "azure", "elevenlabs", "openai"].includes(mode)) {
     base = {
       ...EMPTY_CAPS,
       voice: true,
       model: true,
       api_key: true,
-      base_url: mode === "azure" || mode === "openai"
+      base_url: mode === "google_gemini" || mode === "azure" || mode === "openai"
     };
   } else if (mode === "openai_compatible" || mode === "http_custom") {
     base = { ...EMPTY_CAPS, voice: true, model: true, api_key: true, base_url: true };

@@ -42,6 +42,12 @@ def build_recipe_dict(
     skip_dubbing: bool,
 ) -> dict[str, Any]:
     """Quality-affecting knobs only — concurrency / disk guards do not belong here."""
+    from src.media_pipeline.frame_sampling.event_candidate_scheduler import (
+        EVENT_SCAN_ENGINE_VERSION,
+        EVENT_SCAN_POLICY_VERSION,
+    )
+    from src.services.analyze_ocr_recipe import ANALYZE_OCR_RELEASE_LABEL
+
     loudness_on = bool(_settings_value(settings, "render_loudness_normalization_enabled", True))
     target = float(_settings_value(settings, "render_loudness_target_lufs", -14.0))
     return {
@@ -55,6 +61,12 @@ def build_recipe_dict(
             "final_coverage_fade_tail_max_frames": (
                 FINAL_COVERAGE_FADE_TAIL_MAX_FRAMES
             ),
+            "frontend_analyze_ocr": {
+                "recipe_release": ANALYZE_OCR_RELEASE_LABEL,
+                "analysis_engine": EVENT_SCAN_ENGINE_VERSION,
+                "analysis_policy_version": EVENT_SCAN_POLICY_VERSION,
+                "network_calls_allowed": 0,
+            },
         },
         "phase2": {
             "provider": "local",

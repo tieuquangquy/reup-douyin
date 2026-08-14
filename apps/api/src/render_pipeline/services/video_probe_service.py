@@ -33,7 +33,20 @@ def parse_ffprobe_payload(payload: dict) -> VideoProbe:
         duration_seconds=duration,
         video_codec=_as_codec((video or {}).get("codec_name")),
         audio_codec=_as_codec((audio or {}).get("codec_name")),
-        raw={"probe_strategy": "ffprobe", "streams": len(streams)},
+        raw={
+            "probe_strategy": "ffprobe",
+            "streams": len(streams),
+            "video_stream_count": sum(
+                1
+                for stream in streams
+                if isinstance(stream, dict) and stream.get("codec_type") == "video"
+            ),
+            "audio_stream_count": sum(
+                1
+                for stream in streams
+                if isinstance(stream, dict) and stream.get("codec_type") == "audio"
+            ),
+        },
     )
 
 
@@ -82,9 +95,20 @@ def _parse_frame_rate(value: object) -> float | None:
 
 
 class VideoProbeService:
-    def __init__(self, storage: StorageBackend, *, ffprobe_binary: str = "ffprobe"):
+    def __init__(
+        self,
+        storage: StorageBackend,
+        *,
+        ffprobe_binary: str = "ffprobe",
+        timeout_seconds: float = 30.0,
+    ):
         self.storage = storage
         self.ffprobe_binary = ffprobe_binary
+        try:
+            timeout = float(timeout_seconds)
+        except (TypeError, ValueError):
+            timeout = 30.0
+        self.timeout_seconds = max(1.0, timeout)
 
     def probe(self, storage_key: str) -> VideoProbe:
         metadata = self.storage.metadata(storage_key)
@@ -94,7 +118,31 @@ class VideoProbeService:
                 f"Cannot probe missing or empty asset: {storage_key}",
             )
         absolute = Path(getattr(metadata, "absolute_path", None) or self.storage.resolve(storage_key).absolute_path)
-        suffix = Path(storage_key).suffix.lower().lstrip(".")
+        return self.probe_path(
+            absolute,
+            storage_key=storage_key,
+            size_bytes=metadata.size_bytes,
+        )
+
+    def probe_path(
+        self,
+        path: str | Path,
+        *,
+        storage_key: str | None = None,
+        size_bytes: int | None = None,
+    ) -> VideoProbe:
+        """Probe a completed staging file before it becomes an authoritative asset."""
+        absolute = Path(path).resolve()
+        # A direct staging probe has no storage metadata to vouch for it and must
+        # exist now. Stored-asset probes already passed ``storage.metadata``;
+        # allowing the call through also keeps storage-adapter tests deterministic.
+        if storage_key is None and (not absolute.is_file() or absolute.stat().st_size <= 0):
+            raise RenderPipelineError(
+                RenderPipelineErrorCode.PROBE_FAILED,
+                f"Cannot probe missing or empty media file: {absolute.name}",
+            )
+        actual_size = int(size_bytes or absolute.stat().st_size)
+        suffix = absolute.suffix.lower().lstrip(".")
         try:
             payload = self._run_ffprobe(absolute)
             probe = parse_ffprobe_payload(payload)
@@ -108,13 +156,13 @@ class VideoProbeService:
                 raw={
                     **probe.raw,
                     "storage_key": storage_key,
-                    "size_bytes": metadata.size_bytes,
+                    "size_bytes": actual_size,
                 },
             )
         except Exception as exc:
             logger.warning(
                 "video_probe_ffprobe_failed",
-                extra={"storage_key": storage_key, "error": str(exc)[:240]},
+                extra={"storage_key": storage_key, "path_name": absolute.name, "error": str(exc)[:240]},
             )
             return VideoProbe(
                 width=None,
@@ -125,7 +173,7 @@ class VideoProbeService:
                 audio_codec=None,
                 raw={
                     "storage_key": storage_key,
-                    "size_bytes": metadata.size_bytes,
+                    "size_bytes": actual_size,
                     "probe_strategy": "storage_metadata_fallback",
                     "probe_error": str(exc)[:240],
                 },
@@ -149,6 +197,8 @@ class VideoProbeService:
             text=True,
             encoding="utf-8",
             errors="replace",
+            shell=False,
+            timeout=self.timeout_seconds,
         )
         if completed.returncode != 0:
             detail = (completed.stderr or completed.stdout or "ffprobe failed").strip()

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import unittest
+import json
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 import numpy as np
@@ -13,6 +15,7 @@ from src.media_pipeline.video_renderer.adaptive_output_qa import (
     build_local_residual_ocr_provider,
     build_output_qa_verdict,
     collect_adaptive_output_qa,
+    collect_reused_visual_output_qa,
     classify_source_scene_protected_cjk,
     classify_editor_caption_ocr_false_positives,
     classify_source_intrinsic_edge_cjk,
@@ -23,11 +26,139 @@ from src.media_pipeline.video_renderer.adaptive_output_qa import (
     evaluate_output_damage,
     final_audio_target_lufs,
     include_dense_ui_interval_frames,
+    include_phase1_completeness_frames,
     include_operator_approved_qa_frame,
     propagate_source_intrinsic_cjk_exclusions,
     select_qa_frame_indices,
     summarize_temporal_flicker_for_verdict,
 )
+
+
+class CompletenessFrameSelectionTests(unittest.TestCase):
+    def test_untracked_phase1_candidates_are_carried_into_output_ocr_qa(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            artifact_dir = root / "qa" / "phase4_output"
+            artifact_dir.mkdir(parents=True)
+            (root / "phase1_candidate_windows_v1.json").write_text(
+                json.dumps(
+                    {
+                        "policy_version": "audio_visual_temporal_policy_v9_completeness_first",
+                        "fps": 30.0,
+                        "hard_textness_frames": [7],
+                        "completeness_candidate_frames": [10, 15, 20, 25],
+                        "coverage_unassigned_candidate_frames": [41],
+                        "coverage_residual_dbnet_frames": [41],
+                        "policy": {"completeness_sample_fps": 6.0},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            selected = include_phase1_completeness_frames(
+                [0, 59],
+                artifact_dir=artifact_dir,
+                decoded_frame_count=60,
+            )
+        self.assertIn(7, selected)
+        self.assertIn(41, selected)
+        self.assertEqual(selected[0], 0)
+        self.assertEqual(selected[-1], 59)
+
+    def test_hard_textness_frames_obey_heavy_ocr_budget(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            artifact_dir = root / "qa" / "phase4_output"
+            artifact_dir.mkdir(parents=True)
+            (root / "phase1_candidate_windows_v1.json").write_text(
+                json.dumps(
+                    {
+                        "policy_version": (
+                            "audio_visual_temporal_policy_v11_audio_authority_proxy_budget"
+                        ),
+                        "fps": 30.0,
+                        "hard_textness_frames": list(range(1, 1_001, 2)),
+                        "completeness_candidate_frames": [],
+                        "coverage_unassigned_candidate_frames": [],
+                        "coverage_residual_dbnet_frames": [],
+                        "policy": {"completeness_sample_fps": 6.0},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            selected = include_phase1_completeness_frames(
+                [0, 1_199],
+                artifact_dir=artifact_dir,
+                decoded_frame_count=1_200,
+                max_added_frames=24,
+            )
+
+        self.assertLessEqual(len(set(selected) - {0, 1_199}), 24)
+        self.assertIn(1, selected)
+        self.assertIn(999, selected)
+
+
+class ReusedVisualQaTests(unittest.TestCase):
+    def test_exact_preview_packets_reuse_visual_qa_and_probe_only_final_audio(self) -> None:
+        with TemporaryDirectory() as tmp:
+            preview = Path(tmp) / "preview.mp4"
+            final = Path(tmp) / "final.mp4"
+            preview.write_bytes(b"preview")
+            final.write_bytes(b"final")
+            preview_qa = {
+                "status": "PASS",
+                "failed_checks": [],
+                "checks": {
+                    "duration": True,
+                    "frame_count": True,
+                    "color_authority": True,
+                    "temporal_flicker": True,
+                    "residual_ocr_complete": True,
+                    "residual_cjk": True,
+                    "outside_cover_damage": True,
+                    "cover_layout_alignment": True,
+                    "timeline_edit_coverage": True,
+                    "protected_source_integrity": True,
+                    "final_audio": True,
+                },
+                "media": {
+                    "source_duration_seconds": 1.0,
+                    "duration_tolerance_seconds": 0.08,
+                    "expected_frame_count": 30,
+                },
+                "residual_cjk": {"complete": True, "detections": []},
+            }
+            authority = {
+                "duration_seconds": 1.0,
+                "frame_timestamps_seconds": [index / 30 for index in range(30)],
+                "video": {
+                    "color_range": "tv",
+                    "color_space": "bt709",
+                    "color_transfer": "bt709",
+                    "color_primaries": "bt709",
+                },
+            }
+
+            result = collect_reused_visual_output_qa(
+                preview,
+                final,
+                preview_qa=preview_qa,
+                contract={"video": {"frame_count": 30}, "authorities": {"audio": {}}},
+                media_probe=lambda _path: authority,
+                video_packet_probe=lambda _path: "a" * 64,
+                audio_quality_probe=lambda _path: {
+                    "present": True,
+                    "audio_duration_seconds": 1.0,
+                    "integrated_lufs": -14.0,
+                    "true_peak_db": -1.5,
+                    "measurement_complete": True,
+                },
+            )
+
+            self.assertEqual(result["status"], "PASS")
+            self.assertTrue(result["checks"]["visual_packet_authority"])
+            self.assertEqual(result["audio"]["status"], "PASS")
+            self.assertTrue(result["visual_authority_reuse"]["exact_packet_match"])
 
 
 class OutputQaContactSheetTests(unittest.TestCase):
@@ -495,6 +626,49 @@ class TemporalFlickerVerdictTests(unittest.TestCase):
         self.assertEqual(summary["max_extra_flicker"], 12.0)
         self.assertEqual(summary["limit"], 16.0)
 
+    def test_overlap_transition_boundary_remains_blocking(self) -> None:
+        contract = {
+            "render_tracks": [
+                {
+                    "kind": "hardsub",
+                    "start_frame": 10,
+                    "end_frame": 20,
+                    "cover_start_frame": 10,
+                    "cover_end_frame": 20,
+                    "render_policy": {
+                        "cover": {
+                            "strategy": "soft_reconstruction_plate_v1",
+                            "transition_hold_frames": 3,
+                        }
+                    },
+                },
+                {
+                    "kind": "hardsub",
+                    "start_frame": 21,
+                    "end_frame": 30,
+                    "cover_start_frame": 21,
+                    "cover_end_frame": 30,
+                    "render_policy": {
+                        "cover": {
+                            "strategy": "soft_reconstruction_plate_v1",
+                            "transition_hold_frames": 3,
+                        }
+                    },
+                },
+            ]
+        }
+
+        summary = summarize_temporal_flicker_for_verdict(
+            [{"frame_index": 20, "extra_flicker_max": 50.0}],
+            contract=contract,
+        )
+
+        self.assertEqual(summary["max_extra_flicker"], 50.0)
+        self.assertEqual(
+            summary["frames"][0]["blocking_boundary"],
+            "ACTIVE_COVER_TRANSITION",
+        )
+
 
 class TemporalFlickerTests(unittest.TestCase):
     def test_identical_temporal_change_has_zero_extra_flicker(self) -> None:
@@ -585,6 +759,20 @@ class OutputQaVerdictTests(unittest.TestCase):
         )
         self.assertEqual(verdict["status"], "FAIL")
         self.assertIn("final_audio", verdict["failed_checks"])
+
+    def test_unchanged_source_strokes_block_output_even_without_ocr_hit(self) -> None:
+        verdict = build_output_qa_verdict(
+            duration_match=True,
+            frame_count_match=True,
+            color_authority_match=True,
+            max_extra_flicker=0.0,
+            residual_cjk=[],
+            outside_damage_blocked=False,
+            residual_stroke_removal=False,
+        )
+
+        self.assertEqual(verdict["status"], "FAIL")
+        self.assertIn("residual_stroke_removal", verdict["failed_checks"])
 
 
 class SourceIntrinsicCjkClassificationTests(unittest.TestCase):
@@ -724,6 +912,27 @@ class SourceIntrinsicCjkClassificationTests(unittest.TestCase):
         self.assertEqual(blocking, [])
         self.assertEqual(excluded[0]["policy_branch"], "bounded_source_texture")
 
+    def test_low_confidence_multi_glyph_object_print_is_non_blocking(self) -> None:
+        row = {
+            "frame_index": 20,
+            "text": "美虾",
+            "confidence": 0.6023,
+            "geometry": {"x": 0.24, "y": 0.84, "width": 0.46, "height": 0.11},
+        }
+        source_frame = np.full((500, 1000, 3), 90, dtype=np.uint8)
+        rendered_frame = np.full((500, 1000, 3), 92, dtype=np.uint8)
+
+        blocking, excluded = classify_source_intrinsic_edge_cjk(
+            [row],
+            [],
+            contract={"render_tracks": []},
+            source_frames={20: source_frame},
+            rendered_frames={20: rendered_frame},
+        )
+
+        self.assertEqual(blocking, [])
+        self.assertEqual(excluded[0]["policy_branch"], "object_print_unchanged")
+
     def test_medium_confidence_tall_reflection_texture_is_non_blocking(self) -> None:
         row = {
             "frame_index": 20,
@@ -777,6 +986,68 @@ class SourceIntrinsicCjkClassificationTests(unittest.TestCase):
             [row],
             [row],
             contract={"render_tracks": []},
+            source_frames={20: frame},
+            rendered_frames={20: frame.copy()},
+        )
+
+        self.assertEqual(blocking, [row])
+        self.assertEqual(excluded, [])
+
+    def test_small_low_confidence_source_matched_print_is_non_blocking(self) -> None:
+        rendered = {
+            "frame_index": 20,
+            "text": "\u798f",
+            "confidence": 0.85,
+            "geometry": {"x": 0.304, "y": 0.445, "width": 0.044, "height": 0.026},
+        }
+        source = {
+            **rendered,
+            "confidence": 0.31,
+            "geometry": {"x": 0.319, "y": 0.448, "width": 0.023, "height": 0.018},
+        }
+        source_frame = np.full((500, 1000, 3), 90, dtype=np.uint8)
+        rendered_frame = np.full((500, 1000, 3), 92, dtype=np.uint8)
+
+        blocking, excluded = classify_source_intrinsic_edge_cjk(
+            [rendered],
+            [source],
+            contract={"render_tracks": []},
+            source_frames={20: source_frame},
+            rendered_frames={20: rendered_frame},
+        )
+
+        self.assertEqual(blocking, [])
+        self.assertEqual(
+            excluded[0]["policy_branch"],
+            "small_matched_unchanged_source_print",
+        )
+
+    def test_small_source_matched_glyph_inside_editor_cover_remains_blocking(self) -> None:
+        row = {
+            "frame_index": 20,
+            "text": "\u798f",
+            "confidence": 0.35,
+            "geometry": {"x": 0.304, "y": 0.445, "width": 0.044, "height": 0.026},
+        }
+        frame = np.full((500, 1000, 3), 90, dtype=np.uint8)
+        contract = {
+            "render_tracks": [
+                {
+                    "start_frame": 10,
+                    "end_frame": 30,
+                    "render_policy": {
+                        "cover": {
+                            "roi": {"x": 0.28, "y": 0.42, "width": 0.10, "height": 0.08}
+                        }
+                    },
+                }
+            ]
+        }
+
+        blocking, excluded = classify_source_intrinsic_edge_cjk(
+            [row],
+            [row],
+            contract=contract,
             source_frames={20: frame},
             rendered_frames={20: frame.copy()},
         )
@@ -977,6 +1248,35 @@ class SourceIntrinsicCjkClassificationTests(unittest.TestCase):
             excluded[0]["policy_branch"], "wide_low_confidence_texture"
         )
 
+    def test_wide_low_confidence_food_texture_detector_expansion_is_non_blocking(self) -> None:
+        row = {
+            "frame_index": 20,
+            "text": "福",
+            "confidence": 0.37,
+            "geometry": {
+                "x": 0.58,
+                "y": 0.81,
+                "width": 0.059,
+                "height": 0.061,
+            },
+        }
+        source = np.full((720, 1280, 3), 90, dtype=np.uint8)
+        rendered = source.copy()
+        rendered[583:628, 742:820] = 92
+
+        blocking, excluded = classify_source_intrinsic_edge_cjk(
+            [row],
+            [],
+            contract={"render_tracks": []},
+            source_frames={20: source},
+            rendered_frames={20: rendered},
+        )
+
+        self.assertEqual(blocking, [])
+        self.assertEqual(
+            excluded[0]["policy_branch"], "wide_low_confidence_texture"
+        )
+
     def test_tiny_source_stable_candidate_in_active_cover_remains_blocking(self) -> None:
         row = self._tiny_tall_row()
         frame = np.full((100, 200, 3), 90, dtype=np.uint8)
@@ -1008,7 +1308,7 @@ class SourceIntrinsicCjkClassificationTests(unittest.TestCase):
         self.assertEqual(blocking, [row])
         self.assertEqual(excluded, [])
 
-    def test_single_frame_texture_false_positive_is_temporally_excluded(self) -> None:
+    def test_single_frame_cjk_is_fail_closed_without_neighbor(self) -> None:
         row = self._row(0.63, "福")
         blocking, excluded = classify_temporally_unconfirmed_cjk(
             [row],
@@ -1017,10 +1317,116 @@ class SourceIntrinsicCjkClassificationTests(unittest.TestCase):
             frame_count=30,
         )
 
+        self.assertEqual(excluded, [])
+        self.assertEqual(
+            blocking[0]["temporal_confirmation"]["status"],
+            "SINGLE_FRAME_CJK_FAIL_CLOSED",
+        )
+
+    def test_low_confidence_glyph_on_caption_plate_edge_is_excluded(self) -> None:
+        row = {
+            "frame_index": 20,
+            "text": "\u56cd",
+            "confidence": 0.3254,
+            "geometry": {
+                "x": 0.32,
+                "y": 0.819,
+                "width": 0.031,
+                "height": 0.022,
+            },
+        }
+        contract = {
+            "render_tracks": [
+                {
+                    "text_id": "caption",
+                    "start_frame": 20,
+                    "end_frame": 30,
+                    "kind": "ui",
+                    "text_vi": "Đã đỡ hơn nhiều rồi.",
+                    "render_policy": {
+                        "context": {"caption_row": True},
+                        "cover": {
+                            "roi": {
+                                "x": 0.0,
+                                "y": 0.712,
+                                "width": 1.0,
+                                "height": 0.100,
+                            }
+                        },
+                    },
+                }
+            ]
+        }
+        blocking, excluded = classify_temporally_unconfirmed_cjk(
+            [row],
+            [],
+            contract=contract,
+            frame_count=40,
+        )
+
         self.assertEqual(blocking, [])
         self.assertEqual(
             excluded[0]["classification"],
-            "TEMPORAL_OCR_SINGLE_FRAME_FALSE_POSITIVE",
+            "EDITOR_CAPTION_EDGE_TEXTURE_FALSE_POSITIVE",
+        )
+
+    def test_low_confidence_plate_texture_in_cover_tail_is_excluded(self) -> None:
+        row = {
+            "frame_index": 31,
+            "text": "老线",
+            "confidence": 0.2671,
+            "geometry": {
+                "x": 0.34,
+                "y": 0.782,
+                "width": 0.102,
+                "height": 0.017,
+            },
+        }
+        contract = {
+            "render_tracks": [
+                {
+                    "text_id": "caption_tail",
+                    "start_frame": 20,
+                    "end_frame": 30,
+                    "cover_start_frame": 20,
+                    "cover_end_frame": 32,
+                    "kind": "ui",
+                    "roles": ["generic"],
+                    "cover_only": True,
+                    "text_vi": "",
+                    "geometry": {
+                        "x": 0.02,
+                        "y": 0.74,
+                        "width": 0.96,
+                        "height": 0.05,
+                    },
+                    "render_policy": {
+                        "context": {
+                            "caption_row": True,
+                            "micro_ui": False,
+                            "source_kind": "ui",
+                        },
+                        "cover": {
+                            "roi": {
+                                "x": 0.01,
+                                "y": 0.735,
+                                "width": 0.98,
+                                "height": 0.055,
+                            }
+                        },
+                    },
+                }
+            ]
+        }
+
+        blocking, excluded = classify_editor_caption_ocr_false_positives(
+            [row], contract=contract
+        )
+
+        self.assertEqual(blocking, [])
+        self.assertEqual(
+            excluded[0]["classification"],
+            "BLUR_ONLY_PLATE_EDGE_OCR_FALSE_POSITIVE",
         )
 
     def test_adjacent_same_geometry_residual_remains_blocking(self) -> None:
@@ -1058,10 +1464,10 @@ class SourceIntrinsicCjkClassificationTests(unittest.TestCase):
             frame_count=30,
         )
 
-        self.assertEqual(blocking, [])
+        self.assertEqual(excluded, [])
         self.assertEqual(
-            excluded[0]["classification"],
-            "TEMPORAL_OCR_SINGLE_FRAME_FALSE_POSITIVE",
+            blocking[0]["temporal_confirmation"]["status"],
+            "SINGLE_FRAME_CJK_FAIL_CLOSED",
         )
 
     def test_single_frame_authority_residual_stays_blocking_without_neighbor(self) -> None:
@@ -1239,6 +1645,31 @@ class EditAuthorityMaskTests(unittest.TestCase):
         self.assertEqual(int(active[70, 70]), 255)
         self.assertEqual(int(active[40, 40]), 0)
         self.assertEqual(int(inactive.max()), 0)
+
+    def test_transition_hold_allows_cover_but_not_early_text_layout(self) -> None:
+        contract = {
+            "render_tracks": [
+                {
+                    "start_frame": 10,
+                    "end_frame": 20,
+                    "text_vi": "Nhãn Việt",
+                    "render_policy": {
+                        "cover": {
+                            "roi": {"x": 0.1, "y": 0.1, "width": 0.2, "height": 0.1},
+                            "transition_hold_frames": 2,
+                        },
+                        "layout": {
+                            "safe_area": {"x": 0.6, "y": 0.6, "width": 0.2, "height": 0.2}
+                        },
+                    },
+                }
+            ]
+        }
+
+        held = allowed_edit_mask_for_frame(contract, 8, (100, 100))
+
+        self.assertEqual(int(held[15, 15]), 255)
+        self.assertEqual(int(held[70, 70]), 0)
 
 
 class OutputQaCollectorContractTests(unittest.TestCase):

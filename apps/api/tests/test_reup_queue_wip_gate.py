@@ -21,6 +21,7 @@ from src.services.reup_pipeline_meta import (
     get_pipeline_mode,
     get_pipeline_step,
 )
+from src.services.reup_pipeline_orchestrator import ReupPipelineOrchestrator
 from src.services.reup_queue_service import ReupQueueService
 
 WORKSPACE = uuid4()
@@ -70,7 +71,7 @@ class StartAutoGateTests(unittest.TestCase):
         with (
             patch("src.core.settings.get_settings", return_value=SimpleNamespace(reup_max_items_in_flight=limit)),
             patch.object(service, "get_item", return_value=item),
-            patch.object(service, "_ensure_download_job_id", return_value=uuid4()) as ensure,
+            patch.object(ReupQueueService, "_ensure_download_job_id", return_value=uuid4()) as ensure,
         ):
             service.apply_action(
                 item.id,
@@ -107,6 +108,34 @@ class StartAutoGateTests(unittest.TestCase):
         self._apply(item, [in_flight_item(), in_flight_item()], limit=2)
 
         self.assertEqual(item.status, ReupQueueStatus.READY_FOR_PROCESSING)
+
+    def test_start_auto_resumes_after_completed_analyze_instead_of_restarting_download(self) -> None:
+        item = make_item(
+            metadata_json={
+                "pipeline_mode": "manual",
+                "pipeline_step": "download",
+                "pipeline_last_completed_step": "analyze_audio",
+            }
+        )
+        db = MagicMock()
+        db.scalars.return_value.all.return_value = [item]
+        service = ReupQueueService(db)
+
+        with (
+            patch("src.core.settings.get_settings", return_value=SimpleNamespace(reup_max_items_in_flight=2)),
+            patch.object(service, "get_item", return_value=item),
+            patch.object(ReupPipelineOrchestrator, "_ensure_translation", return_value=True) as translate,
+            patch.object(ReupPipelineOrchestrator, "_ensure_download") as download,
+        ):
+            service.apply_action(
+                item.id,
+                action=ReupQueueAction.START_AUTO_PIPELINE,
+                pipeline_mode=PIPELINE_MODE_AUTO_TO_RENDER,
+            )
+
+        translate.assert_called_once()
+        download.assert_not_called()
+        self.assertEqual(get_pipeline_step(item), "translate")
 
 
 class TerminalJobAdmitsTests(unittest.TestCase):

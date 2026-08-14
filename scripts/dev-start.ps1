@@ -4,9 +4,40 @@ $devDir = Join-Path $root ".dev"
 New-Item -ItemType Directory -Force -Path $devDir | Out-Null
 $pidFile = Join-Path $devDir "pids.json"
 
+function Get-TcpListenerProcessIds {
+    param([int]$Port)
+
+    $processIds = @()
+    $pattern = "^\s*TCP\s+\S+:$Port\s+\S+\s+LISTENING\s+(\d+)\s*$"
+    foreach ($line in (& netstat.exe -ano -p tcp 2>$null)) {
+        if ($line -match $pattern) {
+            $processIds += [int]$Matches[1]
+        }
+    }
+    return @($processIds | Sort-Object -Unique)
+}
+
+function Format-PortOwners {
+    param([int[]]$ProcessIds)
+
+    $owners = foreach ($processId in $ProcessIds) {
+        $process = Get-Process -Id $processId -ErrorAction SilentlyContinue
+        if ($process) {
+            "pid=$processId ($($process.ProcessName))"
+        } else {
+            "pid=$processId"
+        }
+    }
+    return ($owners -join ", ")
+}
+
 if (Test-Path $pidFile) {
     $pidFileTimestampUtc = (Get-Item $pidFile).LastWriteTimeUtc
-    $recordedProcesses = Get-Content $pidFile -Raw | ConvertFrom-Json
+    $recordedProcesses = @(
+        Get-Content $pidFile -Raw |
+            ConvertFrom-Json |
+            ForEach-Object { $_ }
+    )
     $liveRecordedProcesses = @()
     foreach ($entry in $recordedProcesses) {
         $process = Get-Process -Id $entry.pid -ErrorAction SilentlyContinue
@@ -26,7 +57,13 @@ if (Test-Path $pidFile) {
             $liveRecordedProcesses += $entry
         }
     }
-    if ($liveRecordedProcesses.Count -gt 0) {
+    $webListeners = @(Get-TcpListenerProcessIds -Port 3000)
+    $hasLiveWebWrapper = @($liveRecordedProcesses | Where-Object { $_.name -eq "web" }).Count -eq 1
+    $allRecordedProcessesAreLive = (
+        $recordedProcesses.Count -gt 0 -and
+        $liveRecordedProcesses.Count -eq $recordedProcesses.Count
+    )
+    if ($allRecordedProcessesAreLive -and $hasLiveWebWrapper -and $webListeners.Count -gt 0) {
         Write-Host "Dev services are already running. No duplicate processes were started." -ForegroundColor Green
         $liveRecordedProcesses | Select-Object name, pid, working_directory | Format-Table -AutoSize
         Write-Host "Web:      http://localhost:3000"
@@ -34,8 +71,35 @@ if (Test-Path $pidFile) {
         Write-Host "Use scripts/dev-stop.ps1 before a full restart."
         exit 0
     }
+    if ($liveRecordedProcesses.Count -gt 0 -or $webListeners.Count -gt 0) {
+        $listenerDescription = if ($webListeners.Count -gt 0) {
+            Format-PortOwners -ProcessIds $webListeners
+        } else {
+            "none"
+        }
+        throw (
+            "The recorded dev stack is only partially alive; refusing to start duplicates or clear Next.js cache. " +
+            "Live wrappers=$($liveRecordedProcesses.Count)/$($recordedProcesses.Count); port 3000 listener(s): $listenerDescription. " +
+            "Run scripts/dev-stop.ps1, resolve any process it reports, then run scripts/dev-start.ps1 again."
+        )
+    }
     Write-Host "Removing stale dev PID file: $pidFile"
     Remove-Item $pidFile -Force
+}
+
+# Deleting `.next` while a detached Next.js process is still serving it produces
+# valid HTML whose JavaScript chunks return 404. The browser then remains forever
+# on "Loading authentication..." because React never hydrates. Check the bound
+# ports before touching the cache or launching any replacement service.
+foreach ($port in @(3000, 8000)) {
+    $listeners = @(Get-TcpListenerProcessIds -Port $port)
+    if ($listeners.Count -gt 0) {
+        $listenerDescription = Format-PortOwners -ProcessIds $listeners
+        throw (
+            "Port $port is already occupied by $listenerDescription, but no healthy recorded dev stack owns it. " +
+            "Refusing to clear caches or start duplicate services. Stop the stale process and retry."
+        )
+    }
 }
 
 $nextDir = Join-Path $root "apps/web/.next"
@@ -93,7 +157,10 @@ for ($i = 1; $i -le $workerCount; $i++) {
 }
 
 $fixedTunnelConfigPath = Join-Path $devDir "fixed-tunnel.json"
-if (Test-Path $fixedTunnelConfigPath) {
+$localOnly = [string]$env:REUP_LOCAL_ONLY -in @("1", "true", "TRUE", "yes", "YES")
+if ($localOnly) {
+    Write-Host "REUP_LOCAL_ONLY is enabled; external Cloudflare tunnel will not start." -ForegroundColor Green
+} elseif (Test-Path $fixedTunnelConfigPath) {
     $fixedTunnel = Get-Content $fixedTunnelConfigPath -Raw | ConvertFrom-Json
     $cloudflaredCommand = Get-Command cloudflared -ErrorAction SilentlyContinue
     $cloudflaredPath = if ($cloudflaredCommand) {

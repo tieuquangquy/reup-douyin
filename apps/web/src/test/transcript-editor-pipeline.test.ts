@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import {
   fingerprintVietnameseDraft,
   isTranscriptPipelineActionUnlocked,
+  isSourceTranscriptReadyForTranslation,
   isTtsDraftOutdated,
   resolveTranscriptPipelineGuide,
   resolveTtsFreshness,
@@ -34,6 +35,29 @@ function makeSegment(partial: Partial<EditableSegment> & Pick<EditableSegment, "
     translationPreset: partial.translationPreset ?? null,
     isDirty: partial.isDirty ?? false
   };
+}
+
+{
+  const needsReview = makeState([
+    makeSegment({ localId: "review", translatedText: "", status: "NEEDS_REVIEW" })
+  ]);
+  const guide = resolveTranscriptPipelineGuide(needsReview, { sourceTranscriptApproved: false });
+  assert.equal(guide.currentStep, "review");
+  assert.equal(guide.sourceReviewRequired, true);
+  assert.equal(guide.steps.find((step) => step.key === "review")?.state, "active");
+  assert.equal(guide.steps.find((step) => step.key === "translate")?.state, "pending");
+  assert.equal(isTranscriptPipelineActionUnlocked("translate", guide.currentStep), false);
+  assert.equal(isSourceTranscriptReadyForTranslation(needsReview, "dialogue_uncertain"), false);
+}
+
+{
+  const approved = makeState([makeSegment({ localId: "approved", translatedText: "" })]);
+  assert.equal(isSourceTranscriptReadyForTranslation(approved, "source_auto_approved"), true);
+  assert.equal(
+    isSourceTranscriptReadyForTranslation(approved, "dialogue_uncertain"),
+    false,
+    "dialogue_uncertain must fail closed even if a stale response paints rows approved"
+  );
 }
 
 function makeState(segments: EditableSegment[]): TranscriptEditorState {

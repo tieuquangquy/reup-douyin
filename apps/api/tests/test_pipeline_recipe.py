@@ -47,6 +47,15 @@ class PipelineRecipeUnitTests(unittest.TestCase):
             left["recipe"]["phase1"]["final_coverage_fade_tail_max_frames"],
             5,
         )
+        self.assertEqual(
+            left["recipe"]["phase1"]["frontend_analyze_ocr"],
+            {
+                "recipe_release": "OCR-V34",
+                "analysis_engine": "audio_visual_temporal_v1",
+                "analysis_policy_version": "audio_visual_temporal_policy_v12_epoch_complete_cover",
+                "network_calls_allowed": 0,
+            },
+        )
 
     def test_quality_knob_change_changes_fingerprint(self) -> None:
         base = SimpleNamespace(

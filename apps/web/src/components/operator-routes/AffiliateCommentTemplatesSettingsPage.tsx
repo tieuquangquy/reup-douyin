@@ -13,6 +13,8 @@ import type { AffiliateCommentTemplate, AffiliateCommentTemplateInput } from "..
 import { AsyncButton } from "../shared/AsyncButton";
 import { useNotice } from "../shared/NoticeCenter";
 import { OperatorStudioShell } from "../app-shell/OperatorStudioShell";
+import { TopbarRefreshButton } from "../app-shell/TopbarRefreshButton";
+import { IntelligenceSplitEditorSkeleton } from "./IntelligenceDataSkeleton";
 import { PublishingSettingsNav } from "./PublishingSettingsNav";
 
 
@@ -23,6 +25,46 @@ const DEFAULT_FORM: AffiliateCommentTemplateInput = {
   default_disclosure: "Đây là liên kết tiếp thị liên kết; tôi có thể nhận hoa hồng nếu bạn mua hàng qua liên kết này.",
   attach_product_image: true,
 };
+
+
+type CommentTemplateGlyphKind = "plus" | "delete" | "save" | "check";
+
+
+function CommentTemplateGlyph({ kind }: { kind: CommentTemplateGlyphKind }) {
+  const common = {
+    "aria-hidden": true as const,
+    className: "affiliate-comment-template-glyph",
+    fill: "none",
+    viewBox: "0 0 24 24",
+  };
+  if (kind === "delete") {
+    return (
+      <svg {...common}>
+        <path d="M8 7.5h8M10 7.5V6.4h4V7.5M9.2 7.5l.6 10.2h4.4l.6-10.2" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.85" />
+      </svg>
+    );
+  }
+  if (kind === "save") {
+    return (
+      <svg {...common}>
+        <path d="M6 5.5h9.2L17.5 7.8V18.5H6V5.5z" stroke="currentColor" strokeLinejoin="round" strokeWidth="1.85" />
+        <path d="M9 5.5v4.2h6.2V5.5M9 18.5v-4.6h7" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.85" />
+      </svg>
+    );
+  }
+  if (kind === "check") {
+    return (
+      <svg {...common}>
+        <path d="m6.8 12.2 3.2 3.2 7.2-7.4" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" />
+      </svg>
+    );
+  }
+  return (
+    <svg {...common}>
+      <path d="M12 6.5v11M6.5 12h11" stroke="currentColor" strokeLinecap="round" strokeWidth="2" />
+    </svg>
+  );
+}
 
 
 export function AffiliateCommentTemplatesSettingsPage() {
@@ -140,29 +182,163 @@ export function AffiliateCommentTemplatesSettingsPage() {
 
   const selectedTemplate = templates.find((item) => item.id === selectedId);
 
-  return <OperatorStudioShell description={t("affiliateCommentTemplates.description")} title={t("affiliateCommentTemplates.title")}>
-    <main className="publishing-settings-page affiliate-comment-templates-page">
-      <PublishingSettingsNav />
-      {error ? <div className="inline-error" role="alert">{error}</div> : null}
-      <section className="affiliate-comment-template-layout">
-        <aside className="affiliate-comment-template-list">
-          <header><strong>{t("affiliateCommentTemplates.title")}</strong><button onClick={startNew} type="button">{t("affiliateCommentTemplates.newTemplate")}</button></header>
-          {loading ? <p className="muted">{t("affiliateComment.loading")}</p> : templates.length === 0 ? <p className="muted">{t("affiliateCommentTemplates.empty")}</p> : templates.map((template) => <article className={selectedId === template.id ? "is-selected" : ""} key={template.id}><button onClick={() => selectTemplate(template)} type="button"><span><strong>{template.name}</strong><small>{t("affiliateCommentTemplates.version")} {template.version}</small></span>{template.is_active ? <em>{t("affiliateCommentTemplates.active")}</em> : null}</button><AsyncButton className="affiliate-comment-template-card-delete" disabled={template.is_active} pending={busy === `delete-${template.id}`} title={template.is_active ? t("affiliateCommentTemplates.deleteActiveError") : t("affiliateCommentTemplates.delete")} onClick={() => void remove(template)}>{t("affiliateCommentTemplates.delete")}</AsyncButton></article>)}
-        </aside>
-        <section className="affiliate-comment-template-editor">
-          <header><div><strong>{selectedId ? t("affiliateCommentTemplates.editTemplate") : t("affiliateCommentTemplates.newTemplate")}</strong><small>{t("affiliateCommentTemplates.messageHint")}</small></div><span>FACEBOOK_REELS</span></header>
-          <label><span>{t("affiliateCommentTemplates.name")}</span><input onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))} value={form.name} /></label>
-          <label><span>{t("affiliateCommentTemplates.messageTemplate")}</span><textarea onChange={(event) => setForm((current) => ({ ...current, message_template: event.target.value }))} rows={9} value={form.message_template} /></label>
-          <div className="affiliate-comment-template-grid"><label><span>{t("affiliateCommentTemplates.cta")}</span><textarea onChange={(event) => setForm((current) => ({ ...current, default_cta: event.target.value }))} rows={3} value={form.default_cta} /></label><label><span>{t("affiliateCommentTemplates.disclosure")}</span><textarea onChange={(event) => setForm((current) => ({ ...current, default_disclosure: event.target.value }))} rows={3} value={form.default_disclosure} /></label></div>
-          <label className="affiliate-comment-template-attachment"><input checked={form.attach_product_image} onChange={(event) => setForm((current) => ({ ...current, attach_product_image: event.target.checked }))} type="checkbox" /><span><strong>{t("affiliateCommentTemplates.attachImage")}</strong><small>{t("affiliateCommentTemplates.attachImageHint")}</small></span></label>
-          <p className="affiliate-comment-template-variable-note">{t("affiliateCommentTemplates.productImageVariable")}</p>
-          <footer>
-            <AsyncButton className="primary" disabled={busy !== null} pending={busy === "save"} onClick={() => void save()}>{t("affiliateCommentTemplates.save")}</AsyncButton>
-            <AsyncButton disabled={busy !== null} pending={busy === "save-activate"} onClick={() => void save(true)}>{t("affiliateCommentTemplates.saveAndActivate")}</AsyncButton>
-            {selectedTemplate && !selectedTemplate.is_active ? <AsyncButton disabled={busy !== null} pending={busy === `activate-${selectedTemplate.id}`} onClick={() => void activate(selectedTemplate)}>{t("affiliateCommentTemplates.activate")}</AsyncButton> : null}
-          </footer>
-        </section>
-      </section>
-    </main>
-  </OperatorStudioShell>;
+  return (
+    <OperatorStudioShell
+      actions={<TopbarRefreshButton busy={loading} disabled={loading} onClick={() => void load()} />}
+      description={t("publishingSettings.affiliateCommentsHint")}
+      title={t("publishingSettings.affiliateComments")}
+    >
+      <main className="publishing-settings-page is-v1 is-v4">
+        <PublishingSettingsNav />
+        {error ? (
+          <p className="affiliate-comment-template-note" role="alert">
+            <span>{t("affiliateCommentTemplates.title")}</span>
+            {error}
+          </p>
+        ) : null}
+        {loading ? (
+          <IntelligenceSplitEditorSkeleton label={t("affiliateComment.loading")} />
+        ) : (
+          <section className="affiliate-comment-templates-page is-v1">
+            <div className="affiliate-comment-template-layout">
+              <aside className="affiliate-comment-template-list">
+                <header>
+                  <strong>{t("affiliateCommentTemplates.title")}</strong>
+                  <button
+                    aria-label={t("affiliateCommentTemplates.newTemplate")}
+                    className="affiliate-comment-template-icon-btn is-add"
+                    onClick={startNew}
+                    title={t("affiliateCommentTemplates.newTemplate")}
+                    type="button"
+                  >
+                    <CommentTemplateGlyph kind="plus" />
+                  </button>
+                </header>
+                {templates.length === 0 ? (
+                  <p className="affiliate-comment-template-list__empty">{t("affiliateCommentTemplates.empty")}</p>
+                ) : (
+                  templates.map((template) => (
+                    <article
+                      className={`affiliate-comment-template-list__row${selectedId === template.id ? " is-selected" : ""}`}
+                      key={template.id}
+                    >
+                      <button onClick={() => selectTemplate(template)} type="button">
+                        <span>
+                          <strong>{template.name}</strong>
+                          <small>
+                            {t("affiliateCommentTemplates.version")} {template.version}
+                          </small>
+                        </span>
+                        {template.is_active ? <em>{t("affiliateCommentTemplates.active")}</em> : null}
+                      </button>
+                      <AsyncButton
+                        aria-label={t("affiliateCommentTemplates.delete")}
+                        className="affiliate-comment-template-icon-btn is-delete"
+                        disabled={template.is_active}
+                        leadingIcon={<CommentTemplateGlyph kind="delete" />}
+                        pending={busy === `delete-${template.id}`}
+                        pendingLabel={<span className="visually-hidden">{t("affiliateCommentTemplates.delete")}</span>}
+                        title={template.is_active ? t("affiliateCommentTemplates.deleteActiveError") : t("affiliateCommentTemplates.delete")}
+                        onClick={() => void remove(template)}
+                      >
+                        {t("affiliateCommentTemplates.delete")}
+                      </AsyncButton>
+                    </article>
+                  ))
+                )}
+              </aside>
+
+              <section className="affiliate-comment-template-editor">
+                <header>
+                  <div>
+                    <strong>{selectedId ? t("affiliateCommentTemplates.editTemplate") : t("affiliateCommentTemplates.newTemplate")}</strong>
+                    <small>{t("affiliateCommentTemplates.messageHint")}</small>
+                  </div>
+                  <span className="affiliate-comment-template-editor__channel">FACEBOOK_REELS</span>
+                </header>
+
+                <div className="affiliate-comment-template-editor__body">
+                  <label className="affiliate-comment-template-field is-name">
+                    <span>{t("affiliateCommentTemplates.name")}</span>
+                    <input
+                      onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))}
+                      value={form.name}
+                    />
+                  </label>
+                  <label className="affiliate-comment-template-field is-message">
+                    <span>{t("affiliateCommentTemplates.messageTemplate")}</span>
+                    <textarea
+                      onChange={(event) => setForm((current) => ({ ...current, message_template: event.target.value }))}
+                      rows={9}
+                      value={form.message_template}
+                    />
+                  </label>
+                  <div className="affiliate-comment-template-grid">
+                    <label className="affiliate-comment-template-field">
+                      <span>{t("affiliateCommentTemplates.cta")}</span>
+                      <textarea
+                        onChange={(event) => setForm((current) => ({ ...current, default_cta: event.target.value }))}
+                        rows={3}
+                        value={form.default_cta}
+                      />
+                    </label>
+                    <label className="affiliate-comment-template-field">
+                      <span>{t("affiliateCommentTemplates.disclosure")}</span>
+                      <textarea
+                        onChange={(event) => setForm((current) => ({ ...current, default_disclosure: event.target.value }))}
+                        rows={3}
+                        value={form.default_disclosure}
+                      />
+                    </label>
+                  </div>
+                  <label className="affiliate-comment-template-attachment">
+                    <input
+                      checked={form.attach_product_image}
+                      onChange={(event) => setForm((current) => ({ ...current, attach_product_image: event.target.checked }))}
+                      type="checkbox"
+                    />
+                    <span>
+                      <strong>{t("affiliateCommentTemplates.attachImage")}</strong>
+                      <small>{t("affiliateCommentTemplates.attachImageHint")}</small>
+                    </span>
+                  </label>
+                  <p className="affiliate-comment-template-note is-hint">{t("affiliateCommentTemplates.productImageVariable")}</p>
+                </div>
+
+                <footer className="affiliate-comment-template-editor__footer">
+                  <AsyncButton
+                    className="primary"
+                    disabled={busy !== null}
+                    leadingIcon={<CommentTemplateGlyph kind="save" />}
+                    pending={busy === "save"}
+                    onClick={() => void save()}
+                  >
+                    {t("affiliateCommentTemplates.save")}
+                  </AsyncButton>
+                  <AsyncButton
+                    disabled={busy !== null}
+                    leadingIcon={<CommentTemplateGlyph kind="check" />}
+                    pending={busy === "save-activate"}
+                    onClick={() => void save(true)}
+                  >
+                    {t("affiliateCommentTemplates.saveAndActivate")}
+                  </AsyncButton>
+                  {selectedTemplate && !selectedTemplate.is_active ? (
+                    <AsyncButton
+                      disabled={busy !== null}
+                      leadingIcon={<CommentTemplateGlyph kind="check" />}
+                      pending={busy === `activate-${selectedTemplate.id}`}
+                      onClick={() => void activate(selectedTemplate)}
+                    >
+                      {t("affiliateCommentTemplates.activate")}
+                    </AsyncButton>
+                  ) : null}
+                </footer>
+              </section>
+            </div>
+          </section>
+        )}
+      </main>
+    </OperatorStudioShell>
+  );
 }

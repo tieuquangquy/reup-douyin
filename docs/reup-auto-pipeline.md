@@ -25,11 +25,29 @@ Adding a stage means adding one entry to `PIPELINE_STEP_ORDER` plus one entry in
 | --- | --- | --- |
 | `manual` | nothing automatically | drives every stage by hand |
 | `auto_to_tts` | download → tts | reviews transcript/voice, then runs OCR + render |
-| `auto_to_render` | download → render | only watches the finished video |
+| `auto_to_render` | download → render | only watches the finished video; deterministic local quality policy promotes safe OCR/visual/audio checkpoints |
 
 `auto_to_render` is the default behind the primary **Start auto** button in the Reup
 Queue hero rail. **Auto→TTS** is the explicit opt-out for clips you want to edit before
 render. **Start manual** downloads only.
+
+### Full-auto quality checkpoints
+
+`auto_to_render` does not bypass QA. It replaces interactive approvals with the
+versioned local policy `quality_auto_to_render_v1`:
+
+- OCR rows classified only as `EDITOR_OVERLAY` are approved; source-intrinsic and
+  platform-UI rows are preserved. Mixed or unknown provenance fails closed.
+- Existing Vietnamese visual-translation candidates are promoted as a batch; the
+  policy never retranslates or invents text.
+- Visual approval is written only after the encoded preview passes the existing
+  hash-bound Output QA.
+- Audio approval is written only after the joined narration and original background
+  mix preview exist and no unresolved timing-fit status remains.
+- A residual-CJK gate, missing candidate, ambiguous provenance, or failed QA changes
+  the item to `FAILED_NEEDS_ATTENTION` with a concrete `AUTO_*_BLOCKED` code.
+
+Manual and `auto_to_tts` workflows keep their interactive review surfaces.
 
 ## Switching automation mid-flight
 
@@ -57,10 +75,12 @@ continues to `ocr → render` instead of stopping.
 
 ## Where the pipeline stops for a human
 
-- **Uncertain dialogue** — VAD measured speech but ASR produced nothing. The item goes to
-  `FAILED_NEEDS_ATTENTION` with `DIALOGUE_DETECTION_UNCERTAIN`. Guessing here either
-  drops needed dubbing or dubs silence, so this gate is deliberate. See
-  `docs/audio-analysis-pipeline.md`.
+- **Uncertain dialogue** — speech exists but the ASR quality contract is not translation-ready
+  (zero transcript or low-confidence review rows). The item goes to
+  `FAILED_NEEDS_ATTENTION` with `DIALOGUE_DETECTION_UNCERTAIN`. Reviewable rows link directly
+  to Transcript; empty output asks for re-analysis or an explicit no-dialogue decision.
+  Guessing here either drops needed dubbing or voices corrupt text, so this gate is deliberate.
+  See `docs/audio-analysis-pipeline.md`.
 - **Any failed job** — the item records the job's error code and stops.
 - **Hold / pause** — `pipeline_hold` (or `held_at`) blocks advancement; `resume_item`
   re-enqueues the step the item was paused on.
@@ -106,6 +126,20 @@ Parked clips read as `Auto · Queued` on the tile with the hint "starts automati
 slot frees", so nobody mistakes a queued clip for a stuck one. Batch Start auto no longer
 caps the selection either — the manual `START_PROCESSING` batch keeps its download-session
 cap, while auto accepts every clip and parks the overflow.
+
+### Durable stage handoff and stall visibility
+
+Start auto and slot admission both enter through `ReupPipelineOrchestrator.set_automation`.
+They resume from `pipeline_last_completed_step`; they do not reset an already analyzed clip
+to Download. Core stage jobs are created with `commit=False`, then the job row, queue
+`job_id`, stage-specific job id and `pipeline_step` become visible in one database commit.
+This prevents a fast cache-hit worker from finishing before the queue binding exists.
+
+As a second line of defense, `_ensure_step` immediately consumes a reused job that is already
+terminal. Completed progress is monotonic, and a delayed callback from an older stage cannot
+advance or rewind a newer stage. The frontend also detects `pipeline_last_completed_step`
+being ahead of `pipeline_step` and renders **Auto pipeline stalled** instead of an indefinite
+waiting message.
 
 ### Several workers, one card
 
@@ -158,6 +192,17 @@ render now passes through single-pass EBU R128 `loudnorm`
 (`src/render_pipeline/audio_loudness.py`) at `RENDER_LOUDNESS_TARGET_LUFS` (default -14
 LUFS, true peak -1.5 dBTP). It lives in `FfmpegRenderRunner` because that is the one place
 the deliverable's audio is encoded rather than copied.
+
+### One visual encode per approved revision
+
+The adaptive visual preview is already a full-resolution encoded artifact with
+full-timeline edit coverage, residual-CJK, damage and flicker QA. After it passes,
+Final does not repeat the Python frame render. It validates the current render-input
+hash, visual-remediation ref, preview file hash and preview QA, then muxes approved
+narration/background audio with `-c:v copy`. Final QA compares the preview and final
+encoded video-packet SHA-256 and reuses visual evidence only on an exact match; audio,
+duration, frame-count and color/container checks are measured again. A mismatch uses
+the original full-render/full-QA path.
 
 ### Heartbeats instead of wall-clock guesses
 
@@ -213,6 +258,25 @@ while a field or the video element has focus), and the primary link routes by *w
 check failed rather than to a generic details page: a missing dub or missing subtitles
 opens the Transcript Editor, while duration, resolution, renderer warnings and risk flags
 open Final Review. The mapping lives in `outputReviewFixTarget`.
+
+## Phase 5 frontend handoff
+
+The quality path now continues inside Final Review after encoded-output QA:
+
+1. **Approve output** records the hash-bound `FINAL_APPROVED` artifact and creates the
+   local operator package boundary.
+2. The **Export** rail saves and explicitly approves Facebook Reels metadata.
+3. The operator must check all source-video and retained-music attestations before
+   `SOURCE_RIGHTS_AND_MUSIC_APPROVED` can be written.
+4. After the normal Final Review checklist marks the render publish-ready, **Create
+   MANUAL_EXPORT_ONLY** generates the verified ZIP and persists matching
+   `ExportPackage` and `PublishHandoff` database rows.
+5. **Download ZIP** streams the archive through the existing localization-artifact
+   boundary. No external publish request is created or executed.
+
+These actions are idempotent and hash-bound to the active quality run. The API facade is
+`QualityHandoffService`; the underlying artifact authority remains
+`local_final_handoff.py`.
 
 ## Not implemented yet
 

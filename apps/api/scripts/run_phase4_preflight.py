@@ -19,6 +19,10 @@ from src.media_pipeline.video_renderer.adaptive_render import (
     AdaptiveFrameRenderer,
     AdaptiveRenderBlocked,
 )
+from src.media_pipeline.video_renderer.adaptive_video import (
+    active_protected_source_regions_for_frame,
+    active_tracks_for_frame,
+)
 from src.media_pipeline.video_renderer.adaptive_output_qa import (
     _detect_residual_cjk,
     build_local_residual_ocr_provider,
@@ -437,13 +441,15 @@ def write_preflight_samples(
                 raise Phase4InputError(
                     f"Cannot decode representative frame {frame_index}"
                 )
-            active_rows = [
-                row
-                for row in tracks
-                if int(row.get("start_frame") or 0)
-                <= frame_index
-                <= int(row.get("end_frame") or 0)
-            ]
+            # Use the same temporal closure, transition holds and stabilized
+            # geometry as the real video renderer.  Sampling nominal
+            # start/end rows here previously made preflight blind to exactly
+            # the short OCR gaps that produced one-frame Chinese flashes.
+            active_rows = active_tracks_for_frame(
+                contract,
+                frame_index,
+                source_frame_bgr=frame,
+            )
             for row in active_rows:
                 text_id = str(row.get("text_id") or "")
                 policy = dict(row.get("render_policy") or {})
@@ -476,10 +482,19 @@ def write_preflight_samples(
             for row in active_rows:
                 union_mask = cv2.bitwise_or(
                     union_mask,
-                    adaptive.mask_builder(frame, row),
+                    adaptive.track_cover_mask(frame, row),
                 )
             try:
-                rendered, frame_qa = adaptive.render_frame(frame, active_rows)
+                rendered, frame_qa = adaptive.render_frame(
+                    frame,
+                    active_rows,
+                    frame_index=frame_index,
+                    protected_source_regions=(
+                        active_protected_source_regions_for_frame(
+                            contract, frame_index
+                        )
+                    ),
+                )
             except AdaptiveRenderBlocked as exc:
                 blocked_path = sample_dir / f"frame_{frame_index:06d}_blocked.json"
                 _write_json_atomic(
@@ -677,7 +692,16 @@ def write_residual_temporal_confirmation_samples(
                 adaptive.seed_reference(text_id, reference_frame)
                 seeded.add(text_id)
         try:
-            rendered, _frame_qa = adaptive.render_frame(frame, active_rows)
+            rendered, _frame_qa = adaptive.render_frame(
+                frame,
+                active_rows,
+                frame_index=frame_index,
+                protected_source_regions=(
+                    active_protected_source_regions_for_frame(
+                        contract, frame_index
+                    )
+                ),
+            )
         except AdaptiveRenderBlocked as exc:
             raise Phase4InputError(
                 f"Residual confirmation render blocked at frame {frame_index}"

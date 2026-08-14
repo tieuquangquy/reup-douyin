@@ -1,6 +1,7 @@
 "use client";
 
 import type { ReactNode } from "react";
+import { PageLoadError } from "./PageLoadError";
 
 export type AsyncContentStatus = "loading" | "error" | "empty" | "success";
 
@@ -109,8 +110,8 @@ export function AsyncContentBoundary({
   }
   if (status === "error") {
     return (
-      <div className="async-content-state is-error" role="alert">
-        {errorState ?? <p>We could not load this content. Please try again.</p>}
+      <div className="async-content-state is-error">
+        {errorState ?? <PageLoadError />}
       </div>
     );
   }

@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from src.audio_pipeline.types import TranslationPreset
 from src.enums import JobStatus, TranscriptSegmentStatus
@@ -14,6 +14,7 @@ class AudioAnalysisCreateRequest(BaseModel):
     translation_preset: TranslationPreset = TranslationPreset.LITERAL_SAFE
     force_refresh: bool = False
     skip_translation: bool = True
+    expected_stage_version: str | None = None
 
 
 class ApproveSourceTranscriptResponse(BaseModel):
@@ -32,6 +33,7 @@ class ApproveTranslationDraftResponse(BaseModel):
     binding_sha256: str
     resumed_queue_items: int = 0
     job_id: UUID | None = None
+    ocr_resume_job_id: UUID | None = None
 
 
 class AudioAnalysisCreateResponse(BaseModel):
@@ -39,6 +41,7 @@ class AudioAnalysisCreateResponse(BaseModel):
     status: JobStatus
     source_video_id: UUID
     translation_preset: TranslationPreset
+    runtime_version: str
 
 
 class SegmentEditRequest(BaseModel):
@@ -79,6 +82,7 @@ class RerunTranslationDraftRequest(BaseModel):
     translation_preset: TranslationPreset = TranslationPreset.LITERAL_SAFE
     force_refresh: bool = True
     require_source_approved: bool = True
+    expected_stage_version: str | None = None
 
 
 class TranscriptSegmentResponse(BaseModel):
@@ -137,6 +141,8 @@ class TranslationDraftListResponse(BaseModel):
     source_video_id: UUID
     translation_preset: str | None
     segments: list[TranslationSegmentResponse]
+    recipe_version: str | None = None
+    quality_contract: dict | None = None
 
 
 class AudioAnalysisSummaryResponse(BaseModel):
@@ -148,3 +154,10 @@ class AudioAnalysisSummaryResponse(BaseModel):
     manifest: dict
     has_speech: bool | None = None
     dialogue_phase: str | None = None
+    audio_recipe_version: str | None = None
+    analysis_metrics: dict = Field(default_factory=dict)
+    target_speech_authority: dict = Field(default_factory=dict)
+    dialogue_quality_contract: dict = Field(default_factory=dict)
+    semantic_dialogue_segmentation: dict = Field(default_factory=dict)
+    translation_recipe_version: str | None = None
+    downstream_authority_invalidations: list[dict] = Field(default_factory=list)

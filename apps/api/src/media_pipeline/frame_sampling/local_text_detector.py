@@ -18,14 +18,24 @@ logger = logging.getLogger(__name__)
 def resolve_dbnet_execution_providers(available: list[str]) -> list[str]:
     """Select an explicitly enabled accelerator, with deterministic CPU fallback."""
 
-    requested = os.environ.get("DBNET_ONNX_PROVIDER", "cpu").strip().lower()
+    requested = os.environ.get("DBNET_ONNX_PROVIDER", "auto").strip().lower()
     aliases = {
         "cuda": "CUDAExecutionProvider",
         "directml": "DmlExecutionProvider",
         "dml": "DmlExecutionProvider",
         "cpu": "CPUExecutionProvider",
     }
-    selected = aliases.get(requested, "CPUExecutionProvider")
+    if requested == "auto":
+        selected = next(
+            (
+                candidate
+                for candidate in ("CUDAExecutionProvider", "DmlExecutionProvider")
+                if candidate in available
+            ),
+            "CPUExecutionProvider",
+        )
+    else:
+        selected = aliases.get(requested, "CPUExecutionProvider")
     if selected not in available:
         logger.warning(
             "dbnet_execution_provider_unavailable requested=%s available=%s fallback=cpu",
@@ -60,6 +70,9 @@ class TextBox:
     y: float
     width: float
     height: float
+    # Optional DBNet contour orientation. Consumers remain xywh-compatible,
+    # while expansion can conservatively cover italic/rotated glyph corners.
+    angle_degrees: float = 0.0
 
     def as_xyxy(self) -> tuple[float, float, float, float]:
         return (
@@ -177,6 +190,18 @@ def postprocess_prob_map(
     inv = 1.0 / max(scale, 1e-6)
     for cnt in contours:
         x, y, bw, bh = cv2.boundingRect(cnt)
+        rotated = cv2.minAreaRect(cnt)
+        raw_angle = float(rotated[2])
+        rotated_width, rotated_height = (
+            float(rotated[1][0]),
+            float(rotated[1][1]),
+        )
+        if rotated_width < rotated_height:
+            raw_angle += 90.0
+        while raw_angle > 45.0:
+            raw_angle -= 90.0
+        while raw_angle < -45.0:
+            raw_angle += 90.0
         # Map from network canvas (pre-pad coords ≈ resized) back to original.
         ox0 = max(0.0, float(x) * inv)
         oy0 = max(0.0, float(y) * inv)
@@ -191,6 +216,7 @@ def postprocess_prob_map(
                 y=oy0 / float(orig_h),
                 width=ww / float(orig_w),
                 height=hh / float(orig_h),
+                angle_degrees=raw_angle,
             )
         )
     return boxes
@@ -213,9 +239,18 @@ def expand_text_boxes(
         ph_bot = max(0.0, float(pad_h_bottom_frac))
     out: list[TextBox] = []
     for box in boxes:
-        dx = float(box.width) * pw
-        dy_top = float(box.height) * ph_top
-        dy_bot = float(box.height) * ph_bot
+        slant = min(0.35, abs(np.tan(np.deg2rad(float(box.angle_degrees)))))
+        slant_vertical = min(
+            float(box.height) * 0.90,
+            float(box.width) * slant * 0.18,
+        )
+        slant_horizontal = min(
+            float(box.width) * 0.10,
+            float(box.height) * slant * 0.40,
+        )
+        dx = float(box.width) * pw + slant_horizontal
+        dy_top = float(box.height) * ph_top + slant_vertical
+        dy_bot = float(box.height) * ph_bot + slant_vertical
         x0 = max(0.0, float(box.x) - dx)
         y0 = max(0.0, float(box.y) - dy_top)
         x1 = min(1.0, float(box.x) + float(box.width) + dx)
@@ -224,7 +259,15 @@ def expand_text_boxes(
         hh = max(0.0, y1 - y0)
         if ww < 1e-6 or hh < 1e-6:
             continue
-        out.append(TextBox(x=x0, y=y0, width=ww, height=hh))
+        out.append(
+            TextBox(
+                x=x0,
+                y=y0,
+                width=ww,
+                height=hh,
+                angle_degrees=float(box.angle_degrees),
+            )
+        )
     return out
 
 
@@ -272,7 +315,19 @@ def merge_collinear_text_boxes(
                     y0 = min(cur.y, other.y)
                     x1 = max(cur.x + cur.width, other.x + other.width)
                     y1 = max(cur.y + cur.height, other.y + other.height)
-                    cur = TextBox(x=x0, y=y0, width=x1 - x0, height=y1 - y0)
+                    angle = (
+                        float(cur.angle_degrees)
+                        if abs(float(cur.angle_degrees))
+                        >= abs(float(other.angle_degrees))
+                        else float(other.angle_degrees)
+                    )
+                    cur = TextBox(
+                        x=x0,
+                        y=y0,
+                        width=x1 - x0,
+                        height=y1 - y0,
+                        angle_degrees=angle,
+                    )
                     changed = True
                 else:
                     nxt.append(other)
@@ -313,6 +368,9 @@ class LocalTextDetector:
                 sess_options=opts,
                 providers=providers,
             )
+            self._ort = ort
+            self._providers = list(providers)
+            self._dml_sessions: dict[tuple[int, int], object] = {}
             self._input_name = self._session.get_inputs()[0].name
         except Exception as exc:  # noqa: BLE001
             raise FrameSamplingError(
@@ -325,6 +383,40 @@ class LocalTextDetector:
             path.name,
             self._session.get_providers(),
         )
+
+    def _session_for_tensor(self, tensor: np.ndarray):
+        """DirectML needs fixed free-dimension overrides for this dynamic DBNet."""
+
+        providers = list(getattr(self, "_providers", []) or [])
+        if not providers or providers[0] != "DmlExecutionProvider":
+            return self._session
+        height, width = int(tensor.shape[2]), int(tensor.shape[3])
+        key = (height, width)
+        cache = getattr(self, "_dml_sessions", None)
+        if cache is None:
+            cache = {}
+            self._dml_sessions = cache
+        cached = cache.get(key)
+        if cached is not None:
+            return cached
+        ort = self._ort
+        options = ort.SessionOptions()
+        options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        options.log_severity_level = 3
+        options.add_free_dimension_override_by_name("shape_h", height)
+        options.add_free_dimension_override_by_name("shape_w", width)
+        session = ort.InferenceSession(
+            str(self.model_path),
+            sess_options=options,
+            providers=providers,
+        )
+        cache[key] = session
+        logger.info(
+            "dbnet_directml_fixed_shape_session_ready shape=%sx%s",
+            height,
+            width,
+        )
+        return session
 
     def detect(
         self,
@@ -344,7 +436,8 @@ class LocalTextDetector:
             long_edge=max(_DET_LONG_EDGE, int(long_edge)),
         )
         try:
-            outputs = self._session.run(None, {self._input_name: tensor})
+            session = self._session_for_tensor(tensor)
+            outputs = session.run(None, {self._input_name: tensor})
         except Exception as exc:  # noqa: BLE001
             raise FrameSamplingError(
                 FrameSamplingErrorCode.ONNX_INFER_FAILED,

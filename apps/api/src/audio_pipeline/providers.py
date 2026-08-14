@@ -379,6 +379,7 @@ class SileroVadProvider:
                 "speech_seconds": summary.speech_seconds,
                 "audio_seconds": summary.audio_seconds,
                 "speech_segment_count": summary.segment_count,
+                "speech_intervals": [list(interval) for interval in summary.speech_intervals],
                 "min_speech_seconds": self.min_speech_seconds,
                 "source_caption_present": bool(source_caption and source_caption.strip()),
             },
