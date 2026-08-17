@@ -11,7 +11,7 @@ from src.enums import MediaAssetType
 # ASR path, selectively verifies only uncertain spans, and applies a global
 # dialogue decoder before any unit can become a DialogueBeat.
 AUDIO_ANALYSIS_VERSION = "AUDIO_ANALYSIS_V5"
-AUDIO_ANALYSIS_RECIPE_VERSION = "audio-analysis-v5-selective-dialogue-validation1"
+AUDIO_ANALYSIS_RECIPE_VERSION = "audio-analysis-v5-selective-dialogue-validation1-asr-evidence1"
 AUTHORITY_MANIFEST_SCHEMA_VERSION = "audio-analysis-authority-manifest-v1"
 
 

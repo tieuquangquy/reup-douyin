@@ -21,6 +21,14 @@ from src.audio_pipeline.caption_asr_consensus import (
 )
 from src.audio_pipeline.audio_mix_quality import analyze_pcm_wav_mix
 from src.audio_pipeline.analysis_audio import materialize_analysis_audio
+from src.audio_pipeline.asr_evidence import (
+    ASR_EVIDENCE_RECIPE_VERSION,
+    ASR_EVIDENCE_SCHEMA_VERSION,
+    ASR_RECOVERY_SCORE_THRESHOLD,
+    compare_asr_stability,
+    evaluate_asr_evidence,
+    evidence_prefers_candidate,
+)
 from src.audio_pipeline.canonical_audio import ensure_canonical_audio
 from src.audio_pipeline.dialogue_validation import (
     DIALOGUE_VALIDATION_RECIPE_VERSION,
@@ -616,6 +624,15 @@ class AudioAnalysisService:
             "selected_source": "none",
             "reason": "asr_not_started",
         }
+        asr_evidence_contract: dict[str, Any] = {
+            "schema_version": ASR_EVIDENCE_SCHEMA_VERSION,
+            "recipe_version": ASR_EVIDENCE_RECIPE_VERSION,
+            "primary": None,
+            "retry": None,
+            "selected": None,
+            "selected_source": "none",
+            "verification_stability": None,
+        }
         dialogue_quality_contract: dict[str, Any] = {
             "schema_version": "dialogue_quality_contract_v1",
             "recipe_version": DIALOGUE_VALIDATION_RECIPE_VERSION,
@@ -644,6 +661,17 @@ class AudioAnalysisService:
             )
             timings_ms["asr_legacy_adapter_ms"] = int(
                 (time.perf_counter() - stage_started_at) * 1000
+            )
+            legacy_evidence = evaluate_asr_evidence(units)
+            asr_evidence_contract.update(
+                {
+                    "primary": {
+                        "source": "legacy_adapter",
+                        **legacy_evidence.to_dict(),
+                    },
+                    "selected": legacy_evidence.to_dict(),
+                    "selected_source": "legacy_adapter",
+                }
             )
             separation = SourceSeparationResult(
                 vocal_asset_id=None,
@@ -758,12 +786,18 @@ class AudioAnalysisService:
                 timings_ms["asr_primary_ms"] = int(
                     (time.perf_counter() - stage_started_at) * 1000
                 )
+                primary_evidence = evaluate_asr_evidence(primary_units)
+                asr_evidence_contract["primary"] = {
+                    "source": primary_source,
+                    **primary_evidence.to_dict(),
+                }
                 # Adaptive fallback: clear target-speech intervals normally use
                 # the original mix.  If the measured ASR evidence is weak or
                 # the inexpensive mix probe recommends separation, pay the
                 # Demucs cost once and retry only the candidate intervals.
                 if raw_separation is None and self._needs_separation_retry(
                     primary_units,
+                    evidence=primary_evidence,
                     mix_quality=mix_quality,
                     vad_speech_ratio=vad.speech_ratio,
                 ):
@@ -819,9 +853,23 @@ class AudioAnalysisService:
                             source_duration_seconds=duration_seconds,
                             authority=asr_authority,
                         )
-                        if self._asr_quality_score(retry_units) >= self._asr_quality_score(primary_units):
+                        retry_evidence = evaluate_asr_evidence(retry_units)
+                        asr_evidence_contract["retry"] = {
+                            "source": "separated_vocal_adaptive",
+                            "gain_vs_primary": round(
+                                retry_evidence.overall_score
+                                - primary_evidence.overall_score,
+                                4,
+                            ),
+                            **retry_evidence.to_dict(),
+                        }
+                        if evidence_prefers_candidate(
+                            retry_evidence,
+                            primary_evidence,
+                        ):
                             primary_units = retry_units
                             primary_source = "separated_vocal_adaptive"
+                            primary_evidence = retry_evidence
                             primary_audio = {
                                 "mode": "adaptive_separated_vocal",
                                 "fallback_from": "target_mix",
@@ -853,6 +901,25 @@ class AudioAnalysisService:
                     timings_ms["asr_selective_verification_ms"] = int(
                         (time.perf_counter() - stage_started_at) * 1000
                     )
+                verification_stability = compare_asr_stability(
+                    primary_units,
+                    verification_units,
+                )
+                selected_evidence = (
+                    evaluate_asr_evidence(
+                        primary_units,
+                        stability_score=verification_stability,
+                    )
+                    if verification_stability is not None
+                    else primary_evidence
+                )
+                asr_evidence_contract.update(
+                    {
+                        "selected": selected_evidence.to_dict(),
+                        "selected_source": primary_source,
+                        "verification_stability": verification_stability,
+                    }
+                )
                 units = merge_selective_verification(
                     primary_units,
                     verification_units,
@@ -878,7 +945,24 @@ class AudioAnalysisService:
                         3,
                     ),
                     "full_dual_asr": False,
+                    "asr_evidence_recipe_version": ASR_EVIDENCE_RECIPE_VERSION,
+                    "selected_evidence_score": selected_evidence.overall_score,
+                    "selected_evidence_state": selected_evidence.state.value,
+                    "verification_stability": verification_stability,
                 }
+                logger.info(
+                    "audio_asr_evidence_selected",
+                    extra={
+                        "source_video_id": str(source_video.id),
+                        "selected_source": primary_source,
+                        "score": selected_evidence.overall_score,
+                        "state": selected_evidence.state.value,
+                        "recovery_recommended": (
+                            selected_evidence.recovery_recommended
+                        ),
+                        "verification_stability": verification_stability,
+                    },
+                )
             else:
                 units = []
                 target_gate_uncertain = True
@@ -1295,6 +1379,7 @@ class AudioAnalysisService:
             meta["mix_quality"] = mix_quality
             meta["target_speech_authority"] = target_speech_summary
             meta["target_speech_asr_consensus"] = asr_consensus
+            meta["asr_evidence"] = asr_evidence_contract
             meta["dialogue_quality_contract"] = dialogue_quality_contract
             meta["semantic_dialogue_segmentation"] = semantic_dialogue
             meta["audio_analysis_authority"] = authority_manifest_payload
@@ -1339,6 +1424,7 @@ class AudioAnalysisService:
                         },
                         "target_speech_audio": target_speech_audio,
                         "target_speech_asr_consensus": asr_consensus,
+                        "asr_evidence": asr_evidence_contract,
                         "dialogue_quality_contract": dialogue_quality_contract,
                         "semantic_dialogue_segmentation": semantic_dialogue,
                         "audio_analysis_authority": authority_manifest_payload,
@@ -1396,6 +1482,9 @@ class AudioAnalysisService:
             source_video.status = SourceVideoStatus.AI_ANALYZED
             timings_ms["persist_ms"] = int((time.perf_counter() - persist_started_at) * 1000)
             timings_ms["total_ms"] = int((time.perf_counter() - analysis_started_at) * 1000)
+            selected_asr_evidence = dict(
+                asr_evidence_contract.get("selected") or {}
+            )
             metrics_payload = {
                 **timings_ms,
                 "cache_hit": False,
@@ -1409,6 +1498,15 @@ class AudioAnalysisService:
                     "target_ratio"
                 ),
                 "target_speech_authority_sha256": target_speech_sha256,
+                "asr_evidence_recipe_version": ASR_EVIDENCE_RECIPE_VERSION,
+                "asr_evidence_score": selected_asr_evidence.get("overall_score"),
+                "asr_evidence_state": selected_asr_evidence.get("state"),
+                "asr_evidence_recovery_recommended": selected_asr_evidence.get(
+                    "recovery_recommended"
+                ),
+                "asr_verification_stability": asr_evidence_contract.get(
+                    "verification_stability"
+                ),
                 "dialogue_quality_complete": bool(
                     dialogue_quality_contract.get("quality_complete")
                 ),
@@ -2341,6 +2439,10 @@ class AudioAnalysisService:
                 "chunk_seconds": getattr(self.stt_provider, "chunk_seconds", None),
                 "chunk_overlap_seconds": getattr(self.stt_provider, "chunk_overlap_seconds", None),
             },
+            "asr_evidence": {
+                "recipe_version": ASR_EVIDENCE_RECIPE_VERSION,
+                "recovery_score_threshold": ASR_RECOVERY_SCORE_THRESHOLD,
+            },
             "semantic_dialogue": {
                 "recipe_version": SEMANTIC_DIALOGUE_RECIPE_VERSION,
                 "policy": DEFAULT_SEMANTIC_SEGMENTATION_POLICY.to_dict(),
@@ -2446,30 +2548,20 @@ class AudioAnalysisService:
 
     @staticmethod
     def _asr_quality_score(units) -> float:
-        if not units:
-            return 0.0
-        confidences = [
-            max(0.0, min(1.0, float(unit.confidence)))
-            for unit in units
-            if unit.confidence is not None
-        ]
-        confidence = sum(confidences) / len(confidences) if confidences else 0.65
-        char_count = sum(len((unit.text or "").strip()) for unit in units)
-        timing_bonus = 0.08 if all(unit.end_seconds > unit.start_seconds for unit in units) else 0.0
-        untimed_penalty = 0.12 if any("funasr_untimed" in (unit.flags or []) for unit in units) else 0.0
-        text_bonus = min(0.12, char_count / 400.0)
-        return round(max(0.0, min(1.0, confidence + timing_bonus + text_bonus - untimed_penalty)), 4)
+        # Compatibility shim for callers/tests that still consume the scalar.
+        # New decisions must use the persisted evidence object.
+        return evaluate_asr_evidence(units).overall_score
 
     def _needs_separation_retry(
         self,
         units,
         *,
+        evidence=None,
         mix_quality: dict | None = None,
         vad_speech_ratio: float | None = None,
     ) -> bool:
-        if not units:
-            return True
-        if self._asr_quality_score(units) < 0.72:
+        evidence = evidence or evaluate_asr_evidence(units)
+        if evidence.recovery_recommended:
             return True
         if bool((mix_quality or {}).get("separation_recommended")):
             return True
