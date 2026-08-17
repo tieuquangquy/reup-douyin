@@ -1,9 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useId, useState } from "react";
 import { useT } from "../../lib/i18n";
 import type { EditablePublishDraft, PublishTarget, PublishTargetPlatform } from "../../types/publish-draft";
 import { AsyncButton } from "../shared/AsyncButton";
+import { PublishDestSelect } from "./PublishDestSelect";
 
 export function PublishTargetSelector({
   targets,
@@ -21,39 +22,27 @@ export function PublishTargetSelector({
   onCreate: (platform: PublishTargetPlatform) => void;
 }) {
   const t = useT();
+  const platformLabelId = useId();
   const [pendingPlatform, setPendingPlatform] = useState<PublishTargetPlatform>("TIKTOK");
   const selected = editable?.targetPlatform ?? pendingPlatform;
 
   return (
-    <section className="publish-panel">
-      <h2>{t("publishTargetSelector.title")}</h2>
-      <div className="publish-field-row">
-        <label>
-          {t("publishTargetSelector.platform")}
-          <select
-            value={selected}
-            onChange={(event) => {
-              const platform = event.target.value as PublishTargetPlatform;
-              if (editable) onChange({ targetPlatform: platform });
-              else setPendingPlatform(platform);
-            }}
-            disabled={disabled || targets.length === 0}
-          >
-            {targets.map((target) => (
-              <option key={target.platform} value={target.platform}>{target.label}</option>
-            ))}
-          </select>
-        </label>
-        <label>
-          {t("publishTargetSelector.accountRefPlaceholder")}
-          <input
-            value={editable?.platformAccountRef ?? ""}
-            onChange={(event) => onChange({ platformAccountRef: event.target.value })}
-            disabled={disabled || !editable}
-            placeholder="local-account-1"
-          />
-        </label>
-      </div>
+    <section className="publish-draft-desk__platform publish-draft-desk__channel">
+      <span className="visually-hidden" id={platformLabelId}>
+        {t("publishTargetSelector.platform")}
+      </span>
+      <PublishDestSelect
+        className="publish-draft-desk__dest-hero publish-draft-desk__channel-select"
+        value={selected}
+        disabled={disabled || targets.length === 0}
+        labelledBy={platformLabelId}
+        options={targets.map((target) => ({ value: target.platform, label: target.label }))}
+        onChange={(platform) => {
+          const next = platform as PublishTargetPlatform;
+          if (editable) onChange({ targetPlatform: next });
+          else setPendingPlatform(next);
+        }}
+      />
       {!editable ? (
         <AsyncButton
           className="primary"

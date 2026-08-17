@@ -21,6 +21,7 @@ from scripts.rebind_phase3_approvals_after_residual_remediation import (
 )
 from scripts.run_phase2_only import (
     _apply_operator_approved_residual_text_authority,
+    _load_residual_remediation,
     _remediation_approvals,
 )
 
@@ -44,6 +45,86 @@ def _carry() -> dict:
 
 
 class ResidualRemediationMaterializationTests(unittest.TestCase):
+    def test_phase2_consumer_accepts_geometry_override_starting_at_frame_zero(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            master = [
+                {
+                    "text_id": "sub_02",
+                    "start_frame": 0,
+                    "end_frame": 4,
+                    "box_coords": [139.3, 898.88, 550.7, 961.9],
+                }
+            ]
+            master_path = root / "master_timeline.json"
+            master_path.write_text(json.dumps(master), encoding="utf-8")
+            (root / "source.jpg").write_bytes(b"source")
+            (root / "crop.jpg").write_bytes(b"crop")
+
+            proposal = {
+                "proposals": [
+                    {
+                        "remediation_id": "p2r_frame_zero",
+                        "proposed_action": "EXPAND_EXISTING_PHASE2_GEOMETRY",
+                    }
+                ]
+            }
+            proposal_sha = remediation_hash(proposal)
+            proposal["proposal_sha256"] = proposal_sha
+            proposal_path = root / "proposal.json"
+            proposal_path.write_text(json.dumps(proposal), encoding="utf-8")
+
+            remediation = {
+                "status": "OCR_RESIDUAL_REMEDIATION_APPROVED",
+                "proposal_ref": {
+                    "path": proposal_path.name,
+                    "file_sha256": hashlib.sha256(
+                        proposal_path.read_bytes()
+                    ).hexdigest(),
+                    "proposal_sha256": proposal_sha,
+                },
+                "authority_refs": {
+                    "master_timeline": {
+                        "sha256": hashlib.sha256(master_path.read_bytes()).hexdigest()
+                    }
+                },
+                "approved_occurrences": [],
+                "approved_geometry_overrides": [
+                    {
+                        "remediation_id": "p2r_frame_zero",
+                        "geometry_override": {
+                            "target_text_id": "sub_02",
+                            "start_frame": 0,
+                            "end_frame": 4,
+                            "original_box_coords": [139.3, 898.88, 550.7, 961.9],
+                            "box_coords": [139.3, 898.88, 550.7, 1044.3],
+                            "best_keyframe_path": "source.jpg",
+                            "crop_path": "crop.jpg",
+                        },
+                    }
+                ],
+                "translation_carry_forward": {"source_refs": {}, "rows": []},
+            }
+            remediation["remediation_sha256"] = remediation_hash(remediation)
+            remediation_path = root / "remediation.json"
+            remediation_path.write_text(json.dumps(remediation), encoding="utf-8")
+
+            with patch(
+                "scripts.run_phase2_only.resolve_active_residual_remediation",
+                return_value=remediation_path,
+            ):
+                occurrences, overrides, authority, _ref = (
+                    _load_residual_remediation(
+                        root,
+                        master_timeline_path=master_path,
+                        master_timeline=master,
+                    )
+                )
+
+        self.assertEqual(occurrences, [])
+        self.assertEqual(overrides["sub_02"]["start_frame"], 0)
+        self.assertIn("sub_02", authority)
+
     def test_operator_approved_additive_text_overrides_reocr_and_asr_drift(self) -> None:
         approved = "我整理出来76款"
         rows = _apply_operator_approved_residual_text_authority(

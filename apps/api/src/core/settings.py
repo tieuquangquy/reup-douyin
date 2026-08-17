@@ -180,6 +180,11 @@ class Settings(BaseSettings):
     # duplicate model pressure and makes duration calibration deterministic.
     synthesize_tts_max_concurrent_running: int = 1
     build_translation_draft_max_concurrent_running: int = 1
+    # Cheap cached provider probe before a durable translation job is created.
+    translation_provider_preflight_enabled: bool = True
+    translation_provider_preflight_timeout_seconds: float = 12.0
+    translation_provider_preflight_success_ttl_seconds: int = 300
+    translation_provider_preflight_failure_ttl_seconds: int = 30
     analyze_ocr_max_concurrent_running: int = 1
     render_final_max_concurrent_running: int = 1
     metrics_collection_max_concurrent_running: int = 2

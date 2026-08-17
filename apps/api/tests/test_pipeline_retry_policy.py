@@ -19,6 +19,24 @@ from src.services.pipeline_retry_policy import (
 
 
 class ClassifyTests(unittest.TestCase):
+    def test_phase4_contract_input_failure_is_terminal(self) -> None:
+        self.assertEqual(
+            classify_pipeline_failure(
+                "PHASE4_INPUT_INVALID",
+                "Phase 4 input invalid: Invalid timing/geometry for sub_71",
+            ),
+            PipelineFailureClass.TERMINAL,
+        )
+
+    def test_phase2_remediation_contract_failure_is_terminal(self) -> None:
+        self.assertEqual(
+            classify_pipeline_failure(
+                "PHASE2_REMEDIATION_INVALID",
+                "Phase 2 OCR delta failed: remediation authority is invalid",
+            ),
+            PipelineFailureClass.TERMINAL,
+        )
+
     def test_residual_authority_conflicts_are_terminal(self) -> None:
         for message in (
             "Residual matches existing Phase-1 geometry: sub_01,sub_02",

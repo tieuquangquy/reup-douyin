@@ -31,17 +31,17 @@ assert.match(
 // Meta must not show bare No cleaned while OCR exact review is pending.
 assert.match(
   visualSource,
-  /dialogueTranslationPending\s*\|\|\s*ocrReviewPending[\s\S]{0,160}waitingOcrReview|ocrReviewPending\s*\?[\s\S]{0,200}waitingOcrReview/,
-  "Cleaned meta must use a waiting-OCR-review label instead of No cleaned during OCR review"
+  /ocrReviewPending\s*\?[\s\S]{0,240}ocrReviewCountShort/,
+  "Cleaned meta must use the compact pending count instead of No cleaned during OCR review"
 );
 assert.ok(
-  en.finalReviewVisual.waitingOcrReviewShort,
-  "EN must expose waitingOcrReviewShort meta label"
+  en.finalReviewVisual.ocrReviewCountShort,
+  "EN must expose compact OCR review-count meta"
 );
 assert.notEqual(
-  en.finalReviewVisual.waitingOcrReviewShort,
+  en.finalReviewVisual.ocrReviewCountShort,
   en.finalReviewVisual.noCleanedShort,
-  "Waiting OCR meta must not reuse the bare No cleaned short label"
+  "OCR review count must not reuse the bare No cleaned short label"
 );
 
 console.log("final-review OCR CTA/meta dedupe tests passed");

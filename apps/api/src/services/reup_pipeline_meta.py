@@ -10,6 +10,8 @@ PIPELINE_STEP_KEY = "pipeline_step"
 # Recorded for manual items too, so handing one to the auto lane resumes from real
 # progress instead of guessing from the step that happens to be pinned in metadata.
 PIPELINE_LAST_DONE_KEY = "pipeline_last_completed_step"
+PIPELINE_FAILED_STEP_KEY = "pipeline_failed_step"
+PIPELINE_ERROR_KEY = "pipeline_error"
 PIPELINE_MODE_MANUAL = "manual"
 PIPELINE_MODE_AUTO_TO_TTS = "auto_to_tts"
 PIPELINE_MODE_AUTO_TO_RENDER = "auto_to_render"
@@ -92,6 +94,16 @@ def set_pipeline_meta(
         meta[PIPELINE_LAST_DONE_KEY] = last_completed_step
     if extra:
         meta.update(extra)
+    item.metadata_json = meta
+    return meta
+
+
+def clear_pipeline_failure_meta(item: Any) -> dict[str, Any]:
+    """Clear only failure diagnostics; completed-stage and recipe authority remain intact."""
+
+    meta = meta_dict(item)
+    meta.pop(PIPELINE_FAILED_STEP_KEY, None)
+    meta.pop(PIPELINE_ERROR_KEY, None)
     item.metadata_json = meta
     return meta
 

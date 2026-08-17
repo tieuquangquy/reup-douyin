@@ -50,7 +50,7 @@ def resolve_provider_capabilities(
     normalized = str(provider or "").strip().lower().replace("-", "_")
     model = str(model_id or "").strip()
     model_lower = model.lower()
-    if normalized in {"gemini", "google_gemini"} or (
+    if normalized in {"gemini", "google_gemini", "google_cloud_tts"} or (
         normalized == "google" and "gemini" in model_lower
     ):
         base = ProviderCapabilities(

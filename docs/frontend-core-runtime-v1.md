@@ -10,7 +10,7 @@ the exact installed runtime in `payload_json`, `context_json`, and
 | --- | --- | --- |
 | Download Video | `DOWNLOAD_V2` | `download-quality-policy-v2`, `post-download-qa-v1` |
 | Analyze Audio | `AUDIO_ANALYSIS_V5` | `audio-analysis-v5-selective-dialogue-validation1` |
-| Build Translation Draft | `TRANSLATION_V5` | `translation-v3-contextual-semantic-utterance-ranking-5` |
+| Build Translation Draft | `TRANSLATION_V5` | `translation-v3-contextual-semantic-utterance-ranking-6` |
 | Synthesize TTS | `TTS_TEMPORAL_V6` | `context-aware-tts-director-v2` + `gemini-whole-video-v1` + `whole-video-silence-alignment-v2` plus the single enabled Ops voice authority |
 | Analyze OCR | `OCR-V34` | `audio_visual_temporal_v1`, `audio_visual_temporal_policy_v12_epoch_complete_cover`, zero network calls |
 

@@ -30,11 +30,13 @@ import {
 } from "../../lib/api";
 import {
   defaultBaseUrlFor,
+  defaultModelFor,
   LLM_PROVIDER_OPTIONS,
   llmProviderLabel,
   llmRuntimeMode,
   showsLlmApiKey,
-  showsLlmBaseUrl
+  showsLlmBaseUrl,
+  showsLlmRegion
 } from "../../lib/opsLlmProviderCatalog";
 import { isSetupTableInteractiveDragTarget, moveItemIndex, profileIdsOf } from "../../lib/opsProfileReorder";
 import { useT } from "../../lib/i18n";
@@ -64,6 +66,7 @@ type FormState = {
   model: string;
   apiKeyInput: string;
   baseUrl: string;
+  region: string;
   timeoutSeconds: string;
   fallbackProvider: string;
   fallbackModel: string;
@@ -74,6 +77,7 @@ export function modelListReady(provider: string, hasApiKey: boolean, baseUrl: st
   const mode = llmRuntimeMode(provider);
   const base = baseUrl.trim();
   if (mode === "openai_compatible") return hasApiKey && Boolean(base);
+  if (mode === "google_cloud") return hasApiKey;
   if (mode === "gemini") return hasApiKey;
   if (mode === "ollama") return Boolean(base);
   return false;
@@ -111,6 +115,7 @@ function toForm(data: TranslationAiResponse): FormState {
     model: data.model || "",
     apiKeyInput: (data.api_key || "").trim(),
     baseUrl: data.base_url || "",
+    region: data.region || "global",
     timeoutSeconds: String(data.timeout_seconds ?? 90),
     fallbackProvider: data.fallback_provider || "none",
     fallbackModel: data.fallback_model || ""
@@ -124,6 +129,7 @@ function blankForm(): FormState {
     model: "",
     apiKeyInput: "",
     baseUrl: "",
+    region: "global",
     timeoutSeconds: "90",
     fallbackProvider: "none",
     fallbackModel: ""
@@ -306,6 +312,7 @@ type ApiBundle = {
     provider: string;
     api_key?: string | null;
     base_url?: string | null;
+    region?: string | null;
     timeout_seconds?: number;
     profile_id?: string | null;
   }) => Promise<{ ok: boolean; models: string[]; detail: string }>;
@@ -484,6 +491,7 @@ export function OpsLlmAiSetupsPage({ variant }: { variant: LlmAiVariant }) {
       const payload: Parameters<typeof api.listModels>[0] = {
         provider: form.provider,
         base_url: form.baseUrl.trim() || null,
+        region: form.region.trim() || "global",
         // List catalog should fail fast; form timeout is for Test/chat, not model listing.
         timeout_seconds: 12,
         profile_id: editingProfileId || null
@@ -542,6 +550,7 @@ export function OpsLlmAiSetupsPage({ variant }: { variant: LlmAiVariant }) {
   }, [
     form?.provider,
     form?.baseUrl,
+    form?.region,
     form?.apiKeyInput,
     form?.timeoutSeconds,
     meta.apiKeySet,
@@ -564,6 +573,7 @@ export function OpsLlmAiSetupsPage({ variant }: { variant: LlmAiVariant }) {
       provider: form.provider,
       model: form.model.trim(),
       base_url: form.baseUrl.trim(),
+      region: form.region.trim() || "global",
       timeout_seconds: Number.isFinite(timeout) && timeout > 0 ? timeout : 90,
       fallback_provider: form.fallbackProvider,
       fallback_model: form.fallbackModel.trim()
@@ -770,6 +780,13 @@ export function OpsLlmAiSetupsPage({ variant }: { variant: LlmAiVariant }) {
       const preset = defaultBaseUrlFor(next);
       if (preset) patch.baseUrl = preset;
     }
+    if (!patch.model.trim()) {
+      const modelPreset = defaultModelFor(next);
+      if (modelPreset) patch.model = modelPreset;
+    }
+    if (llmRuntimeMode(next) === "google_cloud" && !patch.region.trim()) {
+      patch.region = "global";
+    }
     setForm(patch);
     setProviderMissing(false);
     setError(null);
@@ -969,6 +986,7 @@ export function OpsLlmAiSetupsPage({ variant }: { variant: LlmAiVariant }) {
                             <strong>{providerLabel}</strong>
                             <span aria-hidden="true">·</span>
                             <span>{profile.model?.trim() || "—"}</span>
+                            {showsLlmRegion(profile.provider) ? <span className="is-muted">· {profile.region || "global"}</span> : null}
                             {hasFallback ? (
                               <span className="is-muted">· FB: {profile.fallback_provider}{profile.fallback_model?.trim() ? ` / ${profile.fallback_model}` : ""}</span>
                             ) : null}
@@ -1331,6 +1349,19 @@ export function OpsLlmAiSetupsPage({ variant }: { variant: LlmAiVariant }) {
                   />
                 </div>
               ) : null}
+              {showsLlmRegion(form.provider) ? (
+                <div className="ops-form-field">
+                  <label htmlFor={`${idPrefix}-region`}>{t(`${i18n}.region`)}</label>
+                  <select
+                    id={`${idPrefix}-region`}
+                    value={form.region}
+                    onChange={(event) => setForm({ ...form, region: event.target.value })}
+                  >
+                    <option value="global">global</option>
+                  </select>
+                  <p className="ops-tts-field-hint">{t(`${i18n}.regionHint`)}</p>
+                </div>
+              ) : null}
               {showsApiKey(form.provider) ? (
                 <div className="ops-form-field ops-ai-span-2">
                   <label htmlFor={`${idPrefix}-api-key`}>{t(`${i18n}.apiKey`)}</label>
@@ -1361,7 +1392,7 @@ export function OpsLlmAiSetupsPage({ variant }: { variant: LlmAiVariant }) {
                     id={`${idPrefix}-model`}
                     value={form.model}
                     onChange={(event) => setForm({ ...form, model: event.target.value })}
-                    placeholder="gemini-2.5-flash / gpt-4o-mini / qwen2.5:14b"
+                    placeholder="gemini-3.7-flash / gemini-2.5-flash / gpt-4o-mini / qwen2.5:14b"
                     autoComplete="off"
                     spellCheck={false}
                   />
@@ -1419,7 +1450,7 @@ export function OpsLlmAiSetupsPage({ variant }: { variant: LlmAiVariant }) {
                   onChange={(event) => setForm({ ...form, fallbackProvider: event.target.value })}
                 >
                   <option value="none">none</option>
-                  {LLM_PROVIDER_OPTIONS.map((option) => (
+                  {LLM_PROVIDER_OPTIONS.filter((option) => option.id !== "google_cloud").map((option) => (
                     <option key={`fallback-${option.id}`} value={option.id}>
                       {option.label}
                     </option>

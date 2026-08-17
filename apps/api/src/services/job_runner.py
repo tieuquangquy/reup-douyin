@@ -1496,9 +1496,12 @@ class JobRunner:
                             result = StepHandlerResult(
                                 status=JobStepStatus.FAILED,
                                 progress_percent=0,
-                                error_code="QUALITY_LOCALIZATION_FAILED",
+                                error_code=exc.code,
                                 error_message=str(exc),
-                                output_json={"source_video_id": str(source_video_id)},
+                                output_json={
+                                    "source_video_id": str(source_video_id),
+                                    **dict(exc.details),
+                                },
                             )
                         else:
                             import traceback
@@ -1609,7 +1612,7 @@ class JobRunner:
                     return self._abort_cancelled_job(job)
                 except QualityLocalizationError as exc:
                     message = str(exc)
-                    error_code = (
+                    error_code = exc.code if exc.code != "QUALITY_LOCALIZATION_FAILED" else (
                         "QUALITY_REVIEW_VALIDATION_FAILED"
                         if "translation review validation failed" in message.lower()
                         else "QUALITY_PREFLIGHT_BLOCKED"
@@ -1624,7 +1627,10 @@ class JobRunner:
                         progress_percent=0,
                         error_code=error_code,
                         error_message=message,
-                        output_json={"source_video_id": str(source_video_id)},
+                        output_json={
+                            "source_video_id": str(source_video_id),
+                            **dict(exc.details),
+                        },
                     )
                 except Exception as exc:
                     import traceback

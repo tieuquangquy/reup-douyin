@@ -158,7 +158,7 @@ export function formatProviderError(detail: string, labels: ProviderErrorLabels)
     };
   }
   const httpMatch =
-    raw.match(/(?:list_models_|openai_compatible_|gemini_|ollama_)http_(\d{3})\s*:?\s*(.*)$/i) ||
+    raw.match(/(?:list_models_|openai_compatible_|google_cloud_|gemini_|ollama_)http_(\d{3})\s*:?\s*(.*)$/i) ||
     raw.match(/\bhttp_(\d{3})\s*:?\s*(.*)$/i);
   // API client errors look like "Failed to test …: 500" with no provider dump.
   const bareStatusMatch = !httpMatch ? raw.match(/:\s*(\d{3})\s*$/) : null;

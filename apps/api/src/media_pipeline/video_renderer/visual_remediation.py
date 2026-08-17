@@ -15,6 +15,12 @@ class VisualRemediationError(RuntimeError):
     pass
 
 
+def _int_or_default(value: Any, default: int) -> int:
+    """Default only missing authority fields; zero is a valid frame/time."""
+
+    return int(default if value is None else value)
+
+
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -176,7 +182,7 @@ def apply_visual_remediation(
             region_id = str(region.get("region_id") or "")
             roi = dict(region.get("region_roi") or {})
             start_frame = int(region.get("start_frame") or 0)
-            end_frame = int(region.get("end_frame") or -1)
+            end_frame = _int_or_default(region.get("end_frame"), -1)
             targets = [
                 dict(row)
                 for row in list(operation.get("targets") or [])
@@ -280,10 +286,10 @@ def apply_visual_remediation(
                 != "SOURCE_SCENE_TEXT"
                 or int(replacement.get("start_frame") or 0)
                 > int(current.get("start_frame") or 0)
-                or int(replacement.get("end_frame") or -1)
-                < int(current.get("end_frame") or -1)
+                or _int_or_default(replacement.get("end_frame"), -1)
+                < _int_or_default(current.get("end_frame"), -1)
                 or int(replacement.get("start_frame") or 0) < 0
-                or int(replacement.get("end_frame") or -1)
+                or _int_or_default(replacement.get("end_frame"), -1)
                 >= frame_count
                 or float(roi.get("x") or 0.0) < 0.0
                 or float(roi.get("y") or 0.0) < 0.0
@@ -308,7 +314,7 @@ def apply_visual_remediation(
             canonical = by_id.get(canonical_id)
             roi = dict(panel.get("panel_roi") or {})
             start_frame = int(panel.get("start_frame") or 0)
-            end_frame = int(panel.get("end_frame") or -1)
+            end_frame = _int_or_default(panel.get("end_frame"), -1)
             area = float(roi.get("width") or 0.0) * float(
                 roi.get("height") or 0.0
             )
@@ -365,7 +371,10 @@ def apply_visual_remediation(
             track_id = str(track.get("text_id") or "")
             geometry = dict(track.get("geometry") or {})
             start_frame = int(track.get("start_frame") or 0)
-            end_frame = int(track.get("end_frame") or -1)
+            end_value = track.get("end_frame")
+            end_frame = _int_or_default(end_value, -1)
+            start_ms_value = track.get("start_ms")
+            end_ms_value = track.get("end_ms")
             if (
                 not track_id
                 or track_id in by_id
@@ -374,9 +383,9 @@ def apply_visual_remediation(
                 or start_frame < 0
                 or end_frame < start_frame
                 or (frame_count > 0 and end_frame >= frame_count)
-                or int(track.get("start_ms") or -1)
+                or _int_or_default(start_ms_value, -1)
                 != _timing(start_frame, start_frame, fps)[0]
-                or int(track.get("end_ms") or -1)
+                or _int_or_default(end_ms_value, -1)
                 != _timing(end_frame, end_frame, fps)[1]
                 or not str(track.get("text_vi") or "").strip()
                 or str(track.get("translation_status") or "")
@@ -426,7 +435,7 @@ def apply_visual_remediation(
             ).strip()
             canonical_vi = str(canonical.get("text_vi") or "").strip()
             canonical_start = int(canonical.get("start_frame") or 0)
-            canonical_end = int(canonical.get("end_frame") or -1)
+            canonical_end = _int_or_default(canonical.get("end_frame"), -1)
             drop_ids: set[str] = set()
             for entry in targets:
                 drop_id = str(entry.get("target_text_id") or "")
@@ -443,7 +452,10 @@ def apply_visual_remediation(
                     != canonical_source
                     or str(target.get("text_vi") or "").strip() != canonical_vi
                     or _geometry_overlap_over_smaller(canonical, target) < 0.70
-                    or min(canonical_end, int(target.get("end_frame") or -1))
+                    or min(
+                        canonical_end,
+                        _int_or_default(target.get("end_frame"), -1),
+                    )
                     < max(canonical_start, int(target.get("start_frame") or 0))
                 ):
                     raise VisualRemediationError(

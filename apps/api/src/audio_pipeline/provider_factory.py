@@ -5,6 +5,11 @@ from pathlib import Path
 from typing import Any
 
 from src.audio_pipeline.translation_provider_mode import resolve_translation_provider_mode
+from src.audio_pipeline.google_cloud_genai import (
+    GOOGLE_CLOUD_DEFAULT_MODEL,
+    GOOGLE_CLOUD_DEFAULT_REGION,
+    GoogleCloudAgentPlatformClient,
+)
 from src.audio_pipeline.providers import (
     CaptionFallbackSttProvider,
     PlaceholderVietnameseTranslationProvider,
@@ -138,6 +143,10 @@ def _build_from_workspace_ai(workspace_ai: Any, *, env_settings: Any) -> Transla
     model = str(getattr(workspace_ai, "model", "") or "").strip()
     base_url = str(getattr(workspace_ai, "base_url", "") or "").strip()
     api_key = (getattr(workspace_ai, "api_key", None) or "").strip()
+    region = str(
+        getattr(workspace_ai, "region", GOOGLE_CLOUD_DEFAULT_REGION)
+        or GOOGLE_CLOUD_DEFAULT_REGION
+    ).strip()
     fallback_name = str(getattr(workspace_ai, "fallback_provider", "none") or "none").strip().lower()
     fallback_model = str(getattr(workspace_ai, "fallback_model", "") or "").strip()
 
@@ -146,6 +155,7 @@ def _build_from_workspace_ai(workspace_ai: Any, *, env_settings: Any) -> Transla
         model=model,
         api_key=api_key,
         base_url=base_url,
+        region=region,
         timeout_seconds=timeout,
         env_settings=env_settings,
         prefer_env_key_when_empty=True,
@@ -166,6 +176,7 @@ def _build_from_workspace_ai(workspace_ai: Any, *, env_settings: Any) -> Transla
             model=fallback_model,
             api_key="",
             base_url="",
+            region=region,
             timeout_seconds=timeout,
             env_settings=env_settings,
             prefer_env_key_when_empty=True,
@@ -185,6 +196,7 @@ def _make_llm_client(
     model: str,
     api_key: str,
     base_url: str,
+    region: str,
     timeout_seconds: float,
     env_settings: Any,
     prefer_env_key_when_empty: bool,
@@ -197,6 +209,7 @@ def _make_llm_client(
             model=model,
             api_key=api_key,
             base_url=base_url,
+            region=region,
             timeout_seconds=timeout_seconds,
             env_settings=env_settings,
             prefer_env_key_when_empty=prefer_env_key_when_empty,
@@ -208,12 +221,23 @@ def _make_llm_client(
             model=model,
             api_key=api_key,
             base_url=base_url,
+            region=region,
             timeout_seconds=timeout_seconds,
             env_settings=env_settings,
             prefer_env_key_when_empty=prefer_env_key_when_empty,
         )
 
     mode = resolve_translation_provider_mode(raw)
+    if mode == "google_cloud":
+        if not api_key:
+            return None
+        return GoogleCloudAgentPlatformClient(
+            api_key=api_key,
+            model=model or GOOGLE_CLOUD_DEFAULT_MODEL,
+            region=region or GOOGLE_CLOUD_DEFAULT_REGION,
+            timeout_seconds=timeout_seconds,
+        )
+
     if mode == "gemini":
         key = api_key or (
             (getattr(env_settings, "gemini_api_key", None) or "").strip() if prefer_env_key_when_empty else ""
@@ -261,7 +285,12 @@ def _make_llm_client(
     return None
 
 
-def probe_translation_ai_client(workspace_ai: Any, *, settings: Any | None = None) -> tuple[bool, str, str]:
+def probe_translation_ai_client(
+    workspace_ai: Any,
+    *,
+    settings: Any | None = None,
+    allow_fallback: bool = False,
+) -> tuple[bool, str, str]:
     """
     Smoke-test the primary LLM client.
     Returns (ok, provider_name, detail).
@@ -285,6 +314,20 @@ def probe_translation_ai_client(workspace_ai: Any, *, settings: Any | None = Non
     try:
         text = primary.complete("Reply with exactly: OK")
     except Exception as exc:  # noqa: BLE001 - surface provider errors to Ops UI
+        fallback = getattr(provider, "fallback", None)
+        if allow_fallback and fallback is not None and hasattr(fallback, "complete"):
+            fallback_name = str(getattr(fallback, "provider_name", "unknown"))
+            try:
+                fallback_text = fallback.complete("Reply with exactly: OK")
+            except Exception as fallback_exc:  # noqa: BLE001
+                return (
+                    False,
+                    fallback_name,
+                    f"fallback={str(fallback_exc)[:180]}; primary={str(exc)[:180]}",
+                )
+            fallback_sample = (fallback_text or "").strip()[:120]
+            if fallback_sample:
+                return True, fallback_name, f"fallback_ok:{fallback_sample}"
         return False, name, str(exc)[:400]
     sample = (text or "").strip()[:120]
     if not sample:

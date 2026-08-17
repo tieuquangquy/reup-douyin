@@ -104,6 +104,15 @@ def preview_tts_speech(
         or metadata.get("voice_id")
         or requested_voice_id
     ).strip()
+    requested_model_id = str(metadata.get("requested_model_id") or cfg.model_id or "").strip()
+    resolved_model_id = str(
+        metadata.get("resolved_model_id")
+        or metadata.get("model_id")
+        or requested_model_id
+    ).strip()
+    detail = f"Preview ready ({len(cleaned)} chars)"
+    if requested_model_id and resolved_model_id != requested_model_id:
+        detail += f" · model fallback {requested_model_id} → {resolved_model_id}"
     logger.info(
         "tts_preview_ok",
         extra={
@@ -115,7 +124,7 @@ def preview_tts_speech(
     return {
         "ok": True,
         "provider": provider_name,
-        "detail": f"Preview ready ({len(cleaned)} chars)",
+        "detail": detail,
         "mime_type": output.mime_type or "audio/wav",
         "duration_seconds": float(output.duration_seconds or 0.0),
         "audio_base64": base64.b64encode(bytes(output.audio_bytes)).decode("ascii"),
@@ -123,4 +132,6 @@ def preview_tts_speech(
         "text": cleaned,
         "requested_voice_id": requested_voice_id,
         "resolved_voice_id": resolved_voice_id,
+        "requested_model_id": requested_model_id,
+        "resolved_model_id": resolved_model_id,
     }

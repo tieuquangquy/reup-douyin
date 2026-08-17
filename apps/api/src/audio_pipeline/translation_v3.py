@@ -29,7 +29,7 @@ from src.audio_pipeline.types import (
 )
 
 
-TRANSLATION_V3_RECIPE_VERSION = "translation-v3-contextual-semantic-utterance-ranking-5"
+TRANSLATION_V3_RECIPE_VERSION = "translation-v3-contextual-semantic-utterance-ranking-6"
 
 
 @dataclass(frozen=True)
@@ -377,6 +377,8 @@ def _evaluate_candidate(
         tts_eligibility_reasons.append("context_score_below_tts_floor")
     if naturalness < 0.55:
         tts_eligibility_reasons.append("naturalness_score_below_tts_floor")
+    if budget.status == "too_long":
+        tts_eligibility_reasons.append("speech_budget_too_long")
     total = (
         semantic * 0.30
         + context * 0.20
@@ -583,10 +585,26 @@ def select_translation_candidate(
     # A semantically valid candidate already inside the accepted physical slot
     # beats a marginally higher-scoring candidate that would force review/TTS
     # correction. Weighted score remains the tie-breaker within the same band.
-    pool = within_acceptable_timing or preferred or hard_valid
-    if not pool:
+    if not hard_valid:
         return CandidateSelection(None, None, evaluations, True, True)
-    chosen = max(pool, key=lambda row: (float(row["total_score"]), -int(row["candidate_index"])))
+    if within_acceptable_timing or preferred:
+        pool = within_acceptable_timing or preferred
+        chosen = max(
+            pool,
+            key=lambda row: (float(row["total_score"]), -int(row["candidate_index"])),
+        )
+    else:
+        # Every structurally valid candidate is too long. Start the controlled
+        # rewrite from the closest physical fit, not from a marginally higher
+        # semantic score that costs more tokens to repair.
+        chosen = min(
+            hard_valid,
+            key=lambda row: (
+                int(dict(row.get("speech_budget") or {}).get("spoken_units") or 10**9),
+                -float(row["total_score"]),
+                int(row["candidate_index"]),
+            ),
+        )
     selected = non_empty_candidates[int(chosen["candidate_index"])]
     return CandidateSelection(
         selected=selected,

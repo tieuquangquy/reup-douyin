@@ -87,6 +87,8 @@ assert.equal(modelListReady("openai_compatible", true, "https://api.openai.com/v
 assert.equal(modelListReady("openai_compatible", true, ""), false);
 assert.equal(modelListReady("gemini", true, ""), true);
 assert.equal(modelListReady("gemini", false, ""), false);
+assert.equal(modelListReady("google_cloud", true, ""), true);
+assert.equal(modelListReady("google_cloud", false, ""), false);
 assert.equal(modelListReady("ollama", false, "http://127.0.0.1:11434"), true);
 assert.equal(modelListReady("openrouter", true, "https://openrouter.ai/api/v1"), true);
 assert.equal(modelListReady("placeholder", true, ""), false);
@@ -178,6 +180,13 @@ assert.equal(gemini429.title, "Rate limited");
 assert.equal(gemini429.httpStatus, 429);
 assert.match(gemini429.message, /exceeded your current quota/i);
 assert.doesNotMatch(gemini429.message, /gemini_http_429|ai\.google\.dev|\{"error"/i);
+
+const googleCloud401 = formatProviderError(
+  "google_cloud_http_401:API key not valid",
+  providerErrorLabels
+);
+assert.equal(googleCloud401.title, "Invalid API key");
+assert.equal(googleCloud401.httpStatus, 401);
 
 const urlopenTimeout = formatProviderError(
   "<urlopen error [WinError 10060] A connection attempt failed because the connected party did not properly respond after a period of time, or established connection failed because connected host has failed to respond>",

@@ -20,6 +20,7 @@ import {
   isPublishReady,
   nextCompareMode,
   resolveFinalReviewCompareDiff,
+  resolveFinalReviewOcrCheckpointMetrics,
   resolveFinalReviewPrepBriefing,
   resolveFinalReviewPrepFocus,
   resolveFinalReviewPrepStepProgress,
@@ -320,6 +321,24 @@ assert.deepEqual(
   resolveFinalReviewPrepStepProgress({ ocrSummary: null }),
   { clean: 0, render: 0, compare: 0 },
   "Idle prep steps start at 0%"
+);
+assert.deepEqual(
+  resolveFinalReviewOcrCheckpointMetrics({
+    phase2_content_object_count: 129,
+    review_required: 19,
+    review_objects: Array.from({ length: 19 })
+  }),
+  { total: 129, automatic: 110, manual: 19 },
+  "OCR checkpoint metrics must distinguish automatic results from manual decisions"
+);
+assert.deepEqual(
+  resolveFinalReviewOcrCheckpointMetrics({
+    text_object_count: 2,
+    review_required: 0,
+    review_objects: Array.from({ length: 3 })
+  }),
+  { total: 3, automatic: 0, manual: 3 },
+  "OCR checkpoint metrics must remain truthful for older or inconsistent artifacts"
 );
 assert.deepEqual(
   resolveFinalReviewPrepStepProgress({ ocrSummary: { ocr_events_asset_id: "ocr-partial" } }),

@@ -82,6 +82,32 @@ function formatJobStepLabel(job: Job): string {
     : "";
 }
 
+export type OcrCheckpointOutcome = {
+  reviewRequired: number;
+  totalObjects: number;
+};
+
+function nonNegativeInteger(value: unknown): number {
+  const parsed = typeof value === "number" ? value : typeof value === "string" ? Number(value) : 0;
+  return Number.isFinite(parsed) ? Math.max(0, Math.round(parsed)) : 0;
+}
+
+/** A completed worker can legitimately hand off to a separate operator checkpoint. */
+export function resolveOcrCheckpointOutcome(job: Job): OcrCheckpointOutcome | null {
+  if (job.job_type !== "ANALYZE_OCR" || job.status !== "COMPLETED") return null;
+  const output = job.steps.find((step) => step.step_key === "persist_outputs")?.output_json;
+  if (!output || output.workflow_stage !== "WAITING_OCR_REVIEW") return null;
+  const reviewRequired = nonNegativeInteger(output.review_required);
+  if (reviewRequired <= 0) return null;
+  return {
+    reviewRequired,
+    totalObjects: Math.max(
+      reviewRequired,
+      nonNegativeInteger(output.phase2_content_object_count)
+    )
+  };
+}
+
 function formatTableDateTime(value: string | null | undefined): string {
   if (!value) return "—";
   const date = new Date(value);
@@ -916,10 +942,12 @@ export function OpsJobsPage() {
                 </thead>
                 <tbody>
                   {visibleJobs.map((job) => {
+                    const ocrCheckpoint = resolveOcrCheckpointOutcome(job);
                     const tone =
                       job.status === "COMPLETED" && job.error_message ? "warn" : statusTone(job.status);
                     const typeTone = jobTypePillTone(job.job_type);
                     const source = videoSourceLabel(job);
+                    const liveStep = formatJobStepLabel(job);
                     const progress = Math.max(
                       0,
                       Math.min(
@@ -984,8 +1012,15 @@ export function OpsJobsPage() {
                             <span className={`ops-jobs-table__type tone-${typeTone}`} title={job.job_type}>
                               {formatJobWorkLabel(job)}
                             </span>
-                            <span className="ops-jobs-table__step" title={job.current_step_key ?? undefined}>
-                              {formatJobStepLabel(job) || t("opsJobs.noCurrentStep")}
+                            <span
+                              className={`ops-jobs-table__step${ocrCheckpoint ? " is-attention" : ""}`}
+                              title={job.current_step_key ?? undefined}
+                            >
+                              {ocrCheckpoint
+                                ? t("opsJobs.ocrAnalysisReviewPending")
+                                    .replace("{count}", String(ocrCheckpoint.reviewRequired))
+                                    .replace("{total}", String(ocrCheckpoint.totalObjects))
+                                : liveStep || t("opsJobs.noCurrentStep")}
                             </span>
                           </td>
                           <td>
@@ -1006,6 +1041,13 @@ export function OpsJobsPage() {
                               <i className="ops-jobs-table__status-dot" aria-hidden="true" />
                               {formatStatusLabel(job.status)}
                             </span>
+                            {ocrCheckpoint ? (
+                              <span className="ops-jobs-table__checkpoint-badge">
+                                {t("opsJobs.ocrReviewBadge")
+                                  .replace("{count}", String(ocrCheckpoint.reviewRequired))
+                                  .replace("{total}", String(ocrCheckpoint.totalObjects))}
+                              </span>
+                            ) : null}
                             {job.error_code ? (
                               <code className="ops-jobs-table__error" title={job.error_message ?? job.error_code}>
                                 {job.error_code}

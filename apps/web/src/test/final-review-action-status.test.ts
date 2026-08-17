@@ -190,8 +190,8 @@ assert.match(
 );
 assert.match(
   statusSource,
-  /phase\s*===\s*"success"[\s\S]{0,120}warning[\s\S]{0,120}error|success[\s\S]{0,40}warning[\s\S]{0,40}error/,
-  "Auto-dismiss must apply to success/warning/error terminal phases"
+  /shouldAutoDismissFinalReviewActionStatus/,
+  "Auto-dismiss must apply to success/warning only — errors stay until dismissed"
 );
 assert.doesNotMatch(
   statusSource,

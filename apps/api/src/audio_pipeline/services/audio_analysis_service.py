@@ -1524,6 +1524,42 @@ class AudioAnalysisService:
             )
             return active_job
 
+        from src.audio_pipeline.translation_provider_preflight import (
+            TranslationProviderPreflightResult,
+            preflight_translation_provider,
+        )
+
+        provider_preflight = (
+            TranslationProviderPreflightResult(
+                ok=True,
+                provider=str(getattr(self.translation_provider, "provider_name", "explicit")),
+                detail="explicit_provider",
+                cached=True,
+            )
+            if self._translation_provider_explicit
+            else preflight_translation_provider(
+                settings_svc.get_translation_ai(source_video.workspace_id)
+            )
+        )
+        if not provider_preflight.ok and not provider_preflight.retryable:
+            raise AudioAnalysisError(
+                AudioAnalysisErrorCode.TRANSLATION_FAILED,
+                (
+                    "translation_provider_preflight_failed:"
+                    f"{provider_preflight.detail[:320]} "
+                    "[terminal — open Translation AI settings, run Test Connection, "
+                    "then resume this translation stage]"
+                ),
+            )
+        if not provider_preflight.ok:
+            logger.warning(
+                "translation_provider_preflight_transient",
+                extra={
+                    "source_video_id": str(source_video.id),
+                    "provider": provider_preflight.provider,
+                },
+            )
+
         terminal_slot = self.db.scalar(
             select(Job).where(
                 Job.workspace_id == source_video.workspace_id,
@@ -1559,6 +1595,12 @@ class AudioAnalysisService:
                     "translation_fingerprint": fingerprint,
                     "speech_rate_calibration": speech_rate_calibration,
                     "subphase_percent": 0,
+                    "provider_preflight": {
+                        "ok": provider_preflight.ok,
+                        "provider": provider_preflight.provider,
+                        "cached": provider_preflight.cached,
+                        "degraded_to_fallback": provider_preflight.degraded_to_fallback,
+                    },
                 },
                 commit=commit,
             )

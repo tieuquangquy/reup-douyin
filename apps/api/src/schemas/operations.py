@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -48,6 +49,7 @@ class TranslationAiProfileSummary(BaseModel):
     api_key_masked: str = ""
     api_key: str = ""
     base_url: str = ""
+    region: str = "global"
     timeout_seconds: float = 90.0
     fallback_provider: str = "none"
     fallback_model: str = ""
@@ -80,6 +82,7 @@ class TranslationAiResponse(BaseModel):
         description="Plaintext key for Ops console (Phase 1 local operator). Prefer masked field in logs.",
     )
     base_url: str = ""
+    region: str = "global"
     timeout_seconds: float = 90.0
     fallback_provider: str = "none"
     fallback_model: str = ""
@@ -93,7 +96,10 @@ class TranslationAiResponse(BaseModel):
 
 class TranslationAiUpdateRequest(BaseModel):
     enabled: bool = False
-    provider: str = Field(default="auto", description="auto | gemini | openai_compatible | ollama | placeholder")
+    provider: str = Field(
+        default="auto",
+        description="auto | google_cloud | gemini | openai_compatible | ollama | placeholder",
+    )
     model: str = ""
     api_key: str | None = Field(
         default=None,
@@ -101,6 +107,7 @@ class TranslationAiUpdateRequest(BaseModel):
     )
     clear_api_key: bool = False
     base_url: str = ""
+    region: str = "global"
     timeout_seconds: float = 90.0
     fallback_provider: str = "none"
     fallback_model: str = ""
@@ -115,6 +122,7 @@ class TranslationAiTestRequest(BaseModel):
     api_key: str | None = None
     clear_api_key: bool = False
     base_url: str | None = None
+    region: str | None = None
     timeout_seconds: float | None = None
     fallback_provider: str | None = None
     fallback_model: str | None = None
@@ -134,6 +142,7 @@ class TranslationAiModelsRequest(BaseModel):
     api_key: str | None = None
     clear_api_key: bool = False
     base_url: str | None = None
+    region: str | None = None
     timeout_seconds: float | None = None
     profile_id: str | None = None
 
@@ -372,6 +381,7 @@ class TtsAiUpdateRequest(BaseModel):
 
 
 class TtsAiTestRequest(BaseModel):
+    probe_mode: Literal["connection", "catalog"] = "connection"
     enabled: bool | None = None
     provider: str | None = None
     voice_id: str | None = None
@@ -478,6 +488,8 @@ class TtsAiPreviewResponse(BaseModel):
     text: str = ""
     requested_voice_id: str = ""
     resolved_voice_id: str = ""
+    requested_model_id: str = ""
+    resolved_model_id: str = ""
 
 
 class BacklogSummary(BaseModel):

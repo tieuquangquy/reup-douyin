@@ -9,9 +9,34 @@ from unittest.mock import patch
 import numpy as np
 
 from scripts import run_phase4_preflight
+from src.media_pipeline.video_renderer.phase4_input_contract import Phase4InputError
 
 
 class RunPhase4PreflightTests(unittest.TestCase):
+    def test_recorded_run_persists_actionable_input_failure(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "phase3_render_handoff.json").write_text(
+                '{"status":"READY_FOR_RENDER"}', encoding="utf-8"
+            )
+            with patch.object(
+                run_phase4_preflight,
+                "run",
+                side_effect=Phase4InputError("Invalid timing/geometry for sub_71"),
+            ):
+                with self.assertRaisesRegex(Phase4InputError, "sub_71"):
+                    run_phase4_preflight.run_recorded(root)
+
+            failure = json.loads(
+                (root / "phase4_preflight_failure.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(failure["error_code"], "PHASE4_INPUT_INVALID")
+        self.assertEqual(failure["error_type"], "Phase4InputError")
+        self.assertFalse(failure["retryable"])
+        self.assertIn("sub_71", failure["message"])
+        self.assertEqual(len(failure["phase3_render_handoff_sha256"]), 64)
+
     def test_operator_false_positive_exclusion_keeps_raw_detection_auditable(
         self,
     ) -> None:

@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from typing import Literal
 
-TranslationProviderMode = Literal["gemini", "ollama", "openai_compatible", "unsupported"]
+TranslationProviderMode = Literal[
+    "google_cloud", "gemini", "ollama", "openai_compatible", "unsupported"
+]
 
 # Native runtimes (must match Ops LLM catalog).
 _NATIVE_GEMINI = frozenset({"gemini"})
 _NATIVE_OLLAMA = frozenset({"ollama", "qwen"})
+_NATIVE_GOOGLE_CLOUD = frozenset({"google_cloud"})
 
 # Explicit openai-compatible aliases from the Ops dropdown (plus legacy openai_compatible).
 # Any other non-empty id also falls through to openai_compatible.
@@ -46,13 +49,15 @@ def resolve_translation_provider_mode(provider: str | None) -> TranslationProvid
     """
     Map a stored provider id to the HTTP client family used for Test / Translate / list-models.
 
-    - gemini / ollama / qwen: native clients
+    - google_cloud / gemini / ollama / qwen: native clients
     - known OpenAI-compatible presets and unknown non-empty ids: openai_compatible
     - auto / empty / placeholder / off / none: unsupported (caller handles auto separately)
     """
     mode = (provider or "").strip().lower()
     if not mode or mode in {"auto", "placeholder", "off", "none"}:
         return "unsupported"
+    if mode in _NATIVE_GOOGLE_CLOUD:
+        return "google_cloud"
     if mode in _NATIVE_GEMINI:
         return "gemini"
     if mode in _NATIVE_OLLAMA:

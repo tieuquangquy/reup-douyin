@@ -39,7 +39,7 @@ def resolve_gemini_synthesis_strategy(
 ) -> str:
     """Return ``whole_video`` only for an explicitly compatible Gemini lane."""
 
-    if str(provider or "").strip().lower() != "google_gemini":
+    if str(provider or "").strip().lower() not in {"google_gemini", "google_cloud_tts"}:
         return "segment"
     options = dict(expressive_options or {})
     requested = str(options.get("synthesis_strategy") or "whole_video").strip().lower()

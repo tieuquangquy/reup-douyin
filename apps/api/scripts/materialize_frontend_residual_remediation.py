@@ -62,7 +62,8 @@ def materialize(root_dir: str | Path, decision_path: str | Path) -> dict[str, An
             raise RuntimeError("Residual decision must be an object")
         text_id = str(raw.get("text_id") or "").strip()
         start = int(raw.get("start_frame") or 0)
-        end = int(raw.get("end_frame") or -1)
+        end_value = raw.get("end_frame")
+        end = int(-1 if end_value is None else end_value)
         geometry = dict(raw.get("geometry") or {})
         text_vi = str(raw.get("text_vi") or "").strip()
         if (

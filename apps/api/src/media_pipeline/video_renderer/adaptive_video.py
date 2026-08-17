@@ -21,8 +21,12 @@ from src.media_pipeline.video_renderer.render_policy import (
     enforce_unified_editor_cover_contract,
 )
 from src.media_pipeline.video_renderer.reference_plate import (
+    is_text_reduced_reference_candidate,
     is_usable_reference_plate_candidate,
     reference_plate_candidate_score,
+)
+from src.media_pipeline.frame_sampling.coverage_track_closure import (
+    local_textness_mask,
 )
 from src.media_pipeline.video_renderer.renderer import probe_video_duration_ms
 from src.media_pipeline.video_renderer.video_encoder import (
@@ -196,6 +200,41 @@ def dynamic_track_for_frame(
         row["coverage_geometry_frame"] = int(frame_index)
         return row
 
+    # Outside detector-observed timing, the local outlined-caption gate proves
+    # physical ink is present but cannot prove the missing line's exact width.
+    # A last-keyframe box can be much narrower than the next sentence and
+    # leave readable CJK on both sides. Use the approved caption lane only for
+    # this visually confirmed semantic extension.
+    if (
+        bool(row.get("semantic_envelope_visual_confirmation"))
+        and bool(row.get("semantic_dialogue_hardsub"))
+    ):
+        cover["roi"] = {
+            **cover_roi,
+            "x": 0.0,
+            "width": 1.0,
+        }
+        cover["geometry_mode"] = "full_width_caption_lane"
+        layout["safe_area"] = {
+            **safe_area,
+            "x": 0.04,
+            "width": 0.92,
+        }
+        damage_budget = dict(policy.get("damage_budget") or {})
+        damage_budget["max_frame_change_fraction"] = min(
+            0.16,
+            max(
+                float(damage_budget.get("max_frame_change_fraction") or 0.0),
+                float(cover["roi"].get("height") or 0.0) * 1.02,
+            ),
+        )
+        policy["cover"] = cover
+        policy["layout"] = layout
+        policy["damage_budget"] = damage_budget
+        row["render_policy"] = policy
+        row["coverage_geometry_frame"] = int(frame_index)
+        return row
+
     dx = dynamic["x"] - float(original.get("x") or 0.0)
     dy = dynamic["y"] - float(original.get("y") or 0.0)
     dw = dynamic["width"] - float(original.get("width") or 0.0)
@@ -206,12 +245,23 @@ def dynamic_track_for_frame(
     # though the editor-owned subtitle lane is stationary.  A stabilized
     # caption cover is already the robust envelope of those observations; do
     # not project sparse keyframe jitter back into its mask or text layout.
+    provenance = dict(row.get("visual_provenance") or {})
+    screen_locked_semantic_caption = bool(row.get("semantic_dialogue_hardsub")) and (
+        str(provenance.get("classification") or "") == "EDITOR_OVERLAY"
+        and float(provenance.get("confidence") or 0.0) >= 0.90
+    )
     if geometry_mode in {
         "stable_caption_envelope",
         "stable_caption_group",
         "stable_caption_group_adaptive_horizontal",
         "solid_editor_card_panel_union",
-    }:
+    } or screen_locked_semantic_caption:
+        # High-confidence semantic editor captions are screen-locked. Sparse
+        # OCR keyframes can jump from the caption row to printed text on a
+        # moving product or prop. Keep the approved cover/layout envelope
+        # stable and use those keyframes only as physical-presence evidence.
+        # This also prevents the plate from pulsing as individual glyph boxes
+        # change width between adjacent frames.
         row["geometry"] = dynamic
         row["render_policy"] = policy
         row["coverage_geometry_frame"] = int(frame_index)
@@ -334,13 +384,23 @@ def _outlined_caption_present(
         crop, axis=2
     ).astype(np.int16)
     white_fill = (gray >= 172) & (channel_spread <= 92)
+    # Douyin editor captions are frequently light pink/yellow rather than
+    # neutral white. They retain the same dark outline and baseline structure,
+    # so admit bright chromatic fill here instead of dropping the entire
+    # semantic extension merely because channel spread is high.
+    brightest = np.max(crop, axis=2)
+    bright_chromatic_fill = (
+        (gray >= 125) & (brightest >= 170) & (channel_spread >= 35)
+    )
     dark_outline = gray <= 105
     outline_neighborhood = cv2.dilate(
         dark_outline.astype(np.uint8),
         cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)),
         iterations=1,
     ) > 0
-    candidates = (white_fill & outline_neighborhood).astype(np.uint8)
+    candidates = ((white_fill | bright_chromatic_fill) & outline_neighborhood).astype(
+        np.uint8
+    )
     candidates = cv2.morphologyEx(
         candidates,
         cv2.MORPH_OPEN,
@@ -499,9 +559,9 @@ def active_tracks_for_frame(
         )
         physical_ranges = _physical_presence_ranges(row)
         cover_ranges = (
-            physical_ranges
-            if physical_ranges
-            else ([(cover_start, cover_end)] if explicit_cover_interval else coverage_ranges or [(cover_start, cover_end)])
+            [(cover_start, cover_end)]
+            if explicit_cover_interval
+            else physical_ranges or coverage_ranges or [(cover_start, cover_end)]
         )
         in_cover = any(
             range_start - hold <= int(frame_index) <= range_end + hold
@@ -529,6 +589,7 @@ def active_tracks_for_frame(
                 and str(timing.get("mode") or "")
                 in {
                     "semantic_observed_envelope",
+                    "semantic_observed_coverage_union",
                     "approved_transcript_segment_union",
                 }
                 and len(observed) == 2
@@ -576,7 +637,7 @@ def active_protected_source_regions_for_frame(
 ) -> list[dict[str, Any]]:
     """Return only high-confidence source text regions for mask carve-outs."""
 
-    return [
+    protected = [
         dynamic_track_for_frame(dict(row), int(frame_index))
         for row in list(contract.get("protected_source_tracks") or [])
         if isinstance(row, Mapping)
@@ -591,6 +652,42 @@ def active_protected_source_regions_for_frame(
             dict(row.get("visual_provenance") or {}).get("confidence") or 0.0
         )
         >= 0.90
+    ]
+    semantic_dialogue = [
+        row
+        for row in active_tracks_for_frame(contract, int(frame_index))
+        if bool(row.get("semantic_dialogue_hardsub"))
+    ]
+
+    def overlap_over_smaller(left: Mapping[str, Any], right: Mapping[str, Any]) -> float:
+        a = dict(left.get("geometry") or {})
+        right_policy = dict(right.get("render_policy") or {})
+        semantic_cover = (
+            dict(right_policy.get("cover") or {}).get("roi")
+            if bool(right.get("semantic_dialogue_hardsub"))
+            else None
+        )
+        b = dict(semantic_cover or right.get("geometry") or {})
+        ax0, ay0 = float(a.get("x") or 0.0), float(a.get("y") or 0.0)
+        bx0, by0 = float(b.get("x") or 0.0), float(b.get("y") or 0.0)
+        ax1, ay1 = ax0 + float(a.get("width") or 0.0), ay0 + float(a.get("height") or 0.0)
+        bx1, by1 = bx0 + float(b.get("width") or 0.0), by0 + float(b.get("height") or 0.0)
+        intersection = max(0.0, min(ax1, bx1) - max(ax0, bx0)) * max(
+            0.0, min(ay1, by1) - max(ay0, by0)
+        )
+        smaller = min(
+            max(0.0, ax1 - ax0) * max(0.0, ay1 - ay0),
+            max(0.0, bx1 - bx0) * max(0.0, by1 - by0),
+        )
+        return intersection / smaller if smaller > 0.0 else 0.0
+
+    return [
+        row
+        for row in protected
+        if not any(
+            overlap_over_smaller(row, dialogue) >= 0.65
+            for dialogue in semantic_dialogue
+        )
     ]
 
 
@@ -1063,6 +1160,13 @@ def _reference_candidate(
     outside = np.ones((height, width), dtype=bool)
     outside[y0:y1, x0:x1] = False
     inside = ~outside
+    if x1 <= x0 or y1 <= y0:
+        return None
+    current_gray = cv2.cvtColor(current[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
+    current_textness = local_textness_mask(current_gray)
+    current_textness_fraction = float(
+        np.count_nonzero(current_textness) / max(1, current_textness.size)
+    )
     candidates: list[tuple[float, np.ndarray]] = []
     for offset in sorted(offsets):
         for index in (start - offset, end + offset):
@@ -1089,6 +1193,19 @@ def _reference_candidate(
                 inside_mad=inside_mad,
             ):
                 continue
+            candidate_gray = cv2.cvtColor(
+                candidate[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY
+            )
+            candidate_textness = local_textness_mask(candidate_gray)
+            candidate_textness_fraction = float(
+                np.count_nonzero(candidate_textness)
+                / max(1, candidate_textness.size)
+            )
+            if not is_text_reduced_reference_candidate(
+                current_textness_fraction=current_textness_fraction,
+                candidate_textness_fraction=candidate_textness_fraction,
+            ):
+                continue
             score = reference_plate_candidate_score(
                 outside_mad=outside_mad,
                 inside_mad=inside_mad,
@@ -1105,10 +1222,17 @@ def should_seed_reference_plate(track: Mapping[str, Any]) -> bool:
     has_soft_epoch = bool(cover.get("soft_cover_epoch_id"))
     if mask_mode != "stylized_components" and not has_soft_epoch:
         return False
+    context = dict(policy.get("context") or {})
+    if has_soft_epoch and mask_mode == "full_roi_plate":
+        # A neighboring subtitle frame is different inside the ROI but is not
+        # necessarily clean. Automatic temporal plates can therefore preserve
+        # or copy CJK under the Vietnamese text. Full-ROI caption removal uses
+        # deterministic blur unless an operator explicitly approved a bound
+        # reference plate for this track.
+        return bool(context.get("reference_plate_operator_approved"))
     start = int(track.get("start_frame") or 0)
     end = int(track.get("end_frame") or start)
     span_frames = max(1, end - start + 1)
-    context = dict(policy.get("context") or {})
     return not (start <= 1 and span_frames <= 6) or bool(
         context.get("short_intro_reference_plate_approved")
     )
@@ -1128,7 +1252,6 @@ def _seed_reference_plates(
     if not capture.isOpened():
         raise AdaptiveVideoRenderError("Cannot open source for reference plate selection")
     seeded = 0
-    seeded_epochs: set[str] = set()
     try:
         for track in list(contract.get("render_tracks") or []):
             if not isinstance(track, Mapping):
@@ -1160,15 +1283,6 @@ def _seed_reference_plates(
                     reference = clean_frame
             if reference is not None:
                 renderer.seed_reference(str(track.get("text_id") or ""), reference)
-                epoch_id = str(
-                    dict(dict(track.get("render_policy") or {}).get("cover") or {}).get(
-                        "soft_cover_epoch_id"
-                    )
-                    or ""
-                )
-                if epoch_id and epoch_id not in seeded_epochs:
-                    renderer.seed_epoch_reference(epoch_id, reference)
-                    seeded_epochs.add(epoch_id)
                 seeded += 1
     finally:
         capture.release()

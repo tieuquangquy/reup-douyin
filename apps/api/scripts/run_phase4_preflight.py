@@ -74,6 +74,60 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def write_phase4_preflight_failure(
+    root_dir: str | Path,
+    exc: BaseException,
+) -> dict[str, Any]:
+    """Persist a safe, structured failure at the same authority boundary."""
+
+    root = Path(root_dir).resolve()
+    phase3_handoff = root / "phase3_render_handoff.json"
+    error_code = (
+        "PHASE4_INPUT_INVALID"
+        if isinstance(exc, Phase4InputError)
+        else "PHASE4_PREFLIGHT_EXECUTION_FAILED"
+    )
+    payload = {
+        "schema_version": "phase4_preflight_failure_v1",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "status": "PHASE4_PREFLIGHT_FAILED",
+        "error_code": error_code,
+        "error_type": type(exc).__name__,
+        "message": str(exc)[:1000] or type(exc).__name__,
+        "phase3_render_handoff_sha256": (
+            _sha256_file(phase3_handoff) if phase3_handoff.is_file() else None
+        ),
+        "retryable": not isinstance(exc, Phase4InputError),
+    }
+    _write_json_atomic(root / "phase4_preflight_failure.json", payload)
+    return payload
+
+
+def run_recorded(root_dir: str | Path) -> int:
+    """Run preflight while guaranteeing actionable failure evidence."""
+
+    root = Path(root_dir).resolve()
+    try:
+        result = run(root)
+    except Exception as exc:
+        write_phase4_preflight_failure(root, exc)
+        logger.exception(
+            "phase4_preflight_failed error_code=%s error_type=%s",
+            "PHASE4_INPUT_INVALID"
+            if isinstance(exc, Phase4InputError)
+            else "PHASE4_PREFLIGHT_EXECUTION_FAILED",
+            type(exc).__name__,
+        )
+        raise
+    failure_path = root / "phase4_preflight_failure.json"
+    if result == 0 and failure_path.is_file():
+        stale_dir = root / "qa" / "stale" / "phase4_preflight_failures"
+        stale_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        failure_path.replace(stale_dir / f"{stamp}.json")
+    return result
+
+
 def _load_residual_false_positive_approval(
     root: Path,
     contract: Mapping[str, Any],
@@ -1164,12 +1218,12 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     try:
-        return run(args[0])
+        return run_recorded(args[0])
     except Phase4InputError as exc:
         print(f"[P4-PREFLIGHT][FAIL] {exc}", flush=True)
         return 1
     except Exception as exc:
-        print(f"[P4-PREFLIGHT][FAIL] {type(exc).__name__}", flush=True)
+        print(f"[P4-PREFLIGHT][FAIL] {type(exc).__name__}: {exc}", flush=True)
         return 1
 
 

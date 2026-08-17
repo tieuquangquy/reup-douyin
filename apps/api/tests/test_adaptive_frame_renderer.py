@@ -9,6 +9,7 @@ import numpy as np
 from src.media_pipeline.video_renderer.adaptive_render import (
     AdaptiveFrameRenderer,
     AdaptiveRenderBlocked,
+    _avoid_protected_layout_regions,
     _active_cover_components,
     _default_mask_builder,
     _editor_blur_plate,
@@ -59,6 +60,35 @@ def _mask_builder(frame: np.ndarray, track: dict) -> np.ndarray:
 
 
 class AdaptiveFrameRendererTests(unittest.TestCase):
+    def test_cover_aligned_layout_is_clipped_above_protected_source(self) -> None:
+        track = _track(
+            geometry={"x": 0.02, "y": 0.86, "width": 0.78, "height": 0.04},
+        )
+        track["render_policy"]["layout"] = {
+            "mode": "cover_aligned",
+            "safe_area": {"x": 0.0, "y": 0.835, "width": 0.92, "height": 0.095},
+        }
+
+        adjusted = _avoid_protected_layout_regions(
+            track,
+            [
+                {
+                    "geometry": {"x": 0.26, "y": 0.901, "width": 0.18, "height": 0.08},
+                    "visual_provenance": {
+                        "classification": "SOURCE_INTRINSIC",
+                        "confidence": 0.93,
+                    },
+                }
+            ],
+        )
+
+        safe = adjusted["render_policy"]["layout"]["safe_area"]
+        self.assertLessEqual(safe["y"] + safe["height"], 0.898)
+        self.assertEqual(
+            adjusted["protected_layout_adjustment"]["policy_version"],
+            "protected_source_safe_area_clip_v1",
+        )
+
     def test_overlapping_epoch_tracks_become_one_cover_component(self) -> None:
         first = _track(text_id="first", content_id="first_content")
         second = _track(
@@ -81,6 +111,55 @@ class AdaptiveFrameRendererTests(unittest.TestCase):
         )
         self.assertTrue(
             components[0]["render_policy"]["cover"]["component_union"]
+        )
+
+    def test_exact_semantic_caption_shadows_merge_across_epochs(self) -> None:
+        first = _track(
+            text_id="semantic",
+            content_id="semantic_content",
+            semantic_dialogue_hardsub=True,
+            cover_only=True,
+        )
+        second = _track(
+            text_id="demoted_shadow",
+            content_id=None,
+            geometry={"x": 0.36, "y": 0.781, "width": 0.29, "height": 0.058},
+            cover_only=True,
+        )
+        first["render_policy"]["cover"]["soft_cover_epoch_id"] = "epoch_a"
+        first["render_policy"]["context"]["soft_cover_epoch_id"] = "epoch_a"
+        second["render_policy"]["cover"]["soft_cover_epoch_id"] = "epoch_b"
+        second["render_policy"]["context"]["soft_cover_epoch_id"] = "epoch_b"
+
+        components = _active_cover_components([first, second])
+
+        self.assertEqual(len(components), 1)
+        self.assertEqual(
+            set(components[0]["_cover_component_member_ids"]),
+            {"semantic", "demoted_shadow"},
+        )
+
+    def test_caption_group_member_stays_in_shared_soft_cover_epoch_component(self) -> None:
+        caption = _track(text_id="caption", content_id="caption_content")
+        chip = _track(
+            text_id="chip",
+            content_id="chip_content",
+            geometry={"x": 0.31, "y": 0.80, "width": 0.25, "height": 0.05},
+            text_vi="Chip",
+        )
+        for row in (caption, chip):
+            row["cover_only"] = True
+            row["render_policy"]["cover"]["soft_cover_epoch_id"] = "epoch_shared"
+            row["render_policy"]["context"]["soft_cover_epoch_id"] = "epoch_shared"
+        caption["render_policy"]["cover"]["caption_cover_group_id"] = "caption_group"
+        caption["render_policy"]["context"]["caption_cover_group_id"] = "caption_group"
+
+        components = _active_cover_components([caption, chip])
+
+        self.assertEqual(len(components), 1)
+        self.assertEqual(
+            set(components[0]["_cover_component_member_ids"]),
+            {"caption", "chip"},
         )
 
     def test_renderer_processes_overlapping_epoch_only_once(self) -> None:

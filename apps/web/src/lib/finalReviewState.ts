@@ -61,6 +61,45 @@ export function isFinalReviewOcrReviewPending(
   return (summary.review_required ?? 0) > 0 || (summary.review_objects?.length ?? 0) > 0;
 }
 
+export type FinalReviewOcrCheckpointMetrics = {
+  total: number;
+  automatic: number;
+  manual: number;
+};
+
+function toNonNegativeCount(value: number | null | undefined): number {
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.max(0, Math.round(value))
+    : 0;
+}
+
+/**
+ * Normalize the Phase 2 handoff counters shown at the operator checkpoint.
+ * The review array is retained as a fallback because older artifacts may not
+ * persist review_required, while total must never be lower than the manual set.
+ */
+export function resolveFinalReviewOcrCheckpointMetrics(
+  summary: {
+    phase2_content_object_count?: number | null;
+    text_object_count?: number | null;
+    review_required?: number | null;
+    review_objects?: unknown[] | null;
+  } | null
+): FinalReviewOcrCheckpointMetrics {
+  const persistedManual = toNonNegativeCount(summary?.review_required);
+  const listedManual = summary?.review_objects?.length ?? 0;
+  const manual = Math.max(persistedManual, listedManual);
+  const persistedTotal = toNonNegativeCount(
+    summary?.phase2_content_object_count ?? summary?.text_object_count
+  );
+  const total = Math.max(persistedTotal, manual);
+  return {
+    total,
+    automatic: Math.max(0, total - manual),
+    manual
+  };
+}
+
 /** OCR geometry is reusable; only approved Vietnamese dialogue authority is missing. */
 export function isFinalReviewDialogueTranslationApprovalPending(
   summary: {
@@ -128,6 +167,26 @@ export function isFinalReviewOcrPrepComplete(
   return warnings.includes("no_hardsub_detected") || warnings.includes("clean_skipped_no_hardsub");
 }
 
+/** OCR data authority is complete before the later Visual Clean/audio gates. */
+export function isFinalReviewOcrAnalysisComplete(
+  summary: Parameters<typeof isFinalReviewOcrPrepComplete>[0]
+): boolean {
+  if (!summary) return false;
+  if (summary.workflow_version === "QUALITY_LOCALIZATION_V24_1") {
+    return Boolean(
+      summary.workflow_stage &&
+      summary.workflow_stage !== "NOT_STARTED" &&
+      summary.workflow_stage !== "WAITING_OCR_REVIEW"
+    );
+  }
+  return Boolean(
+    summary.ocr_events_asset_id ||
+    summary.cleaned_video_asset_id ||
+    (summary.warnings ?? []).includes("no_hardsub_detected") ||
+    (summary.warnings ?? []).includes("clean_skipped_no_hardsub")
+  );
+}
+
 export function resolveFinalReviewPrepFocus(
   summary: Parameters<typeof isFinalReviewOcrPrepComplete>[0]
 ): FinalReviewPrepFocus {
@@ -161,6 +220,68 @@ export function formatFinalReviewFailedRenderDetail(errorMessage: string | null 
   return stripped || raw;
 }
 
+export type ParsedFinalReviewActionStatus = {
+  title: string | null;
+  detail: string;
+  flags: string[];
+};
+
+const EXCEPTION_SEGMENT = /^[A-Z][A-Za-z0-9_]*(Error|Exception)$/;
+const SNAKE_ERROR_CODE = /^[a-z][a-z0-9_]+$/;
+const PIPELINE_WRAPPER = /(?:preflight|execution|pipeline)\s+failed$/i;
+const TRAILING_FLAG_BLOCK = /\[([^\]]+)\]\s*\.?$/;
+
+function extractActionStatusFlags(message: string): { text: string; flags: string[] } {
+  const match = message.match(TRAILING_FLAG_BLOCK);
+  if (!match || match.index === undefined) return { text: message, flags: [] };
+  const flags = match[1]
+    .split(/\s*[·•|,;]\s*/)
+    .map((flag) => flag.trim())
+    .filter(Boolean);
+  const text = message.slice(0, match.index).trim().replace(/[.:]\s*$/, "");
+  return { text, flags };
+}
+
+function isExceptionNoise(part: string): boolean {
+  if (EXCEPTION_SEGMENT.test(part)) return true;
+  if (SNAKE_ERROR_CODE.test(part) && part.includes("_")) return true;
+  if (PIPELINE_WRAPPER.test(part)) return true;
+  return false;
+}
+
+/**
+ * Split an operator status dump into title, human reason, and trailing recovery flags.
+ * Backend nested chains stay the authority; the UI only hides class/code wrappers.
+ */
+export function parseFinalReviewActionStatus(
+  phase: "queued" | "running" | "success" | "warning" | "error",
+  message: string
+): ParsedFinalReviewActionStatus {
+  const trimmed = message.trim();
+  const { text, flags } = extractActionStatusFlags(trimmed);
+  if (phase !== "error") {
+    return { title: null, detail: trimmed, flags: [] };
+  }
+  const parts = text
+    .split(/:\s+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (parts.length <= 1) {
+    return { title: null, detail: text || trimmed, flags };
+  }
+  const title = parts[0] ?? null;
+  const human = parts.slice(1).filter((part) => !isExceptionNoise(part));
+  const detail = (human.at(-1) ?? parts.at(-1) ?? text).replace(/[.:]\s*$/, "");
+  return { title, detail, flags };
+}
+
+/** Success/warning toasts may fade; errors stay until the operator closes them. */
+export function shouldAutoDismissFinalReviewActionStatus(
+  phase: "queued" | "running" | "success" | "warning" | "error"
+): boolean {
+  return phase === "success" || phase === "warning";
+}
+
 export type FinalReviewPrepStepProgress = {
   clean: number;
   render: number;
@@ -192,8 +313,6 @@ export function resolveFinalReviewPrepStepProgress(input: {
   } else if (isFinalReviewDialogueTranslationApprovalPending(input.ocrSummary)) {
     // OCR geometry is done; operator gate owns the remaining Clean work.
     clean = 72;
-  } else if (isFinalReviewOcrReviewPending(input.ocrSummary)) {
-    clean = 58;
   }
 
   let render = 0;
@@ -251,7 +370,7 @@ export function resolveFinalReviewPrepBriefing(input: {
   let ocrStatus: FinalReviewPrepBriefing["ocrStatus"] = "idle";
   if (input.ocrBusy) ocrStatus = "running";
   else if (isFinalReviewOcrReviewPending(input.ocrSummary)) ocrStatus = "review";
-  else if (isFinalReviewOcrPrepComplete(input.ocrSummary)) ocrStatus = "ready";
+  else if (isFinalReviewOcrAnalysisComplete(input.ocrSummary)) ocrStatus = "ready";
   else if (input.ocrSummary) ocrStatus = "partial";
 
   return {

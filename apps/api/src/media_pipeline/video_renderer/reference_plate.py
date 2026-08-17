@@ -8,6 +8,8 @@ import math
 MAX_REFERENCE_OUTSIDE_MAD = 24.0
 MIN_REFERENCE_INSIDE_MAD = 8.0
 MIN_REFERENCE_INSIDE_GAIN = 3.0
+MAX_REFERENCE_TEXTNESS_RATIO = 0.72
+MIN_REFERENCE_TEXTNESS_GAIN = 0.015
 
 
 def reference_plate_candidate_score(
@@ -42,4 +44,31 @@ def is_usable_reference_plate_candidate(
         and outside <= float(max_outside_mad)
         and inside >= float(min_inside_mad)
         and inside - outside >= float(min_inside_gain)
+    )
+
+
+def is_text_reduced_reference_candidate(
+    *,
+    current_textness_fraction: float,
+    candidate_textness_fraction: float,
+    max_ratio: float = MAX_REFERENCE_TEXTNESS_RATIO,
+    min_gain: float = MIN_REFERENCE_TEXTNESS_GAIN,
+) -> bool:
+    """Require positive evidence that a temporal plate contains less ink.
+
+    Pixel MAD alone prefers a neighboring frame whose subtitle text changed;
+    that frame is different inside the ROI but is not clean. A reusable plate
+    must materially reduce the local stroke map as well as satisfy scene
+    alignment, otherwise the renderer falls back to deterministic blur.
+    """
+
+    current = float(current_textness_fraction)
+    candidate = float(candidate_textness_fraction)
+    return bool(
+        math.isfinite(current)
+        and math.isfinite(candidate)
+        and current > 0.0
+        and candidate >= 0.0
+        and current - candidate >= float(min_gain)
+        and candidate <= current * float(max_ratio)
     )

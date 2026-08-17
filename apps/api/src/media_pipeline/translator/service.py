@@ -32,11 +32,14 @@ from src.media_pipeline.translator.normalize import (
 from src.media_pipeline.translator.resolve import resolve_translator_settings
 from src.media_pipeline.translator.rule_route import rule_translate_zh
 from src.media_pipeline.translator.translate_llm import ContextualTranslator, MISSING_VI
+from src.audio_pipeline.google_cloud_genai import is_google_cloud_retryable_error
 
 logger = logging.getLogger(__name__)
 
 
 def _is_retryable_llm_error(exc: BaseException) -> bool:
+    if is_google_cloud_retryable_error(exc):
+        return True
     if isinstance(exc, (APITimeoutError, APIConnectionError, RateLimitError)):
         return True
     if isinstance(exc, APIStatusError):

@@ -18,6 +18,10 @@ from src.media_pipeline.translator.config import (
 )
 from src.media_pipeline.translator.errors import TranslatorError, TranslatorErrorCode
 from src.services.workspace_settings_service import TranslationAiConfig, WorkspaceSettingsService
+from src.audio_pipeline.google_cloud_genai import (
+    GOOGLE_CLOUD_DEFAULT_MODEL,
+    GOOGLE_CLOUD_DEFAULT_REGION,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +59,7 @@ def _settings_from_openai_compatible(
         system_prompt=system_prompt,
         timeout_seconds=float(timeout_seconds or 90.0),
         source=source,
+        provider="openai_compatible",
     )
 
 
@@ -70,11 +75,31 @@ def _map_workspace_ai_to_settings(
     base_url = (ai.base_url or "").strip()
     model = (ai.model or "").strip()
     timeout = float(ai.timeout_seconds or 90.0)
+    region = str(ai.region or GOOGLE_CLOUD_DEFAULT_REGION).strip() or GOOGLE_CLOUD_DEFAULT_REGION
 
     if provider in {"placeholder", "off", "none"}:
         raise TranslatorError(
             TranslatorErrorCode.CONFIG_MISSING,
             "Ops Caption AI provider is placeholder — pick openai_compatible / gemini / ollama.",
+        )
+
+    if provider == "google_cloud":
+        chosen_model = model or GOOGLE_CLOUD_DEFAULT_MODEL
+        if not api_key:
+            raise TranslatorError(
+                TranslatorErrorCode.CONFIG_MISSING,
+                "Ops Caption AI (google_cloud) needs a Google Cloud API key. "
+                "Save it under Ops Console → Caption AI settings.",
+            )
+        return TranslatorSettings(
+            api_key=api_key,
+            base_url="",
+            model_name=chosen_model,
+            system_prompt=system_prompt,
+            timeout_seconds=timeout,
+            source="workspace_db",
+            provider="google_cloud",
+            region=region,
         )
 
     if provider == "openai_compatible":
@@ -219,6 +244,8 @@ def resolve_translator_settings(
             system_prompt=system_prompt.strip(),
             timeout_seconds=settings.timeout_seconds,
             source="env",
+            provider=settings.provider,
+            region=settings.region,
         )
     logger.info(
         "caption_translator_settings_env",

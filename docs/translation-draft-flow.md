@@ -2,7 +2,7 @@
 
 ## Translation V5 recipe
 
-The active recipe is `translation-v3-contextual-semantic-utterance-ranking-5`. Approved
+The active recipe is `translation-v3-contextual-semantic-utterance-ranking-6`. Approved
 semantic utterances remain the only speech authority; raw ASR timing units, video
 caption, title and hashtags are never treated as complete dialogue sentences.
 
@@ -24,8 +24,9 @@ plus an authority hash. A failed authority/overlap contract blocks Translation l
 4. Run local deterministic gates and ranking: CJK removal, protected number/unit/URL
    checks, glossary consistency, speech-budget fit, naturalness and prosody. A
    provider self-score is only a tie-breaker and never replaces a hard local gate.
-5. Select the best candidate. Only a selected candidate outside the 15% over-duration
-   limit enters the existing controlled rewrite path.
+5. Select the best candidate. Candidates that exceed the physical speech budget are never
+   TTS-eligible. If every structurally valid candidate is oversized, the shortest candidate
+   becomes the controlled-rewrite input instead of selecting a longer line by aggregate score.
 6. Checkpoint every completed block in the durable job metadata. A retry resumes from
    the first incomplete block and does not repeat completed provider calls.
 7. Persist the immutable V3 fingerprint, candidate history and a quality contract with
@@ -71,6 +72,17 @@ Stored in DB at `workspaces.settings_json.translation_ai` (per workspace). Suppo
 Phase 1 note: if the login JWT `workspace_id` is not a real `workspaces` row, settings Save falls back to `ensure_default_workspace` (same local workspace jobs/videos use) so Translate picks up the saved connection/prompt.
 
 API: `GET/PUT /ops/translation-ai`, `POST /ops/translation-ai/test`, `POST /ops/translation-ai/models` (list models after provider credentials are filled).
+
+Before a durable `BUILD_TRANSLATION_DRAFT` job is created, the API runs a short provider
+preflight. Successful results are cached (default five minutes) so a batch does not pay for
+one extra request per clip. HTTP 401/402/403 and missing-credential responses fail before job
+creation and direct the operator to **Translation AI → Test Connection**. Transient network
+errors remain owned by the durable job retry policy. The timeouts and cache TTLs are configured
+with `TRANSLATION_PROVIDER_PREFLIGHT_*` environment variables.
+
+An explicitly configured fallback (Gemini environment credentials or local Ollama) may recover
+even when the primary returns an authorization/configuration error. This is opt-in: `none`
+continues to fail closed, and MyMemory is never introduced into the production draft.
 
 ### Operator-owned translation prompt
 
@@ -119,7 +131,7 @@ The versioned `TRANSLATION_DRAFT_JSON` also exports each row's `status` and safe
 
 Translation first produces the complete Vietnamese meaning. It then evaluates the line against the slot using Vietnamese spoken units, punctuation pause budget, and a provider-neutral default rate. This estimate is an early review signal only; synthesized audio remains the final authority.
 
-Only an oversized line enters controlled rewrite, for at most two attempts in the production provider factory. Every candidate records its text and SHA-256, speech-budget result, missing protected tokens, a deterministic semantic-retention screening score, and whether it is safe to present for operator review. Numbers, URLs, acronyms and common units are protected against accidental deletion. A safe candidate is selected as a review candidate and receives `needs_operator_review`; it is never silently approved.
+Only an oversized line enters controlled rewrite, for at most two attempts in the production provider factory. The rewrite ceiling reserves 10% spoken-unit headroom because punctuation pauses can reduce the final physical capacity after text generation; prompts also request one compact sentence with minimal punctuation. Every candidate records its text and SHA-256, speech-budget result, missing protected tokens, a deterministic semantic-retention screening score, and whether it is safe to present for operator review. Numbers, URLs, acronyms and common units are protected against accidental deletion. A safe candidate is selected as a review candidate and receives `needs_operator_review`; it is never silently approved.
 
 If no safe candidate exists, the original translation is retained with `duration_adaptation_required` and `duration_rewrite_no_safe_candidate`. Underfilled lines are also retained rather than padded with invented speech. Candidate history is stored under `metadata.duration_adaptation` with schema `duration_adaptation_v1`.
 
@@ -162,7 +174,7 @@ TTS/subtitle generation should read:
 5. `TranscriptSegment` timing for subtitle alignment.
 6. `translation_authority` as the hash-bound transcript/translation handoff contract.
 
-Before TTS, risky or unapproved rows park the Reup Queue at `translation_review`. The frontend approval endpoint hash-binds the reviewed Vietnamese text and timing; only then may the recipe-owned OmniVoice TTS job resume. `timing_fit_blocked` is terminal and is never retried as a transient provider error.
+Before TTS, risky or unapproved rows park the Reup Queue at `translation_review`. Operator edits are re-assessed immediately and replace stale duration flags/metadata with the new speech budget. The frontend approval endpoint validates every current row, clears resolved review/block counts transactionally, and hash-binds the reviewed Vietnamese text and timing; only then may the recipe-owned TTS job resume. `timing_fit_blocked` is terminal and is never retried as a transient provider error.
 
 ## Phase 1 Limits
 

@@ -12,6 +12,8 @@ from src.services.reup_pipeline_meta import (
     PIPELINE_MODE_AUTO_TO_RENDER,
     PIPELINE_MODE_AUTO_TO_TTS,
     PIPELINE_MODE_MANUAL,
+    PIPELINE_ERROR_KEY,
+    PIPELINE_FAILED_STEP_KEY,
     PIPELINE_STEP_ANALYZE_AUDIO,
     PIPELINE_STEP_NEEDS_ATTENTION,
     PIPELINE_STEP_OCR,
@@ -638,6 +640,54 @@ class ReupPipelineOrchestratorTests(unittest.TestCase):
         self.assertEqual(updated, 1)
         self.assertEqual(item.status, ReupQueueStatus.FAILED_NEEDS_ATTENTION)
         self.assertEqual(item.last_error_code, "DOWNLOAD_FAILED")
+        self.assertEqual(item.metadata_json[PIPELINE_FAILED_STEP_KEY], "download")
+        self.assertEqual(item.metadata_json[PIPELINE_ERROR_KEY]["error_domain"], "download")
+
+    def test_translation_provider_failure_preserves_stage_and_resumes_translation_only(self) -> None:
+        item = auto_item(
+            status=ReupQueueStatus.WAITING_FOR_METADATA,
+            media_ready_at=object(),
+            metadata_json={
+                "pipeline_mode": PIPELINE_MODE_AUTO_TO_RENDER,
+                "pipeline_hold": False,
+                "pipeline_step": PIPELINE_STEP_TRANSLATE,
+                "pipeline_last_completed_step": PIPELINE_STEP_ANALYZE_AUDIO,
+                "download_job_completed": True,
+            },
+        )
+        job = SimpleNamespace(
+            id=item.job_id,
+            job_type=JobType.BUILD_TRANSLATION_DRAFT,
+            status=JobStatus.FAILED,
+            source_video_id=item.source_video_id,
+            error_code="translation_failed",
+            error_message=(
+                "translation_provider_auth_failed:"
+                "openai_compatible_http_403:error code: 1010"
+            ),
+        )
+        orchestrator = ReupPipelineOrchestrator(FakeDb([item]))
+
+        updated = orchestrator.on_job_terminal(job)
+
+        self.assertEqual(updated, 1)
+        self.assertEqual(item.metadata_json[PIPELINE_FAILED_STEP_KEY], PIPELINE_STEP_TRANSLATE)
+        context = item.metadata_json[PIPELINE_ERROR_KEY]
+        self.assertEqual(context["error_domain"], "translation_provider")
+        self.assertEqual(context["http_status"], 403)
+        self.assertEqual(context["provider_error_code"], "1010")
+        self.assertFalse(context["retryable"])
+        self.assertEqual(context["recovery_action"], "CHECK_TRANSLATION_AI_CONNECTION")
+
+        with patch.object(orchestrator, "_ensure_translation", return_value=True) as translate, patch.object(
+            orchestrator, "_ensure_analyze_audio"
+        ) as analyze:
+            orchestrator.resume_item(item)
+
+        translate.assert_called_once_with(item)
+        analyze.assert_not_called()
+        self.assertNotIn(PIPELINE_FAILED_STEP_KEY, item.metadata_json)
+        self.assertNotIn(PIPELINE_ERROR_KEY, item.metadata_json)
 
     def test_resume_needs_attention_requeues_last_completed_ocr_only(self) -> None:
         item = auto_item(

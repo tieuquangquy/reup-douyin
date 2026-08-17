@@ -39,6 +39,8 @@ class TtsPreviewJobTests(unittest.TestCase):
                 "warnings": [],
                 "requested_voice_id": "vi-VN-Chirp3-HD-Aoede",
                 "resolved_voice_id": "Aoede",
+                "requested_model_id": "gemini-3.1-flash-preview-tts",
+                "resolved_model_id": "gemini-2.5-flash-tts",
                 "text": "Xin chào",
             }
 
@@ -46,6 +48,7 @@ class TtsPreviewJobTests(unittest.TestCase):
             provider="omnivoice",
             enabled=True,
             voice_id="vi-VN-Chirp3-HD-Aoede",
+            model_id="gemini-3.1-flash-preview-tts",
         )
         with patch("src.tts_pipeline.preview.preview_tts_speech", side_effect=slow_preview):
             job = start_tts_preview_job(
@@ -79,6 +82,8 @@ class TtsPreviewJobTests(unittest.TestCase):
             self.assertEqual(final.provider, "omnivoice")
             self.assertEqual(final.requested_voice_id, "vi-VN-Chirp3-HD-Aoede")
             self.assertEqual(final.resolved_voice_id, "Aoede")
+            self.assertEqual(final.requested_model_id, "gemini-3.1-flash-preview-tts")
+            self.assertEqual(final.resolved_model_id, "gemini-2.5-flash-tts")
             self.assertTrue(final.audio_base64)
 
     def test_route_source_starts_background_preview(self) -> None:

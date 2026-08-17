@@ -97,6 +97,9 @@ for (const [label, source] of surfaces) {
 for (const [label, source] of surfaces) {
   if (label.includes("detail")) {
     assert.match(source, /OpsDetailPanel/, `${label} must use the shared detail panel`);
+    if (label === "Export Package detail") {
+      assert.doesNotMatch(source, /OpsItemCard|OpsSummaryCards/, `${label} must leave Ops inventory cards`);
+    }
   } else if (label === "Capture Inbox" || label === "Review Board" || label === "Reup Queue") {
     // Studio media-tile surfaces: Operator shell + shared Ops primitives (not OpsItemCard lists).
     assert.match(source, /OpsConsolePage|OpsDetailPanel|OpsStatePanel/, `${label} must keep shared Ops Console primitives`);
@@ -104,8 +107,13 @@ for (const [label, source] of surfaces) {
     assert.match(source, /export-packages-page is-v4/, `${label} must use Dispatch bay export-packages shell`);
     assert.doesNotMatch(source, /OpsItemCard|OpsSummaryCards|ops-export-page|export-packages-spectrum/, `${label} must leave legacy Ops / Drafts-clone chrome`);
   } else if (label === "Publish Handoffs index") {
-    assert.match(source, /ops-handoffs-page/, `${label} must use triage ops-handoffs-page shell`);
-    assert.doesNotMatch(source, /OpsItemCard|OpsSummaryCards/, `${label} must leave legacy OpsItemCard / OpsSummaryCards`);
+    assert.match(source, /publish-handoffs-page is-bay/, `${label} must use Dispatch bay publish-handoffs shell`);
+    assert.match(source, /publish-handoffs-mix__donut/, `${label} must expose mix donut`);
+    assert.doesNotMatch(
+      source,
+      /OpsItemCard|OpsSummaryCards|ops-handoffs-page|export-packages-mix|publish-handoffs-page is-desk|publish-handoffs-dial|publish-handoffs-brief|publish-handoffs-dossier|publish-handoffs-filing|publish-handoffs-trays|publish-handoffs-stamps|publish-handoffs-pulse|publish-handoffs-orbit|publish-handoffs-river/,
+      `${label} must leave Export class clones / prior handoff chrome`
+    );
   } else {
     assert.match(source, /OpsItemCard|OpsSummaryCards/, `${label} must use shared list or summary primitives`);
   }

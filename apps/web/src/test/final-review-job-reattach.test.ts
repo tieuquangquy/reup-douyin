@@ -6,8 +6,10 @@ import {
   isActiveFinalReviewJobStatus,
   isOcrJobType,
   isRenderJobType,
+  isVisualCleanJobType,
   pickActiveOcrJob,
-  pickActiveRenderJob
+  pickActiveRenderJob,
+  pickActiveVisualCleanJob
 } from "../lib/finalReviewJobReattach";
 import type { Job } from "../types/jobs";
 
@@ -41,11 +43,13 @@ function job(partial: Partial<Job> & Pick<Job, "id" | "job_type" | "status">): J
 }
 
 assert.equal(isOcrJobType("ANALYZE_OCR"), true);
-assert.equal(isOcrJobType("RENDER_PREVIEW"), true);
+assert.equal(isOcrJobType("RENDER_PREVIEW"), false);
 assert.equal(isOcrJobType("RENDER_FINAL"), false);
 assert.equal(isOcrJobType("ANALYZE_AUDIO"), false);
 assert.equal(isRenderJobType("RENDER_FINAL"), true);
 assert.equal(isRenderJobType("ANALYZE_OCR"), false);
+assert.equal(isVisualCleanJobType("RENDER_PREVIEW"), true);
+assert.equal(isVisualCleanJobType("ANALYZE_OCR"), false);
 
 assert.equal(isActiveFinalReviewJobStatus("RUNNING"), true);
 assert.equal(isActiveFinalReviewJobStatus("QUEUED"), true);
@@ -85,7 +89,7 @@ const picked = pickActiveOcrJob([
 assert.ok(picked);
 assert.equal(picked?.id, "new-ocr");
 
-const pickedPreview = pickActiveOcrJob([
+const pickedPreview = pickActiveVisualCleanJob([
   job({
     id: "quality-preview",
     job_type: "RENDER_PREVIEW",
@@ -95,6 +99,12 @@ const pickedPreview = pickActiveOcrJob([
   })
 ]);
 assert.equal(pickedPreview?.id, "quality-preview");
+assert.equal(
+  pickActiveOcrJob([
+    job({ id: "quality-preview", job_type: "RENDER_PREVIEW", status: "RUNNING" })
+  ]),
+  null
+);
 
 assert.equal(pickActiveOcrJob([]), null);
 assert.equal(
@@ -147,6 +157,16 @@ const testDir = dirname(fileURLToPath(import.meta.url));
 const pageSource = readFileSync(resolve(testDir, "../components/final-review/FinalReviewPage.tsx"), "utf8");
 assert.match(pageSource, /resumeActiveOcrJob/, "Page must re-attach active OCR jobs after reload");
 assert.match(pageSource, /pickActiveOcrJob/, "Page must pick the newest in-flight ANALYZE_OCR job");
+assert.match(
+  pageSource,
+  /pickActiveVisualCleanJob/,
+  "Page must identify RENDER_PREVIEW as a distinct Visual Clean job"
+);
+assert.match(
+  pageSource,
+  /visualCleanInProgress/,
+  "RENDER_PREVIEW must not be labeled as Analyze OCR"
+);
 assert.match(pageSource, /resumeActiveRenderJob/, "Page must re-attach active RENDER_FINAL jobs after reload");
 assert.match(pageSource, /pickActiveRenderJob/, "Page must pick the newest in-flight RENDER_FINAL job");
 assert.match(pageSource, /fetchJobs/, "Job re-attach must load jobs from the jobs API authority");

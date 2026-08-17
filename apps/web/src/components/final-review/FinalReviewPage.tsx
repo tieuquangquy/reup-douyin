@@ -26,7 +26,11 @@ import {
   submitVisualTranslationReview,
   updateRiskFlagStatus
 } from "../../lib/api";
-import { pickActiveOcrJob, pickActiveRenderJob } from "../../lib/finalReviewJobReattach";
+import {
+  pickActiveOcrJob,
+  pickActiveRenderJob,
+  pickActiveVisualCleanJob
+} from "../../lib/finalReviewJobReattach";
 import { pollAnalyzeJobUntilSettled } from "../../lib/transcriptEditorReanalyze";
 import { useAsyncAction } from "../../lib/useAsyncAction";
 import type { OcrSummaryResponse } from "../../types/ocr";
@@ -103,6 +107,7 @@ export const FinalReviewPage = forwardRef<FinalReviewPageHandle, { sourceVideoId
   const [actionStatus, setActionStatus] = useState<FinalReviewActionStatusState | null>(null);
   const [ocrStatus, setOcrStatus] = useState<FinalReviewActionStatusState | null>(null);
   const [ocrProgressPercent, setOcrProgressPercent] = useState<number | null>(null);
+  const [preparationJobKind, setPreparationJobKind] = useState<"ocr" | "visual-clean">("ocr");
   const [renderProgressPercent, setRenderProgressPercent] = useState<number | null>(null);
   const [ocrJobId, setOcrJobId] = useState<string | null>(null);
   const [renderJobId, setRenderJobId] = useState<string | null>(null);
@@ -142,6 +147,16 @@ export const FinalReviewPage = forwardRef<FinalReviewPageHandle, { sourceVideoId
           // The current hash-bound artifact is newer authority than any error
           // retained in this mounted page from a previous terminal job.
           setOcrStatus(null);
+        } else if (nextOcrSummary.visual_preview_status === "FAILED") {
+          const detail =
+            nextOcrSummary.visual_preview_error_message ||
+            nextOcrSummary.visual_preview_error_code ||
+            t("finalReviewVisual.visualCleanFailed");
+          setPreparationJobKind("visual-clean");
+          setOcrStatus({
+            phase: "error",
+            message: `${t("finalReviewVisual.visualCleanFailed")}: ${detail}`
+          });
         }
       } catch {
         setOcrSummary(null);
@@ -554,12 +569,24 @@ export const FinalReviewPage = forwardRef<FinalReviewPageHandle, { sourceVideoId
     clearOcrWatchSession();
   }
 
-  async function settleOcrJob(jobId: string) {
+  async function settlePreparationJob(
+    jobId: string,
+    kind: "ocr" | "visual-clean"
+  ) {
+    const visualClean = kind === "visual-clean";
+    setPreparationJobKind(kind);
     setOcrJobId(jobId);
     ocrCancelRequestedRef.current = false;
     ocrWatchPausedRef.current = false;
     setOcrWatchPaused(false);
-    setOcrStatus({ phase: "running", message: t("finalReviewVisual.analyzeInProgress") });
+    setOcrStatus({
+      phase: "running",
+      message: t(
+        visualClean
+          ? "finalReviewVisual.visualCleanInProgress"
+          : "finalReviewVisual.analyzeInProgress"
+      )
+    });
     const settled = await pollAnalyzeJobUntilSettled({
       fetchStatus: async () => {
         const job = await fetchJob(jobId);
@@ -589,7 +616,9 @@ export const FinalReviewPage = forwardRef<FinalReviewPageHandle, { sourceVideoId
         (summary.warnings || []).some(
           (warning) => warning === "clean_skipped_no_hardsub" || warning === "no_hardsub_detected"
         ));
-      const message = isQualityWorkflow
+      const message = visualClean && summary.visual_preview_asset_id
+        ? t("finalReviewVisual.visualCleanSuccess")
+        : isQualityWorkflow
         ? t("finalReviewVisual.reviewCompleted")
         : noFreshClean
           ? t("finalReviewVisual.analyzeNoOutput")
@@ -604,27 +633,50 @@ export const FinalReviewPage = forwardRef<FinalReviewPageHandle, { sourceVideoId
     }
     if (settled.outcome === "cancelled") {
       if (ocrWatchPausedRef.current && !ocrCancelRequestedRef.current) {
-        const message = t("finalReviewVisual.ocrWatchPaused");
+        const message = t(
+          visualClean
+            ? "finalReviewVisual.visualCleanWatchPaused"
+            : "finalReviewVisual.ocrWatchPaused"
+        );
         setOcrWatchPaused(true);
         setOcrStatus({ phase: "warning", message });
         return;
       }
-      const message = t("finalReviewVisual.ocrCancelled");
+      const message = t(
+        visualClean
+          ? "finalReviewVisual.visualCleanCancelled"
+          : "finalReviewVisual.ocrCancelled"
+      );
       setOcrStatus({ phase: "warning", message });
       notify({ id: `final-review-ocr-cancel-${sourceVideoId}`, message, tone: "info" });
       return;
     }
     if (settled.outcome === "failed") {
-      const message = `${t("finalReviewVisual.analyzeFailed")}: ${settled.errorMessage ?? settled.status}`;
+      const message = `${t(
+        visualClean
+          ? "finalReviewVisual.visualCleanFailed"
+          : "finalReviewVisual.analyzeFailed"
+      )}: ${settled.errorMessage ?? settled.status}`;
       setOcrStatus({ phase: "error", message });
-      setError(message);
       return;
     }
+    const timeoutLabel = t(
+      visualClean
+        ? "finalReviewVisual.visualCleanTimeout"
+        : "finalReviewVisual.analyzeTimeout"
+    );
     const timeoutMessage = settled.status
-      ? `${t("finalReviewVisual.analyzeTimeout")} (${settled.status})`
-      : t("finalReviewVisual.analyzeTimeout");
+      ? `${timeoutLabel} (${settled.status})`
+      : timeoutLabel;
     setOcrStatus({ phase: "error", message: timeoutMessage });
-    setError(timeoutMessage);
+  }
+
+  async function settleOcrJob(jobId: string) {
+    await settlePreparationJob(jobId, "ocr");
+  }
+
+  async function settleVisualCleanJob(jobId: string) {
+    await settlePreparationJob(jobId, "visual-clean");
   }
 
   async function handleAnalyzeOcr(forceRefresh = false) {
@@ -679,7 +731,10 @@ export const FinalReviewPage = forwardRef<FinalReviewPageHandle, { sourceVideoId
     }
   }
 
-  async function runLocalizationReviewJob(createJob: () => Promise<{ job_id: string }>) {
+  async function runLocalizationReviewJob(
+    createJob: () => Promise<{ job_id: string }>,
+    kind: "ocr" | "visual-clean"
+  ) {
     ocrBusyRef.current = true;
     ocrCancelRequestedRef.current = false;
     ocrWatchPausedRef.current = false;
@@ -688,11 +743,23 @@ export const FinalReviewPage = forwardRef<FinalReviewPageHandle, { sourceVideoId
     setOcrPausePending(false);
     setOcrCancelPending(false);
     setOcrProgressPercent(0);
-    setOcrStatus({ phase: "queued", message: t("finalReviewVisual.reviewQueued") });
+    setPreparationJobKind(kind);
+    setOcrStatus({
+      phase: "queued",
+      message: t(
+        kind === "visual-clean"
+          ? "finalReviewVisual.visualCleanQueued"
+          : "finalReviewVisual.reviewQueued"
+      )
+    });
     setError(null);
     try {
       const created = await createJob();
-      await settleOcrJob(created.job_id);
+      if (kind === "visual-clean") {
+        await settleVisualCleanJob(created.job_id);
+      } else {
+        await settleOcrJob(created.job_id);
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : t("finalReviewVisual.analyzeFailed");
       setOcrStatus({ phase: "error", message });
@@ -723,32 +790,43 @@ export const FinalReviewPage = forwardRef<FinalReviewPageHandle, { sourceVideoId
       ocr_text_approved?: string | null;
     }>
   ) {
-    await runLocalizationReviewJob(() => submitOcrReview(sourceVideoId, decisions));
+    await runLocalizationReviewJob(
+      () => submitOcrReview(sourceVideoId, decisions),
+      "ocr"
+    );
   }
 
   async function handleSubmitTranslationReview(
     translations: Array<{ content_id: string; vi_text: string }>
   ) {
-    await runLocalizationReviewJob(() =>
-      submitVisualTranslationReview(sourceVideoId, translations)
+    await runLocalizationReviewJob(
+      () => submitVisualTranslationReview(sourceVideoId, translations),
+      "visual-clean"
     );
   }
 
   async function handleSubmitResidualTriage(
     suggestions: Array<{ content_id?: string; ocr_text: string; ocr_text_corrected: string; vi_text_suggested: string }>
   ) {
-    await runLocalizationReviewJob(() => submitResidualTriage(sourceVideoId, suggestions));
+    await runLocalizationReviewJob(
+      () => submitResidualTriage(sourceVideoId, suggestions),
+      "visual-clean"
+    );
   }
 
   async function handleApproveResidual(proposalSha256: string) {
-    await runLocalizationReviewJob(() => approveResidualReview(sourceVideoId, proposalSha256));
+    await runLocalizationReviewJob(
+      () => approveResidualReview(sourceVideoId, proposalSha256),
+      "visual-clean"
+    );
   }
 
   async function handleRequestResidualTranslationSuggestions() {
     setResidualTranslationBusy(true);
     try {
-      await runLocalizationReviewJob(() =>
-        requestResidualTranslationSuggestions(sourceVideoId)
+      await runLocalizationReviewJob(
+        () => requestResidualTranslationSuggestions(sourceVideoId),
+        "visual-clean"
       );
     } finally {
       setResidualTranslationBusy(false);
@@ -762,8 +840,18 @@ export const FinalReviewPage = forwardRef<FinalReviewPageHandle, { sourceVideoId
         fetchJobs(undefined, { sourceVideoId, jobType: "ANALYZE_OCR", limit: 30 }),
         fetchJobs(undefined, { sourceVideoId, jobType: "RENDER_PREVIEW", limit: 30 })
       ]);
-      const active = pickActiveOcrJob([...ocrJobs.jobs, ...previewJobs.jobs]);
+      const activeOcr = pickActiveOcrJob(ocrJobs.jobs);
+      const activeVisualClean = pickActiveVisualCleanJob(previewJobs.jobs);
+      const active = [activeOcr, activeVisualClean]
+        .filter((job): job is NonNullable<typeof job> => job !== null)
+        .sort((left, right) => {
+          const leftKey = `${left.updated_at || left.created_at}|${left.created_at}`;
+          const rightKey = `${right.updated_at || right.created_at}|${right.created_at}`;
+          return rightKey.localeCompare(leftKey);
+        })[0] ?? null;
       if (!active || ocrBusyRef.current) return;
+      const kind = active.job_type === "RENDER_PREVIEW" ? "visual-clean" : "ocr";
+      setPreparationJobKind(kind);
       ocrBusyRef.current = true;
       ocrCancelRequestedRef.current = false;
       ocrWatchPausedRef.current = false;
@@ -781,10 +869,22 @@ export const FinalReviewPage = forwardRef<FinalReviewPageHandle, { sourceVideoId
           phase,
           message:
             phase === "queued"
-              ? t("finalReviewVisual.analyzeQueued")
-              : t("finalReviewVisual.analyzeInProgress")
+              ? t(
+                  kind === "visual-clean"
+                    ? "finalReviewVisual.visualCleanQueued"
+                    : "finalReviewVisual.analyzeQueued"
+                )
+              : t(
+                  kind === "visual-clean"
+                    ? "finalReviewVisual.visualCleanInProgress"
+                    : "finalReviewVisual.analyzeInProgress"
+                )
         });
-        await settleOcrJob(active.id);
+        if (kind === "visual-clean") {
+          await settleVisualCleanJob(active.id);
+        } else {
+          await settleOcrJob(active.id);
+        }
       } finally {
         finishOcrPollSession();
       }
@@ -839,7 +939,14 @@ export const FinalReviewPage = forwardRef<FinalReviewPageHandle, { sourceVideoId
     if (!ocrJobId || ocrWatchPausedRef.current || ocrCancelPending) return;
     ocrWatchPausedRef.current = true;
     setOcrWatchPaused(true);
-    setOcrStatus({ phase: "warning", message: t("finalReviewVisual.ocrWatchPaused") });
+    setOcrStatus({
+      phase: "warning",
+      message: t(
+        preparationJobKind === "visual-clean"
+          ? "finalReviewVisual.visualCleanWatchPaused"
+          : "finalReviewVisual.ocrWatchPaused"
+      )
+    });
   }
 
   async function resumeOcrWatch() {
@@ -852,7 +959,11 @@ export const FinalReviewPage = forwardRef<FinalReviewPageHandle, { sourceVideoId
     setOcrPausePending(true);
     setError(null);
     try {
-      await settleOcrJob(jobId);
+      if (preparationJobKind === "visual-clean") {
+        await settleVisualCleanJob(jobId);
+      } else {
+        await settleOcrJob(jobId);
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : t("finalReviewVisual.analyzeFailed");
       setOcrStatus({ phase: "error", message });
@@ -875,7 +986,11 @@ export const FinalReviewPage = forwardRef<FinalReviewPageHandle, { sourceVideoId
         // No active poll loop — settle the strip here.
         ocrWatchPausedRef.current = false;
         setOcrWatchPaused(false);
-        const message = t("finalReviewVisual.ocrCancelled");
+        const message = t(
+          preparationJobKind === "visual-clean"
+            ? "finalReviewVisual.visualCleanCancelled"
+            : "finalReviewVisual.ocrCancelled"
+        );
         setOcrStatus({ phase: "warning", message });
         notify({ id: `final-review-ocr-cancel-${sourceVideoId}`, message, tone: "info" });
         clearOcrWatchSession();
@@ -973,6 +1088,8 @@ export const FinalReviewPage = forwardRef<FinalReviewPageHandle, { sourceVideoId
   }
   if (error && !render && !ocrSummary) return <FinalReviewErrorState message={error} onRetry={loadData} />;
   if (!render) {
+    const ocrAnalysisBusy = ocrBusy && preparationJobKind === "ocr";
+    const visualCleanBusy = ocrBusy && preparationJobKind === "visual-clean";
     const prepFocus = resolveFinalReviewPrepFocus(ocrSummary);
     const ocrSessionOpen = ocrBusy || ocrWatchPaused;
     const visualCard = (
@@ -1048,7 +1165,7 @@ export const FinalReviewPage = forwardRef<FinalReviewPageHandle, { sourceVideoId
           sourceVideoId={sourceVideoId}
           manifest={manifest}
           ocrSummary={ocrSummary}
-          ocrBusy={ocrBusy}
+          ocrBusy={ocrAnalysisBusy}
           startRenderPending={asyncAction.isPending("start-render") || renderBusy}
           prepFocus={prepFocus}
         />
@@ -1057,7 +1174,8 @@ export const FinalReviewPage = forwardRef<FinalReviewPageHandle, { sourceVideoId
           <FinalReviewPrepJourney
             prepFocus={prepFocus}
             ocrSummary={ocrSummary}
-            ocrBusy={ocrBusy}
+            ocrBusy={ocrAnalysisBusy}
+            visualCleanBusy={visualCleanBusy}
             ocrWatchPaused={ocrWatchPaused}
             approveBusy={approveBusy}
             actionBusy={actionBusy || ocrSessionOpen || approveBusy}

@@ -54,6 +54,17 @@ assert.match(
   "Opening a saved setup must resolve persisted or curated provider catalog"
 );
 assert.match(componentSource, /onRefreshCatalog/, "Editor must expose an explicit catalog refresh action");
+assert.match(
+  componentSource,
+  /await onTest\("catalog"\)/,
+  "Catalog refresh must use catalog-only probe mode instead of generating paid preview audio"
+);
+assert.match(
+  componentSource,
+  /probe_mode:\s*probeMode/,
+  "TTS test requests must explicitly distinguish catalog refresh from connection probes"
+);
+assert.match(apiSource, /probe_mode\?:\s*"connection" \| "catalog"/, "TTS API must type the probe mode contract");
 assert.match(componentSource, /CatalogRefreshPhase/, "Catalog refresh must have explicit lifecycle phases");
 assert.match(componentSource, /setCatalogRefreshPhase\("preparing"\)/, "Catalog refresh must render pre-loading state");
 assert.match(componentSource, /setCatalogRefreshPhase\("loading"\)/, "Catalog refresh must render API loading state");
@@ -262,10 +273,11 @@ assert.match(componentSource, /sectionPreview/, "Must expose Preview speech sect
 assert.match(componentSource, /ops-tts-preview-bar/, "Preview controls must sit in one bar");
 assert.match(componentSource, /previewValidationMessage/, "Preview must validate provider configuration before API calls");
 assert.match(componentSource, /previewCloudUnavailable/, "Unsupported Cloud preview must use friendly guidance");
+assert.match(componentSource, /previewGoogleModelUnavailable/, "Google model 404 must use actionable guidance instead of raw provider JSON");
 assert.match(
   componentSource,
-  /DIRECT_CLOUD_PREVIEW_PROVIDERS\s*=\s*new Set\(\["google", "google_gemini"\]\)/,
-  "Google Gemini Expressive must be treated as a direct Cloud Preview provider"
+  /DIRECT_CLOUD_PREVIEW_PROVIDERS\s*=\s*new Set\(\["google", "google_gemini", "google_cloud_tts"\]\)/,
+  "Google Gemini and Agent Platform TTS must be direct Cloud Preview providers"
 );
 assert.match(
   componentSource,
@@ -281,6 +293,9 @@ assert.match(componentSource, /showPreviewFailure/, "Preview failures must use p
 assert.match(apiSource, /requested_voice_id:\s*string/, "Preview response must report the requested voice id");
 assert.match(apiSource, /resolved_voice_id:\s*string/, "Preview response must report the provider-resolved voice id");
 assert.match(componentSource, /previewMeta\.resolvedVoiceId/, "Preview UI must show the voice actually resolved by the provider");
+assert.match(apiSource, /resolved_model_id:\s*string/, "Preview response must report the provider-resolved model id");
+assert.match(componentSource, /status\.resolved_model_id/, "Preview polling must retain the actually resolved model");
+assert.match(componentSource, /previewMeta\.resolvedModelId/, "Preview UI must show the model actually resolved by the provider");
 assert.match(componentSource, /URL\.revokeObjectURL\(previous\)/, "A new Preview must clear stale audio before synthesis starts");
 assert.doesNotMatch(
   componentSource,
@@ -661,6 +676,9 @@ assert.match(enSource, /"testErrorHint"/, "TTS i18n must include test error hint
   assert.doesNotMatch(autoVieneu.message, /auto →/);
 }
 assert.match(catalogSource, /TTS_PROVIDERS_BY_KIND/, "Catalog must define provider kinds");
+assert.match(catalogSource, /google_cloud_tts/, "Cloud catalog must expose Agent Platform TTS additively");
+assert.match(componentSource, /gemini-2\.5-flash-tts/, "New Agent Platform setup must default to the verified Gemini 2.5 Flash TTS model");
+assert.match(componentSource, /googleCloudRegion/, "Agent Platform TTS editor must persist the global region");
 assert.match(catalogSource, /"custom"/, "Catalog must include custom local provider");
 assert.match(catalogSource, /pip install vieneu/, "Catalog must include VieNeu install recipe");
 assert.match(catalogSource, /pip install edge-tts/, "Catalog must include edge install recipe");

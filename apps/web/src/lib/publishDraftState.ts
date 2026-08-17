@@ -72,6 +72,32 @@ export function schedulePayload(editable: EditablePublishDraft) {
   };
 }
 
+export function remainingPostChars(
+  editable: EditablePublishDraft,
+  target: PublishTarget | null
+): number | null {
+  if (!target) return null;
+  return target.caption_max_length - buildPostPreview(editable).length;
+}
+
+export function remainingHashtagSlots(
+  editable: EditablePublishDraft,
+  target: PublishTarget | null
+): number | null {
+  if (!target) return null;
+  return target.hashtag_limit - editable.hashtags.length;
+}
+
+export function resolvePublishAccountId(
+  assignedId: string | null | undefined,
+  accounts: Array<{ id: string }>,
+  currentSelected: string
+): string {
+  if (assignedId && accounts.some((account) => account.id === assignedId)) return assignedId;
+  if (currentSelected && accounts.some((account) => account.id === currentSelected)) return currentSelected;
+  return "";
+}
+
 function normalizeHashtags(items: HashtagDraftItem[]): HashtagDraftItem[] {
   return items
     .map((item) => ({ tag: cleanTag(item.tag), source: item.source || "unknown" }))
@@ -87,4 +113,20 @@ function toDatetimeLocalValue(value: string | null): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "";
   return date.toISOString().slice(0, 16);
+}
+
+export function splitPlannedPublishAt(value: string): { date: string; time: string } {
+  if (!value) return { date: "", time: "" };
+  const [date = "", clock = ""] = value.split("T");
+  return { date, time: clock.slice(0, 5) };
+}
+
+export function joinPlannedPublishAt(date: string, time: string): string {
+  if (!date.trim()) return "";
+  const clock = time.trim() || "09:00";
+  return `${date}T${clock.slice(0, 5)}`;
+}
+
+export function isCompletePlannedPublishAt(value: string): boolean {
+  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(value);
 }

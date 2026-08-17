@@ -94,6 +94,8 @@ assert.doesNotMatch(componentSource, /OpsPageHeader/, "Must not duplicate Topbar
 assert.equal(captionModelListReady("openai_compatible", true, "https://api.openai.com/v1"), true);
 assert.equal(captionModelListReady("openai_compatible", true, ""), false);
 assert.equal(captionModelListReady("gemini", true, ""), true);
+assert.equal(captionModelListReady("google_cloud", true, ""), true);
+assert.equal(captionModelListReady("google_cloud", false, ""), false);
 assert.equal(captionModelListReady("gemini", false, ""), false);
 assert.equal(captionModelListReady("ollama", false, "http://127.0.0.1:11434"), true);
 assert.equal(captionModelListReady("openrouter", true, "https://openrouter.ai/api/v1"), true);

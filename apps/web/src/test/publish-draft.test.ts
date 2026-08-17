@@ -4,8 +4,11 @@ import {
   buildEditablePublishDraft,
   buildPostPreview,
   hasDraftChanges,
+  isCompletePlannedPublishAt,
+  joinPlannedPublishAt,
   removeHashtag,
   schedulePayload,
+  splitPlannedPublishAt,
   toPublishDraftUpdatePayload,
   validatePublishDraft
 } from "../lib/publishDraftState";
@@ -43,6 +46,12 @@ assert.equal(toPublishDraftUpdatePayload(withTag).target_platform, "TIKTOK");
 
 const scheduled = { ...withTag, plannedPublishAt: "2026-04-18T09:30", timezone: "Asia/Bangkok" };
 assert.equal(schedulePayload(scheduled).timezone, "Asia/Bangkok");
+assert.deepEqual(splitPlannedPublishAt("2026-04-18T09:30"), { date: "2026-04-18", time: "09:30" });
+assert.equal(joinPlannedPublishAt("2026-04-18", "09:30"), "2026-04-18T09:30");
+assert.equal(joinPlannedPublishAt("2026-04-18", ""), "2026-04-18T09:00");
+assert.equal(joinPlannedPublishAt("", "09:30"), "");
+assert.equal(isCompletePlannedPublishAt("2026-04-18T09:30"), true);
+assert.equal(isCompletePlannedPublishAt("2026-04-18"), false);
 
 console.log("publish-draft state tests passed");
 

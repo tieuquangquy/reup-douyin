@@ -36,9 +36,11 @@ _load_worker_dotenv()
 
 try:
     from .handlers.mock_handlers import build_mock_handler_registry
+    from .instance_lock import worker_instance_lock
     from .runtime import LocalPollingWorker
 except ImportError:  # Allows `python src/main.py` from apps/worker during local dev.
     from handlers.mock_handlers import build_mock_handler_registry
+    from instance_lock import worker_instance_lock
     from runtime import LocalPollingWorker
 
 
@@ -63,7 +65,8 @@ def main() -> None:
         redis_url=redis_url,
         redis_queue_name=redis_queue_name,
     )
-    worker.run_forever()
+    with worker_instance_lock(worker_id):
+        worker.run_forever()
 
 
 if __name__ == "__main__":

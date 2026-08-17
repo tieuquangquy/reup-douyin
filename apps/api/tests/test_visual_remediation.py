@@ -252,6 +252,48 @@ def test_adds_hash_bound_output_residual_track() -> None:
     assert effective["render_tracks"][-1]["text_vi"] == "Nhãn mới"
 
 
+def test_adds_single_frame_output_residual_track_at_frame_zero() -> None:
+    with TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        contract = _contract()
+        contract["video"]["frame_count"] = 30
+        added = {
+            "text_id": "p4out_frame_zero",
+            "content_id": "p4out_content_frame_zero",
+            "start_frame": 0,
+            "end_frame": 0,
+            "best_frame_index": 0,
+            "start_ms": 0,
+            "end_ms": 33,
+            "geometry": {"x": 0.2, "y": 0.3, "width": 0.2, "height": 0.05},
+            "roles": ["ui_chip"],
+            "kind": "ui",
+            "text_vi": "Nhãn đầu video",
+            "translation_status": "TRANSLATION_APPROVED",
+            "cover_only": False,
+            "duplicate_transition_canonical": False,
+            "render_policy": {"policy_version": "test"},
+        }
+        contract_path = _write_authority(
+            root,
+            contract,
+            [
+                {
+                    "operation": "ADD_TRACK",
+                    "track": added,
+                    "expected_added_track_sha256": _sha256_json(added),
+                }
+            ],
+        )
+
+        effective, _ref = apply_visual_remediation(
+            root, contract, contract_path=contract_path
+        )
+
+    assert effective["render_tracks"][-1]["start_frame"] == 0
+    assert effective["render_tracks"][-1]["end_frame"] == 0
+
+
 def _group_track(text_id: str, *, x: float = 0.2) -> dict:
     return {
         "text_id": text_id,

@@ -74,6 +74,19 @@ It contains the hash-bound Phase 1/2/3 authorities and Phase 4 preview/final art
 The API artifact route only serves files beneath the active quality workspace and
 rejects traversal. Manual export/publish remains outside this workflow by design.
 
+## Analyze OCR versus Visual Clean
+
+`ANALYZE_OCR` and `RENDER_PREVIEW` are separate durable products. Analyze OCR publishes
+tracks, content objects, geometry/provenance and review authority. Submitting approved
+visual translations starts `RENDER_PREVIEW`, which runs Phase 3/4 and materializes the
+Visual Clean preview. Final Review therefore labels an active preview job **Building
+Visual Clean preview**, never **Analyzing OCR**.
+
+The OCR summary exposes `visual_preview_status` independently of `workflow_stage`:
+`READY_TO_BUILD`, active job states, `BLOCKED_REVIEW`, `FAILED`, or `READY`. A structured
+preflight error is shown after refresh, while a residual-CJK gate remains an explicit
+review checkpoint rather than a failed OCR run.
+
 ## Reup Queue full-auto authority
 
 The ordinary Final Review buttons remain manual. A queue item explicitly running in

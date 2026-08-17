@@ -92,9 +92,12 @@ _TERMINAL_CODE_MARKERS = (
     "quality_review_required",
     "quality_preflight_blocked",
     "quality_output_qa_failed",
+    "quality_frame_render_failed",
     "blocked_visual_residual_cjk",
     "timing_fit_blocked",
     "translation_review_required",
+    "phase4_input_invalid",
+    "phase2_remediation_invalid",
 )
 
 _TERMINAL_PROVIDER_MARKERS = (

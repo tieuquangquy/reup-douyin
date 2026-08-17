@@ -49,6 +49,8 @@ def light_tts_import_ready(provider: str) -> bool | None:
         return _module_importable("vieneu")
     if name in {"omnivoice", "omnivoice_studio", "omnivoice-studio"}:
         return _module_importable("omnivoice")
+    if name == "google_cloud_tts":
+        return _module_importable("google.genai")
     if name == "auto":
         return _module_importable("vieneu") or _module_importable("edge_tts")
     return None
@@ -510,6 +512,33 @@ def _make_provider(
                 f"Invalid Gemini expressive connector configuration: {str(exc)[:300]}",
             )
 
+    if name == "google_cloud_tts":
+        if not str(api_key or "").strip():
+            return ConfiguredButUnavailableTtsProvider(
+                name,
+                "google_cloud_tts requires an Agent Platform API key.",
+            )
+        from src.tts_pipeline.google_cloud_agent_tts_provider import (
+            GOOGLE_CLOUD_TTS_DEFAULT_MODEL,
+            GoogleCloudAgentTtsProvider,
+        )
+
+        agent_options = dict(options or {})
+        agent_config = dict(agent_options.get("google_cloud_tts") or {})
+        try:
+            return GoogleCloudAgentTtsProvider(
+                api_key=str(api_key),
+                model_id=model_id or GOOGLE_CLOUD_TTS_DEFAULT_MODEL,
+                region=str(agent_config.get("region") or "global"),
+                options=agent_options,
+                timeout_seconds=timeout_seconds,
+            )
+        except ValueError as exc:
+            return ConfiguredButUnavailableTtsProvider(
+                name,
+                f"Invalid Google Cloud Agent TTS configuration: {str(exc)[:300]}",
+            )
+
     if name in {
         "openai",
         "openai_compatible",
@@ -652,6 +681,61 @@ def probe_tts_ai_client(
     api_key = getattr(cfg, "api_key", None)
     base_url = getattr(cfg, "base_url", "")
     options = dict(getattr(cfg, "options_json", None) or {})
+    if name == "google_cloud_tts":
+        result = _probe_named(name, api_key=api_key, base_url="", cli_binary="")
+        if result.ok and discover_remote:
+            from src.tts_pipeline.google_cloud_agent_tts_provider import (
+                GOOGLE_CLOUD_TTS_DEFAULT_MODEL,
+                GoogleCloudAgentTtsProvider,
+            )
+            from src.tts_pipeline.types import TtsProviderInput, VoiceConfig
+
+            agent_config = dict(options.get("google_cloud_tts") or {})
+            try:
+                provider = GoogleCloudAgentTtsProvider(
+                    api_key=str(api_key or ""),
+                    model_id=str(getattr(cfg, "model_id", "") or GOOGLE_CLOUD_TTS_DEFAULT_MODEL),
+                    region=str(agent_config.get("region") or "global"),
+                    options=options,
+                    timeout_seconds=float(getattr(cfg, "timeout_seconds", 120.0) or 120.0),
+                )
+                output = provider.synthesize(
+                    TtsProviderInput(
+                        text="Xin chào.",
+                        language_code=language,
+                        voice_config=VoiceConfig(
+                            voice_id=str(getattr(cfg, "voice_id", "") or "Achernar"),
+                            language_code=language,
+                        ),
+                    )
+                )
+                if not output.audio_bytes:
+                    raise RuntimeError("google_cloud_tts_probe_empty_audio")
+                result.detail = "Agent Platform TTS generated probe audio successfully."
+                result.checks = [
+                    {"stage": "audio_generation", "status": "passed", "detail": result.detail}
+                ]
+            except Exception as exc:  # noqa: BLE001 - return operator-safe SDK error
+                result = TtsProbeResult(
+                    False,
+                    name,
+                    str(exc)[:400],
+                    checks=[
+                        {
+                            "stage": "audio_generation",
+                            "status": "failed",
+                            "detail": str(exc)[:300],
+                        }
+                    ],
+                )
+        return _attach_catalog(
+            result,
+            language_code=language,
+            api_key=api_key,
+            timeout_seconds=float(getattr(cfg, "timeout_seconds", 120.0) or 120.0),
+            discover_remote=False,
+            options=options,
+        )
     if name == "google":
         from src.tts_pipeline.google_cloud_credentials import GOOGLE_CLOUD_TTS_BASE_URL
 
@@ -850,6 +934,7 @@ def _attach_catalog(
         "omnivoice_studio",
         "omnivoice-studio",
         "google_gemini",
+        "google_cloud_tts",
     }
     if result.provider not in catalog_providers:
         return result
@@ -906,6 +991,15 @@ def _probe_named(
         return TtsProbeResult(
             True, name, f"{name} settings look valid (HTTP adapter pending for synthesis)."
         )
+
+    if name == "google_cloud_tts":
+        if not (api_key or "").strip():
+            return TtsProbeResult(False, name, "google_cloud_tts requires an Agent Platform API key")
+        try:
+            from google import genai  # noqa: F401
+        except (ImportError, ModuleNotFoundError):
+            return TtsProbeResult(False, name, "google-genai is not installed")
+        return TtsProbeResult(True, name, "Agent Platform TTS SDK and API key are configured.")
 
     if name in {"google", "google_gemini", "azure", "elevenlabs", "openai"}:
         if not (api_key or "").strip():

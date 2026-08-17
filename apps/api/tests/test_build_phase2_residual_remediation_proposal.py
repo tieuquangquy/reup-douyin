@@ -19,6 +19,7 @@ from scripts.build_phase2_residual_remediation_proposal import (
     match_source_box,
     match_source_cluster_crop,
     match_source_box_for_geometry_expansion,
+    match_source_box_for_partial_caption_expansion,
     preflight_source_bound_temporal_matches,
     refine_hit_boundaries,
     select_residual_authority,
@@ -477,6 +478,139 @@ class Phase2ResidualRemediationProposalTests(unittest.TestCase):
         )
 
         self.assertIsNone(target)
+
+    def test_partial_caption_selects_approved_caption_row_not_overlapping_ui_chip(self) -> None:
+        cluster = cluster_residual_detections(
+            [
+                {
+                    "frame_index": 0,
+                    "text": "王",
+                    "confidence": 0.3073,
+                    "geometry": {
+                        "x": 0.5122,
+                        "y": 0.7954,
+                        "width": 0.0978,
+                        "height": 0.0189,
+                    },
+                    "temporal_confirmation": {
+                        "status": "CONFIRMED_ON_ADJACENT_FRAME",
+                        "match": {"frame_index": 1},
+                    },
+                }
+            ]
+        )[0]
+        caption_policy = {
+            "context": {"caption_row": True},
+            "cover": {
+                "roi": {
+                    "x": 0.0269,
+                    "y": 0.6706,
+                    "width": 0.9731,
+                    "height": 0.1275,
+                }
+            },
+        }
+        ui_chip_policy = {
+            "context": {"caption_row": False},
+            "cover": {
+                "roi": {
+                    "x": 0.319,
+                    "y": 0.762,
+                    "width": 0.213,
+                    "height": 0.060,
+                }
+            },
+        }
+        tracks = [
+            {
+                "text_id": "sub_02",
+                "content_id": "caption",
+                "start_frame": 0,
+                "end_frame": 4,
+                "geometry": {
+                    "x": 0.1935,
+                    "y": 0.7023,
+                    "width": 0.5714,
+                    "height": 0.0492,
+                },
+                "text_vi": "Makeup kiểu mắt mèo",
+                "translation_status": "TRANSLATION_APPROVED",
+                "render_policy": {
+                    "context": {"caption_row": True},
+                    "cover": {
+                        "roi": {
+                            "x": 0.0,
+                            "y": 0.6566,
+                            "width": 0.9676,
+                            "height": 0.1241,
+                        }
+                    },
+                },
+            },
+            {
+                "text_id": "sub_03",
+                "content_id": "caption",
+                "start_frame": 0,
+                "end_frame": 14,
+                "geometry": {
+                    "x": 0.1923,
+                    "y": 0.7134,
+                    "width": 0.6259,
+                    "height": 0.0440,
+                },
+                "text_vi": "Makeup kiểu mắt mèo",
+                "translation_status": "TRANSLATION_APPROVED",
+                "render_policy": caption_policy,
+            },
+            {
+                "text_id": "sub_04",
+                "content_id": "chip",
+                "start_frame": 0,
+                "end_frame": 25,
+                "geometry": {
+                    "x": 0.3291,
+                    "y": 0.7741,
+                    "width": 0.1931,
+                    "height": 0.0359,
+                },
+                "text_vi": "Vuông",
+                "translation_status": "TRANSLATION_APPROVED",
+                "render_policy": ui_chip_policy,
+            },
+        ]
+
+        target = _active_expansion_target(
+            cluster,
+            tracks,
+            {
+                "caption": {"ocr_text_approved": "猫系美女妆"},
+                "chip": {"ocr_text_approved": "正方形"},
+            },
+            source_detections=[
+                {
+                    "frame_index": 0,
+                    "text": "教程",
+                    "confidence": 0.9987,
+                    "geometry": {
+                        "x": 0.3704,
+                        "y": 0.7660,
+                        "width": 0.2222,
+                        "height": 0.0498,
+                    },
+                }
+            ],
+        )
+
+        self.assertIsNotNone(target)
+        self.assertEqual(target["text_id"], "sub_02")
+        association = target["_partial_caption_association"]
+        self.assertEqual(association["source_detection"]["text"], "教程")
+        self.assertEqual(association["confirmed_frame_range"], [0, 1])
+        self.assertEqual(association["target_temporal_slack_frames"], 3)
+        self.assertEqual(
+            association["policy_version"],
+            "preflight_partial_caption_association_v1",
+        )
     def test_selects_encoded_output_residual_after_preview_qa_failure(self) -> None:
         source, residual = select_residual_authority(
             {"status": "READY_FOR_PHASE4"},
@@ -632,6 +766,45 @@ class Phase2ResidualRemediationProposalTests(unittest.TestCase):
 
         self.assertIsNotNone(match)
         self.assertGreater(match["geometry"]["width"], 0.20)
+
+    def test_matches_adjacent_full_source_line_for_partial_caption_expansion(self) -> None:
+        cluster = cluster_residual_detections(
+            [
+                {
+                    "frame_index": 0,
+                    "text": "王",
+                    "confidence": 0.3073,
+                    "geometry": {
+                        "x": 0.5122,
+                        "y": 0.7954,
+                        "width": 0.0978,
+                        "height": 0.0189,
+                    },
+                }
+            ]
+        )[0]
+
+        match = match_source_box_for_partial_caption_expansion(
+            expected_text="教程",
+            residual=cluster,
+            source_anchor_geometry={
+                "x": 0.3704,
+                "y": 0.7660,
+                "width": 0.2222,
+                "height": 0.0498,
+            },
+            existing_geometry={
+                "x": 0.1923,
+                "y": 0.7134,
+                "width": 0.6259,
+                "height": 0.0440,
+            },
+            boxes=[_Box("教程", 0.998, 0.371, 0.766, 0.221, 0.050)],
+        )
+
+        self.assertIsNotNone(match)
+        self.assertTrue(match["partial_caption_match"])
+        self.assertGreater(match["expanded_area_ratio"], 1.05)
 
     def test_dominant_window_is_fail_closed_when_ambiguous(self) -> None:
         timeline = [

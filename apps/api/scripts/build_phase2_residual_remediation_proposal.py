@@ -40,6 +40,10 @@ _MAX_BOUNDARY_SCAN_SAMPLES = 120
 _SOURCE_BOUND_MIN_CJK_SIMILARITY = 0.50
 _SOURCE_BOUND_MIN_GEOMETRY_OVERLAP = 0.50
 _SOURCE_BOUND_MIN_AREA_SIMILARITY = 0.25
+_PARTIAL_CAPTION_MAX_RESIDUAL_CONFIDENCE = 0.65
+_PARTIAL_CAPTION_MIN_SOURCE_CONFIDENCE = 0.85
+_PARTIAL_CAPTION_MIN_CONTAINMENT = 0.65
+_PARTIAL_CAPTION_POLICY_VERSION = "preflight_partial_caption_association_v1"
 
 
 class ResidualRemediationProposalError(RuntimeError):
@@ -148,6 +152,12 @@ def _signature(text: str) -> str:
     return "".join(_SIGNATURE_RE.findall(str(text or "")))
 
 
+def _int_or_default(value: Any, default: int) -> int:
+    """Default only absent values; frame zero is valid authority."""
+
+    return int(default if value is None else value)
+
+
 def _rect(raw: Mapping[str, Any]) -> tuple[float, float, float, float]:
     try:
         x = float(raw.get("x") or 0.0)
@@ -185,6 +195,42 @@ def _rect_area_similarity(
     right_area = max(0.0, right[2] - right[0]) * max(0.0, right[3] - right[1])
     larger = max(left_area, right_area)
     return min(left_area, right_area) / larger if larger > 0 else 0.0
+
+
+def _rect_area(rect: tuple[float, float, float, float]) -> float:
+    return max(0.0, rect[2] - rect[0]) * max(0.0, rect[3] - rect[1])
+
+
+def _rect_union(
+    left: tuple[float, float, float, float],
+    right: tuple[float, float, float, float],
+) -> tuple[float, float, float, float]:
+    return (
+        min(left[0], right[0]),
+        min(left[1], right[1]),
+        max(left[2], right[2]),
+        max(left[3], right[3]),
+    )
+
+
+def _axis_overlap_fraction(
+    left_start: float,
+    left_end: float,
+    right_start: float,
+    right_end: float,
+) -> float:
+    intersection = max(0.0, min(left_end, right_end) - max(left_start, right_start))
+    smaller = min(max(0.0, left_end - left_start), max(0.0, right_end - right_start))
+    return intersection / smaller if smaller > 0 else 0.0
+
+
+def _axis_gap(
+    left_start: float,
+    left_end: float,
+    right_start: float,
+    right_end: float,
+) -> float:
+    return max(0.0, max(left_start, right_start) - min(left_end, right_end))
 
 
 def _cjk_signature_similarity(left: str, right: str) -> float:
@@ -277,7 +323,7 @@ def preflight_source_bound_temporal_matches(
 
     confirmation = dict(representative.get("temporal_confirmation") or {})
     temporal = dict(confirmation.get("match") or {})
-    neighbor_frame = int(temporal.get("frame_index") or -1)
+    neighbor_frame = _int_or_default(temporal.get("frame_index"), -1)
     if (
         str(confirmation.get("status") or "")
         != "CONFIRMED_ON_ADJACENT_FRAME"
@@ -812,10 +858,100 @@ def match_source_box_for_geometry_expansion(
     return max(candidates, key=lambda item: item[0])[1] if candidates else None
 
 
+def match_source_box_for_partial_caption_expansion(
+    *,
+    expected_text: str,
+    residual: Mapping[str, Any],
+    source_anchor_geometry: Mapping[str, Any],
+    existing_geometry: Mapping[str, Any],
+    boxes: Sequence[Any],
+) -> dict[str, Any] | None:
+    """Match a high-confidence source line that owns a low-confidence fragment.
+
+    This is deliberately stricter than a nearest-box match. Phase 4 must have
+    already shown that the residual is contained in a larger source OCR line,
+    and each re-probe must reproduce that line at the same geometry. The line
+    may be adjacent to an existing caption row instead of textually matching
+    it, such as the second line of a two-line editor title.
+    """
+
+    expected = _signature(expected_text)
+    if len(expected) < 2 or not contains_cjk(expected):
+        return None
+    anchor = tuple(residual.get("anchor_rect") or ())
+    if len(anchor) != 4:
+        return None
+    source_anchor_rect = _rect(source_anchor_geometry)
+    existing_rect = _rect(existing_geometry)
+    candidates: list[tuple[float, dict[str, Any]]] = []
+    for box in boxes:
+        text = str(getattr(box, "text", "") or "").strip()
+        signature = _signature(text)
+        confidence = float(getattr(box, "confidence", 0.0) or 0.0)
+        similarity = SequenceMatcher(None, expected, signature).ratio()
+        if not contains_cjk(signature) or confidence < 0.70 or similarity < 0.80:
+            continue
+        geometry = {
+            "x": float(getattr(box, "x", 0.0) or 0.0),
+            "y": float(getattr(box, "y", 0.0) or 0.0),
+            "width": float(getattr(box, "width", 0.0) or 0.0),
+            "height": float(getattr(box, "height", 0.0) or 0.0),
+        }
+        try:
+            source_rect = _rect(geometry)
+        except ResidualRemediationProposalError:
+            continue
+        anchor_overlap = _intersection_over_smaller(source_rect, source_anchor_rect)
+        residual_overlap = _intersection_over_smaller(source_rect, anchor)
+        horizontal_overlap = _axis_overlap_fraction(
+            source_rect[0], source_rect[2], existing_rect[0], existing_rect[2]
+        )
+        vertical_gap = _axis_gap(
+            source_rect[1], source_rect[3], existing_rect[1], existing_rect[3]
+        )
+        expanded_area_ratio = _rect_area(_rect_union(source_rect, existing_rect)) / max(
+            1e-9, _rect_area(existing_rect)
+        )
+        if (
+            anchor_overlap < 0.60
+            or residual_overlap < 0.50
+            or horizontal_overlap < 0.50
+            or vertical_gap > 0.04
+            or expanded_area_ratio < 1.05
+        ):
+            continue
+        candidates.append(
+            (
+                similarity
+                + confidence
+                + anchor_overlap
+                + residual_overlap
+                + horizontal_overlap
+                - vertical_gap,
+                {
+                    "text": text,
+                    "signature": signature,
+                    "confidence": confidence,
+                    "similarity": similarity,
+                    "geometry": geometry,
+                    "source_anchor_overlap": anchor_overlap,
+                    "residual_overlap": residual_overlap,
+                    "horizontal_overlap": horizontal_overlap,
+                    "vertical_gap": vertical_gap,
+                    "expanded_area_ratio": expanded_area_ratio,
+                    "partial_caption_match": True,
+                },
+            )
+        )
+    return max(candidates, key=lambda item: item[0])[1] if candidates else None
+
+
 def _active_expansion_target(
     cluster: Mapping[str, Any],
     render_tracks: Sequence[Mapping[str, Any]],
     content_by_id: Mapping[str, Mapping[str, Any]],
+    *,
+    source_detections: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any] | None:
     representative = max(
         list(cluster.get("detections") or []),
@@ -832,7 +968,7 @@ def _active_expansion_target(
         if not (
             int(track.get("start_frame") or 0)
             <= frame_index
-            <= int(track.get("end_frame") or -1)
+            <= _int_or_default(track.get("end_frame"), -1)
         ):
             continue
         content = dict(content_by_id.get(str(track.get("content_id") or "")) or {})
@@ -871,7 +1007,145 @@ def _active_expansion_target(
         if overlap < 0.10 and (vertical_overlap < 0.50 or horizontal_gap > 0.08):
             continue
         candidates.append((overlap + vertical_overlap - horizontal_gap, track))
-    return max(candidates, key=lambda item: item[0])[1] if candidates else None
+    if candidates:
+        return max(candidates, key=lambda item: item[0])[1]
+
+    # A low-confidence residual can be one glyph from an incompletely covered
+    # second caption line. Text similarity is intentionally not used for this
+    # fallback: the source-bound OCR line is the text authority. Association
+    # is allowed only for an approved active caption row, never for a nearby UI
+    # chip or arbitrary track.
+    residual_confidence = float(dict(representative).get("confidence") or 0.0)
+    if residual_confidence > _PARTIAL_CAPTION_MAX_RESIDUAL_CONFIDENCE:
+        return None
+    partial_sources: list[tuple[float, dict[str, Any]]] = []
+    residual_area = _rect_area(residual_rect)
+    for raw_source in source_detections:
+        source = dict(raw_source)
+        if int(source.get("frame_index") or 0) != frame_index:
+            continue
+        source_text = str(source.get("text") or "").strip()
+        source_signature = _signature(source_text)
+        source_confidence = float(source.get("confidence") or 0.0)
+        if (
+            len(source_signature) < 2
+            or not contains_cjk(source_signature)
+            or source_confidence < _PARTIAL_CAPTION_MIN_SOURCE_CONFIDENCE
+        ):
+            continue
+        try:
+            source_rect = _rect(dict(source.get("geometry") or {}))
+        except ResidualRemediationProposalError:
+            continue
+        containment = _intersection_over_smaller(residual_rect, source_rect)
+        area_ratio = _rect_area(source_rect) / max(1e-9, residual_area)
+        if containment < _PARTIAL_CAPTION_MIN_CONTAINMENT or area_ratio < 1.25:
+            continue
+        partial_sources.append(
+            (
+                containment + source_confidence + min(area_ratio, 4.0) / 4.0,
+                {
+                    "frame_index": frame_index,
+                    "text": source_text,
+                    "confidence": source_confidence,
+                    "geometry": dict(source.get("geometry") or {}),
+                    "containment": containment,
+                    "source_to_residual_area_ratio": area_ratio,
+                    "rect": source_rect,
+                },
+            )
+        )
+    if not partial_sources:
+        return None
+    _, partial_source = max(partial_sources, key=lambda item: item[0])
+    source_rect = tuple(partial_source.pop("rect"))
+    confirmed_frames = [frame_index]
+    for detection in list(cluster.get("detections") or []):
+        if not isinstance(detection, Mapping):
+            continue
+        confirmed_frames.append(int(detection.get("frame_index") or frame_index))
+        temporal_match = dict(
+            dict(detection.get("temporal_confirmation") or {}).get("match") or {}
+        )
+        if temporal_match:
+            confirmed_frames.append(
+                int(temporal_match.get("frame_index") or frame_index)
+            )
+    evidence_start = min(confirmed_frames)
+    evidence_end = max(confirmed_frames)
+
+    caption_candidates: list[tuple[float, dict[str, Any]]] = []
+    for raw in render_tracks:
+        track = dict(raw)
+        if not (
+            int(track.get("start_frame") or 0)
+            <= frame_index
+            <= _int_or_default(track.get("end_frame"), -1)
+            and has_approved_translation_authority(track)
+            and str(track.get("text_vi") or "").strip()
+        ):
+            continue
+        context = dict(dict(track.get("render_policy") or {}).get("context") or {})
+        if not bool(context.get("caption_row")):
+            continue
+        cover = dict(dict(track.get("render_policy") or {}).get("cover") or {})
+        roi = dict(cover.get("roi") or {})
+        geometry = dict(track.get("geometry") or {})
+        if not roi or not geometry:
+            continue
+        try:
+            cover_rect = _rect(roi)
+            track_rect = _rect(geometry)
+        except ResidualRemediationProposalError:
+            continue
+        source_cover_overlap = _intersection_over_smaller(source_rect, cover_rect)
+        horizontal_overlap = _axis_overlap_fraction(
+            source_rect[0], source_rect[2], track_rect[0], track_rect[2]
+        )
+        vertical_gap = _axis_gap(
+            source_rect[1], source_rect[3], track_rect[1], track_rect[3]
+        )
+        expanded_area_ratio = _rect_area(_rect_union(source_rect, track_rect)) / max(
+            1e-9, _rect_area(track_rect)
+        )
+        temporal_slack = max(
+            0, evidence_start - int(track.get("start_frame") or 0)
+        ) + max(0, _int_or_default(track.get("end_frame"), -1) - evidence_end)
+        if (
+            source_cover_overlap < 0.20
+            or horizontal_overlap < 0.50
+            or vertical_gap > 0.04
+            or expanded_area_ratio < 1.05
+        ):
+            continue
+        selected = dict(track)
+        selected["_partial_caption_association"] = {
+            "policy_version": _PARTIAL_CAPTION_POLICY_VERSION,
+            "source_detection": partial_source,
+            "target_text_id": str(track.get("text_id") or ""),
+            "source_cover_overlap": source_cover_overlap,
+            "horizontal_overlap": horizontal_overlap,
+            "vertical_gap": vertical_gap,
+            "expanded_area_ratio": expanded_area_ratio,
+            "residual_confidence": residual_confidence,
+            "confirmed_frame_range": [evidence_start, evidence_end],
+            "target_temporal_slack_frames": temporal_slack,
+        }
+        caption_candidates.append(
+            (
+                source_cover_overlap
+                + horizontal_overlap
+                + min(expanded_area_ratio, 3.0) / 3.0
+                - vertical_gap
+                - (0.10 * temporal_slack),
+                selected,
+            )
+        )
+    return (
+        max(caption_candidates, key=lambda item: item[0])[1]
+        if caption_candidates
+        else None
+    )
 
 
 def _same_content_translation(
@@ -931,7 +1205,7 @@ def dominant_active_window(
         for row in timeline
         if int(row.get("start_frame") or 0)
         <= frame_index
-        <= int(row.get("end_frame") or -1)
+        <= _int_or_default(row.get("end_frame"), -1)
     ]
     if not windows:
         raise ResidualRemediationProposalError(
@@ -1403,9 +1677,19 @@ def build_proposal(
             ),
         )
         expansion_target = _active_expansion_target(
-            cluster, render_tracks, content_by_id
+            cluster,
+            render_tracks,
+            content_by_id,
+            source_detections=[
+                dict(row)
+                for row in list(residual.get("source_detections") or [])
+                if isinstance(row, Mapping)
+            ],
         )
         if expansion_target is not None:
+            partial_caption_association = dict(
+                expansion_target.get("_partial_caption_association") or {}
+            )
             target_text_id = str(expansion_target.get("text_id") or "")
             content_id = str(expansion_target.get("content_id") or "")
             master_row = master_by_id.get(target_text_id)
@@ -1445,7 +1729,40 @@ def build_proposal(
                     scan_frames.append(end_frame)
             frames = load_frames(source, scan_frames)
             matches: list[dict[str, Any]] = []
+            partial_source_detection = dict(
+                partial_caption_association.get("source_detection") or {}
+            )
+            partial_source_text = str(
+                partial_source_detection.get("text") or ""
+            ).strip()
+            partial_source_geometry = dict(
+                partial_source_detection.get("geometry") or {}
+            )
+            partial_source_frame = _int_or_default(
+                partial_source_detection.get("frame_index"), -1
+            )
+            if (
+                partial_caption_association
+                and partial_source_text
+                and partial_source_geometry
+                and partial_source_frame in scan_frames
+            ):
+                matches.append(
+                    {
+                        "frame_index": partial_source_frame,
+                        "text": partial_source_text,
+                        "signature": _signature(partial_source_text),
+                        "confidence": float(
+                            partial_source_detection.get("confidence") or 0.0
+                        ),
+                        "similarity": 1.0,
+                        "geometry": partial_source_geometry,
+                        "preflight_partial_caption_authority": True,
+                    }
+                )
             for frame_index in scan_frames:
+                if frame_index == partial_source_frame and partial_caption_association:
+                    continue
                 frame = frames.get(frame_index)
                 if frame is None:
                     continue
@@ -1461,12 +1778,21 @@ def build_proposal(
                         temp_path,
                         frame_time_ms=int(round(frame_index * 1000.0 / fps)),
                     )
-                matched = match_source_box_for_geometry_expansion(
-                    expected_text=expected_text,
-                    residual=cluster,
-                    existing_geometry=existing_geometry,
-                    boxes=list(getattr(result, "boxes", []) or []),
-                )
+                if partial_caption_association:
+                    matched = match_source_box_for_partial_caption_expansion(
+                        expected_text=partial_source_text,
+                        residual=cluster,
+                        source_anchor_geometry=partial_source_geometry,
+                        existing_geometry=existing_geometry,
+                        boxes=list(getattr(result, "boxes", []) or []),
+                    )
+                else:
+                    matched = match_source_box_for_geometry_expansion(
+                        expected_text=expected_text,
+                        residual=cluster,
+                        existing_geometry=existing_geometry,
+                        boxes=list(getattr(result, "boxes", []) or []),
+                    )
                 if matched is not None:
                     matched["frame_index"] = frame_index
                     matches.append(matched)
@@ -1479,7 +1805,9 @@ def build_proposal(
                 or hit_frames[-1] != end_frame
             ):
                 raise ResidualRemediationProposalError(
-                    f"Geometry expansion for {target_text_id} lacks stable source evidence"
+                    f"Geometry expansion for {target_text_id} lacks stable source evidence "
+                    f"(hits={hit_frames}, sampled={len(scan_frames)}, "
+                    f"density={hit_density:.3f}, expected={start_frame}-{end_frame})"
                 )
             source_geometry = {
                 key: _median(
@@ -1534,8 +1862,11 @@ def build_proposal(
                 raise ResidualRemediationProposalError("Cannot write crop evidence")
             observed_texts = Counter(str(row["text"]) for row in matches)
             accepted_signatures = sorted(
-                {_signature(expected_text)}
-                | {str(row["signature"]) for row in matches}
+                (
+                    {_signature(expected_text), _signature(partial_source_text)}
+                    | {str(row["signature"]) for row in matches}
+                )
+                - {""}
             )
             proposals.append(
                 {
@@ -1577,6 +1908,7 @@ def build_proposal(
                         "phase4_detections": cluster["detections"],
                         "source_ocr": {
                             "expected_approved_text": expected_text,
+                            "partial_caption_source_text": partial_source_text or None,
                             "observed_text_counts": dict(observed_texts),
                             "observations": len(matches),
                             "median_confidence": round(
@@ -1587,6 +1919,9 @@ def build_proposal(
                             ),
                             "median_geometry": source_geometry,
                         },
+                        "partial_caption_association": (
+                            partial_caption_association or None
+                        ),
                         "source_frame_ref": {
                             "path": source_path.relative_to(root).as_posix(),
                             "sha256": _sha256_file(source_path),

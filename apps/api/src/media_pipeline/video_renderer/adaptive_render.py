@@ -53,12 +53,83 @@ def _cover_component_identity(row: Mapping[str, Any]) -> str:
     ):
         return ""
     return str(
-        cover.get("caption_cover_group_id")
-        or context.get("caption_cover_group_id")
-        or cover.get("soft_cover_epoch_id")
+        # The reconstruction epoch is the shared visual style/plate authority.
+        # A caption-group id is narrower and may exist on only one member of
+        # the same overlapping epoch, which used to split that member back
+        # into a second blur pass and trigger a false residual-stroke block.
+        cover.get("soft_cover_epoch_id")
         or context.get("soft_cover_epoch_id")
+        or cover.get("caption_cover_group_id")
+        or context.get("caption_cover_group_id")
         or ""
     )
+
+
+def _avoid_protected_layout_regions(
+    row: Mapping[str, Any],
+    protected_source_regions: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Keep replacement text inside its lane without covering source labels."""
+
+    track = dict(row)
+    policy = dict(track.get("render_policy") or {})
+    layout = dict(policy.get("layout") or {})
+    safe = dict(layout.get("safe_area") or {})
+    if str(layout.get("mode") or "") != "cover_aligned" or not safe:
+        return track
+    adjusted = False
+    for protected in protected_source_regions:
+        provenance = dict(protected.get("visual_provenance") or {})
+        if (
+            str(provenance.get("classification") or "") != "SOURCE_INTRINSIC"
+            or float(provenance.get("confidence") or 0.0) < 0.90
+        ):
+            continue
+        region = dict(protected.get("geometry") or {})
+        sx0, sy0 = float(safe.get("x") or 0.0), float(safe.get("y") or 0.0)
+        sx1 = sx0 + float(safe.get("width") or 0.0)
+        sy1 = sy0 + float(safe.get("height") or 0.0)
+        px0, py0 = float(region.get("x") or 0.0), float(region.get("y") or 0.0)
+        px1 = px0 + float(region.get("width") or 0.0)
+        py1 = py0 + float(region.get("height") or 0.0)
+        horizontal = max(0.0, min(sx1, px1) - max(sx0, px0))
+        if horizontal <= 0.0 or min(sx1, px1) <= max(sx0, px0):
+            continue
+        if min(sy1, py1) <= max(sy0, py0):
+            continue
+        margin = 0.003
+        above_height = max(0.0, py0 - margin - sy0)
+        below_y = py1 + margin
+        below_height = max(0.0, sy1 - below_y)
+        geometry = dict(track.get("geometry") or {})
+        center_y = float(geometry.get("y") or 0.0) + float(
+            geometry.get("height") or 0.0
+        ) / 2.0
+        candidates = [
+            (above_height, sy0, above_height),
+            (below_height, below_y, below_height),
+        ]
+        if center_y <= py0:
+            candidates.sort(key=lambda item: (item[1] != sy0, -item[0]))
+        elif center_y >= py1:
+            candidates.sort(key=lambda item: (item[1] == sy0, -item[0]))
+        else:
+            candidates.sort(key=lambda item: -item[0])
+        height, y, _ = candidates[0]
+        if height < 0.025:
+            continue
+        safe["y"] = y
+        safe["height"] = height
+        adjusted = True
+    if adjusted:
+        layout["safe_area"] = safe
+        policy["layout"] = layout
+        track["render_policy"] = policy
+        track["protected_layout_adjustment"] = {
+            "policy_version": "protected_source_safe_area_clip_v1",
+            "safe_area": dict(safe),
+        }
+    return track
 
 
 def _active_cover_components(
@@ -87,9 +158,9 @@ def _active_cover_components(
         )
 
     def connected(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
-        if not _cover_component_identity(left) or _cover_component_identity(
-            left
-        ) != _cover_component_identity(right):
+        left_identity = _cover_component_identity(left)
+        right_identity = _cover_component_identity(right)
+        if not left_identity or not right_identity:
             return False
         a, b = roi(left), roi(right)
         ax0, ay0 = float(a.get("x") or 0.0), float(a.get("y") or 0.0)
@@ -101,7 +172,40 @@ def _active_cover_components(
         vertical = max(0.0, min(ay1, by1) - max(ay0, by0))
         min_height = min(max(0.0, ay1 - ay0), max(0.0, by1 - by0))
         horizontal_gap = max(0.0, bx0 - ax1, ax0 - bx1)
-        return min_height > 0.0 and vertical / min_height >= 0.55 and horizontal_gap <= 0.018
+        same_epoch = left_identity == right_identity
+        if same_epoch:
+            return (
+                min_height > 0.0
+                and vertical / min_height >= 0.55
+                and horizontal_gap <= 0.018
+            )
+
+        # A protected-caption shadow can be demoted into a new reconstruction
+        # epoch at the exact boundary of the already-approved semantic row.
+        # Rendering both epochs sequentially creates a darker pulse. Merge
+        # different epochs only when both rows are editor-caption authorities
+        # and their rectangles are nearly the same physical plate.
+        def semantic_editor(row: Mapping[str, Any]) -> bool:
+            provenance = dict(row.get("visual_provenance") or {})
+            return bool(row.get("semantic_dialogue_hardsub")) or bool(
+                row.get("cover_only")
+            ) or str(provenance.get("classification") or "") in {
+                "EDITOR_LABEL",
+                "EDITOR_OVERLAY",
+                "DIALOGUE_HARDSUB",
+            }
+
+        intersection = max(0.0, min(ax1, bx1) - max(ax0, bx0)) * vertical
+        smaller_area = min(
+            max(0.0, ax1 - ax0) * max(0.0, ay1 - ay0),
+            max(0.0, bx1 - bx0) * max(0.0, by1 - by0),
+        )
+        return bool(
+            semantic_editor(left)
+            and semantic_editor(right)
+            and smaller_area > 0.0
+            and intersection / smaller_area >= 0.80
+        )
 
     neighbors = {index: set() for index in range(len(rows))}
     for index, left in enumerate(rows):
@@ -1553,6 +1657,10 @@ class AdaptiveFrameRenderer:
             for track in selected_text_tracks
             if str(track.get("text_id") or "") not in panel_suppressed_ids
         ]
+        text_tracks = [
+            _avoid_protected_layout_regions(track, protected_source_regions)
+            for track in text_tracks
+        ]
         protected_text_conflict_ids = {
             str(track.get("text_id") or "")
             for track in text_tracks
@@ -1616,6 +1724,14 @@ class AdaptiveFrameRenderer:
                         frame_width=width,
                         frame_height=height,
                     )
+                    # Keep reconstruction feathering and codec ringing away
+                    # from protected source glyphs, not merely their exact OCR
+                    # box. The bounded padding is roughly one encoded stroke.
+                    carve_padding = max(3, min(10, int(round(height * 0.006))))
+                    px0 = max(0, px0 - carve_padding)
+                    py0 = max(0, py0 - carve_padding)
+                    px1 = min(width, px1 + carve_padding)
+                    py1 = min(height, py1 + carve_padding)
                     if px1 <= px0 or py1 <= py0:
                         continue
                     before = int(np.count_nonzero(mask[py0:py1, px0:px1]))
@@ -1949,22 +2065,32 @@ class AdaptiveFrameRenderer:
                         "rounded_corner_text_height_fraction": 0.0,
                     }
                 reconstruction_mode = "stable_soft_blur"
-                clean_reference = self._epoch_reference_frames.get(epoch_id)
+                # ``soft_cover_epoch_id`` is a style/component authority, not
+                # a globally reusable pixel plate. Use the representative
+                # track's locally selected reference so distant captions that
+                # share one style can never copy each other's CJK glyphs.
+                clean_reference = self._reference_frames.get(text_id)
+                reference_key = f"{epoch_id}:{text_id}"
+                if clean_reference is None:
+                    # Retain explicitly seeded/operator-approved epoch plates;
+                    # automatic seeding no longer creates these global refs.
+                    clean_reference = self._epoch_reference_frames.get(epoch_id)
+                    reference_key = epoch_id
                 reference_ready = (
                     clean_reference is not None
                     and clean_reference.shape == output.shape
-                    and epoch_id not in self._epoch_temporal_reference_disabled
+                    and reference_key not in self._epoch_temporal_reference_disabled
                 )
                 if reference_ready:
                     assert clean_reference is not None
                     reference_roi = clean_reference[ty0:ty1, tx0:tx1].copy()
-                    if epoch_id not in self._epoch_temporal_seeded:
-                        self.temporal.seed(epoch_id, reference_roi)
-                        self._epoch_temporal_seeded.add(epoch_id)
+                    if reference_key not in self._epoch_temporal_seeded:
+                        self.temporal.seed(reference_key, reference_roi)
+                        self._epoch_temporal_seeded.add(reference_key)
                     cleaned_roi, temporal_candidate_qa = self.temporal.clean(
                         source_roi,
                         mask_roi,
-                        key=epoch_id,
+                        key=reference_key,
                     )
                     if str(temporal_candidate_qa.get("mode") or "") in {
                         "static_plate",
@@ -1976,6 +2102,7 @@ class AdaptiveFrameRenderer:
                             "status": "PASS",
                             "reconstruction_mode": "temporal_clean_reference",
                             "soft_cover_epoch_id": epoch_id,
+                            "reference_text_id": text_id,
                         }
                         reconstruction_mode = "temporal_clean_reference"
                     else:
@@ -1985,7 +2112,7 @@ class AdaptiveFrameRenderer:
                         # mode flapping is the main source of visible cover
                         # pulsing on moving scenes. Keep the epoch on the
                         # deterministic fallback for its remaining lifetime.
-                        self._epoch_temporal_reference_disabled.add(epoch_id)
+                        self._epoch_temporal_reference_disabled.add(reference_key)
                         cleaned_roi = source_roi.copy()
                         temporal_qa = {
                             **dict(temporal_candidate_qa),

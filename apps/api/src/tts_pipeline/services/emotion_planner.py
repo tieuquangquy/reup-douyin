@@ -114,7 +114,7 @@ def planner_enabled(
     config = dict(raw) if isinstance(raw, Mapping) else {}
     caps = dict(capabilities or {})
     return bool(
-        str(provider or "").strip().lower() == "google_gemini"
+        str(provider or "").strip().lower() in {"google_gemini", "google_cloud_tts"}
         and config.get("enabled") is True
         and caps.get("supports_audio_tags", True) is True
         and caps.get("supports_voice_direction", True) is True

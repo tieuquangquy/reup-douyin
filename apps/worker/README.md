@@ -28,6 +28,13 @@ python src/main.py
 
 Run this from `apps/worker` after API/worker dependencies are installed and `DATABASE_URL` is configured.
 
+Each stable `WORKER_ID` owns an OS-level singleton lock under
+`.dev/worker-locks`. This prevents an unclosed worker from an older code build
+from continuing to claim jobs after the development stack is restarted. The
+lock is released automatically if the process exits or crashes. Set
+`WORKER_LOCK_DIR` only when the default repository-local runtime directory is
+not writable.
+
 ## Current Status
 
 Worker skeleton only. No Redis queue backend, crawler, OCR, STT, TTS, render, or publishing logic has been implemented.

@@ -96,6 +96,10 @@ class OcrSummaryResponse(BaseModel):
     review_objects: list[dict] = Field(default_factory=list)
     translation_objects: list[dict] = Field(default_factory=list)
     visual_preview_asset_id: str | None = None
+    visual_preview_status: str = "NOT_STARTED"
+    visual_preview_error_code: str | None = None
+    visual_preview_error_message: str | None = None
+    visual_preview_retryable: bool = False
     can_render_final: bool = False
     audio_review_status: str = "NOT_STAGED"
     audio_mix_review_status: str = "NOT_STAGED"
@@ -227,6 +231,12 @@ def _summary_response(summary: dict) -> OcrSummaryResponse:
         review_objects=list(summary.get("review_objects") or []),
         translation_objects=list(summary.get("translation_objects") or []),
         visual_preview_asset_id=summary.get("visual_preview_asset_id"),
+        visual_preview_status=str(
+            summary.get("visual_preview_status") or "NOT_STARTED"
+        ),
+        visual_preview_error_code=summary.get("visual_preview_error_code"),
+        visual_preview_error_message=summary.get("visual_preview_error_message"),
+        visual_preview_retryable=bool(summary.get("visual_preview_retryable")),
         can_render_final=bool(summary.get("can_render_final")),
         audio_review_status=str(summary.get("audio_review_status") or "NOT_STAGED"),
         audio_mix_review_status=str(

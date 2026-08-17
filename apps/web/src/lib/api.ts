@@ -1781,6 +1781,7 @@ export type TranslationAiProfileSummary = {
   api_key_masked: string;
   api_key?: string;
   base_url: string;
+  region: string;
   timeout_seconds: number;
   fallback_provider: string;
   fallback_model: string;
@@ -1795,6 +1796,7 @@ export type TranslationAiResponse = {
   api_key_masked: string;
   api_key?: string;
   base_url: string;
+  region: string;
   timeout_seconds: number;
   fallback_provider: string;
   fallback_model: string;
@@ -1813,6 +1815,7 @@ export type TranslationAiPayload = {
   api_key?: string | null;
   clear_api_key?: boolean;
   base_url: string;
+  region: string;
   timeout_seconds: number;
   fallback_provider: string;
   fallback_model: string;
@@ -1977,6 +1980,7 @@ export async function listTranslationAiModels(payload: {
   api_key?: string | null;
   clear_api_key?: boolean;
   base_url?: string | null;
+  region?: string | null;
   timeout_seconds?: number;
   profile_id?: string | null;
 }): Promise<TranslationAiModelsResponse> {
@@ -2249,6 +2253,7 @@ export async function listCaptionAiModels(payload: {
   api_key?: string | null;
   clear_api_key?: boolean;
   base_url?: string | null;
+  region?: string | null;
   timeout_seconds?: number;
   profile_id?: string | null;
 }): Promise<TranslationAiModelsResponse> {
@@ -2593,7 +2598,12 @@ export async function deleteTtsAiProfile(profileId: string): Promise<TtsAiRespon
   return (await response.json()) as TtsAiResponse;
 }
 
-export async function testTtsAi(payload: Partial<TtsAiPayload> & { profile_id?: string }): Promise<TtsAiTestResponse> {
+export async function testTtsAi(
+  payload: Partial<TtsAiPayload> & {
+    profile_id?: string;
+    probe_mode?: "connection" | "catalog";
+  }
+): Promise<TtsAiTestResponse> {
   const response = await apiFetch(`${API_BASE_URL}/ops/tts-ai/test`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -2693,6 +2703,8 @@ export type TtsAiPreviewResponse = {
   text: string;
   requested_voice_id: string;
   resolved_voice_id: string;
+  requested_model_id: string;
+  resolved_model_id: string;
 };
 
 export async function previewTtsAiSpeech(payload: TtsAiPreviewPayload): Promise<TtsAiPreviewResponse> {

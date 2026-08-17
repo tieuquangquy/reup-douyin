@@ -15,6 +15,7 @@ from src.media_pipeline.ocr_filtering.script_filter import contains_cjk
 from src.media_pipeline.translator.client import build_openai_client
 from src.media_pipeline.translator.config import TranslatorSettings
 from src.media_pipeline.translator.memory import TranslationMemory
+from src.audio_pipeline.google_cloud_genai import is_google_cloud_retryable_error
 
 PHASE3_SCHEMA_VERSION = "phase3_translation_timeline_v1"
 PHASE3_APPROVAL_SCHEMA_VERSION = "phase3_translation_approvals_v1"
@@ -70,6 +71,8 @@ def _write_json_atomic(path: Path, payload: Any) -> None:
 
 
 def _is_retryable(exc: BaseException) -> bool:
+    if is_google_cloud_retryable_error(exc):
+        return True
     if isinstance(exc, (APITimeoutError, APIConnectionError, RateLimitError)):
         return True
     if isinstance(exc, APIStatusError):

@@ -93,6 +93,36 @@ class ProtectedTokenTests(unittest.TestCase):
 
 
 class ControlledDurationRewriteTests(unittest.TestCase):
+    def test_rewrite_prompt_reserves_punctuation_headroom(self) -> None:
+        class CapturingClient:
+            provider_name = "capturing"
+
+            def __init__(self) -> None:
+                self.prompts: list[str] = []
+                self.responses = [
+                    "Còn hộp quà cú đêm có hai món quà tặng là quạt mini với máy thổi bong bóng, mở ra xem nào.",
+                    "Hộp quà cú đêm tặng quạt mini và máy thổi bong bóng. Mở xem nhé.",
+                ]
+
+            def complete(self, prompt: str) -> str:
+                self.prompts.append(prompt)
+                return self.responses[min(len(self.prompts) - 1, len(self.responses) - 1)]
+
+        client = CapturingClient()
+        provider = DurationConstrainedTranslationProvider(primary=client, max_rewrite_rounds=2)
+        result = provider.translate(
+            "夜猫礼包有两个赠品",
+            preset=TranslationPreset.LITERAL_SAFE,
+            duration_budget_seconds=4.18,
+        )
+
+        self.assertEqual(
+            result.translated_text,
+            "Hộp quà cú đêm tặng quạt mini và máy thổi bong bóng. Mở xem nhé.",
+        )
+        self.assertIn("Target spoken-unit range: 14-16", client.prompts[1])
+        self.assertEqual(result.metadata["speech_budget"]["status"], "fits_budget")
+
     def test_rewrite_rejects_dropped_protected_tokens_then_keeps_safe_candidate(self) -> None:
         original = "Cho 200 g cơm vào chảo rồi đảo thật đều để cơm nóng hoàn toàn"
         client = FixedLlmClient(

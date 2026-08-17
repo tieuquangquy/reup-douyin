@@ -11,6 +11,26 @@ from scripts import run_phase4_adaptive
 
 
 class RunPhase4AdaptiveTests(unittest.TestCase):
+    def test_records_frame_diagnostics_before_render_meta_exists(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            error = run_phase4_adaptive.AdaptiveVideoRenderError(
+                "Adaptive frame blocked at index 5",
+                diagnostics={"frame_index": 5, "track_id": "sub_04"},
+            )
+
+            path = run_phase4_adaptive._record_runner_failure(
+                root,
+                visual_preview=True,
+                exc=error,
+            )
+
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["status"], "VISUAL_PREVIEW_RENDER_FAILED")
+            self.assertEqual(payload["failed_checks"], ["frame_render"])
+            self.assertEqual(payload["error"]["diagnostics"]["frame_index"], 5)
+            self.assertEqual(payload["error"]["type"], "AdaptiveVideoRenderError")
+
     def test_final_reuses_hash_bound_preview_and_skips_full_visual_qa(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -1,6 +1,6 @@
 /** LLM Ops provider presets for Translation / Caption AI (UI + gate authority). */
 
-export type LlmRuntimeMode = "gemini" | "ollama" | "openai_compatible";
+export type LlmRuntimeMode = "google_cloud" | "gemini" | "ollama" | "openai_compatible";
 export type LlmProviderCategory = "cloud" | "local" | "gateway" | "system";
 
 export type LlmProviderOption = {
@@ -9,11 +9,13 @@ export type LlmProviderOption = {
   runtime: LlmRuntimeMode;
   /** Auto-filled when Base URL is empty on provider change. */
   defaultBaseUrl?: string;
+  /** Auto-filled when Model is empty on provider change. */
+  defaultModel?: string;
 };
 
 /**
  * Dropdown order follows common IDE provider lists.
- * Most entries run as openai_compatible; gemini/ollama stay native.
+ * Most entries run as openai_compatible; google_cloud/gemini/ollama stay native.
  */
 export const LLM_PROVIDER_OPTIONS: readonly LlmProviderOption[] = [
   { id: "amazon_bedrock", label: "Amazon Bedrock", runtime: "openai_compatible" },
@@ -32,6 +34,12 @@ export const LLM_PROVIDER_OPTIONS: readonly LlmProviderOption[] = [
     defaultBaseUrl: "https://api.fireworks.ai/inference/v1"
   },
   { id: "gcp_vertex", label: "GCP Vertex AI", runtime: "openai_compatible" },
+  {
+    id: "google_cloud",
+    label: "Google Cloud Agent Platform",
+    runtime: "google_cloud",
+    defaultModel: "gemini-3.7-flash"
+  },
   { id: "gemini", label: "Google Gemini", runtime: "gemini" },
   { id: "litellm", label: "LiteLLM", runtime: "openai_compatible" },
   {
@@ -97,7 +105,7 @@ export const LLM_PROVIDER_OPTIONS: readonly LlmProviderOption[] = [
 const BY_ID = new Map(LLM_PROVIDER_OPTIONS.map((option) => [option.id, option]));
 
 /** Modes that never use the OpenAI-compatible HTTP client. */
-const NATIVE_MODES = new Set<string>(["gemini", "ollama", "qwen"]);
+const NATIVE_MODES = new Set<string>(["google_cloud", "gemini", "ollama", "qwen"]);
 
 export function llmProviderOption(provider: string): LlmProviderOption | undefined {
   return BY_ID.get((provider || "").trim().toLowerCase());
@@ -119,6 +127,10 @@ export function defaultBaseUrlFor(provider: string): string {
   return llmProviderOption(provider)?.defaultBaseUrl || "";
 }
 
+export function defaultModelFor(provider: string): string {
+  return llmProviderOption(provider)?.defaultModel || "";
+}
+
 export function showsLlmBaseUrl(provider: string): boolean {
   const mode = llmRuntimeMode(provider);
   return mode === "openai_compatible" || mode === "ollama";
@@ -126,7 +138,11 @@ export function showsLlmBaseUrl(provider: string): boolean {
 
 export function showsLlmApiKey(provider: string): boolean {
   const mode = llmRuntimeMode(provider);
-  return mode === "openai_compatible" || mode === "gemini";
+  return mode === "openai_compatible" || mode === "gemini" || mode === "google_cloud";
+}
+
+export function showsLlmRegion(provider: string): boolean {
+  return llmRuntimeMode(provider) === "google_cloud";
 }
 
 export function llmProviderLabel(provider: string): string {

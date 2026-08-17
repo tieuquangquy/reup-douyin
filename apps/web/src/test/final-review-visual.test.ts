@@ -783,6 +783,16 @@ assert.match(
 );
 assert.match(
   statesSource,
+  /final-review-prep-steps__checkpoint[\s\S]*journeyAnalysisDone[\s\S]*journeyReviewCount/,
+  "OCR review must replace fake percent progress with compact checkpoint states"
+);
+assert.match(
+  cssSource,
+  /\.final-review--prep \.final-review-prep-stage[\s\S]{0,100}align-items:\s*start/,
+  "Locked First render panel must not stretch to the Visual Clean panel height"
+);
+assert.match(
+  statesSource,
   /ocrWatchPaused|analyzePausedShort/,
   "Prep step Clean CTA must support a quiet Paused state (no Analyzing spinner)"
 );

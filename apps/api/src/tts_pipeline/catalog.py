@@ -216,6 +216,13 @@ GEMINI_TTS_MODELS = (
     "gemini-2.5-pro-preview-tts",
 )
 
+GOOGLE_CLOUD_AGENT_TTS_MODELS = (
+    "gemini-2.5-flash-tts",
+    "gemini-3.1-flash-preview-tts",
+    "gemini-2.5-pro-tts",
+    "gemini-2.5-flash-lite-preview-tts",
+)
+
 
 def normalize_gemini_voice_id(value: Any) -> str:
     """Return a canonical Gemini voice id, including legacy Cloud ids."""
@@ -289,7 +296,7 @@ def capabilities_for_provider(provider: str, *, local_backend: str = "auto") -> 
         )
     if name == "cli":
         return TtsFieldCapabilities(voice=True, cli_binary=True)
-    if name in {"google", "google_gemini", "elevenlabs"}:
+    if name in {"google", "google_gemini", "google_cloud_tts", "elevenlabs"}:
         return TtsFieldCapabilities(voice=True, model=True, api_key=True)
     if name in {"azure", "openai"}:
         return TtsFieldCapabilities(voice=True, model=True, api_key=True, base_url=True)
@@ -339,6 +346,8 @@ def discover_tts_catalog(
         return _discover_omnivoice()
     if name == "google_gemini":
         return _discover_google_gemini()
+    if name == "google_cloud_tts":
+        return _discover_google_cloud_agent_tts()
     if name in {
         "google",
         "azure",
@@ -410,6 +419,46 @@ def _discover_google_gemini() -> TtsProviderCatalog:
         default_language_code="vi-VN",
         warning="Gemini voice choices are provider-native curated presets.",
         capabilities=capabilities_for_provider("google_gemini"),
+    )
+
+
+def _discover_google_cloud_agent_tts() -> TtsProviderCatalog:
+    voices = [
+        TtsVoiceOption(
+            id=voice_id,
+            label=label,
+            languages=["vi-VN"],
+            models=list(GOOGLE_CLOUD_AGENT_TTS_MODELS),
+            capabilities=["expressive", "single_speaker", "agent_platform"],
+        )
+        for voice_id, label in GEMINI_TTS_VOICES
+    ]
+    voice_ids = [voice.id for voice in voices]
+    model_options = [
+        TtsModelOption(
+            id=model_id,
+            label=model_id,
+            languages=["vi-VN"],
+            voices=voice_ids,
+            capabilities=["audio", "expressive_tts", "agent_platform"],
+        )
+        for model_id in GOOGLE_CLOUD_AGENT_TTS_MODELS
+    ]
+    return TtsProviderCatalog(
+        source="curated",
+        voices=voices,
+        models=list(GOOGLE_CLOUD_AGENT_TTS_MODELS),
+        model_options=model_options,
+        languages=[TtsLanguageOption(code="vi-VN", label="Tiếng Việt (Việt Nam)")],
+        default_voice_id="Achernar",
+        default_model_id=GOOGLE_CLOUD_AGENT_TTS_MODELS[0],
+        default_language_code="vi-VN",
+        warning=(
+            "Agent Platform API-key mode uses a curated catalog because Vertex models.list "
+            "requires OAuth2. Refresh is offline; Test Connection performs a real audio "
+            "generation request."
+        ),
+        capabilities=capabilities_for_provider("google_cloud_tts"),
     )
 
 

@@ -147,7 +147,7 @@ export const TTS_KIND_ORDER: TtsProviderKind[] = ["local", "cloud", "http", "sys
 
 export const TTS_PROVIDERS_BY_KIND: Record<TtsProviderKind, readonly string[]> = {
   local: ["edge", "vieneu", "omnivoice", "cli", "custom"],
-  cloud: ["google", "google_gemini", "azure", "elevenlabs", "openai"],
+  cloud: ["google", "google_gemini", "google_cloud_tts", "azure", "elevenlabs", "openai"],
   http: ["openai_compatible", "http_custom"],
   system: ["auto", "placeholder"]
 };
@@ -256,6 +256,13 @@ export const GEMINI_TTS_MODELS = [
   "gemini-2.5-pro-preview-tts"
 ] as const;
 
+export const GOOGLE_CLOUD_AGENT_TTS_MODELS = [
+  "gemini-2.5-flash-tts",
+  "gemini-3.1-flash-preview-tts",
+  "gemini-2.5-pro-tts",
+  "gemini-2.5-flash-lite-preview-tts"
+] as const;
+
 export const GEMINI_TTS_VOICES = [
   ["Zephyr", "Zephyr · bright"], ["Puck", "Puck · upbeat"],
   ["Charon", "Charon · informative"], ["Kore", "Kore · firm"],
@@ -332,6 +339,41 @@ export function resolveTtsCatalogForProvider(
   provider: string,
   persistedCatalog: TtsAiCatalog | null | undefined
 ): TtsAiCatalog | null {
+  if (provider.trim().toLowerCase() === "google_cloud_tts") {
+    const voiceIds = GEMINI_TTS_VOICES.map(([id]) => id);
+    return {
+      source: persistedCatalog?.source === "provider" ? "provider" : "curated",
+      voices: GEMINI_TTS_VOICES.map(([id, label]) => ({
+        id,
+        label,
+        languages: ["vi-VN"],
+        models: [...GOOGLE_CLOUD_AGENT_TTS_MODELS],
+        capabilities: ["expressive", "single_speaker", "agent_platform"]
+      })),
+      styles: [],
+      models: [...GOOGLE_CLOUD_AGENT_TTS_MODELS],
+      model_options: GOOGLE_CLOUD_AGENT_TTS_MODELS.map((id) => ({
+        id,
+        label: id,
+        languages: ["vi-VN"],
+        voices: voiceIds,
+        capabilities: ["audio", "expressive_tts", "agent_platform"]
+      })),
+      languages: [{ code: "vi-VN", label: "Tiếng Việt (Việt Nam)" }],
+      default_voice_id: "Achernar",
+      default_model_id: GOOGLE_CLOUD_AGENT_TTS_MODELS[0],
+      default_language_code: "vi-VN",
+      warning: persistedCatalog?.warning || "",
+      discovery: persistedCatalog?.discovery || null,
+      sample_rate: persistedCatalog?.sample_rate ?? null,
+      backends: [],
+      capabilities: persistedCatalog?.capabilities || {
+        voice: true,
+        model: true,
+        api_key: true
+      }
+    };
+  }
   if (provider.trim().toLowerCase() === "google_gemini") {
     const voiceIds = GEMINI_TTS_VOICES.map(([id]) => id);
     return {
@@ -523,7 +565,7 @@ export function getTtsFieldCapabilities(
     };
   } else if (mode === "cli") {
     base = { ...EMPTY_CAPS, voice: true, cli_binary: true };
-  } else if (["google", "google_gemini", "azure", "elevenlabs", "openai"].includes(mode)) {
+  } else if (["google", "google_gemini", "google_cloud_tts", "azure", "elevenlabs", "openai"].includes(mode)) {
     base = {
       ...EMPTY_CAPS,
       voice: true,

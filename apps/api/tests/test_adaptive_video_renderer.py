@@ -8,9 +8,15 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+import cv2
+import numpy as np
+
 from src.media_pipeline.video_renderer.adaptive_video import (
+    _outlined_caption_present,
     AdaptiveVideoRenderError,
+    active_protected_source_regions_for_frame,
     active_tracks_for_frame,
+    dynamic_track_for_frame,
     build_audio_mux_command,
     execute_mux_with_fallback,
     remux_adaptive_preview_as_final,
@@ -23,6 +29,95 @@ from src.media_pipeline.video_renderer.adaptive_video import (
 
 
 class AdaptiveVideoContractTests(unittest.TestCase):
+    def test_coloured_outlined_caption_is_detected_in_semantic_extension(self) -> None:
+        frame = np.full((200, 400, 3), 150, dtype=np.uint8)
+        for x in (80, 125, 170, 215):
+            cv2.rectangle(frame, (x, 90), (x + 28, 116), (30, 30, 30), -1)
+            cv2.rectangle(frame, (x + 4, 94), (x + 24, 112), (90, 130, 255), -1)
+        track = {
+            "geometry": {"x": 0.18, "y": 0.45, "width": 0.50, "height": 0.13},
+            "render_policy": {
+                "cover": {
+                    "roi": {"x": 0.15, "y": 0.40, "width": 0.60, "height": 0.20}
+                }
+            },
+        }
+
+        self.assertTrue(_outlined_caption_present(frame, track))
+
+    def test_screen_locked_semantic_caption_ignores_outlier_cover_geometry(self) -> None:
+        canonical_cover = {"x": 0.14, "y": 0.70, "width": 0.72, "height": 0.08}
+        row = {
+            "semantic_dialogue_hardsub": True,
+            "visual_provenance": {
+                "classification": "EDITOR_OVERLAY",
+                "confidence": 0.95,
+            },
+            "geometry": {"x": 0.16, "y": 0.72, "width": 0.68, "height": 0.04},
+            "coverage_authority": {
+                "geometry_keyframes": [
+                    {
+                        "frame_index": 20,
+                        "geometry": {
+                            "x": 0.04,
+                            "y": 0.82,
+                            "width": 0.08,
+                            "height": 0.02,
+                        },
+                    }
+                ]
+            },
+            "render_policy": {
+                "cover": {"roi": canonical_cover.copy(), "geometry_mode": "track_relative"},
+                "layout": {
+                    "safe_area": {"x": 0.08, "y": 0.69, "width": 0.84, "height": 0.10}
+                },
+            },
+        }
+
+        projected = dynamic_track_for_frame(row, 20)
+
+        self.assertEqual(projected["render_policy"]["cover"]["roi"], canonical_cover)
+        self.assertEqual(projected["geometry"]["y"], 0.82)
+
+    def test_confirmed_semantic_extension_uses_full_caption_lane(self) -> None:
+        row = {
+            "text_id": "dialogue",
+            "semantic_dialogue_hardsub": True,
+            "semantic_envelope_visual_confirmation": True,
+            "geometry": {"x": 0.18, "y": 0.72, "width": 0.64, "height": 0.04},
+            "coverage_authority": {
+                "geometry_keyframes": [
+                    {
+                        "frame_index": 10,
+                        "geometry": {"x": 0.18, "y": 0.72, "width": 0.64, "height": 0.04},
+                    }
+                ]
+            },
+            "render_policy": {
+                "cover": {
+                    "roi": {"x": 0.16, "y": 0.70, "width": 0.68, "height": 0.08}
+                },
+                "layout": {
+                    "mode": "cover_aligned",
+                    "safe_area": {"x": 0.12, "y": 0.69, "width": 0.76, "height": 0.10},
+                },
+                "damage_budget": {"max_frame_change_fraction": 0.05},
+            },
+        }
+
+        projected = dynamic_track_for_frame(row, 12)
+
+        cover = projected["render_policy"]["cover"]
+        self.assertEqual(
+            (cover["roi"]["x"], cover["roi"]["width"]),
+            (0.0, 1.0),
+        )
+        self.assertEqual(cover["geometry_mode"], "full_width_caption_lane")
+        self.assertEqual(
+            projected["render_policy"]["layout"]["safe_area"]["width"], 0.92
+        )
+
     def test_final_can_reuse_exact_approved_preview_video_stream(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -134,6 +229,23 @@ class AdaptiveVideoContractTests(unittest.TestCase):
             "end_frame": 3,
         }
         self.assertTrue(should_seed_reference_plate(approved))
+
+    def test_soft_caption_reference_requires_explicit_operator_approval(self) -> None:
+        track = {
+            "start_frame": 100,
+            "end_frame": 130,
+            "render_policy": {
+                "cover": {
+                    "mask_mode": "full_roi_plate",
+                    "soft_cover_epoch_id": "caption_style",
+                },
+                "context": {},
+            },
+        }
+
+        self.assertFalse(should_seed_reference_plate(track))
+        track["render_policy"]["context"]["reference_plate_operator_approved"] = True
+        self.assertTrue(should_seed_reference_plate(track))
 
     def test_activation_uses_frame_authority_not_nominal_timestamp(self) -> None:
         contract = {
@@ -253,16 +365,21 @@ class AdaptiveVideoContractTests(unittest.TestCase):
                         "presence_ranges": [[14, 16]],
                     },
                     "render_policy": {
-                        "cover": {"transition_hold_frames": 0}
+                        "cover": {"transition_hold_frames": 0},
+                        "context": {
+                            "physical_presence_ranges": [[10, 12], [18, 20]]
+                        },
                     },
                 }
             ]
         }
 
         before_presence = active_tracks_for_frame(contract, 12)
+        detector_gap = active_tracks_for_frame(contract, 17)
         during_presence = active_tracks_for_frame(contract, 15)
 
         self.assertEqual(len(before_presence), 1)
+        self.assertEqual(len(detector_gap), 1)
         self.assertFalse(before_presence[0].get("cover_only", False))
         self.assertFalse(during_presence[0].get("cover_only", False))
 
@@ -479,6 +596,79 @@ class AdaptiveVideoContractTests(unittest.TestCase):
         self.assertEqual([row["text_id"] for row in cover_only], ["late_caption"])
         self.assertTrue(cover_only[0]["cover_only"])
         self.assertFalse(text_active[0]["cover_only"])
+
+    def test_semantic_dialogue_suppresses_overlapping_protected_ocr_shadow(self) -> None:
+        contract = {
+            "render_tracks": [
+                {
+                    "text_id": "dialogue",
+                    "start_frame": 10,
+                    "end_frame": 20,
+                    "cover_start_frame": 8,
+                    "cover_end_frame": 22,
+                    "semantic_dialogue_hardsub": True,
+                    "geometry": {"x": 0.15, "y": 0.72, "width": 0.70, "height": 0.06},
+                }
+            ],
+            "protected_source_tracks": [
+                {
+                    "text_id": "shadow",
+                    "start_frame": 8,
+                    "end_frame": 22,
+                    "geometry": {"x": 0.16, "y": 0.72, "width": 0.68, "height": 0.06},
+                    "visual_provenance": {
+                        "classification": "SOURCE_INTRINSIC",
+                        "confidence": 0.98,
+                    },
+                },
+                {
+                    "text_id": "phone_label",
+                    "start_frame": 8,
+                    "end_frame": 22,
+                    "geometry": {"x": 0.05, "y": 0.20, "width": 0.20, "height": 0.05},
+                    "visual_provenance": {
+                        "classification": "SOURCE_INTRINSIC",
+                        "confidence": 0.98,
+                    },
+                },
+            ],
+        }
+
+        protected = active_protected_source_regions_for_frame(contract, 15)
+
+        self.assertEqual([row["text_id"] for row in protected], ["phone_label"])
+
+    def test_semantic_cover_suppresses_outline_fragment_below_geometry(self) -> None:
+        contract = {
+            "render_tracks": [
+                {
+                    "text_id": "dialogue",
+                    "start_frame": 10,
+                    "end_frame": 20,
+                    "semantic_dialogue_hardsub": True,
+                    "geometry": {"x": 0.18, "y": 0.72, "width": 0.70, "height": 0.035},
+                    "render_policy": {
+                        "cover": {
+                            "roi": {"x": 0.16, "y": 0.705, "width": 0.74, "height": 0.065}
+                        }
+                    },
+                }
+            ],
+            "protected_source_tracks": [
+                {
+                    "text_id": "outline_fragment",
+                    "start_frame": 10,
+                    "end_frame": 20,
+                    "geometry": {"x": 0.17, "y": 0.751, "width": 0.05, "height": 0.016},
+                    "visual_provenance": {
+                        "classification": "SOURCE_INTRINSIC",
+                        "confidence": 0.98,
+                    },
+                }
+            ],
+        }
+
+        self.assertEqual(active_protected_source_regions_for_frame(contract, 15), [])
 
     def test_vfr_contract_requires_pts_map(self) -> None:
         contract = {

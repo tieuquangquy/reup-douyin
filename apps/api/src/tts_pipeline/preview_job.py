@@ -31,6 +31,8 @@ class TtsPreviewJobSnapshot:
     text: str = ""
     requested_voice_id: str = ""
     resolved_voice_id: str = ""
+    requested_model_id: str = ""
+    resolved_model_id: str = ""
     ok: bool = False
 
 
@@ -64,6 +66,8 @@ def _copy_snapshot(snap: TtsPreviewJobSnapshot) -> TtsPreviewJobSnapshot:
         text=snap.text,
         requested_voice_id=snap.requested_voice_id,
         resolved_voice_id=snap.resolved_voice_id,
+        requested_model_id=snap.requested_model_id,
+        resolved_model_id=snap.resolved_model_id,
         ok=snap.ok,
     )
 
@@ -124,6 +128,7 @@ def start_tts_preview_job(
         provider=str(getattr(workspace_tts, "provider", "") or "").strip(),
         text=(text or "").strip()[: max(20, min(int(max_chars or 280), 500))],
         requested_voice_id=str(getattr(workspace_tts, "voice_id", "") or "").strip(),
+        requested_model_id=str(getattr(workspace_tts, "model_id", "") or "").strip(),
         ok=False,
     )
 
@@ -208,6 +213,8 @@ def _run_preview_job(
             record.snapshot.text = str(result.get("text") or "")
             record.snapshot.requested_voice_id = str(result.get("requested_voice_id") or "")
             record.snapshot.resolved_voice_id = str(result.get("resolved_voice_id") or "")
+            record.snapshot.requested_model_id = str(result.get("requested_model_id") or "")
+            record.snapshot.resolved_model_id = str(result.get("resolved_model_id") or "")
         logger.info(
             "tts_preview_job_ok",
             extra={"workspace_id": workspace_id, "provider": record.snapshot.provider},

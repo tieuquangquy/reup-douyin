@@ -81,7 +81,11 @@ continues to `ocr → render` instead of stopping.
   to Transcript; empty output asks for re-analysis or an explicit no-dialogue decision.
   Guessing here either drops needed dubbing or voices corrupt text, so this gate is deliberate.
   See `docs/audio-analysis-pipeline.md`.
-- **Any failed job** — the item records the job's error code and stops.
+- **Any failed job** — the item records the job's error code and stops. Metadata preserves
+  `pipeline_failed_step` plus a secret-safe `pipeline_error` object (`error_domain`, retry
+  class, provider HTTP/code when available, and recovery action), while `pipeline_step`
+  moves to `needs_attention`. The Queue UI uses this authority to distinguish Download,
+  Analyze Audio, Translation, TTS, OCR, Preview and Final Render failures.
 - **Hold / pause** — `pipeline_hold` (or `held_at`) blocks advancement; `resume_item`
   re-enqueues the step the item was paused on.
 

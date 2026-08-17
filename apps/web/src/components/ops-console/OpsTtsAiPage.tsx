@@ -114,6 +114,7 @@ type FormState = {
   googleServiceAccountJson: string;
   googleServiceAccountFileName: string;
   clearGoogleServiceAccount: boolean;
+  googleCloudRegion: string;
   baseUrl: string;
   timeoutSeconds: string;
   fallbackProvider: string;
@@ -150,6 +151,10 @@ function toForm(data: TtsAiResponse): FormState {
       ? (options.expressive_tts as Record<string, unknown>)
       : {};
   const provider = data.provider || "auto";
+  const agentOptions =
+    options.google_cloud_tts && typeof options.google_cloud_tts === "object"
+      ? (options.google_cloud_tts as Record<string, unknown>)
+      : {};
   const recipe = getLocalInstallRecipe(provider);
   const choice = resolveProviderChoice(provider);
   return {
@@ -158,8 +163,8 @@ function toForm(data: TtsAiResponse): FormState {
     providerChoice: choice.choice,
     customProviderSlug: choice.customSlug,
     voiceId:
-      provider === "google_gemini"
-        ? canonicalizeGeminiVoiceId(data.voice_id) || "Kore"
+      isGeminiExpressiveProvider(provider)
+        ? canonicalizeGeminiVoiceId(data.voice_id) || (provider === "google_cloud_tts" ? "Achernar" : "Kore")
         : data.voice_id || "",
     speakingRate: String(data.speaking_rate ?? 1),
     languageCode: data.language_code || "vi",
@@ -169,6 +174,7 @@ function toForm(data: TtsAiResponse): FormState {
     googleServiceAccountJson: "",
     googleServiceAccountFileName: "",
     clearGoogleServiceAccount: false,
+    googleCloudRegion: typeof agentOptions.region === "string" ? agentOptions.region : "global",
     baseUrl: data.base_url || (provider === "google" ? "https://texttospeech.googleapis.com/v1" : ""),
     timeoutSeconds: String(data.timeout_seconds ?? 120),
     fallbackProvider: data.fallback_provider || "none",
@@ -186,7 +192,7 @@ function toForm(data: TtsAiResponse): FormState {
     synthesisStrategy:
       typeof expressive.synthesis_strategy === "string"
         ? expressive.synthesis_strategy
-        : provider === "google_gemini"
+        : isGeminiExpressiveProvider(provider)
           ? "whole_video"
           : "segment",
     maxWholeVideoSeconds: String(expressive.max_whole_video_seconds ?? 180),
@@ -263,12 +269,16 @@ const GOOGLE_CREDENTIAL_MODES = [
   "google_adc",
   "google_oauth_token"
 ] as const;
-const DIRECT_CLOUD_PREVIEW_PROVIDERS = new Set(["google", "google_gemini"]);
+const DIRECT_CLOUD_PREVIEW_PROVIDERS = new Set(["google", "google_gemini", "google_cloud_tts"]);
 const HTTP_CONNECTOR_MODES: HttpConnectorMode[] = ["auto", "openapi", "custom"];
 const HTTP_CATALOG_RESOURCES = ["models", "voices", "languages"] as const;
 
 function supportsDirectCloudPreview(provider: string): boolean {
   return DIRECT_CLOUD_PREVIEW_PROVIDERS.has((provider || "").trim().toLowerCase());
+}
+
+function isGeminiExpressiveProvider(provider: string): boolean {
+  return ["google_gemini", "google_cloud_tts"].includes((provider || "").trim().toLowerCase());
 }
 
 function sameCatalogId(left: string | null | undefined, right: string | null | undefined): boolean {
@@ -419,6 +429,7 @@ function blankForm(): FormState {
     googleServiceAccountJson: "",
     googleServiceAccountFileName: "",
     clearGoogleServiceAccount: false,
+    googleCloudRegion: "global",
     baseUrl: "",
     timeoutSeconds: "",
     fallbackProvider: "",
@@ -722,6 +733,8 @@ export function OpsTtsAiPage() {
     detail: string;
     requestedVoiceId: string;
     resolvedVoiceId: string;
+    requestedModelId: string;
+    resolvedModelId: string;
   } | null>(null);
   const [profiles, setProfiles] = useState<TtsAiProfileSummary[]>([]);
   const [activeProfileId, setActiveProfileId] = useState("");
@@ -955,7 +968,7 @@ export function OpsTtsAiPage() {
       mode: ["off", "best_effort", "required"].includes(form.expressiveMode)
         ? form.expressiveMode
         : "best_effort",
-      ...(provider === "google_gemini"
+      ...(isGeminiExpressiveProvider(provider)
         ? {
             synthesis_strategy: ["whole_video", "auto_blocks", "segment"].includes(
               form.synthesisStrategy
@@ -982,6 +995,16 @@ export function OpsTtsAiPage() {
           }
         : {})
     };
+    if (provider === "google_cloud_tts") {
+      options_json.google_cloud_tts = {
+        ...(
+          options_json.google_cloud_tts && typeof options_json.google_cloud_tts === "object"
+            ? (options_json.google_cloud_tts as Record<string, unknown>)
+            : {}
+        ),
+        region: form.googleCloudRegion || "global"
+      };
+    }
     if (resolveTtsProviderKind(provider) === "local") {
       delete options_json.install_command;
       delete options_json.extra_requirement;
@@ -994,7 +1017,11 @@ export function OpsTtsAiPage() {
       if (provider !== "vieneu") delete options_json.style;
       if (provider === "vieneu") options_json.style = form.style || "tu_nhien";
     }
-    if (["http", "cloud"].includes(resolveTtsProviderKind(provider)) && provider !== "google") {
+    if (
+      ["http", "cloud"].includes(resolveTtsProviderKind(provider)) &&
+      provider !== "google" &&
+      provider !== "google_cloud_tts"
+    ) {
       delete options_json.http_connector;
       Object.assign(options_json, httpConnectorToOptions(form.httpConnector));
     }
@@ -1203,7 +1230,7 @@ export function OpsTtsAiPage() {
     }
   }
 
-  async function onTest() {
+  async function onTest(probeMode: "connection" | "catalog" = "connection") {
     if (!form) return;
     if (kindRequiresNamedProvider(kind)) {
       const named = nameProviderForTest(form);
@@ -1267,7 +1294,11 @@ export function OpsTtsAiPage() {
     setError(null);
     setTestResult(null);
     try {
-      const result = await testTtsAi({ ...payload, profile_id: editingProfileId || undefined });
+      const result = await testTtsAi({
+        ...payload,
+        profile_id: editingProfileId || undefined,
+        probe_mode: probeMode
+      });
       setTestResult({
         ok: result.ok,
         provider: result.provider,
@@ -1367,6 +1398,18 @@ export function OpsTtsAiPage() {
       if (!patch.baseUrl.trim()) patch.baseUrl = "https://generativelanguage.googleapis.com/v1beta";
       if (!patch.modelId.trim()) patch.modelId = "gemini-2.5-flash-preview-tts";
       patch.voiceId = canonicalizeGeminiVoiceId(patch.voiceId) || "Kore";
+      patch.expressiveMode = "required";
+      patch.synthesisStrategy = "whole_video";
+      patch.maxWholeVideoSeconds = "180";
+      patch.maxBlockSeconds = "45";
+      patch.compactTriggerRatio = "0.88";
+    } else if (next === "google_cloud_tts") {
+      patch.credentialMode = "api_key";
+      patch.baseUrl = "";
+      patch.modelId = "gemini-2.5-flash-tts";
+      patch.voiceId = canonicalizeGeminiVoiceId(patch.voiceId) || "Achernar";
+      patch.languageCode = "vi-VN";
+      patch.googleCloudRegion = "global";
       patch.expressiveMode = "required";
       patch.synthesisStrategy = "whole_video";
       patch.maxWholeVideoSeconds = "180";
@@ -1705,7 +1748,7 @@ export function OpsTtsAiPage() {
     });
     setCatalogRefreshPhase("loading");
     try {
-      await onTest();
+      await onTest("catalog");
     } finally {
       setCatalogRefreshPhase("idle");
     }
@@ -1914,6 +1957,9 @@ export function OpsTtsAiPage() {
     if (/cloud TTS adapter is not enabled|settings are saved, but the cloud TTS adapter/i.test(message)) {
       return t("opsTtsAi.previewCloudUnavailable");
     }
+    if (/google_cloud_http_404[\s\S]*publisher model|publisher model[\s\S]*not found/i.test(message)) {
+      return t("opsTtsAi.previewGoogleModelUnavailable");
+    }
     if (/requires an API key|api[_ -]?key/i.test(message)) {
       return t("opsTtsAi.previewNeedApiKey");
     }
@@ -2024,7 +2070,9 @@ export function OpsTtsAiPage() {
           duration: 0,
           detail: t("opsTtsAi.previewing"),
           requestedVoiceId: started.requested_voice_id || payload.voice_id || "",
-          resolvedVoiceId: started.resolved_voice_id || ""
+          resolvedVoiceId: started.resolved_voice_id || "",
+          requestedModelId: started.requested_model_id || payload.model_id || "",
+          resolvedModelId: started.resolved_model_id || ""
         });
         const maxAttempts = 300;
         for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
@@ -2043,7 +2091,9 @@ export function OpsTtsAiPage() {
               duration: 0,
               detail: t("opsTtsAi.previewing"),
               requestedVoiceId: status.requested_voice_id || payload.voice_id || "",
-              resolvedVoiceId: status.resolved_voice_id || ""
+              resolvedVoiceId: status.resolved_voice_id || "",
+              requestedModelId: status.requested_model_id || payload.model_id || "",
+              resolvedModelId: status.resolved_model_id || ""
             });
             continue;
           }
@@ -2073,7 +2123,9 @@ export function OpsTtsAiPage() {
             duration: status.duration_seconds,
             detail: status.detail,
             requestedVoiceId: status.requested_voice_id || payload.voice_id || "",
-            resolvedVoiceId: status.resolved_voice_id || ""
+            resolvedVoiceId: status.resolved_voice_id || "",
+            requestedModelId: status.requested_model_id || payload.model_id || "",
+            resolvedModelId: status.resolved_model_id || ""
           });
           notify({ id: "tts-preview-finished", message: status.detail || t("opsTtsAi.preview"), tone: "success" });
           return;
@@ -2102,7 +2154,9 @@ export function OpsTtsAiPage() {
         duration: started.duration_seconds,
         detail: started.detail,
         requestedVoiceId: started.requested_voice_id || payload.voice_id || "",
-        resolvedVoiceId: started.resolved_voice_id || ""
+        resolvedVoiceId: started.resolved_voice_id || "",
+        requestedModelId: started.requested_model_id || payload.model_id || "",
+        resolvedModelId: started.resolved_model_id || ""
       });
       notify({ id: "tts-preview-finished", message: started.detail || t("opsTtsAi.preview"), tone: "success" });
     } catch (err) {
@@ -2358,7 +2412,11 @@ export function OpsTtsAiPage() {
                             hasFallback ? `FB: ${profile.fallback_provider}${profile.fallback_voice_id?.trim() ? ` / ${profile.fallback_voice_id}` : ""}` : ""
                           ].filter(Boolean).join(" · ")}
                         >
-                          <strong>{profile.provider || "auto"}</strong>
+                          <strong>
+                            {profile.provider === "google_cloud_tts"
+                              ? t("opsTtsAi.providerGoogleCloudTts")
+                              : profile.provider || "auto"}
+                          </strong>
                           <span aria-hidden="true">·</span>
                           <span>{profile.voice_id?.trim() || "—"}</span>
                           {profile.model_id?.trim() ? <><span aria-hidden="true">·</span><span>{profile.model_id}</span></> : null}
@@ -2473,6 +2531,7 @@ export function OpsTtsAiPage() {
   const isGoogle = activeProvider === "google" || (
     activeProvider === "google_gemini" && form.credentialMode !== "api_key"
   );
+  const isGoogleAgentTts = activeProvider === "google_cloud_tts";
   const googleDraftMetadata = googleServiceAccountMetadata(form.googleServiceAccountJson);
   const googleServiceAccountReady = Boolean(googleDraftMetadata) ||
     (meta.googleServiceAccountSet && !form.clearGoogleServiceAccount);
@@ -2934,7 +2993,11 @@ export function OpsTtsAiPage() {
               ) : null}
               {TTS_PROVIDERS_BY_KIND[kind].map((slug) => (
                 <option key={slug} value={slug}>
-                  {slug === "custom" ? t("opsTtsAi.providerCustom") : slug}
+                  {slug === "custom"
+                    ? t("opsTtsAi.providerCustom")
+                    : slug === "google_cloud_tts"
+                      ? t("opsTtsAi.providerGoogleCloudTts")
+                      : slug}
                 </option>
               ))}
             </select>
@@ -2958,7 +3021,7 @@ export function OpsTtsAiPage() {
             </select>
             <p className="ops-tts-field-hint">{t("opsTtsAi.expressiveModeHint")}</p>
           </div>
-          {activeProvider === "google_gemini" ? (
+          {isGeminiExpressiveProvider(activeProvider) ? (
             <>
               <div className="ops-form-field ops-tts-span-2">
                 <label htmlFor="tts-ai-synthesis-strategy">
@@ -3108,7 +3171,7 @@ export function OpsTtsAiPage() {
               <p>{t(isHttp ? "opsTtsAi.sectionHttpHint" : "opsTtsAi.sectionCredentialsHint")}</p>
             </header>
             <div className="ops-tts-grid">
-              {(isHttp || isCloud || fieldCaps.base_url) ? (
+              {(isHttp || isCloud || fieldCaps.base_url) && activeProvider !== "google_cloud_tts" ? (
                 <div className="ops-form-field ops-tts-span-2">
                   <label htmlFor="tts-ai-base-url">{t("opsTtsAi.baseUrl")}</label>
                   <input
@@ -3237,8 +3300,28 @@ export function OpsTtsAiPage() {
                   </div>
                 </>
               ) : null}
+              {activeProvider === "google_cloud_tts" ? (
+                <div className="ops-form-field ops-tts-span-2">
+                  <label htmlFor="tts-ai-google-cloud-region">{t("opsTtsAi.googleCloudRegion")}</label>
+                  <select
+                    id="tts-ai-google-cloud-region"
+                    value={form.googleCloudRegion || "global"}
+                    onChange={(event) =>
+                      setForm((current) =>
+                        current ? { ...current, googleCloudRegion: event.target.value } : current
+                      )
+                    }
+                    disabled={testing || catalogRefreshBusy}
+                  >
+                    <option value="global">global</option>
+                  </select>
+                  <p className="ops-tts-field-hint ops-tts-field-hint--quiet">
+                    {t("opsTtsAi.googleCloudRegionHint")}
+                  </p>
+                </div>
+              ) : null}
             </div>
-            {(isCloud || isHttp) && !isGoogle ? (
+            {(isCloud || isHttp) && !isGoogle && !isGoogleAgentTts ? (
               <div className="ops-tts-http-connector" aria-label={t("opsTtsAi.httpConnectorTitle")}>
                 <div className="ops-tts-http-connector__intro">
                   <div>
@@ -4600,6 +4683,9 @@ export function OpsTtsAiPage() {
                   {previewMeta.provider}
                   {previewMeta.resolvedVoiceId || previewMeta.requestedVoiceId
                     ? ` · ${previewMeta.resolvedVoiceId || previewMeta.requestedVoiceId}`
+                    : ""}
+                  {previewMeta.resolvedModelId || previewMeta.requestedModelId
+                    ? ` · ${previewMeta.resolvedModelId || previewMeta.requestedModelId}`
                     : ""}
                   {` · ${previewMeta.duration.toFixed(1)}s`}
                 </span>

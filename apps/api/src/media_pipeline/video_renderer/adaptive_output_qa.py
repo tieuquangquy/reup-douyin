@@ -26,6 +26,7 @@ from src.media_pipeline.video_renderer.source_text_provenance import (
     is_editor_caption_track,
 )
 from src.media_pipeline.video_renderer.adaptive_video import (
+    active_protected_source_regions_for_frame,
     active_tracks_for_frame,
     dynamic_track_for_frame,
 )
@@ -123,6 +124,16 @@ SOURCE_INTRINSIC_OFF_LANE_TEXTURE_MAX_CONFIDENCE = 0.70
 SOURCE_INTRINSIC_OFF_LANE_TEXTURE_MAX_Y = 0.65
 SOURCE_INTRINSIC_LARGE_LOW_CONF_TEXTURE_MAX_AREA = 0.30
 SOURCE_INTRINSIC_LARGE_LOW_CONF_TEXTURE_MAX_CONFIDENCE = 0.55
+# Small printed labels on products/props can sit near the subtitle lane. They
+# are source content, not an editor caption, when the source/output patch is
+# unchanged, the box is bounded, and no conservative caption authority covers
+# it. Keep the bounds well below a normal dialogue row so a missed subtitle
+# cannot be silently classified as object print.
+SOURCE_INTRINSIC_BOUNDED_PRINT_MAX_CHARS = 3
+SOURCE_INTRINSIC_BOUNDED_PRINT_MAX_AREA = 0.006
+SOURCE_INTRINSIC_BOUNDED_PRINT_MAX_WIDTH = 0.15
+SOURCE_INTRINSIC_BOUNDED_PRINT_MAX_HEIGHT = 0.075
+SOURCE_INTRINSIC_BOUNDED_PRINT_MAX_CONFIDENCE = 0.75
 
 
 class AdaptiveOutputQaError(RuntimeError):
@@ -662,9 +673,47 @@ def evaluate_cover_layout_alignment(contract: Mapping[str, Any]) -> dict[str, An
         )
         dx = abs(cover_center[0] - layout_center[0])
         dy = abs(cover_center[1] - layout_center[1])
+        cover_area = max(
+            0.0,
+            float(cover.get("width") or 0.0)
+            * float(cover.get("height") or 0.0),
+        )
+        intersection = max(
+            0.0,
+            min(
+                float(cover.get("x") or 0.0)
+                + float(cover.get("width") or 0.0),
+                float(layout.get("x") or 0.0)
+                + float(layout.get("width") or 0.0),
+            )
+            - max(
+                float(cover.get("x") or 0.0),
+                float(layout.get("x") or 0.0),
+            ),
+        ) * max(
+            0.0,
+            min(
+                float(cover.get("y") or 0.0)
+                + float(cover.get("height") or 0.0),
+                float(layout.get("y") or 0.0)
+                + float(layout.get("height") or 0.0),
+            )
+            - max(
+                float(cover.get("y") or 0.0),
+                float(layout.get("y") or 0.0),
+            ),
+        )
+        cover_contained = bool(
+            cover_area > 0.0 and intersection / cover_area >= 0.98
+        )
         aligned = (
             str(layout_policy.get("mode") or "") == "cover_aligned"
-            and dx <= max(0.01, float(cover.get("width") or 0.0) * 0.05)
+            and (
+                cover_contained
+                or dx <= max(
+                    0.01, float(cover.get("width") or 0.0) * 0.05
+                )
+            )
             and dy <= max(0.01, float(cover.get("height") or 0.0) * 0.15)
         )
         rows.append(
@@ -673,6 +722,7 @@ def evaluate_cover_layout_alignment(contract: Mapping[str, Any]) -> dict[str, An
                 "status": "PASS" if aligned else "BLOCKED",
                 "layout_mode": layout_policy.get("mode"),
                 "center_displacement": {"x": round(dx, 6), "y": round(dy, 6)},
+                "cover_contained_by_layout": cover_contained,
                 "cover_roi": cover,
                 "layout_safe_area": layout,
             }
@@ -1276,19 +1326,6 @@ def scan_full_timeline_visual_authority(
         for row in list(contract.get("render_tracks") or [])
         if isinstance(row, Mapping)
     ]
-    protected_tracks = [
-        dict(row)
-        for row in list(contract.get("protected_source_tracks") or [])
-        if isinstance(row, Mapping)
-        and str(
-            dict(row.get("visual_provenance") or {}).get("classification") or ""
-        )
-        == "SOURCE_INTRINSIC"
-        and float(
-            dict(row.get("visual_provenance") or {}).get("confidence") or 0.0
-        )
-        >= 0.90
-    ]
     missing_edit_frames: list[int] = []
     residual_stroke_frames: list[int] = []
     protected_damage_frames: list[int] = []
@@ -1603,13 +1640,12 @@ def scan_full_timeline_visual_authority(
                     for (fraction, pixels), row, geometry in residual_entries
                 ):
                     residual_stroke_frames.append(frame_index)
-            active_protected = [
-                dynamic_track_for_frame(row, frame_index)
-                for row in protected_tracks
-                if int(row.get("start_frame") or 0)
-                <= frame_index
-                <= int(row.get("end_frame") or -1)
-            ]
+            # Use the same frame-exact authority as the renderer. A protected
+            # OCR shadow that loses to an active semantic dialogue track must
+            # not be resurrected by QA and reported as source damage.
+            active_protected = active_protected_source_regions_for_frame(
+                contract, frame_index
+            )
             if active_protected:
                 deltas = [
                     _roi_delta(source_frame, rendered_frame, dict(row.get("geometry") or {}))
@@ -1870,6 +1906,43 @@ def classify_source_scene_protected_cjk(
         row = dict(raw)
         frame_index = int(row.get("frame_index") or 0)
         detection_rect = _normalized_rect(row)
+        matched_protected_track = None
+        for protected in active_protected_source_regions_for_frame(
+            contract, frame_index
+        ):
+            if _intersection_over_smaller(
+                detection_rect,
+                _normalized_rect({"geometry": protected.get("geometry")}),
+            ) >= 0.65:
+                matched_protected_track = protected
+                break
+        if matched_protected_track is not None:
+            patch_similarity = _source_render_patch_similarity(
+                row,
+                source_frame=(source_frames or {}).get(frame_index),
+                rendered_frame=(rendered_frames or {}).get(frame_index),
+            )
+            if (
+                patch_similarity is not None
+                and patch_similarity["mean_abs_delta"]
+                <= SOURCE_SCENE_EDITOR_OVERLAP_MAX_MEAN_DELTA
+                and patch_similarity["p95_abs_delta"]
+                <= SOURCE_SCENE_EDITOR_OVERLAP_MAX_P95_DELTA
+            ):
+                excluded.append(
+                    {
+                        **row,
+                        "classification": "PROTECTED_SOURCE_TRACK_CJK",
+                        "source_scene_track_ids": [
+                            str(matched_protected_track.get("text_id") or "")
+                        ],
+                        "source_render_patch": {
+                            key: round(value, 6)
+                            for key, value in patch_similarity.items()
+                        },
+                    }
+                )
+                continue
         matched_region: dict[str, Any] | None = None
         for region in regions:
             if not (
@@ -2155,11 +2228,11 @@ def classify_source_intrinsic_edge_cjk(
             or rect[0] >= 1.0 - SOURCE_INTRINSIC_EDGE_GUTTER
         )
         overlaps_authority = False
-        runtime_tracks = active_tracks_for_frame(
-            contract,
-            frame_index,
-            source_frame_bgr=(source_frames or {}).get(frame_index),
-        )
+        # Use conservative contract timing here. The source-conditioned runtime
+        # gate may be exactly what failed to recognize a coloured caption; if
+        # QA reused that filtered list it could misclassify a real residual as
+        # harmless source print.
+        runtime_tracks = active_tracks_for_frame(contract, frame_index)
         for track in runtime_tracks:
             roi = dict(
                 dict(dict(track.get("render_policy") or {}).get("cover") or {}).get(
@@ -2420,6 +2493,20 @@ def classify_source_intrinsic_edge_cjk(
             and patch_similarity["p95_abs_delta"]
             <= SOURCE_INTRINSIC_MATCHED_TEXTURE_MAX_P95_DELTA
         )
+        bounded_unchanged_source_print = (
+            1 <= len(rendered_chars) <= SOURCE_INTRINSIC_BOUNDED_PRINT_MAX_CHARS
+            and area <= SOURCE_INTRINSIC_BOUNDED_PRINT_MAX_AREA
+            and float(rect[2] - rect[0]) <= SOURCE_INTRINSIC_BOUNDED_PRINT_MAX_WIDTH
+            and float(rect[3] - rect[1]) <= SOURCE_INTRINSIC_BOUNDED_PRINT_MAX_HEIGHT
+            and float(row.get("confidence") or 0.0)
+            <= SOURCE_INTRINSIC_BOUNDED_PRINT_MAX_CONFIDENCE
+            and not overlaps_authority
+            and patch_similarity is not None
+            and patch_similarity["mean_abs_delta"]
+            <= SOURCE_INTRINSIC_MATCHED_TEXTURE_MAX_MEAN_DELTA
+            and patch_similarity["p95_abs_delta"]
+            <= SOURCE_INTRINSIC_MATCHED_TEXTURE_MAX_P95_DELTA
+        )
         if (
             is_tiny_texture_false_positive
             or is_low_confidence_texture_false_positive
@@ -2432,6 +2519,7 @@ def classify_source_intrinsic_edge_cjk(
             or object_print_unchanged
             or off_lane_source_texture
             or large_low_confidence_source_texture
+            or bounded_unchanged_source_print
         ):
             excluded.append(
                 {
@@ -2465,6 +2553,8 @@ def classify_source_intrinsic_edge_cjk(
                                         if off_lane_source_texture
                                         else "large_low_confidence_source_texture"
                                         if large_low_confidence_source_texture
+                                        else "bounded_unchanged_source_print"
+                                        if bounded_unchanged_source_print
                                         else "tiny_texture"
                                         )
                                         )

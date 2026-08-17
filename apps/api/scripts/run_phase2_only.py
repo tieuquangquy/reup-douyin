@@ -51,6 +51,12 @@ def _sha256_json(payload: Mapping[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _int_or_default(value: Any, default: int) -> int:
+    """Preserve valid zero-valued frame/time fields while defaulting only null."""
+
+    return int(default if value is None else value)
+
+
 def _load_semantic_dialogue_authority(
     path: Path,
     *,
@@ -571,10 +577,10 @@ def _load_residual_remediation(
             or text_id in authority_by_text_id
             or len(coords) != 4
             or original != list(master_row.get("box_coords") or [])
-            or int(override.get("start_frame") or -1)
-            != int(master_row.get("start_frame") or 0)
-            or int(override.get("end_frame") or -1)
-            != int(master_row.get("end_frame") or 0)
+            or _int_or_default(override.get("start_frame"), -1)
+            != _int_or_default(master_row.get("start_frame"), 0)
+            or _int_or_default(override.get("end_frame"), -1)
+            != _int_or_default(master_row.get("end_frame"), 0)
         ):
             raise RuntimeError("Residual remediation geometry override is unsafe")
         for key in ("best_keyframe_path", "crop_path"):

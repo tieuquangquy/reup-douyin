@@ -300,6 +300,7 @@ def _translation_ai_response(
         api_key_masked=str(public.get("api_key_masked") or ""),
         api_key=str(public.get("api_key") or ""),
         base_url=str(public.get("base_url") or ""),
+        region=str(public.get("region") or "global"),
         timeout_seconds=float(public.get("timeout_seconds") or 90.0),
         fallback_provider=str(public.get("fallback_provider") or "none"),
         fallback_model=str(public.get("fallback_model") or ""),
@@ -514,6 +515,7 @@ def test_translation_ai(
             model=str(body.model if body.model is not None else saved.model),
             api_key=api_key,
             base_url=str(body.base_url if body.base_url is not None else saved.base_url),
+            region=str(body.region if body.region is not None else saved.region),
             timeout_seconds=float(
                 body.timeout_seconds if body.timeout_seconds is not None else saved.timeout_seconds
             ),
@@ -555,11 +557,13 @@ def list_translation_ai_models_route(
         clear_api_key=body.clear_api_key,
     )
     base_url = str(body.base_url if body.base_url is not None else saved.base_url or "")
+    region = str(body.region if body.region is not None else saved.region or "global")
     timeout = float(body.timeout_seconds if body.timeout_seconds is not None else saved.timeout_seconds or 30.0)
     ok, models, detail = list_translation_ai_models(
         provider=provider,
         api_key=api_key or "",
         base_url=base_url,
+        region=region,
         timeout_seconds=list_models_timeout_seconds(timeout),
     )
     return TranslationAiModelsResponse(ok=ok, provider=provider, models=models, detail=detail)
@@ -887,6 +891,7 @@ def test_caption_ai(
             model=str(body.model if body.model is not None else saved.model),
             api_key=api_key,
             base_url=str(body.base_url if body.base_url is not None else saved.base_url),
+            region=str(body.region if body.region is not None else saved.region),
             timeout_seconds=float(
                 body.timeout_seconds if body.timeout_seconds is not None else saved.timeout_seconds
             ),
@@ -914,11 +919,13 @@ def list_caption_ai_models_route(
         clear_api_key=body.clear_api_key,
     )
     base_url = str(body.base_url if body.base_url is not None else saved.base_url or "")
+    region = str(body.region if body.region is not None else saved.region or "global")
     timeout = float(body.timeout_seconds if body.timeout_seconds is not None else saved.timeout_seconds or 30.0)
     ok, models, detail = list_translation_ai_models(
         provider=provider,
         api_key=api_key or "",
         base_url=base_url,
+        region=region,
         timeout_seconds=list_models_timeout_seconds(timeout),
     )
     return TranslationAiModelsResponse(ok=ok, provider=provider, models=models, detail=detail)
@@ -1144,7 +1151,7 @@ def test_tts_ai(
         saved = service._parse_tts_ai(target)
     else:
         saved = service.get_tts_ai(workspace_id)
-    draft = body.model_dump(exclude_none=True, exclude={"profile_id"})
+    draft = body.model_dump(exclude_none=True, exclude={"profile_id", "probe_mode"})
     if not draft and not body.clear_api_key:
         cfg = saved
     else:
@@ -1197,7 +1204,16 @@ def test_tts_ai(
                 body.options_json if body.options_json is not None else (saved.options_json or {})
             ),
         )
-    result = probe_tts_ai_client(cfg, discover_remote=True)
+    # Agent Platform's TTS catalog is curated: models.list needs OAuth2 and a
+    # catalog refresh must never spend quota or fail because synthesis is not
+    # available in a project region. Keep every existing provider's discovery
+    # behavior unchanged; only an explicit connection test performs the short
+    # google_cloud_tts audio probe.
+    discover_remote = not (
+        body.probe_mode == "catalog"
+        and str(getattr(cfg, "provider", "") or "").strip().lower() == "google_cloud_tts"
+    )
+    result = probe_tts_ai_client(cfg, discover_remote=discover_remote)
     catalog = None
     if result.catalog:
         catalog = TtsAiCatalog.model_validate(result.catalog)
@@ -1398,6 +1414,8 @@ def _tts_preview_response_from_job(job) -> TtsAiPreviewResponse:
         text=job.text or "",
         requested_voice_id=job.requested_voice_id or "",
         resolved_voice_id=job.resolved_voice_id or "",
+        requested_model_id=job.requested_model_id or "",
+        resolved_model_id=job.resolved_model_id or "",
     )
 
 

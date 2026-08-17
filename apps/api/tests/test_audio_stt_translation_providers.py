@@ -318,6 +318,36 @@ class DurationConstrainedTranslationTests(unittest.TestCase):
                 duration_budget_seconds=3.0,
             )
 
+    def test_explicit_fallback_recovers_primary_configuration_failure(self) -> None:
+        @dataclass
+        class BlockedClient:
+            provider_name: str = "openai_compatible"
+
+            def complete(self, prompt: str) -> str:
+                del prompt
+                raise RuntimeError("openai_compatible_http_403:error code: 1010")
+
+        fallback = FixedLlmClient(
+            responses=["Bản dịch từ nhà cung cấp dự phòng"],
+            provider_name="gemini_fallback",
+        )
+        provider = DurationConstrainedTranslationProvider(
+            primary=BlockedClient(),
+            fallback=fallback,
+            max_rewrite_rounds=0,
+            allow_machine_translate_recovery=False,
+        )
+
+        result = provider.translate(
+            "测试",
+            preset=TranslationPreset.LITERAL_SAFE,
+            duration_budget_seconds=4.0,
+        )
+
+        self.assertEqual(result.translated_text, "Bản dịch từ nhà cung cấp dự phòng")
+        self.assertEqual(result.metadata.get("provider"), "gemini_fallback")
+        self.assertIn("translation_fallback_used", result.quality_flags)
+
     def test_rewrite_loop_shortens_oversized_translation(self) -> None:
         client = FixedLlmClient(
             responses=[

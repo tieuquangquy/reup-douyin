@@ -165,8 +165,10 @@ class TtsPreviewTests(unittest.TestCase):
                         "voice_id": "Aoede",
                         "requested_voice_id": "vi-VN-Chirp3-HD-Aoede",
                         "resolved_voice_id": "Aoede",
+                        "requested_model_id": "gemini-3.1-flash-preview-tts",
+                        "resolved_model_id": "gemini-2.5-flash-tts",
                     },
-                    warnings=[],
+                    warnings=["google_cloud_tts_model_fallback"],
                 )
 
             @staticmethod
@@ -218,6 +220,9 @@ class TtsPreviewTests(unittest.TestCase):
         self.assertEqual(result["provider"], "google_gemini")
         self.assertEqual(result["requested_voice_id"], "vi-VN-Chirp3-HD-Aoede")
         self.assertEqual(result["resolved_voice_id"], "Aoede")
+        self.assertEqual(result["requested_model_id"], "gemini-3.1-flash-preview-tts")
+        self.assertEqual(result["resolved_model_id"], "gemini-2.5-flash-tts")
+        self.assertIn("model fallback", result["detail"])
         self.assertEqual(base64.b64decode(result["audio_base64"]), b"gemini-expressive-audio")
 
 

@@ -56,8 +56,13 @@ assert.match(
 );
 assert.match(
   visualSource,
-  /Local temporal[\s\S]*detector_frame_count/,
-  "OCR checkpoint must expose the active local engine and detector metrics"
+  /Local temporal/,
+  "OCR checkpoint must expose the active local engine"
+);
+assert.match(
+  visualSource,
+  /detector_frame_count/,
+  "OCR checkpoint must expose detector metrics"
 );
 assert.match(
   visualSource,
@@ -71,6 +76,43 @@ assert.match(
 );
 assert.equal(en.finalReviewStates.prepOcrReview, "Needs review");
 assert.equal(vi.finalReviewStates.prepOcrReview, "Cần duyệt OCR");
+assert.match(
+  visualSource,
+  /ocrCheckpointComplete[\s\S]*ocrCheckpointSummaryCompact[\s\S]*ocrCheckpointReviewCta/,
+  "OCR review must explain that analysis completed and identify the next operator action"
+);
+assert.match(
+  visualSource,
+  /phase2_content_object_count|resolveFinalReviewOcrCheckpointMetrics/,
+  "OCR checkpoint must derive total, automatic and manual review counts from artifact authority"
+);
+assert.match(
+  visualSource,
+  /cleanPreviewAfterOcrReview/,
+  "Missing clean preview must explain that it is produced after OCR decisions are saved"
+);
+assert.match(
+  statesSource,
+  /journeyAnalysisDone[\s\S]*journeyReviewCount/,
+  "Clean journey must show analysis completion and the remaining review count without a fake percent"
+);
+assert.doesNotMatch(
+  statesSource,
+  /journeyCheckpointMilestone/,
+  "OCR review checkpoint must not present a fabricated percentage"
+);
+assert.match(
+  visualSource,
+  /ocrCheckpointSummaryCompact[\s\S]*ocrCheckpointReviewCta/,
+  "OCR completion banner must stay compact and provide one direct review CTA"
+);
+assert.match(
+  visualSource,
+  /cleanPreviewAfterOcrReviewShort/,
+  "Preview placeholder must use compact non-repeating copy"
+);
+assert.ok(en.finalReviewVisual.ocrCheckpointSummary.includes("{automatic}"));
+assert.ok(vi.finalReviewVisual.cleanPreviewAfterOcrReview.includes("{count}"));
 
 assert.match(
   apiSource,

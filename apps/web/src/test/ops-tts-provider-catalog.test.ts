@@ -7,6 +7,7 @@ import {
   filterTtsCatalogVoices,
   getLocalInstallRecipe,
   getTtsFieldCapabilities,
+  GOOGLE_CLOUD_AGENT_TTS_MODELS,
   GEMINI_TTS_VOICES,
   isPresetLocalProvider,
   looksLikeEdgeVoiceId,
@@ -25,6 +26,8 @@ import type { TtsAiCatalog } from "../lib/api";
 
 assert.deepEqual([...TTS_PROVIDERS_BY_KIND.local], ["edge", "vieneu", "omnivoice", "cli", "custom"]);
 assert.equal(defaultProviderForKind("cloud"), "google");
+assert.ok(TTS_PROVIDERS_BY_KIND.cloud.includes("google_cloud_tts"));
+assert.equal(resolveTtsProviderKind("google_cloud_tts"), "cloud");
 assert.equal(resolveTtsProviderKind("http_custom"), "http");
 assert.equal(resolveTtsProviderKind("my_tts_sdk"), "local");
 assert.equal(getLocalInstallRecipe("cli")?.installCommand, "");
@@ -80,6 +83,13 @@ assert.ok(geminiCatalog?.voices.some((voice) => voice.id === "Aoede"));
 assert.ok(geminiCatalog?.voices.every((voice) => !voice.id.includes("Chirp3-HD")));
 assert.equal(canonicalizeGeminiVoiceId("vi-VN-Chirp3-HD-Aoede"), "Aoede");
 assert.equal(canonicalizeGeminiVoiceId("not-a-gemini-voice"), "");
+
+const agentTtsCatalog = resolveTtsCatalogForProvider("google_cloud_tts", null);
+assert.ok(agentTtsCatalog, "Agent Platform TTS must hydrate without the OAuth-only models.list endpoint");
+assert.equal(agentTtsCatalog?.default_model_id, "gemini-2.5-flash-tts");
+assert.equal(agentTtsCatalog?.default_voice_id, "Achernar");
+assert.ok(GOOGLE_CLOUD_AGENT_TTS_MODELS.includes("gemini-2.5-flash-tts"));
+assert.deepEqual(agentTtsCatalog?.models, [...GOOGLE_CLOUD_AGENT_TTS_MODELS]);
 
 const staleOmniCatalog = resolveTtsCatalogForProvider("omnivoice", {
   source: "sdk",

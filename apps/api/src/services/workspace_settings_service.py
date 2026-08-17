@@ -30,7 +30,9 @@ DEFAULT_LLM_AI_PROFILE_NAME = "Default"
 DEFAULT_PROMPT_PROFILE_ID = "default"
 DEFAULT_PROMPT_PROFILE_NAME = "Default"
 
-_ALLOWED_PROVIDERS = frozenset({"auto", "gemini", "openai_compatible", "ollama", "placeholder"})
+_ALLOWED_PROVIDERS = frozenset(
+    {"auto", "google_cloud", "gemini", "openai_compatible", "ollama", "placeholder"}
+)
 _ALLOWED_FALLBACKS = frozenset({"none", "ollama", "gemini", "openai_compatible"})
 
 _ALLOWED_TTS_PROVIDERS = frozenset(
@@ -40,6 +42,7 @@ _ALLOWED_TTS_PROVIDERS = frozenset(
         "vieneu",
         "google",
         "google_gemini",
+        "google_cloud_tts",
         "azure",
         "elevenlabs",
         "openai",
@@ -149,6 +152,7 @@ class TranslationAiConfig:
     model: str = ""
     api_key: str | None = None
     base_url: str = ""
+    region: str = "global"
     timeout_seconds: float = 90.0
     fallback_provider: str = "none"
     fallback_model: str = ""
@@ -712,6 +716,7 @@ class WorkspaceSettingsService:
             "api_key_masked": mask_secret(key),
             "api_key": key,
             "base_url": cfg.base_url,
+            "region": cfg.region,
             "timeout_seconds": cfg.timeout_seconds,
             "fallback_provider": cfg.fallback_provider,
             "fallback_model": cfg.fallback_model,
@@ -746,6 +751,7 @@ class WorkspaceSettingsService:
             "api_key_masked": mask_secret(key),
             "api_key": key,
             "base_url": cfg.base_url,
+            "region": cfg.region,
             "timeout_seconds": cfg.timeout_seconds,
             "fallback_provider": cfg.fallback_provider,
             "fallback_model": cfg.fallback_model,
@@ -954,6 +960,7 @@ class WorkspaceSettingsService:
             "model": "",
             "api_key": "",
             "base_url": "",
+            "region": "global",
             "timeout_seconds": 90.0,
             "fallback_provider": "none",
             "fallback_model": "",
@@ -973,6 +980,7 @@ class WorkspaceSettingsService:
             "api_key_masked": mask_secret(key),
             "api_key": key,
             "base_url": cfg.base_url,
+            "region": cfg.region,
             "timeout_seconds": cfg.timeout_seconds,
             "fallback_provider": cfg.fallback_provider,
             "fallback_model": cfg.fallback_model,
@@ -1027,6 +1035,7 @@ class WorkspaceSettingsService:
                 "model": str(payload.get("model") or "").strip(),
                 "api_key": api_key or "",
                 "base_url": str(payload.get("base_url") or "").strip(),
+                "region": str(payload.get("region") or "global").strip() or "global",
                 "timeout_seconds": timeout,
                 "fallback_provider": fallback,
                 "fallback_model": str(payload.get("fallback_model") or "").strip(),
@@ -1068,6 +1077,7 @@ class WorkspaceSettingsService:
             model=str(raw.get("model") or "").strip(),
             api_key=key or None,
             base_url=str(raw.get("base_url") or "").strip(),
+            region=str(raw.get("region") or "global").strip() or "global",
             timeout_seconds=timeout,
             fallback_provider=fallback,
             fallback_model=str(raw.get("fallback_model") or "").strip(),
@@ -1535,7 +1545,7 @@ class WorkspaceSettingsService:
             runtime = scope_runtime_to_provider(payload.get("runtime"), provider)
 
         voice_id = str(payload.get("voice_id") or "").strip()
-        if provider == "google_gemini":
+        if provider in {"google_gemini", "google_cloud_tts"}:
             from src.tts_pipeline.catalog import normalize_gemini_voice_id
 
             voice_id = normalize_gemini_voice_id(voice_id) or "Kore"
@@ -1777,7 +1787,7 @@ class WorkspaceSettingsService:
             if isinstance(nested, dict):
                 runtime = scope_runtime_to_provider(nested, provider)
         voice_id = str(raw.get("voice_id") or "").strip()
-        if provider == "google_gemini":
+        if provider in {"google_gemini", "google_cloud_tts"}:
             from src.tts_pipeline.catalog import normalize_gemini_voice_id
 
             voice_id = normalize_gemini_voice_id(voice_id) or "Kore"

@@ -781,7 +781,7 @@ class TtsPipelineService:
                     "emotion_planner": {
                         "enabled": bool(emotion_enabled),
                         "version": EMOTION_PLANNER_VERSION if emotion_enabled else None,
-                        "provider_scope": "google_gemini",
+                        "provider_scope": provider_name,
                         "decision": (
                             emotion_decision.to_dict()
                             if emotion_decision is not None

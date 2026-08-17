@@ -240,6 +240,86 @@ def _normalized_ocr_text(value: Any) -> str:
     )
 
 
+def _semantic_hardsub_recovery_geometry(
+    enrichment: Mapping[str, Any],
+    semantic: Mapping[str, Any],
+    *,
+    frame_width: int,
+    frame_height: int,
+) -> tuple[list[float], dict[str, Any]] | None:
+    """Promote a full-line OCR recovery after semantic dialogue classification.
+
+    Local recovery runs before ASR-backed semantic classification. A track can
+    therefore begin as a tiny ``ui_chip`` and only later become an approved
+    dialogue hardsub. Reuse the recovered full-line box only when two source
+    frames agree, OCR confidence is high, and recovered/canonical CJK authority
+    has a containment relationship. Phase 1 remains immutable.
+    """
+
+    recovery = dict(enrichment.get("ocr_recovery") or {})
+    if (
+        str(semantic.get("classification") or "") != "DIALOGUE_HARDSUB"
+        or str(recovery.get("status") or "")
+        != "RECOVERED_FOR_OPERATOR_REVIEW"
+        or str(recovery.get("method") or "") != "temporal_consensus"
+        or float(recovery.get("confidence") or 0.0) < 0.88
+        or int(recovery.get("frame_support") or 0) < 2
+        or int(recovery.get("geometry_observation_count") or 0) < 2
+    ):
+        return None
+    recovered_text = _normalized_ocr_text(recovery.get("text"))
+    canonical_text = _normalized_ocr_text(
+        semantic.get("canonical_text_authority")
+        or semantic.get("text_authority")
+    )
+    if (
+        not recovered_text
+        or not canonical_text
+        or (
+            canonical_text not in recovered_text
+            and recovered_text not in canonical_text
+        )
+    ):
+        return None
+    selected = list(recovery.get("selected_box") or [])
+    if len(selected) != 4:
+        return None
+    try:
+        x0, y0, x1, y1 = (float(value) for value in selected)
+    except (TypeError, ValueError):
+        return None
+    width = x1 - x0
+    height = y1 - y0
+    if (
+        x0 < 0.0
+        or y0 < 0.0
+        or width <= 0.0
+        or height <= 0.0
+        or x1 > float(frame_width)
+        or y1 > float(frame_height)
+        or width / max(1.0, float(frame_width)) > 0.95
+        or height / max(1.0, float(frame_height)) > 0.15
+    ):
+        return None
+    audit = {
+        "policy_version": "semantic_hardsub_temporal_geometry_v1",
+        "status": "LOCAL_TEMPORAL_CONSENSUS_PROMOTED_AT_PHASE4",
+        "derived_box_coords": [x0, y0, x1, y1],
+        "frame_support": int(recovery.get("frame_support") or 0),
+        "geometry_observation_count": int(
+            recovery.get("geometry_observation_count") or 0
+        ),
+        "confidence": float(recovery.get("confidence") or 0.0),
+        "recovered_text": str(recovery.get("text") or ""),
+        "canonical_text_authority": str(
+            semantic.get("canonical_text_authority")
+            or semantic.get("text_authority")
+            or ""
+        ),
+    }
+    return [x0, y0, x1, y1], audit
+
+
 def _recovered_duplicate_shadow_ids(
     master: Mapping[str, Mapping[str, Any]],
     enrichments: Mapping[str, Mapping[str, Any]],
@@ -362,6 +442,28 @@ def _geometry_overlap_over_smaller(
     return intersection / smaller if smaller > 0.0 else 0.0
 
 
+def _evidence_timing_span(row: Mapping[str, Any]) -> tuple[int, int]:
+    """Return a bounded legacy-compatible span for partition comparisons."""
+
+    start = int(row.get("start_frame") or 0)
+    end = int(row.get("end_frame") if row.get("end_frame") is not None else start)
+    if end >= start:
+        return start, end
+    evidence = {
+        int(value)
+        for value in list(row.get("hit_frames") or [])
+        if isinstance(value, (int, float)) and int(value) >= 0
+    }
+    for value in (start, end, row.get("best_frame_index")):
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            continue
+        if parsed >= 0:
+            evidence.add(parsed)
+    return (min(evidence), max(evidence)) if evidence else (start, end)
+
+
 def _resolve_protected_caption_shadow_ids(
     master: Mapping[str, Mapping[str, Any]],
     enrichments: Mapping[str, Mapping[str, Any]],
@@ -388,10 +490,29 @@ def _resolve_protected_caption_shadow_ids(
         master_row = master.get(str(text_id))
         if enrichment is None or master_row is None:
             continue
-        provenance = dict(enrichment.get("visual_provenance") or {})
-        classification = str(provenance.get("classification") or "").upper()
-        confidence = float(provenance.get("confidence") or 0.0)
-        if classification not in {"EDITOR_LABEL", "EDITOR_OVERLAY"} or confidence < 0.90:
+        # Semantic enrichment can be intentionally conservative on a short
+        # boundary fragment. Do not let a weak semantic score erase the
+        # independent high-confidence visual editor provenance persisted on
+        # the master row.
+        provenance_candidates = [
+            dict(enrichment.get("visual_provenance") or {}),
+            dict(master_row.get("visual_provenance") or {}),
+        ]
+        editor_provenance = None
+        for provenance in provenance_candidates:
+            classification = str(provenance.get("classification") or "").upper()
+            confidence = float(provenance.get("confidence") or 0.0)
+            minimum_confidence = (
+                0.70 if classification == "DIALOGUE_HARDSUB" else 0.90
+            )
+            if classification in {
+                "EDITOR_LABEL",
+                "EDITOR_OVERLAY",
+                "DIALOGUE_HARDSUB",
+            } and confidence >= minimum_confidence:
+                editor_provenance = provenance
+                break
+        if editor_provenance is None:
             continue
         editor_rows.append(dict(master_row, text_id=str(text_id)))
 
@@ -417,8 +538,7 @@ def _resolve_protected_caption_shadow_ids(
         x0, y0, x1, y1 = (float(value) for value in coords)
         candidate_width = max(1.0, x1 - x0)
         candidate_height = max(1.0, y1 - y0)
-        candidate_start = int(candidate.get("start_frame") or 0)
-        candidate_end = int(candidate.get("end_frame") or candidate_start)
+        candidate_start, candidate_end = _evidence_timing_span(candidate)
         candidate_span = max(1, candidate_end - candidate_start + 1)
         # A compact OCR child may be a duplicate fragment fully enclosed by a
         # wider approved editor row (for example the last two glyphs of a
@@ -429,8 +549,7 @@ def _resolve_protected_caption_shadow_ids(
         compact_nested_shadow = False
         if candidate_width / fw < 0.14 and candidate_height / fh <= 0.045:
             for editor in editor_rows:
-                editor_start = int(editor.get("start_frame") or 0)
-                editor_end = int(editor.get("end_frame") or editor_start)
+                editor_start, editor_end = _evidence_timing_span(editor)
                 overlap_frames = max(
                     0,
                     min(candidate_end, editor_end)
@@ -454,6 +573,76 @@ def _resolve_protected_caption_shadow_ids(
             if compact_nested_shadow:
                 demoted.add(str(text_id))
                 continue
+        # A detector can emit the same outlined caption once as a normal row
+        # and once as a taller glow/outline envelope. Height alone must not
+        # protect that duplicate. Require strong bidirectional area overlap
+        # plus temporal overlap, which a merely adjacent tall source object
+        # cannot satisfy.
+        exact_editor_shadow = False
+        for editor in editor_rows:
+            editor_start, editor_end = _evidence_timing_span(editor)
+            overlap_frames = max(
+                0,
+                min(candidate_end, editor_end)
+                - max(candidate_start, editor_start)
+                + 1,
+            )
+            editor_span = max(1, editor_end - editor_start + 1)
+            if overlap_frames / float(min(editor_span, candidate_span)) < 0.60:
+                continue
+            editor_coords = list(editor.get("box_coords") or [])
+            if len(editor_coords) != 4:
+                continue
+            ex0, ey0, ex1, ey1 = (float(value) for value in editor_coords)
+            intersection = max(0.0, min(x1, ex1) - max(x0, ex0)) * max(
+                0.0, min(y1, ey1) - max(y0, ey0)
+            )
+            candidate_area = candidate_width * candidate_height
+            editor_area = max(1.0, ex1 - ex0) * max(1.0, ey1 - ey0)
+            if (
+                intersection / candidate_area >= 0.65
+                and intersection / editor_area >= 0.65
+            ):
+                exact_editor_shadow = True
+                break
+        if exact_editor_shadow:
+            demoted.add(str(text_id))
+            continue
+        # OCR can split one screen-locked caption into adjacent temporal
+        # fragments: the approved editor row ends on frame N and an identical
+        # protected shadow begins on N+1. Requiring 60% temporal overlap misses
+        # exactly that boundary. Caption-sized geometry with strong
+        # bidirectional overlap and at most a three-frame gap is sufficient,
+        # while compact phone/product labels remain protected below.
+        adjacent_caption_shadow = False
+        if candidate_width / fw >= 0.30 and candidate_height / fh <= 0.08:
+            for editor in editor_rows:
+                editor_start, editor_end = _evidence_timing_span(editor)
+                temporal_gap = max(
+                    0,
+                    editor_start - candidate_end - 1,
+                    candidate_start - editor_end - 1,
+                )
+                if temporal_gap > 3:
+                    continue
+                editor_coords = list(editor.get("box_coords") or [])
+                if len(editor_coords) != 4:
+                    continue
+                ex0, ey0, ex1, ey1 = (float(value) for value in editor_coords)
+                intersection = max(0.0, min(x1, ex1) - max(x0, ex0)) * max(
+                    0.0, min(y1, ey1) - max(y0, ey0)
+                )
+                candidate_area = candidate_width * candidate_height
+                editor_area = max(1.0, ex1 - ex0) * max(1.0, ey1 - ey0)
+                if (
+                    intersection / candidate_area >= 0.65
+                    and intersection / editor_area >= 0.65
+                ):
+                    adjacent_caption_shadow = True
+                    break
+        if adjacent_caption_shadow:
+            demoted.add(str(text_id))
+            continue
         # A genuinely small phone label that is not an enclosed detector child
         # is not demoted merely because a caption happens to be nearby.
         if candidate_width / fw < 0.14 or candidate_height / fh > 0.045:
@@ -461,8 +650,7 @@ def _resolve_protected_caption_shadow_ids(
         for editor in editor_rows:
             if str(editor.get("text_id") or "") == str(text_id):
                 continue
-            editor_start = int(editor.get("start_frame") or 0)
-            editor_end = int(editor.get("end_frame") or editor_start)
+            editor_start, editor_end = _evidence_timing_span(editor)
             editor_span = max(1, editor_end - editor_start + 1)
             overlap_frames = max(
                 0,
@@ -511,12 +699,10 @@ def _resolve_protected_caption_shadow_ids(
             candidate_height = max(1.0, y1 - y0)
             if candidate_width / fw < 0.14 or candidate_height / fh > 0.045:
                 continue
-            candidate_start = int(candidate.get("start_frame") or 0)
-            candidate_end = int(candidate.get("end_frame") or candidate_start)
+            candidate_start, candidate_end = _evidence_timing_span(candidate)
             candidate_span = max(1, candidate_end - candidate_start + 1)
             for seed in seed_rows:
-                seed_start = int(seed.get("start_frame") or 0)
-                seed_end = int(seed.get("end_frame") or seed_start)
+                seed_start, seed_end = _evidence_timing_span(seed)
                 seed_span = max(1, seed_end - seed_start + 1)
                 overlap_frames = max(
                     0,
@@ -571,14 +757,24 @@ def _redundant_nested_editor_shadow_parents(
             )
             or ""
         ).upper()
-        in {"EDITOR_LABEL", "EDITOR_OVERLAY"}
+        in {"EDITOR_LABEL", "EDITOR_OVERLAY", "DIALOGUE_HARDSUB"}
         and float(
             dict(enrichments.get(text_id, {}).get("visual_provenance") or {}).get(
                 "confidence"
             )
             or 0.0
         )
-        >= 0.90
+        >= (
+            0.70
+            if str(
+                dict(enrichments.get(text_id, {}).get("visual_provenance") or {}).get(
+                    "classification"
+                )
+                or ""
+            ).upper()
+            == "DIALOGUE_HARDSUB"
+            else 0.90
+        )
     ]
     redundant: dict[str, str] = {}
     for text_id in shadow_ids:
@@ -590,14 +786,12 @@ def _redundant_nested_editor_shadow_parents(
             continue
         x0, y0, x1, y1 = (float(value) for value in coords)
         area = max(0.0, x1 - x0) * max(0.0, y1 - y0)
-        start = int(candidate.get("start_frame") or 0)
-        end = int(candidate.get("end_frame") or start)
+        start, end = _evidence_timing_span(candidate)
         span = max(1, end - start + 1)
         if area <= 0.0:
             continue
         for editor in editors:
-            editor_start = int(editor.get("start_frame") or 0)
-            editor_end = int(editor.get("end_frame") or editor_start)
+            editor_start, editor_end = _evidence_timing_span(editor)
             overlap = max(
                 0,
                 min(end, editor_end) - max(start, editor_start) + 1,
@@ -765,6 +959,157 @@ def _normalize_shared_caption_boundaries(
                 ),
                 "frames_trimmed": overlap_frames,
             }
+            adjusted += 1
+    return adjusted
+
+
+def _normalize_overlapping_text_authorities(
+    tracks: list[dict[str, Any]], *, fps: float
+) -> int:
+    """Partition Vietnamese text while retaining conservative source cover."""
+
+    candidates = [
+        row
+        for row in tracks
+        if not bool(row.get("cover_only"))
+        and str(row.get("text_vi") or "").strip()
+    ]
+    if len(candidates) < 2:
+        return 0
+
+    def anchor(row: Mapping[str, Any]) -> float:
+        hits = sorted(
+            int(value)
+            for value in list(row.get("hit_frames") or [])
+            if isinstance(value, (int, float))
+        )
+        if hits:
+            middle = len(hits) // 2
+            return (
+                float(hits[middle])
+                if len(hits) % 2
+                else (hits[middle - 1] + hits[middle]) / 2.0
+            )
+        best = row.get("best_frame_index")
+        if isinstance(best, (int, float)):
+            return float(best)
+        return (
+            int(row.get("start_frame") or 0)
+            + int(row.get("end_frame") or 0)
+        ) / 2.0
+
+    def overlaps_in_time(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
+        return max(
+            int(left.get("start_frame") or 0),
+            int(right.get("start_frame") or 0),
+        ) <= min(
+            int(left.get("end_frame") or 0),
+            int(right.get("end_frame") or 0),
+        )
+
+    def related(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
+        if not overlaps_in_time(left, right):
+            return False
+        if _geometry_overlap_over_smaller(
+            dict(left.get("geometry") or {}),
+            dict(right.get("geometry") or {}),
+        ) >= 0.65:
+            return True
+        if not (
+            bool(left.get("semantic_dialogue_hardsub"))
+            and bool(right.get("semantic_dialogue_hardsub"))
+        ):
+            return False
+        left_context = dict(
+            dict(left.get("render_policy") or {}).get("context") or {}
+        )
+        right_context = dict(
+            dict(right.get("render_policy") or {}).get("context") or {}
+        )
+        left_epoch = str(left_context.get("soft_cover_epoch_id") or "")
+        right_epoch = str(right_context.get("soft_cover_epoch_id") or "")
+        left_semantic = dict(left.get("semantic_timing_authority") or {})
+        right_semantic = dict(right.get("semantic_timing_authority") or {})
+        left_segment = str(left_semantic.get("transcript_segment_id") or "")
+        right_segment = str(right_semantic.get("transcript_segment_id") or "")
+        return bool(
+            (left_epoch and left_epoch == right_epoch)
+            or (left_segment and left_segment == right_segment)
+        )
+
+    neighbors: dict[int, set[int]] = {
+        index: set() for index in range(len(candidates))
+    }
+    for index, left in enumerate(candidates):
+        for other_index in range(index + 1, len(candidates)):
+            if related(left, candidates[other_index]):
+                neighbors[index].add(other_index)
+                neighbors[other_index].add(index)
+
+    adjusted = 0
+    visited: set[int] = set()
+    for seed in range(len(candidates)):
+        if seed in visited or not neighbors[seed]:
+            continue
+        pending = [seed]
+        component: set[int] = set()
+        while pending:
+            current = pending.pop()
+            if current in component:
+                continue
+            component.add(current)
+            pending.extend(neighbors[current])
+        visited.update(component)
+        ordered = sorted(
+            (candidates[index] for index in component),
+            key=lambda row: (anchor(row), str(row.get("text_id") or "")),
+        )
+        for left, right in zip(ordered, ordered[1:]):
+            if not overlaps_in_time(left, right):
+                continue
+            left_start = int(left.get("start_frame") or 0)
+            left_end = int(left.get("end_frame") or left_start)
+            right_start = int(right.get("start_frame") or 0)
+            right_end = int(right.get("end_frame") or right_start)
+            midpoint = int(math.floor((anchor(left) + anchor(right)) / 2.0))
+            overlap_start = max(left_start, right_start)
+            overlap_end = min(left_end, right_end)
+            lower = max(left_start, overlap_start)
+            upper = min(left_end, right_end - 1, overlap_end)
+            if lower > upper:
+                continue
+            boundary = max(lower, min(upper, midpoint))
+            new_left_end = min(left_end, boundary)
+            new_right_start = max(right_start, boundary + 1)
+            if new_left_end < left_start or new_right_start > right_end:
+                continue
+            for row in (left, right):
+                row.setdefault(
+                    "cover_start_frame", int(row.get("start_frame") or 0)
+                )
+                row.setdefault(
+                    "cover_end_frame", int(row.get("end_frame") or 0)
+                )
+            left["end_frame"] = new_left_end
+            left["end_ms"] = _frame_ms(new_left_end + 1, fps)
+            right["start_frame"] = new_right_start
+            right["start_ms"] = _frame_ms(new_right_start, fps)
+            for row in (left, right):
+                policy = dict(row.get("render_policy") or {})
+                context = dict(policy.get("context") or {})
+                timing = dict(context.get("cover_timing_authority") or {})
+                timing["semantic_range"] = [
+                    int(row.get("start_frame") or 0),
+                    int(row.get("end_frame") or 0),
+                ]
+                context["cover_timing_authority"] = timing
+                policy["context"] = context
+                row["render_policy"] = policy
+                row["semantic_timing_adjustment"] = {
+                    "policy_version": "phase4_semantic_text_schedule_v1",
+                    "reason": "partition_overlapping_vietnamese_authority",
+                    "boundary_frame": boundary,
+                }
             adjusted += 1
     return adjusted
 
@@ -970,6 +1315,63 @@ def _suppress_weak_caption_fragments(tracks: list[dict[str, Any]]) -> int:
     return suppressed
 
 
+def repair_legacy_phase1_timing(
+    master_row: Mapping[str, Any],
+    coverage_authority: Mapping[str, Any],
+    *,
+    frame_count: int,
+) -> tuple[int, int, dict[str, Any] | None]:
+    """Adapt a legacy corrupt span without mutating its immutable authority.
+
+    New Phase 1 runs enforce this invariant before publication. Existing runs
+    can still contain an inverted sparse-track interval, so Phase 4 derives a
+    bounded compatibility interval from the row's hash-bound evidence and
+    records the repair in the generated contract.
+    """
+
+    last_frame = int(frame_count) - 1
+    start = int(master_row.get("start_frame") or 0)
+    end = int(master_row.get("end_frame") or start)
+    if 0 <= start <= end <= last_frame:
+        return start, end, None
+
+    evidence: set[int] = {
+        int(value)
+        for value in list(master_row.get("hit_frames") or [])
+        if isinstance(value, (int, float)) and 0 <= int(value) <= last_frame
+    }
+    for value in (start, end, master_row.get("best_frame_index")):
+        try:
+            frame_index = int(value)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= frame_index <= last_frame:
+            evidence.add(frame_index)
+    for raw_range in list(coverage_authority.get("presence_ranges") or []):
+        if not isinstance(raw_range, Sequence) or len(raw_range) != 2:
+            continue
+        try:
+            left, right = int(raw_range[0]), int(raw_range[1])
+        except (TypeError, ValueError):
+            continue
+        if 0 <= left <= right <= last_frame:
+            evidence.update((left, right))
+    if not evidence:
+        return start, end, None
+    repaired_start = min(evidence)
+    repaired_end = max(evidence)
+    return (
+        repaired_start,
+        repaired_end,
+        {
+            "policy_version": "phase4_legacy_temporal_interval_repair_v1",
+            "prior_span": [start, end],
+            "repaired_span": [repaired_start, repaired_end],
+            "evidence_frames": sorted(evidence),
+        },
+    )
+
+
 def build_phase4_render_input(
     master_timeline: Sequence[Mapping[str, Any]],
     phase2_timeline: Mapping[str, Any],
@@ -1086,8 +1488,11 @@ def build_phase4_render_input(
     for text_id, master_row in master.items():
         if text_id in suppressed_ids:
             continue
-        start_frame = int(master_row.get("start_frame") or 0)
-        end_frame = int(master_row.get("end_frame") or start_frame)
+        start_frame, end_frame, timing_integrity_repair = repair_legacy_phase1_timing(
+            master_row,
+            coverage_by_id.get(text_id) or {},
+            frame_count=frame_count,
+        )
         provisional_content_id = str(
             dict(geometry.get(text_id) or {}).get("content_id")
             or dict(enrichments.get(text_id) or {}).get("content_id")
@@ -1156,6 +1561,15 @@ def build_phase4_render_input(
         if not start_frame <= best_frame_index <= end_frame:
             best_frame_index = (start_frame + end_frame) // 2
         coords = list(master_row.get("box_coords") or [])
+        semantic_geometry_recovery: dict[str, Any] | None = None
+        promoted_geometry = _semantic_hardsub_recovery_geometry(
+            enrichments.get(text_id, {}),
+            provisional_semantic,
+            frame_width=frame_width,
+            frame_height=frame_height,
+        )
+        if promoted_geometry is not None:
+            coords, semantic_geometry_recovery = promoted_geometry
         if (
             len(coords) != 4
             or start_frame < 0
@@ -1194,6 +1608,7 @@ def build_phase4_render_input(
                     "coverage_authority": dict(
                         coverage_by_id.get(text_id) or {}
                     ),
+                    "timing_integrity_repair": timing_integrity_repair,
                 }
             )
             continue
@@ -1300,6 +1715,8 @@ def build_phase4_render_input(
                 "coverage_authority": dict(
                     coverage_by_id.get(text_id) or {}
                 ),
+                "timing_integrity_repair": timing_integrity_repair,
+                "semantic_geometry_recovery": semantic_geometry_recovery,
                 "visual_provenance": dict(
                     master_row.get("visual_provenance") or {}
                 ),
@@ -1387,6 +1804,29 @@ def build_phase4_render_input(
                     semantic_dialogue_residual_expanded
                 ),
                 "semantic_dialogue_hardsub": semantic_dialogue_hardsub,
+                "semantic_timing_authority": (
+                    {
+                        "classification": "DIALOGUE_HARDSUB",
+                        "transcript_segment_id": str(
+                            dict(
+                                provisional_semantic.get(
+                                    "translation_authority"
+                                )
+                                or {}
+                            ).get("transcript_segment_id")
+                            or dict(
+                                provisional_semantic.get("alignment") or {}
+                            ).get("transcript_segment_id")
+                            or ""
+                        ),
+                        "cue_index": dict(
+                            provisional_semantic.get("translation_authority")
+                            or {}
+                        ).get("cue_index"),
+                    }
+                    if semantic_dialogue_hardsub
+                    else {}
+                ),
                 "duplicate_transition_canonical": (
                     duplicate_transition_canonical if not is_cover_only else False
                 ),
@@ -1467,7 +1907,7 @@ def build_phase4_render_input(
     adjusted_boundaries = _normalize_shared_caption_boundaries(
         render_tracks, fps=fps
     )
-    return enrich_phase4_render_policies({
+    contract = enrich_phase4_render_policies({
         "schema_version": PHASE4_INPUT_SCHEMA_VERSION,
         "status": "READY_FOR_PHASE4_PREFLIGHT",
         "refs": dict(refs),
@@ -1510,6 +1950,18 @@ def build_phase4_render_input(
         ],
         "suppressed_shadow_refs": sorted(suppressed_ids),
     })
+    semantic_adjustments = _normalize_overlapping_text_authorities(
+        list(contract.get("render_tracks") or []),
+        fps=fps,
+    )
+    contract["timing_normalization"] = {
+        **dict(contract.get("timing_normalization") or {}),
+        "semantic_text_authority_policy_version": (
+            "phase4_semantic_text_schedule_v1"
+        ),
+        "semantic_text_authority_adjustments": semantic_adjustments,
+    }
+    return contract
 
 
 def _segments_from_contract(contract: Mapping[str, Any]) -> list[OverlaySegment]:

@@ -23,7 +23,7 @@ Provider transport audio may be WAV, MP3, OGG, Opus, WebM, FLAC, M4A or AAC. Pro
 
 ## Cloud and HTTP catalog discovery in Ops
 
-`/ops/tts-ai` can discover selectable provider metadata from draft credentials without requiring the operator to save them first. **Refresh catalog** calls `POST /ops/tts-ai/test`; the API resolves the saved or draft key server-side and performs bounded, read-only catalog requests.
+`/ops/tts-ai` can discover selectable provider metadata from draft credentials without requiring the operator to save them first. **Refresh catalog** calls `POST /ops/tts-ai/test` with `probe_mode=catalog`; the API resolves the saved or draft key server-side and performs bounded, read-only catalog requests. Providers with a curated catalog return it without a paid synthesis request.
 
 - OpenAI and OpenAI-compatible endpoints load `/models`; official OpenAI voices use reviewed presets because OpenAI does not expose a voice-list endpoint.
 - ElevenLabs loads its model and voice catalogs with `xi-api-key` authentication.
@@ -53,6 +53,14 @@ The Google setup supports three explicit credential modes:
 At runtime, `google-auth` obtains and refreshes a short-lived access token using the Cloud Platform scope. Tokens are cached in process only until shortly before expiry; they are never persisted or returned. Voice discovery calls `GET /v1/voices`, synthesis calls `POST /v1/text:synthesize`, and the response reads Base64 audio from `audioContent` with `Authorization: Bearer <token>`.
 
 Cloud Text-to-Speech does not currently expose a dedicated predefined `roles/texttospeech.user` role. For a standalone Service Account in this local setup, enable the API and grant the project-level **Service Usage Consumer** role (`roles/serviceusage.serviceUsageConsumer`) so the identity can consume the enabled API without receiving Editor/Owner access. Never commit the downloaded JSON file. API and worker deployments must share the same `PLATFORM_CREDENTIAL_ENCRYPTION_KEY_REF`; local development uses the existing server-only local credential key store.
+
+### Google Cloud Agent Platform TTS
+
+`google_cloud_tts` is an additive Gemini expressive provider and does not replace the legacy `google_gemini` AI Studio/Vertex OAuth profile. It uses `google-genai` with `vertexai=True` and an Agent Platform Express Mode API key. API-key mode is global and therefore does not accept a project/location pair.
+
+The curated model catalog contains `gemini-2.5-flash-tts`, `gemini-3.1-flash-preview-tts`, `gemini-2.5-pro-tts`, and `gemini-2.5-flash-lite-preview-tts`; new profiles default to Gemini 2.5 Flash TTS with the Achernar voice because it has broader regional availability. The catalog is curated because Vertex `models.list` requires OAuth2 even when audio generation accepts an Express Mode API key. Refresh Catalog is offline for this provider. Ops Test Connection validates credentials and model access with one short real audio generation call. Preview and durable jobs use the same native SDK adapter. If a configured model returns a publisher-model 404, the provider tries the curated fallback order once, records requested/resolved model IDs and reuses the resolved model for the rest of that job; authentication, quota and transient failures do not trigger this fallback.
+
+The provider participates in the existing text-conditioned emotion planner, provider instruction lowering, whole-video/auto-block strategy, single-voice enforcement, timing QA, and normalized WAV boundary. Chirp 3 HD remains in the classic Google Cloud TTS lane because it does not implement the same Gemini text-conditioned expressive contract.
 
 ## Timing policy
 

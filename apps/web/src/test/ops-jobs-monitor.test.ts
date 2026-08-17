@@ -77,6 +77,23 @@ assert.match(page, /function JobStepTrace/, "Expanded rows must render durable s
 assert.match(page, /ops-jobs-v2-trace-row/, "Step trace must render inline with its job");
 assert.match(page, /colSpan=\{6\}/, "Step trace must span the six-column worklist");
 assert.match(page, /job\.steps/, "Step trace must use persisted job steps");
+assert.match(
+  page,
+  /resolveOcrCheckpointOutcome[\s\S]*persist_outputs[\s\S]*WAITING_OCR_REVIEW/,
+  "Completed Analyze OCR jobs must derive their operator checkpoint from persisted step output"
+);
+assert.match(
+  page,
+  /ocrAnalysisReviewPending[\s\S]*reviewRequired/,
+  "Jobs worklist must replace No current step with the pending OCR decision count"
+);
+assert.match(
+  page,
+  /ops-jobs-table__checkpoint-badge[\s\S]*ocrReviewBadge/,
+  "Completed OCR jobs must show review attention as a separate badge"
+);
+assert.match(css, /\.ops-jobs-table__step\.is-attention/, "Pending OCR checkpoint copy must have an attention treatment");
+assert.match(css, /\.ops-jobs-table__checkpoint-badge/, "OCR review badge must have a compact amber treatment");
 
 assert.match(page, /status === "COMPLETED"[\s\S]*?100/, "Completed jobs must force displayed progress to 100%");
 assert.match(page, /status === "CANCELLED"[\s\S]*?0/, "Cancelled jobs must force displayed progress to 0%");

@@ -84,5 +84,6 @@ assert.match(en, /"opsExportPackages"/, "en.json must define opsExportPackages")
 assert.match(vi, /"opsExportPackages"/, "vi.json must define opsExportPackages");
 assert.match(pkg, /ops-export-packages-ui\.test\.ts/, "package.json must run export packages UI test");
 assert.match(pkg, /export-packages-index-polish\.test\.ts/, "package.json must run export packages polish test");
+assert.match(pkg, /export-package-detail-polish\.test\.ts/, "package.json must run export package detail polish");
 
 console.log("ops-export-packages-ui tests passed");

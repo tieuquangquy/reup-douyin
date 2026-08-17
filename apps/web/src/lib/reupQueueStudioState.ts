@@ -460,6 +460,148 @@ export type PipelineStage = {
   state: PipelineStageState;
 };
 
+export type PipelineFailureStage =
+  | "download"
+  | "analyze_audio"
+  | "translate"
+  | "tts"
+  | "ocr"
+  | "render_preview"
+  | "render"
+  | "unknown";
+
+export type PipelineFailureDescriptor = {
+  stage: PipelineFailureStage;
+  label: string;
+  autoLabel: string;
+};
+
+const PIPELINE_FAILURE_DESCRIPTORS: Record<PipelineFailureStage, PipelineFailureDescriptor> = {
+  download: { stage: "download", label: "Download failed", autoLabel: "Auto · Download" },
+  analyze_audio: { stage: "analyze_audio", label: "Analyze Audio failed", autoLabel: "Auto · ASR" },
+  translate: { stage: "translate", label: "Translation failed", autoLabel: "Auto · Translate" },
+  tts: { stage: "tts", label: "TTS failed", autoLabel: "Auto · TTS" },
+  ocr: { stage: "ocr", label: "OCR failed", autoLabel: "Auto · OCR" },
+  render_preview: { stage: "render_preview", label: "Preview failed", autoLabel: "Auto · Preview" },
+  render: { stage: "render", label: "Final render failed", autoLabel: "Auto · Render" },
+  unknown: { stage: "unknown", label: "Pipeline needs attention", autoLabel: "Auto · Needs attention" }
+};
+
+const FAILURE_STAGE_BY_JOB_TYPE: Record<string, PipelineFailureStage> = {
+  DOWNLOAD_VIDEO: "download",
+  ANALYZE_AUDIO: "analyze_audio",
+  BUILD_TRANSLATION_DRAFT: "translate",
+  SYNTHESIZE_TTS: "tts",
+  ANALYZE_OCR: "ocr",
+  RENDER_PREVIEW: "render_preview",
+  RENDER_FINAL: "render"
+};
+
+function normalizeFailureStage(value: unknown): PipelineFailureStage | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "translation" || normalized === "translation_draft") return "translate";
+  if (normalized === "synthesize_tts") return "tts";
+  if (normalized === "analyze_ocr") return "ocr";
+  if (normalized === "render_final") return "render";
+  if (normalized in PIPELINE_FAILURE_DESCRIPTORS) return normalized as PipelineFailureStage;
+  return null;
+}
+
+/** One authority for failure labels, stepper state and recovery actions. */
+export function pipelineFailureDescriptor(item: ReupQueueItem): PipelineFailureDescriptor | null {
+  const jobStatus = (item.job_status ?? "").toUpperCase();
+  const hasFailure =
+    item.status === "FAILED_NEEDS_ATTENTION"
+    || jobStatus === "FAILED"
+    || jobStatus === "RETRYABLE";
+  if (!hasFailure) return null;
+
+  const persisted = normalizeFailureStage(item.metadata_json?.pipeline_failed_step);
+  if (persisted) return PIPELINE_FAILURE_DESCRIPTORS[persisted];
+
+  const byJob = FAILURE_STAGE_BY_JOB_TYPE[(item.job_type ?? "").toUpperCase()];
+  if (byJob) return PIPELINE_FAILURE_DESCRIPTORS[byJob];
+
+  const errorBlob = [
+    item.job_error_code,
+    item.job_error_message,
+    item.last_error_code,
+    item.last_error_message,
+    item.blocked_reason
+  ].filter((value): value is string => typeof value === "string").join(" ").toUpperCase();
+  if (
+    errorBlob.includes("ANALYZE_AUDIO")
+    || errorBlob.includes("DIALOGUE_DETECTION")
+    || errorBlob.includes("TRANSCRIPTION")
+    || errorBlob.includes("TRANSCRIPT_BUILD")
+    || errorBlob.includes("AUDIO_EXTRACT")
+  ) return PIPELINE_FAILURE_DESCRIPTORS.analyze_audio;
+  if (errorBlob.includes("TRANSLAT") || errorBlob.includes("LLM_PROVIDER")) return PIPELINE_FAILURE_DESCRIPTORS.translate;
+  if (errorBlob.includes("SYNTHES") || errorBlob.includes("TTS")) return PIPELINE_FAILURE_DESCRIPTORS.tts;
+  if (errorBlob.includes("OCR") || errorBlob.includes("RESIDUAL")) return PIPELINE_FAILURE_DESCRIPTORS.ocr;
+  if (errorBlob.includes("PREVIEW")) return PIPELINE_FAILURE_DESCRIPTORS.render_preview;
+  if (errorBlob.includes("RENDER")) return PIPELINE_FAILURE_DESCRIPTORS.render;
+  if (errorBlob.includes("DOWNLOAD") || errorBlob.includes("DOUYIN_")) return PIPELINE_FAILURE_DESCRIPTORS.download;
+
+  const lastCompleted = metadataString(item.metadata_json, "pipeline_last_completed_step");
+  const downloadDone =
+    item.metadata_json?.download_job_completed === true
+    || Boolean(item.media_ready_at)
+    || Boolean(lastCompleted);
+  if (!downloadDone) return PIPELINE_FAILURE_DESCRIPTORS.download;
+  return PIPELINE_FAILURE_DESCRIPTORS.unknown;
+}
+
+function pipelineErrorMetadata(item: ReupQueueItem): Record<string, unknown> {
+  const raw = item.metadata_json?.pipeline_error;
+  return raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
+}
+
+export function pipelineFailureRecoveryLink(item: ReupQueueItem): { href: string; label: string; detail: string } | null {
+  const failure = pipelineFailureDescriptor(item);
+  if (failure?.stage !== "translate") return null;
+  const context = pipelineErrorMetadata(item);
+  const errorBlob = [item.job_error_message, item.last_error_message, item.last_error_code]
+    .filter((value): value is string => typeof value === "string")
+    .join(" ")
+    .toLowerCase();
+  if (
+    context.recovery_action !== "CHECK_TRANSLATION_AI_CONNECTION"
+    && !errorBlob.includes("translation_provider")
+    && !errorBlob.includes("http_403")
+  ) return null;
+  return {
+    href: "/ops/translation-ai",
+    label: "Check Translation AI",
+    detail: "Open Translation AI, run Test Connection, then resume this translation stage."
+  };
+}
+
+function pipelineFailureDetail(item: ReupQueueItem, failure: PipelineFailureDescriptor): string {
+  const recovery = pipelineFailureRecoveryLink(item);
+  if (recovery) {
+    const context = pipelineErrorMetadata(item);
+    const rawError = `${item.job_error_message ?? ""} ${item.last_error_message ?? ""}`;
+    const legacyHttpStatus = rawError.match(/http[_ ](\d{3})/i)?.[1];
+    const legacyProviderCode = rawError.match(/error\s+code\s*:\s*([a-z0-9_-]+)/i)?.[1];
+    const status = typeof context.http_status === "number"
+      ? `HTTP ${context.http_status}`
+      : legacyHttpStatus ? `HTTP ${legacyHttpStatus}` : "provider rejection";
+    const resolvedProviderCode =
+      (typeof context.provider_error_code === "string" && context.provider_error_code)
+      || legacyProviderCode;
+    const providerCode = resolvedProviderCode
+      ? ` / provider ${resolvedProviderCode}`
+      : "";
+    return `Translation provider rejected the request (${status}${providerCode}). ${recovery.detail}`;
+  }
+  return item.job_error_message?.trim()
+    || item.last_error_message?.trim()
+    || item.blocked_reason?.trim()
+    || `${failure.label}. Open Details for context.`;
+}
+
 const CORE_PIPELINE_STAGE_RANK: Record<string, number> = {
   download: 0,
   analyze_audio: 1,
@@ -474,18 +616,17 @@ const CORE_PIPELINE_STAGE_RANK: Record<string, number> = {
 
 export function buildPipelineStages(item: ReupQueueItem): PipelineStage[] {
   const exportPackageId = metadataString(item.metadata_json, "export_package_id");
-  const failed = item.status === "FAILED_NEEDS_ATTENTION" || isAnalyzeAudioFailed(item);
   return [
-    pipelineStage("download", "Download", downloadStageState(item, failed)),
+    pipelineStage("download", "Download", downloadStageState(item)),
     // Preserve the historical transcript/render keys for existing callers while
     // exposing the canonical seven production stages in the stepper.
-    pipelineStage("transcript", "Analyze Audio", transcriptStageState(item, failed)),
+    pipelineStage("transcript", "Analyze Audio", transcriptStageState(item)),
     pipelineStage("translation_draft", "Build Translation Draft", corePipelineStageState(item, 2, "BUILD_TRANSLATION_DRAFT")),
     pipelineStage("synthesize_tts", "Synthesize TTS", corePipelineStageState(item, 3, "SYNTHESIZE_TTS")),
     pipelineStage("analyze_ocr", "Analyze OCR", corePipelineStageState(item, 4, "ANALYZE_OCR")),
     pipelineStage("render_preview", "Render Preview", corePipelineStageState(item, 5, "RENDER_PREVIEW")),
-    pipelineStage("render", "Render Final", renderStageState(item, failed)),
-    pipelineStage("export", "Export", exportStageState(item, exportPackageId, failed))
+    pipelineStage("render", "Render Final", renderStageState(item)),
+    pipelineStage("export", "Export", exportStageState(item, exportPackageId, item.status === "FAILED_NEEDS_ATTENTION"))
   ];
 }
 
@@ -802,6 +943,10 @@ export function queueTileFailureAlert(item: ReupQueueItem): QueueTileFailureAler
       || "Open Details for context, then Retry analyze.";
     return { message: "Analyze failed", detail };
   }
+  const failure = pipelineFailureDescriptor(item);
+  if (failure) {
+    return { message: failure.label, detail: pipelineFailureDetail(item, failure) };
+  }
   if (isAutoPipelineNeedsAttention(item)) {
     const detail =
       item.last_error_message?.trim()
@@ -954,7 +1099,7 @@ export function formatJobChipLabel(item: ReupQueueItem): string | null {
   if (status === "FAILED") {
     // Queue stage owns the failure chip when item is already FAILED_NEEDS_ATTENTION.
     if (item.status === "FAILED_NEEDS_ATTENTION") return null;
-    return "Download failed";
+    return pipelineFailureDescriptor(item)?.label ?? "Job failed";
   }
   if (status === "CANCELLED") return "Job cancelled";
   if (status === "COMPLETED" || status === "SUCCEEDED") return null;
@@ -993,6 +1138,7 @@ export function downloadJobErrorLine(item: ReupQueueItem): string | null {
   const status = (item.job_status ?? "").toUpperCase();
   const failed = item.status === "FAILED_NEEDS_ATTENTION" || status === "FAILED";
   if (!failed) return null;
+  if (pipelineFailureDescriptor(item)?.stage !== "download") return null;
   const message = item.job_error_message || item.last_error_message || item.job_error_code || item.last_error_code;
   if (!message) return "Download failed. Open Details for more context.";
   const trimmed = message.trim();
@@ -1008,8 +1154,8 @@ function pipelineStage(key: string, label: string, state: PipelineStageState): P
   return { key, label, state };
 }
 
-function downloadStageState(item: ReupQueueItem, failed: boolean): PipelineStageState {
-  if (failed && item.status === "FAILED_NEEDS_ATTENTION" && !item.media_ready_at) return "failed";
+function downloadStageState(item: ReupQueueItem): PipelineStageState {
+  if (pipelineFailureDescriptor(item)?.stage === "download") return "failed";
   // Needs-start: chip/CTA own the truth — do not mark Download done from stale media_ready_at.
   if (item.status === "READY_FOR_PROCESSING") return "pending";
   if (item.media_ready_at || item.status === "WAITING_FOR_METADATA" || isPastProduction(item.status)) return "done";
@@ -1017,17 +1163,17 @@ function downloadStageState(item: ReupQueueItem, failed: boolean): PipelineStage
   return "pending";
 }
 
-function transcriptStageState(item: ReupQueueItem, failed: boolean): PipelineStageState {
+function transcriptStageState(item: ReupQueueItem): PipelineStageState {
   const canonical = corePipelineStageState(item, 1, "ANALYZE_AUDIO");
   if (canonical !== "pending") return canonical;
   if (isAnalyzeAudioFailed(item)) return "failed";
-  if (failed && item.status === "WAITING_FOR_METADATA") return "failed";
+  if (pipelineFailureDescriptor(item)?.stage === "analyze_audio") return "failed";
   if (item.media_prep_status === "READY_FOR_EXPORT" || isPastProduction(item.status)) return "done";
   if (item.status === "WAITING_FOR_METADATA") return "active";
   return "pending";
 }
 
-function renderStageState(item: ReupQueueItem, failed: boolean): PipelineStageState {
+function renderStageState(item: ReupQueueItem): PipelineStageState {
   const canonical = corePipelineStageState(item, 6, "RENDER_FINAL");
   if (canonical !== "pending") return canonical;
   if (item.render_output_id || item.status === "READY_TO_EXPORT" || isPastExport(item.status)) return "done";
@@ -1035,7 +1181,7 @@ function renderStageState(item: ReupQueueItem, failed: boolean): PipelineStageSt
   const jobType = (item.job_type ?? "").toUpperCase();
   const jobStatus = (item.job_status ?? "").toUpperCase();
   if (
-    failed
+    pipelineFailureDescriptor(item)?.stage === "render"
     && (jobType === "RENDER_PREVIEW" || jobType === "RENDER_FINAL")
     && (jobStatus === "FAILED" || jobStatus === "RETRYABLE")
   ) return "failed";
@@ -1052,6 +1198,7 @@ function corePipelineStageState(
   }
 
   const currentStep = metadataString(item.metadata_json, "pipeline_step");
+  const failedStep = normalizeFailureStage(item.metadata_json?.pipeline_failed_step);
   const lastCompletedStep = metadataString(item.metadata_json, "pipeline_last_completed_step");
   const currentRank = currentStep ? CORE_PIPELINE_STAGE_RANK[currentStep] : undefined;
   const lastCompletedRank = lastCompletedStep ? CORE_PIPELINE_STAGE_RANK[lastCompletedStep] : undefined;
@@ -1061,6 +1208,8 @@ function corePipelineStageState(
 
   if (typeof lastCompletedRank === "number" && lastCompletedRank >= stageRank) return "done";
   if (currentStep === "ready_final" || (typeof currentRank === "number" && currentRank > stageRank)) return "done";
+  const failedRank = failedStep ? CORE_PIPELINE_STAGE_RANK[failedStep === "render_preview" ? "quality_review" : failedStep] : undefined;
+  if (typeof failedRank === "number" && failedRank === stageRank) return "failed";
   if (normalizedJobType === jobType && jobFailed) return "failed";
   if (currentStep === "needs_attention" && normalizedJobType === jobType) return "failed";
   if (normalizedJobType === jobType && isActiveAnalyzeJobStatus(normalizedJobStatus)) return "active";
@@ -1215,7 +1364,7 @@ export function queueStageLabel(item: ReupQueueItem): string {
   }
   if (item.status === "PROCESSING") return "Processing";
   if (item.status === "FAILED_NEEDS_ATTENTION") {
-    return isDownloadFailureAttention(item) ? "Download failed" : "Needs attention";
+    return pipelineFailureDescriptor(item)?.label ?? "Needs attention";
   }
   if (item.status === "COMPLETED") return "Completed";
   if (item.status === "CANCELLED") return "Cancelled";
@@ -1238,7 +1387,7 @@ export function worklistStageLabel(item: ReupQueueItem): string {
   }
   if (item.status === "PROCESSING") return "Render";
   if (item.status === "FAILED_NEEDS_ATTENTION") {
-    return isDownloadFailureAttention(item) ? "Failed" : "Attention";
+    return pipelineFailureDescriptor(item)?.label ?? "Attention";
   }
   if (item.status === "READY_TO_EXPORT" || item.status === "EXPORT_PACKAGE_CREATED") return "Export";
   if (item.status === "READY_TO_PUBLISH" || item.status === "PUBLISH_HANDOFF_CREATED") return "Handoff";
@@ -1271,14 +1420,6 @@ export function worklistStageTone(item: ReupQueueItem): WorklistStageTone {
   if (tone === "danger") return "danger";
   if (tone === "muted") return "muted";
   return "warn";
-}
-
-function isDownloadFailureAttention(item: ReupQueueItem): boolean {
-  const jobStatus = (item.job_status ?? "").toUpperCase();
-  if (jobStatus === "FAILED") return true;
-  if (item.job_error_code || item.job_error_message) return true;
-  const code = (item.last_error_code ?? "").toUpperCase();
-  return code.includes("DOWNLOAD") || code.startsWith("DOUYIN_");
 }
 
 export function queueStageTone(item: ReupQueueItem): "good" | "warn" | "danger" | "muted" {
@@ -1609,7 +1750,7 @@ export function pipelineStepChipLabel(item: ReupQueueItem): string | null {
   if (step === "ocr") return "Auto · OCR";
   if (step === "render") return "Auto · Render";
   if (step === "ready_final") return "Auto · Ready for Final";
-  if (step === "needs_attention") return "Auto · Needs attention";
+  if (step === "needs_attention") return pipelineFailureDescriptor(item)?.autoLabel ?? "Auto · Needs attention";
   return "Auto pipeline";
 }
 

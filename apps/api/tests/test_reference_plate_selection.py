@@ -4,12 +4,29 @@ import math
 import unittest
 
 from src.media_pipeline.video_renderer.reference_plate import (
+    is_text_reduced_reference_candidate,
     is_usable_reference_plate_candidate,
     reference_plate_candidate_score,
 )
 
 
 class ReferencePlateSelectionTests(unittest.TestCase):
+    def test_rejects_neighbor_with_different_but_equally_dense_text(self) -> None:
+        self.assertFalse(
+            is_text_reduced_reference_candidate(
+                current_textness_fraction=0.08,
+                candidate_textness_fraction=0.075,
+            )
+        )
+
+    def test_accepts_materially_cleaner_local_plate(self) -> None:
+        self.assertTrue(
+            is_text_reduced_reference_candidate(
+                current_textness_fraction=0.08,
+                candidate_textness_fraction=0.03,
+            )
+        )
+
     def test_rejects_candidate_that_still_contains_the_overlay(self) -> None:
         self.assertFalse(
             is_usable_reference_plate_candidate(

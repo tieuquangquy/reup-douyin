@@ -52,6 +52,7 @@ import {
   queueTileDurationLabel,
   queueTileFailureAlert,
   queueTileFailureStrip,
+  pipelineFailureRecoveryLink,
   queueTilePostedLabel,
   queueTileThumbnailUrl,
   queueTileTranscriptCta,
@@ -1737,6 +1738,7 @@ function ReupQueueMediaTile({
   const primaryLabel = primaryQueueActionLabel(item);
   const primaryButtonClass = queueTilePrimaryButtonClassName(item);
   const transcriptCta = queueTileTranscriptCta(item);
+  const recoveryLink = pipelineFailureRecoveryLink(item);
   const failureAlert = queueTileFailureAlert(item);
   const failureStrip = queueTileFailureStrip(item);
   const nextStepHint = failureAlert ? null : queueTileNextStepHint(item);
@@ -1916,7 +1918,7 @@ function ReupQueueMediaTile({
           </ol>
         </div>
         {nextStepHint ? <p className="reup-queue-tile-stage-hint">{nextStepHint}</p> : null}
-        {secondaryLinks.length > 0 || dismissAction || showPrimaryAction || transcriptCta || showOpenDetails ? (
+        {secondaryLinks.length > 0 || dismissAction || showPrimaryAction || recoveryLink || transcriptCta || showOpenDetails ? (
           <div className="capture-inbox-tile-footer capture-inbox-compact-actions">
             {secondaryLinks.length > 0 ? (
               <div className="reup-queue-tile-quick-links" aria-label="Workflow shortcuts">
@@ -1933,7 +1935,7 @@ function ReupQueueMediaTile({
                 ))}
               </div>
             ) : null}
-            {dismissAction || showPrimaryAction || transcriptCta || showOpenDetails ? (
+            {dismissAction || showPrimaryAction || recoveryLink || transcriptCta || showOpenDetails ? (
               <div
                 aria-label="Queue item actions"
                 className="review-board-tile-action-bar review-board-tile-action-grid is-tile reup-queue-tile-action-bar"
@@ -1952,6 +1954,15 @@ function ReupQueueMediaTile({
                     >
                       Dismiss
                     </AsyncButton>
+                  ) : recoveryLink ? (
+                    <a
+                      className="review-board-tile-btn is-primary is-promoted-open"
+                      href={recoveryLink.href}
+                      title={recoveryLink.detail}
+                    >
+                      <WorkItemActionIcon kind="open" />
+                      {recoveryLink.label}
+                    </a>
                   ) : transcriptCta ? (
                     <a
                       className="review-board-tile-btn is-primary is-promoted-open reup-queue-tile-transcript-cta"
@@ -2230,6 +2241,7 @@ function ReupQueueInspectorActions({
   const disabled = mutatingAction !== null;
   const dismissAction = terminalQueueDismissAction(item);
   const transcriptCta = queueTileTranscriptCta(item);
+  const recoveryLink = pipelineFailureRecoveryLink(item);
   const primaryAction = primaryQueueAction(item);
   const showPrimaryAction = primaryAction !== null && primaryAction !== "inspect";
   const primaryLabel = primaryQueueActionLabel(item);
@@ -2238,6 +2250,7 @@ function ReupQueueInspectorActions({
 
   const shownPrimaryKey =
     dismissAction ??
+    (recoveryLink ? "OPEN_RECOVERY" : null) ??
     (transcriptCta ? "OPEN_TRANSCRIPT" : null) ??
     (typeof primaryAction === "string" && primaryAction !== "inspect" ? primaryAction : null);
 
@@ -2260,7 +2273,7 @@ function ReupQueueInspectorActions({
   const transcriptCompact = Boolean(transcriptCta);
   const useCompactCompanions = attentionCompact || transcriptCompact;
   const compactCompanions = useCompactCompanions ? [...moreTransitions, ...danger, ...quiet] : [];
-  const hasPrimary = Boolean(dismissAction || transcriptCta || showPrimaryAction);
+  const hasPrimary = Boolean(dismissAction || recoveryLink || transcriptCta || showPrimaryAction);
   const hasSecondary = useCompactCompanions
     ? compactCompanions.length > 0 || showExportPackage || showPublishHandoff
     : moreTransitions.length > 0 || danger.length > 0 || quiet.length > 0 || showExportPackage || showPublishHandoff;
@@ -2333,6 +2346,15 @@ function ReupQueueInspectorActions({
                 >
                   Dismiss
                 </AsyncButton>
+              ) : recoveryLink ? (
+                <a
+                  className="review-board-tile-btn is-primary is-promoted-open"
+                  href={recoveryLink.href}
+                  title={recoveryLink.detail}
+                >
+                  <WorkItemActionIcon kind="open" />
+                  {recoveryLink.label}
+                </a>
               ) : transcriptCta ? (
                 <a
                   className="review-board-tile-btn is-primary is-promoted-open reup-queue-tile-transcript-cta"

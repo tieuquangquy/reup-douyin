@@ -8,6 +8,7 @@ import {
   hasFinalReviewOcrRun,
   isFinalReviewDialogueTranslationApprovalPending,
   isFinalReviewOcrReviewPending,
+  resolveFinalReviewOcrCheckpointMetrics,
   resolveFinalReviewPrepBriefing,
   resolveFinalReviewPrepStepProgress
 } from "../../lib/finalReviewState";
@@ -179,6 +180,7 @@ export function FinalReviewPrepJourney({
   prepFocus,
   ocrSummary = null,
   ocrBusy = false,
+  visualCleanBusy = false,
   ocrWatchPaused = false,
   approveBusy = false,
   actionBusy = false,
@@ -192,6 +194,7 @@ export function FinalReviewPrepJourney({
   prepFocus: FinalReviewPrepFocus;
   ocrSummary?: Parameters<typeof resolveFinalReviewPrepStepProgress>[0]["ocrSummary"];
   ocrBusy?: boolean;
+  visualCleanBusy?: boolean;
   /** UI stopped watching; job may still run — quiet Paused CTA, no spinner. */
   ocrWatchPaused?: boolean;
   approveBusy?: boolean;
@@ -206,16 +209,27 @@ export function FinalReviewPrepJourney({
   const t = useT();
   const progress = resolveFinalReviewPrepStepProgress({
     ocrSummary,
-    ocrBusy,
+    ocrBusy: ocrBusy || visualCleanBusy,
     startRenderPending,
     ocrProgressPercent,
     renderProgressPercent
   });
   const ocrReviewPending = isFinalReviewOcrReviewPending(ocrSummary);
+  const ocrCheckpoint = resolveFinalReviewOcrCheckpointMetrics(ocrSummary);
   const dialogueTranslationPending =
     isFinalReviewDialogueTranslationApprovalPending(ocrSummary);
+  const visualCheckpointLabel =
+    ocrSummary?.workflow_stage === "WAITING_RESIDUAL_TRIAGE"
+      ? t("finalReviewVisual.stageWaitingResidualTriage")
+      : ocrSummary?.workflow_stage === "WAITING_RESIDUAL_REVIEW"
+        ? t("finalReviewVisual.stageWaitingResidualReview")
+        : null;
   const lockedLabel = t("finalReviewStates.emptyStepLocked");
   const waitingApprovalLabel = t("finalReviewStates.journeyWaitingTranslationApproval");
+  const waitingOcrReviewLabel = t("finalReviewStates.journeyWaitingOcrReview").replace(
+    "{count}",
+    String(ocrCheckpoint.manual)
+  );
   const steps = [
     {
       key: "ocr" as const,
@@ -223,21 +237,33 @@ export function FinalReviewPrepJourney({
       label: t("finalReviewStates.emptyStepShort1"),
       desc: dialogueTranslationPending
         ? waitingApprovalLabel
+        : ocrReviewPending
+          ? waitingOcrReviewLabel
         : t("finalReviewStates.emptyStepDesc1"),
       cta: ocrWatchPaused
         ? t("finalReviewVisual.analyzePausedShort")
         : ocrReviewPending
           ? t("finalReviewVisual.reviewOcrBelow")
+        : visualCheckpointLabel
+          ? visualCheckpointLabel
         : hasFinalReviewOcrRun(ocrSummary)
           ? t("finalReviewStates.emptyStepCta1Again")
           : t("finalReviewStates.emptyStepCta1"),
       icon: ocrReviewPending ? "details" as const : "recheck" as const,
-      pending: ocrBusy && !ocrWatchPaused && !ocrReviewPending && !dialogueTranslationPending,
-      pendingLabel: t("finalReviewVisual.analyzing"),
+      pending: (ocrBusy || visualCleanBusy) && !ocrWatchPaused && !ocrReviewPending && !dialogueTranslationPending,
+      pendingLabel: t(
+        visualCleanBusy
+          ? "finalReviewVisual.visualCleanInProgress"
+          : "finalReviewVisual.analyzing"
+      ),
       locked: false,
-      hideCta: dialogueTranslationPending,
-      statusLabel: dialogueTranslationPending ? waitingApprovalLabel : null,
-      attention: dialogueTranslationPending,
+      hideCta: dialogueTranslationPending || Boolean(visualCheckpointLabel),
+      statusLabel: dialogueTranslationPending
+        ? waitingApprovalLabel
+        : ocrReviewPending
+          ? waitingOcrReviewLabel
+          : visualCheckpointLabel,
+      attention: dialogueTranslationPending || ocrReviewPending || Boolean(visualCheckpointLabel),
       disabled: approveBusy || !onAnalyze || ocrWatchPaused || dialogueTranslationPending,
       onClick: onAnalyze,
       primary: prepFocus === "ocr" && !ocrWatchPaused && !dialogueTranslationPending,
@@ -266,6 +292,7 @@ export function FinalReviewPrepJourney({
         prepFocus === "ocr" ||
         actionBusy ||
         ocrBusy ||
+        visualCleanBusy ||
         approveBusy ||
         !onStartRender ||
         renderWatchPaused,
@@ -309,6 +336,7 @@ export function FinalReviewPrepJourney({
         const done = step.key === "ocr" && prepFocus === "render";
         const locked = step.locked && !done;
         const pct = progress[step.progressKey];
+        const showOcrCheckpoint = step.key === "ocr" && ocrReviewPending;
         const prefix = t("finalReviewStates.emptyStepLabelPrefix").replace("{n}", String(index + 1));
         const ctaLabel = locked ? lockedLabel : step.cta;
         return (
@@ -341,14 +369,26 @@ export function FinalReviewPrepJourney({
                   <h3 className="final-review-prep-steps__title">
                     <span className="final-review-prep-steps__prefix">{prefix}</span> {step.label}
                   </h3>
-                  <p className="final-review-prep-steps__desc">{step.desc}</p>
+                  {showOcrCheckpoint ? null : <p className="final-review-prep-steps__desc">{step.desc}</p>}
                 </div>
-                <div className="final-review-prep-steps__progress" aria-hidden="true">
-                  <div className="final-review-prep-steps__bar">
-                    <span className="final-review-prep-steps__bar-fill" style={{ width: `${pct}%` }} />
+                {showOcrCheckpoint ? (
+                  <div className="final-review-prep-steps__checkpoint" role="status">
+                    <span className="is-done">{t("finalReviewStates.journeyAnalysisDone")}</span>
+                    <span className="is-review">
+                      {t("finalReviewStates.journeyReviewCount").replace(
+                        "{count}",
+                        String(ocrCheckpoint.manual)
+                      )}
+                    </span>
                   </div>
-                  <span className="final-review-prep-steps__pct">{pct}%</span>
-                </div>
+                ) : (
+                  <div className="final-review-prep-steps__progress" aria-hidden="true">
+                    <div className="final-review-prep-steps__bar">
+                      <span className="final-review-prep-steps__bar-fill" style={{ width: `${pct}%` }} />
+                    </div>
+                    <span className="final-review-prep-steps__pct">{pct}%</span>
+                  </div>
+                )}
               </div>
               {step.hideCta ? (
                 <span className="final-review-prep-steps__waiting" role="status" title={step.statusLabel ?? undefined}>

@@ -10,6 +10,7 @@ from src.media_pipeline.video_renderer.phase4_input_contract import (
     _apply_geometry_overrides,
     _collapse_residual_caption_cover_groups,
     _kind_for_roles,
+    _normalize_overlapping_text_authorities,
     _normalize_shared_caption_boundaries,
     _rects_overlap,
     _resolve_protected_caption_shadow_ids,
@@ -17,6 +18,7 @@ from src.media_pipeline.video_renderer.phase4_input_contract import (
     _suppress_weak_caption_fragments,
     analyze_phase4_typography,
     build_phase4_render_input,
+    repair_legacy_phase1_timing,
     write_phase4_preflight_artifacts,
 )
 from src.media_pipeline.video_renderer.render_policy import (
@@ -25,6 +27,49 @@ from src.media_pipeline.video_renderer.render_policy import (
 
 
 class Phase4SourceResolutionTests(unittest.TestCase):
+    def test_demotes_adjacent_shadow_using_strong_master_editor_provenance(self) -> None:
+        master = {
+            "editor": {
+                "text_id": "editor",
+                "start_frame": 100,
+                "end_frame": 110,
+                "box_coords": [122, 923, 607, 965],
+                "visual_provenance": {
+                    "classification": "EDITOR_OVERLAY",
+                    "confidence": 0.95,
+                },
+            },
+            "shadow": {
+                "text_id": "shadow",
+                "start_frame": 111,
+                "end_frame": 128,
+                "box_coords": [168, 925, 562, 963],
+                "visual_provenance": {
+                    "classification": "SOURCE_INTRINSIC",
+                    "confidence": 0.96,
+                },
+            },
+        }
+        enrichments = {
+            "editor": {
+                "visual_provenance": {
+                    "classification": "DIALOGUE_HARDSUB",
+                    "confidence": 0.52,
+                }
+            }
+        }
+
+        demoted = _resolve_protected_caption_shadow_ids(
+            master,
+            enrichments,
+            ["editor"],
+            {"shadow"},
+            frame_width=720,
+            frame_height=1280,
+        )
+
+        self.assertEqual(demoted, {"shadow"})
+
     def test_demotes_dense_source_shadow_inside_approved_editor_caption_lane(self) -> None:
         master = {
             "editor": {
@@ -83,6 +128,28 @@ class Phase4SourceResolutionTests(unittest.TestCase):
                     "confidence": 0.98,
                 },
             },
+            "inverted_shadow": {
+                "text_id": "inverted_shadow",
+                "start_frame": 120,
+                "end_frame": 105,
+                "best_frame_index": 112,
+                "hit_frames": [105, 112, 120],
+                "box_coords": [230, 530, 585, 565],
+                "visual_provenance": {
+                    "classification": "SOURCE_INTRINSIC",
+                    "confidence": 0.96,
+                },
+            },
+            "tall_outline_shadow": {
+                "text_id": "tall_outline_shadow",
+                "start_frame": 104,
+                "end_frame": 122,
+                "box_coords": [220, 520, 590, 575],
+                "visual_provenance": {
+                    "classification": "SOURCE_INTRINSIC",
+                    "confidence": 0.96,
+                },
+            },
         }
         enrichments = {
             "editor": {
@@ -103,6 +170,8 @@ class Phase4SourceResolutionTests(unittest.TestCase):
                 "phone_label",
                 "tall_source_object",
                 "nested_editor_fragment",
+                "inverted_shadow",
+                "tall_outline_shadow",
             },
             frame_width=720,
             frame_height=1280,
@@ -110,7 +179,13 @@ class Phase4SourceResolutionTests(unittest.TestCase):
 
         self.assertEqual(
             demoted,
-            {"shadow_top", "shadow_second_line", "nested_editor_fragment"},
+            {
+                "shadow_top",
+                "shadow_second_line",
+                "nested_editor_fragment",
+                "inverted_shadow",
+                "tall_outline_shadow",
+            },
         )
 
     def test_unions_same_lane_residual_caption_fragments(self) -> None:
@@ -365,6 +440,135 @@ def _phase3() -> dict:
 
 
 class Phase4InputContractTests(unittest.TestCase):
+    def test_promotes_temporal_recovery_after_dialogue_semantic_classification(self) -> None:
+        master = [
+            {
+                "text_id": "sub_tiny",
+                "start_frame": 10,
+                "end_frame": 40,
+                "best_frame_index": 24,
+                "box_coords": [491, 1065, 521, 1090],
+            }
+        ]
+        phase2 = {
+            "track_enrichments": [
+                {
+                    "text_id": "sub_tiny",
+                    "content_id": "ocr_content_dialogue",
+                    "ocr_recovery": {
+                        "status": "RECOVERED_FOR_OPERATOR_REVIEW",
+                        "method": "temporal_consensus",
+                        "confidence": 0.92,
+                        "frame_support": 2,
+                        "geometry_observation_count": 2,
+                        "text": "再蘸取这颗浅色",
+                        "selected_box": [150, 923, 574, 968],
+                    },
+                }
+            ],
+            "content_objects": [
+                {
+                    "content_id": "ocr_content_dialogue",
+                    "geometry_refs": ["sub_tiny"],
+                    "roles": ["ui_chip"],
+                    "semantic_hardsub": {
+                        "classification": "DIALOGUE_HARDSUB",
+                        "canonical_text_authority": "再蘸取这颗浅色",
+                    },
+                }
+            ],
+        }
+        phase3 = {
+            "status": "READY_FOR_RENDER",
+            "geometry_map": {
+                "sub_tiny": {
+                    "content_id": "ocr_content_dialogue",
+                    "text_vi": "Lại chấm vào màu sáng này",
+                    "translation_status": "TRANSLATION_APPROVED",
+                }
+            },
+        }
+
+        contract = build_phase4_render_input(
+            master,
+            phase2,
+            phase3,
+            video_metadata={
+                "frame_width": 720,
+                "frame_height": 1280,
+                "frame_count": 100,
+                "fps": 30.0,
+            },
+            refs={},
+        )
+
+        track = contract["render_tracks"][0]
+        self.assertEqual(track["kind"], "hardsub")
+        self.assertAlmostEqual(track["geometry"]["x"], 150 / 720)
+        self.assertAlmostEqual(track["geometry"]["width"], 424 / 720)
+        self.assertEqual(
+            track["semantic_geometry_recovery"]["status"],
+            "LOCAL_TEMPORAL_CONSENSUS_PROMOTED_AT_PHASE4",
+        )
+        report = analyze_phase4_typography(
+            contract,
+            fontfile=Path(r"C:\Windows\Fonts\segoeui.ttf"),
+        )
+        self.assertEqual(report["counts"]["text_overflow"], 0)
+
+    def test_partitions_dialogue_text_without_shortening_source_cover(self) -> None:
+        tracks = [
+            {
+                "text_id": "dialogue_a",
+                "content_id": "content_a",
+                "start_frame": 0,
+                "end_frame": 30,
+                "start_ms": 0,
+                "end_ms": 1033,
+                "best_frame_index": 12,
+                "hit_frames": [8, 12, 15],
+                "geometry": {"x": 0.2, "y": 0.72, "width": 0.6, "height": 0.05},
+                "text_vi": "Cau thu nhat",
+                "cover_only": False,
+                "semantic_dialogue_hardsub": True,
+                "semantic_timing_authority": {"transcript_segment_id": "seg_1"},
+                "render_policy": {"context": {"soft_cover_epoch_id": "epoch_1"}},
+            },
+            {
+                "text_id": "dialogue_b",
+                "content_id": "content_b",
+                "start_frame": 10,
+                "end_frame": 40,
+                "start_ms": 333,
+                "end_ms": 1367,
+                "best_frame_index": 27,
+                "hit_frames": [24, 27, 31],
+                "geometry": {"x": 0.2, "y": 0.72, "width": 0.6, "height": 0.05},
+                "text_vi": "Cau thu hai",
+                "cover_only": False,
+                "semantic_dialogue_hardsub": True,
+                "semantic_timing_authority": {"transcript_segment_id": "seg_1"},
+                "render_policy": {"context": {"soft_cover_epoch_id": "epoch_1"}},
+            },
+        ]
+
+        adjusted = _normalize_overlapping_text_authorities(tracks, fps=30.0)
+
+        self.assertEqual(adjusted, 1)
+        self.assertLess(tracks[0]["end_frame"], tracks[1]["start_frame"])
+        self.assertEqual(
+            (tracks[0]["cover_start_frame"], tracks[0]["cover_end_frame"]),
+            (0, 30),
+        )
+        self.assertEqual(
+            (tracks[1]["cover_start_frame"], tracks[1]["cover_end_frame"]),
+            (10, 40),
+        )
+        self.assertEqual(
+            tracks[0]["semantic_timing_adjustment"]["reason"],
+            "partition_overlapping_vietnamese_authority",
+        )
+
     def test_recovered_duplicate_shadow_is_suppressed_without_content_id_shift(self) -> None:
         master = [
             {
@@ -1085,6 +1289,25 @@ class Phase4InputContractTests(unittest.TestCase):
         )
 
         self.assertEqual(report["counts"]["collision_events"], 0)
+
+
+class Phase4LegacyTimingRepairTests(unittest.TestCase):
+    def test_inverted_legacy_span_uses_hit_and_coverage_authority(self) -> None:
+        start, end, audit = repair_legacy_phase1_timing(
+            {
+                "start_frame": 567,
+                "end_frame": 563,
+                "best_frame_index": 571,
+                "hit_frames": [563, 571],
+            },
+            {"presence_ranges": [[556, 567]]},
+            frame_count=1000,
+        )
+
+        self.assertEqual((start, end), (556, 571))
+        self.assertIsNotNone(audit)
+        self.assertEqual(audit["prior_span"], [567, 563])
+        self.assertEqual(audit["evidence_frames"], [556, 563, 567, 571])
 
 
 if __name__ == "__main__":

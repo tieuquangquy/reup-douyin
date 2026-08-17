@@ -390,7 +390,7 @@ assert.match(pageSource, /reup-queue-pipeline-stepper/, "Queue tile pipeline mus
 assert.match(pageSource, /reup-queue-pipeline-stepper__node/, "Queue tile stepper must render numbered or checked nodes");
 assert.match(pageSource, /reup-queue-pipeline-stepper__label/, "Queue tile stepper must show stage labels under each node");
 assert.doesNotMatch(pageSource, /reup-queue-pipeline-strip__focus|pipelineTileFocusLabel/, "Queue tile stepper must not keep the single Now-focus caption");
-assert.match(globalCssSource, /\.reup-queue-pipeline-stepper\s*\{[^}]*width: 100%;[^}]*grid-template-columns: repeat\(4, minmax\(0, 1fr\)\)/, "Queue tile stepper must span the full tile width with four stages");
+assert.match(globalCssSource, /\.reup-queue-pipeline-stepper\s*\{[^}]*width: 100%;[^}]*grid-template-columns: repeat\(8, minmax\(0, 1fr\)\)/, "Queue tile stepper must span the full tile width with all eight stages");
 assert.match(globalCssSource, /\.reup-queue-pipeline-stepper__step:first-child[\s\S]*justify-items: start/, "Queue tile stepper must pin the first stage to the left edge");
 assert.match(globalCssSource, /\.reup-queue-pipeline-stepper__step:last-child[\s\S]*justify-items: end/, "Queue tile stepper must pin the last stage to the right edge");
 assert.match(pageSource, /pipelineStageInteraction/, "Queue tile stepper must gate click actions per stage");

@@ -11,7 +11,7 @@ runtime after a deploy.
 | --- | --- | --- |
 | `DOWNLOAD_VIDEO` | `DOWNLOAD_V2` | `download-quality-policy-v2` + `post-download-qa-v1` |
 | `ANALYZE_AUDIO` | `AUDIO_ANALYSIS_V5` | `audio-analysis-v5-selective-dialogue-validation1` |
-| `BUILD_TRANSLATION_DRAFT` | `TRANSLATION_V5` | `translation-v3-contextual-semantic-utterance-ranking-5` |
+| `BUILD_TRANSLATION_DRAFT` | `TRANSLATION_V5` | `translation-v3-contextual-semantic-utterance-ranking-6` |
 | `SYNTHESIZE_TTS` | `TTS_TEMPORAL_V6` | `context-aware-tts-director-v2` + `gemini-whole-video-v1` + `whole-video-silence-alignment-v2` |
 | `ANALYZE_OCR` | `OCR-V34` | official Analyze OCR immutable recipe |
 | `RENDER_PREVIEW` | `QUALITY_LOCALIZATION_V24_1` | immutable pipeline recipe `V24.1` |

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect } from "react";
+import { parseFinalReviewActionStatus, shouldAutoDismissFinalReviewActionStatus } from "../../lib/finalReviewState";
 import { useT } from "../../lib/i18n";
 
 export type FinalReviewActionStatusPhase = "queued" | "running" | "success" | "warning" | "error";
@@ -10,18 +11,8 @@ export type FinalReviewActionStatusState = {
   message: string;
 };
 
-/** Terminal success/warning/error strips auto-hide after this read window. */
+/** Success/warning strips auto-hide after this read window; errors stay until dismissed. */
 export const FINAL_REVIEW_STATUS_AUTO_DISMISS_MS = 6000;
-
-function splitActionStatusMessage(phase: FinalReviewActionStatusPhase, message: string) {
-  if (phase !== "error") return { title: null, detail: message };
-  const separatorIndex = message.indexOf(":");
-  if (separatorIndex < 1) return { title: null, detail: message };
-  return {
-    title: message.slice(0, separatorIndex).trim(),
-    detail: message.slice(separatorIndex + 1).trim()
-  };
-}
 
 type Props = {
   phase: FinalReviewActionStatusPhase;
@@ -147,15 +138,16 @@ export function FinalReviewActionStatus({
   const inFlight = phase === "queued" || phase === "running" || watchPaused;
   const showControls = inFlight && (Boolean(onPause) || Boolean(onResume) || Boolean(onCancel));
   const showProgress = phase === "running" && !watchPaused;
-  const statusMessage = splitActionStatusMessage(phase, message);
+  const statusMessage = parseFinalReviewActionStatus(phase, message);
   const canDismiss =
     Boolean(onDismiss) && (phase === "success" || phase === "warning" || phase === "error") && !watchPaused;
+  const autoDismiss = canDismiss && shouldAutoDismissFinalReviewActionStatus(phase);
 
   useEffect(() => {
-    if (!canDismiss || !onDismiss) return;
+    if (!autoDismiss || !onDismiss) return;
     const timer = window.setTimeout(onDismiss, FINAL_REVIEW_STATUS_AUTO_DISMISS_MS);
     return () => window.clearTimeout(timer);
-  }, [canDismiss, onDismiss, phase, message]);
+  }, [autoDismiss, onDismiss, phase, message]);
 
   return (
     <div
@@ -168,12 +160,23 @@ export function FinalReviewActionStatus({
         <StatusIcon phase={watchPaused ? "warning" : phase} />
       </span>
       <div className="fr-action-status__body">
-        <p className="fr-action-status__message">
-          {statusMessage.title ? (
-            <strong className="fr-action-status__message-title">{statusMessage.title}</strong>
+        <div className="fr-action-status__copy">
+          <p className="fr-action-status__message">
+            {statusMessage.title ? (
+              <strong className="fr-action-status__message-title">{statusMessage.title}</strong>
+            ) : null}
+            <span className="fr-action-status__message-detail">{statusMessage.detail}</span>
+          </p>
+          {statusMessage.flags.length ? (
+            <ul className="fr-action-status__flags">
+              {statusMessage.flags.map((flag) => (
+                <li key={flag} className="fr-action-status__flag">
+                  {flag}
+                </li>
+              ))}
+            </ul>
           ) : null}
-          <span className="fr-action-status__message-detail">{statusMessage.detail}</span>
-        </p>
+        </div>
         {showProgress ? (
           <div className="fr-action-status__progress is-indeterminate" aria-hidden="true">
             <span className="fr-action-status__progress-bar" />

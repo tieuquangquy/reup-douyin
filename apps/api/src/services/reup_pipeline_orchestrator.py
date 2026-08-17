@@ -18,6 +18,8 @@ from src.services.reup_pipeline_meta import (
     OCR_JOB_ID_KEY,
     PIPELINE_MODE_AUTO_TO_RENDER,
     PIPELINE_MODE_AUTO_TO_TTS,
+    PIPELINE_ERROR_KEY,
+    PIPELINE_FAILED_STEP_KEY,
     PIPELINE_STEP_ANALYZE_AUDIO,
     PIPELINE_STEP_KEY,
     PIPELINE_STEP_DOWNLOAD,
@@ -34,6 +36,7 @@ from src.services.reup_pipeline_meta import (
     QUALITY_WORKFLOW_STAGE_KEY,
     TRANSLATION_JOB_ID_KEY,
     TTS_JOB_ID_KEY,
+    clear_pipeline_failure_meta,
     DOWNLOAD_JOB_ID_KEY,
     get_last_completed_step,
     get_pipeline_mode,
@@ -44,6 +47,7 @@ from src.services.reup_pipeline_meta import (
     set_pipeline_meta,
 )
 from src.services.reup_pipeline_plan import PIPELINE_STEP_ORDER, next_pipeline_step
+from src.services.pipeline_failure_context import build_pipeline_failure_context
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +119,9 @@ class ReupPipelineOrchestrator:
                     item,
                     error_code=getattr(job, "error_code", None) or "PIPELINE_JOB_FAILED",
                     error_message=getattr(job, "error_message", None) or "Pipeline job failed.",
+                    failed_step=_FAILED_STEP_BY_JOB_TYPE.get(
+                        _type_value(getattr(job, "job_type", None))
+                    ),
                 )
                 updated += 1
                 continue
@@ -128,6 +135,9 @@ class ReupPipelineOrchestrator:
                         item,
                         error_code="PIPELINE_JOB_CANCELLED",
                         error_message="The linked pipeline job was cancelled outside the queue workflow.",
+                        failed_step=_FAILED_STEP_BY_JOB_TYPE.get(
+                            _type_value(getattr(job, "job_type", None))
+                        ),
                     )
                     updated += 1
                 continue
@@ -319,6 +329,9 @@ class ReupPipelineOrchestrator:
                         getattr(job, "error_message", None)
                         or f"The linked {step} job is {status.lower()} and needs review."
                     ),
+                    failed_step=_FAILED_STEP_BY_JOB_TYPE.get(
+                        _type_value(getattr(job, "job_type", None))
+                    ) or step,
                 )
                 repaired += 1
         if repaired:
@@ -327,6 +340,7 @@ class ReupPipelineOrchestrator:
 
     def resume_item(self, item: ReupQueueItem) -> ReupQueueItem:
         """Clear hold and re-enqueue the step the item was paused on."""
+        failed_step = str(meta_dict(item).get(PIPELINE_FAILED_STEP_KEY) or "").strip()
         set_pipeline_meta(item, hold=False)
         item.held_at = None
         step = meta_dict(item).get("pipeline_step") or PIPELINE_STEP_DOWNLOAD
@@ -337,7 +351,10 @@ class ReupPipelineOrchestrator:
             # completed. Resume the failed authority stage from its cache,
             # rather than resetting the whole auto lane to Download.
             last_completed = get_last_completed_step(item)
-            if (
+            if failed_step in _ENSURE_METHOD_BY_STEP:
+                step = failed_step
+                set_pipeline_meta(item, step=step)
+            elif (
                 last_completed == PIPELINE_STEP_ANALYZE_AUDIO
                 and not self._dialogue_is_uncertain(item)
             ):
@@ -346,7 +363,7 @@ class ReupPipelineOrchestrator:
                 # would discard the reviewed authority and can recreate the same gate.
                 self.set_automation(item, mode=get_pipeline_mode(item))
                 return item
-            if last_completed in {
+            elif last_completed in {
                 PIPELINE_STEP_ANALYZE_AUDIO,
                 PIPELINE_STEP_TRANSLATE,
                 PIPELINE_STEP_TTS,
@@ -355,13 +372,14 @@ class ReupPipelineOrchestrator:
             }:
                 step = last_completed
                 set_pipeline_meta(item, step=step)
-            else:
+            elif not failed_step:
                 return item
         if step in {
             PIPELINE_STEP_READY_FINAL,
             PIPELINE_STEP_TRANSLATION_REVIEW,
         }:
             return item
+        clear_pipeline_failure_meta(item)
         self._ensure_step(step, item)
         return item
 
@@ -1203,8 +1221,21 @@ class ReupPipelineOrchestrator:
             return True
         return False
 
-    def _mark_needs_attention(self, item: ReupQueueItem, *, error_code: str, error_message: str) -> None:
+    def _mark_needs_attention(
+        self,
+        item: ReupQueueItem,
+        *,
+        error_code: str,
+        error_message: str,
+        failed_step: str | None = None,
+    ) -> None:
         now = utc_now()
+        resolved_failed_step = str(failed_step or get_pipeline_step(item) or "unknown")
+        error_context = build_pipeline_failure_context(
+            failed_step=resolved_failed_step,
+            error_code=error_code,
+            error_message=error_message,
+        )
         item.status = ReupQueueStatus.FAILED_NEEDS_ATTENTION
         item.media_prep_status = ReupQueueMediaPrepStatus.BLOCKED
         item.failed_at = now
@@ -1213,7 +1244,15 @@ class ReupPipelineOrchestrator:
         item.last_error_code = error_code
         item.last_error_message = error_message
         item.last_action_note = f"Auto pipeline stopped: {error_message}"
-        set_pipeline_meta(item, step=PIPELINE_STEP_NEEDS_ATTENTION, hold=True)
+        set_pipeline_meta(
+            item,
+            step=PIPELINE_STEP_NEEDS_ATTENTION,
+            hold=True,
+            extra={
+                PIPELINE_FAILED_STEP_KEY: resolved_failed_step,
+                PIPELINE_ERROR_KEY: error_context,
+            },
+        )
 
     def _find_items_for_job(self, job: Any) -> list[ReupQueueItem]:
         job_id = getattr(job, "id", None)
@@ -1276,6 +1315,11 @@ _COMPLETED_STEP_BY_JOB_TYPE: dict[str, str] = {
     JobType.SYNTHESIZE_TTS.value: PIPELINE_STEP_TTS,
     JobType.ANALYZE_OCR.value: PIPELINE_STEP_OCR,
     JobType.RENDER_FINAL.value: PIPELINE_STEP_RENDER,
+}
+
+_FAILED_STEP_BY_JOB_TYPE: dict[str, str] = {
+    **_COMPLETED_STEP_BY_JOB_TYPE,
+    JobType.RENDER_PREVIEW.value: "render_preview",
 }
 
 _ENSURE_METHOD_BY_STEP: dict[str, str] = {

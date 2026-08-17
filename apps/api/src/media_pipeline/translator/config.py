@@ -30,6 +30,8 @@ class TranslatorSettings:
     system_prompt: str
     timeout_seconds: float = 90.0
     source: str = "env"  # workspace_db | env
+    provider: str = "openai_compatible"
+    region: str = "global"
 
 
 def _load_env_file(path: Path) -> None:

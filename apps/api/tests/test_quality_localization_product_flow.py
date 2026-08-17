@@ -12,11 +12,13 @@ from fastapi import HTTPException
 from src.api.routes.audio_analysis import approve_source_video_translation_draft
 from src.api.routes.ocr import OcrCreateRequest, _summary_response, create_ocr_job
 from src.enums import MediaAssetStatus, MediaAssetType, TranscriptSegmentStatus
+from src.media_pipeline.video_renderer.phase4_input_contract import Phase4InputError
 from src.schemas.audio_analysis import ApproveTranslationDraftRequest
 from src.services.quality_localization_service import (
     QUALITY_WORKFLOW_VERSION,
     QualityLocalizationError,
     QualityLocalizationService,
+    _build_residual_proposal_checked,
     _matching_active_residual_remediation,
     _phase1_watchdog_timeout_seconds,
     _residual_translation_input_sha256,
@@ -950,3 +952,34 @@ def test_final_cache_requires_complete_narration_and_hash_bound_pass(tmp_path) -
     meta["audio_mix"]["narration_complete"] = False
     meta_path.write_text(json.dumps(meta), encoding="utf-8")
     assert service._final_output_is_reusable(root, uuid4()) is False
+
+
+def test_residual_proposal_wraps_phase4_contract_error(tmp_path) -> None:
+    with patch(
+        "src.services.quality_localization_service.build_residual_remediation_proposal",
+        side_effect=Phase4InputError("Invalid timing/geometry for sub_71"),
+    ):
+        with pytest.raises(QualityLocalizationError) as caught:
+            _build_residual_proposal_checked(tmp_path)
+
+    assert caught.value.code == "PHASE4_INPUT_INVALID"
+    assert "sub_71" in str(caught.value)
+
+
+def test_phase2_remediation_runtime_error_has_terminal_contract_code(tmp_path) -> None:
+    service = object.__new__(QualityLocalizationService)
+    service._write_semantic_dialogue_authority = lambda *_args, **_kwargs: None
+    with patch(
+        "src.services.quality_localization_service.run_phase2_only.main",
+        side_effect=RuntimeError(
+            "Residual remediation geometry override is unsafe"
+        ),
+    ):
+        with pytest.raises(QualityLocalizationError) as caught:
+            service._run_phase2_with_semantic_authority(
+                source=object(),
+                root=tmp_path,
+                video_path=tmp_path / "source.mp4",
+            )
+
+    assert caught.value.code == "PHASE2_REMEDIATION_INVALID"

@@ -72,6 +72,7 @@ from src.media_pipeline.video_renderer.phase4_approvals import (
     stage_background_mix_review,
     stage_verified_no_dialogue_audio_handoff,
 )
+from src.media_pipeline.video_renderer.phase4_input_contract import Phase4InputError
 from src.models.ingestion import SourceVideo
 from src.models.artifacts import TranscriptSegment, TranslationSegment
 from src.models.media import MediaAsset
@@ -105,7 +106,54 @@ ProgressCallback = Callable[[str, int | None], None]
 
 
 class QualityLocalizationError(RuntimeError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "QUALITY_LOCALIZATION_FAILED",
+        details: Mapping[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = str(code or "QUALITY_LOCALIZATION_FAILED")
+        self.details = dict(details or {})
+
+
+def _execute_phase4_preflight(root: Path) -> int:
+    try:
+        return run_phase4_preflight.run_recorded(root)
+    except Phase4InputError as exc:
+        raise QualityLocalizationError(
+            f"Phase 4 input invalid: {exc}",
+            code="PHASE4_INPUT_INVALID",
+            details={"artifact": "phase4_preflight_failure.json"},
+        ) from exc
+    except Exception as exc:
+        raise QualityLocalizationError(
+            f"Adaptive Phase 4 preflight execution failed: "
+            f"{type(exc).__name__}: {exc}",
+            code="PHASE4_PREFLIGHT_EXECUTION_FAILED",
+            details={"artifact": "phase4_preflight_failure.json"},
+        ) from exc
+
+
+def _build_residual_proposal_checked(root: Path) -> dict[str, Any]:
+    """Build residual authority without leaking Phase 4 contract exceptions."""
+
+    try:
+        proposal = build_residual_remediation_proposal(root)
+        validate_residual_remediation_proposal(root, proposal)
+        return proposal
+    except Phase4InputError as exc:
+        raise QualityLocalizationError(
+            f"Phase 4 input invalid while building residual proposal: {exc}",
+            code="PHASE4_INPUT_INVALID",
+            details={"artifact": "phase4_preflight_failure.json"},
+        ) from exc
+    except ResidualRemediationProposalError as exc:
+        raise QualityLocalizationError(
+            f"Residual remediation proposal validation failed: {exc}",
+            code="QUALITY_REVIEW_VALIDATION_FAILED",
+        ) from exc
 
 
 def _phase1_watchdog_timeout_seconds(settings: Any, phase: str) -> int:
@@ -744,7 +792,8 @@ class QualityLocalizationService:
         if operator_id == AUTO_QUALITY_ACTOR:
             self._prepare_auto_preflight_audio(source.id)
         progress("adaptive_preflight", 30)
-        if run_phase4_preflight.main([str(root)]) != 0:
+        preflight_exit = _execute_phase4_preflight(root)
+        if preflight_exit != 0:
             preflight_meta = _read_object(root / "phase4_preflight_meta.json", required=False)
             preflight_report = _read_object(
                 root / "qa" / "phase4_preflight_report.json", required=False
@@ -826,13 +875,37 @@ class QualityLocalizationService:
             qa_meta = _read_object(
                 root / "phase4_adaptive_render_meta.json", required=False
             )
+            failure_meta = _read_object(
+                root / "phase4_adaptive_failure_meta.json", required=False
+            )
             failed_checks = ",".join(
                 str(value)
-                for value in list(qa_meta.get("output_qa_failed_checks") or [])
+                for value in list(
+                    qa_meta.get("output_qa_failed_checks")
+                    or failure_meta.get("failed_checks")
+                    or []
+                )
             )
+            failure_error = dict(failure_meta.get("error") or {})
+            failure_message = str(failure_error.get("message") or "").strip()
             raise QualityLocalizationError(
-                "Adaptive visual preview output QA failed "
-                f"({failed_checks or 'unknown_check'})"
+                "Adaptive visual preview frame render failed "
+                f"({failed_checks or 'frame_render'})"
+                + (f": {failure_message}" if failure_message else ""),
+                code=(
+                    "QUALITY_FRAME_RENDER_FAILED"
+                    if "frame_render" in failed_checks
+                    else "QUALITY_OUTPUT_QA_FAILED"
+                ),
+                details={
+                    "artifact": "phase4_adaptive_failure_meta.json",
+                    "failed_checks": [
+                        str(value)
+                        for value in list(
+                            failure_meta.get("failed_checks") or []
+                        )
+                    ],
+                },
             )
         preview = root / "phase4_adaptive_visual_preview.mp4"
         self._register_workspace_file(
@@ -1192,7 +1265,7 @@ class QualityLocalizationService:
             # Phase 4 evidence is bound to the Phase 3 handoff. Refresh it after any
             # recovery; a residual block is expected here and feeds the proposal
             # builder, while unrelated preflight failures remain terminal.
-            preflight_exit = run_phase4_preflight.main([str(root)])
+            preflight_exit = _execute_phase4_preflight(root)
             if preflight_exit != 0:
                 refreshed = _read_object(
                     root / "phase4_preflight_meta.json", required=False
@@ -1288,11 +1361,7 @@ class QualityLocalizationService:
                 suggestion_payload,
             )
             progress("auto_residual_proposal", 20)
-            try:
-                proposal = build_residual_remediation_proposal(root)
-                validate_residual_remediation_proposal(root, proposal)
-            except ResidualRemediationProposalError as exc:
-                raise QualityLocalizationError(str(exc)) from exc
+            proposal = _build_residual_proposal_checked(root)
             _write_json_atomic(proposal_path, proposal)
             proposal_sha256 = str(proposal.get("proposal_sha256") or "")
             operator_id = AUTO_QUALITY_ACTOR
@@ -1328,11 +1397,7 @@ class QualityLocalizationService:
                 suggestion_payload,
             )
             progress("residual_proposal", 20)
-            try:
-                proposal = build_residual_remediation_proposal(root)
-                validate_residual_remediation_proposal(root, proposal)
-            except ResidualRemediationProposalError as exc:
-                raise QualityLocalizationError(str(exc)) from exc
+            proposal = _build_residual_proposal_checked(root)
             _write_json_atomic(proposal_path, proposal)
             self._set_active_root(source, root, stage="WAITING_RESIDUAL_REVIEW")
             self.db.commit()
@@ -2034,7 +2099,7 @@ class QualityLocalizationService:
                 )
         except Phase4ApprovalError as exc:
             raise QualityLocalizationError(str(exc)) from exc
-        if run_phase4_preflight.main([str(root)]) != 0:
+        if _execute_phase4_preflight(root) != 0:
             raise QualityLocalizationError("Final adaptive preflight failed")
         try:
             from scripts.rebind_phase4_audio_authority import (
@@ -2193,6 +2258,10 @@ class QualityLocalizationService:
                 "review_required": 0,
                 "translation_review_required": 0,
                 "visual_preview_asset_id": None,
+                "visual_preview_status": "NOT_STARTED",
+                "visual_preview_error_code": None,
+                "visual_preview_error_message": None,
+                "visual_preview_retryable": False,
                 "can_render_final": False,
                 "audio_review_status": "NOT_STAGED",
                 "audio_mix_review_status": "NOT_STAGED",
@@ -2339,6 +2408,26 @@ class QualityLocalizationService:
         preflight_meta = _read_object(
             root / "phase4_preflight_meta.json", required=False
         )
+        preflight_failure = _read_object(
+            root / "phase4_preflight_failure.json", required=False
+        )
+        latest_preview_job = self.db.scalar(
+            select(Job)
+            .where(
+                Job.source_video_id == source.id,
+                Job.job_type == JobType.RENDER_PREVIEW,
+            )
+            .order_by(Job.created_at.desc())
+            .limit(1)
+        )
+        latest_preview_job_status = (
+            str(
+                getattr(getattr(latest_preview_job, "status", None), "value", None)
+                or getattr(latest_preview_job, "status", "")
+            ).upper()
+            if latest_preview_job is not None
+            else ""
+        )
         residual = (
             encoded_residual
             if encoded_residual_current
@@ -2477,6 +2566,21 @@ class QualityLocalizationService:
                 != active_remediation_sha256
             ):
                 preview_asset = None
+        if preview_asset is not None:
+            visual_preview_status = "READY"
+        elif latest_preview_job_status in {"QUEUED", "RUNNING", "RETRYABLE"}:
+            visual_preview_status = latest_preview_job_status
+        elif preflight_failure:
+            visual_preview_status = "FAILED"
+        elif (
+            str(preflight_meta.get("status") or "") == "PHASE4_PREFLIGHT_BLOCKED"
+            or str(preflight_meta.get("final_render_gate") or "").startswith("BLOCKED_")
+        ):
+            visual_preview_status = "BLOCKED_REVIEW"
+        elif (root / "phase3_closeout.json").is_file():
+            visual_preview_status = "READY_TO_BUILD"
+        else:
+            visual_preview_status = "NOT_STARTED"
         if (root / "phase4_adaptive_final.mp4").is_file():
             stage = "FINAL_READY"
         elif residual_proposal_objects:
@@ -2623,6 +2727,14 @@ class QualityLocalizationService:
             "review_required": len(review_objects),
             "translation_review_required": len(translation_objects),
             "visual_preview_asset_id": str(preview_asset.id) if preview_asset else None,
+            "visual_preview_status": visual_preview_status,
+            "visual_preview_error_code": (
+                str(preflight_failure.get("error_code") or "") or None
+            ),
+            "visual_preview_error_message": (
+                str(preflight_failure.get("message") or "") or None
+            ),
+            "visual_preview_retryable": bool(preflight_failure.get("retryable")),
             # The public OCR summary historically exposes the player source as
             # cleaned_video_asset_id.  Override the legacy OCR asset with the
             # QA-bound quality preview (or null after a failed active run).
@@ -2866,8 +2978,15 @@ class QualityLocalizationService:
                 ["--provider", "local", str(root), str(video_path)]
             )
         except RuntimeError as exc:
+            message = str(exc)
+            remediation_invalid = "remediation" in message.lower()
             raise QualityLocalizationError(
-                f"Phase 2 OCR delta failed: {exc}"
+                f"Phase 2 OCR delta failed: {message}",
+                code=(
+                    "PHASE2_REMEDIATION_INVALID"
+                    if remediation_invalid
+                    else "PHASE2_DELTA_FAILED"
+                ),
             ) from exc
 
     def _write_semantic_dialogue_authority(

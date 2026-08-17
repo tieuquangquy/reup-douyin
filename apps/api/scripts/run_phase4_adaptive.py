@@ -60,6 +60,32 @@ def _write_json_atomic(path: Path, payload: Any) -> None:
     temporary.replace(path)
 
 
+def _record_runner_failure(
+    root: Path,
+    *,
+    visual_preview: bool,
+    exc: Exception,
+) -> Path:
+    diagnostics = dict(getattr(exc, "diagnostics", {}) or {})
+    failure = {
+        "schema_version": "phase4_adaptive_failure_meta_v1",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "status": "VISUAL_PREVIEW_RENDER_FAILED"
+        if visual_preview
+        else "FINAL_RENDER_FAILED",
+        "visual_preview": bool(visual_preview),
+        "failed_checks": ["frame_render"],
+        "error": {
+            "type": type(exc).__name__,
+            "message": str(exc)[:1000],
+            "diagnostics": diagnostics,
+        },
+    }
+    path = root / "phase4_adaptive_failure_meta.json"
+    _write_json_atomic(path, failure)
+    return path
+
+
 def _load_json(path: Path) -> Any:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -457,12 +483,16 @@ def main(argv: list[str] | None = None) -> int:
     except SystemExit as exc:
         return int(exc.code)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    root = Path(args.phase4_output_dir).resolve()
+    visual_preview = not bool(args.final)
     try:
-        return run(
+        result = run(
             args.phase4_output_dir,
-            visual_preview=not bool(args.final),
+            visual_preview=visual_preview,
             narration_path=args.narration,
         )
+        (root / "phase4_adaptive_failure_meta.json").unlink(missing_ok=True)
+        return result
     except (
         Phase4AdaptiveRunnerError,
         AdaptiveVideoRenderError,
@@ -470,10 +500,20 @@ def main(argv: list[str] | None = None) -> int:
         Phase4ApprovalError,
         VisualRemediationError,
     ) as exc:
-        print(f"[P4-ADAPTIVE][FAIL] {exc}", flush=True)
+        _record_runner_failure(
+            root,
+            visual_preview=visual_preview,
+            exc=exc,
+        )
+        print(f"[P4-ADAPTIVE][FAIL] {type(exc).__name__}: {exc}", flush=True)
         return 1
     except Exception as exc:
-        print(f"[P4-ADAPTIVE][FAIL] {type(exc).__name__}", flush=True)
+        _record_runner_failure(
+            root,
+            visual_preview=visual_preview,
+            exc=exc,
+        )
+        print(f"[P4-ADAPTIVE][FAIL] {type(exc).__name__}: {exc}", flush=True)
         return 1
 
 

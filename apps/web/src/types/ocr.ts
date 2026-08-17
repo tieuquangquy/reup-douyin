@@ -98,6 +98,19 @@ export type OcrSummaryResponse = {
     review_input_sha256?: string;
   }>;
   visual_preview_asset_id?: string | null;
+  visual_preview_status?:
+    | "NOT_STARTED"
+    | "READY_TO_BUILD"
+    | "QUEUED"
+    | "RUNNING"
+    | "RETRYABLE"
+    | "FAILED"
+    | "BLOCKED_REVIEW"
+    | "READY"
+    | string;
+  visual_preview_error_code?: string | null;
+  visual_preview_error_message?: string | null;
+  visual_preview_retryable?: boolean;
   can_render_final?: boolean;
   audio_review_status?: string;
   audio_mix_review_status?: string;

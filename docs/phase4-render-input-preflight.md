@@ -110,7 +110,11 @@ Nếu preflight bị `BLOCKED_VISUAL_RESIDUAL_CJK`, không nới mask mù và kh
 python -m scripts.build_phase2_residual_remediation_proposal <phase3-output-directory>
 ```
 
-Builder gom detection trùng giữa các sample frame, bắt buộc OCR lại source bằng local DBNet + PP-OCR, yêu cầu cùng signature số/CJK và xác nhận temporal window trên source. Với video VFR, frame evidence được decode tuần tự theo index thay vì random-seek OpenCV để tránh lấy nhầm hình. Proposal v2 hỗ trợ hai hành động fail-closed: thêm occurrence Phase 2 thật sự bị thiếu, hoặc mở rộng geometry của occurrence hiện hữu khi OCR nguồn xác nhận toàn dòng đã được operator duyệt nhưng box Phase 1 bị cắt cụt. Geometry override chỉ tồn tại trong remediation authority, không sửa `master_timeline.json`. Artifact `phase2_residual_remediation_proposal.json` tự bind SHA-256 của toàn chuỗi Phase 1 → Phase 4 và source video; crop review nằm trong `qa/phase2_residual_remediation/`. Proposal chỉ là gợi ý: chưa tạo authority thay đổi, chưa ghi OCR approval và chưa tái sử dụng translation approval cũ. Operator phải duyệt proposal trước khi materialize remediation và chạy lại Phase 2 → Phase 4.
+Builder gom detection trùng giữa các sample frame, bắt buộc OCR lại source bằng local DBNet + PP-OCR, yêu cầu cùng signature số/CJK và xác nhận temporal window trên source. Với video VFR, frame evidence được decode tuần tự theo index thay vì random-seek OpenCV để tránh lấy nhầm hình. Proposal v3 hỗ trợ hai hành động fail-closed: thêm occurrence Phase 2 thật sự bị thiếu, hoặc mở rộng geometry của occurrence hiện hữu khi OCR nguồn xác nhận toàn dòng đã được operator duyệt nhưng box Phase 1 bị cắt cụt. Geometry override chỉ tồn tại trong remediation authority, không sửa `master_timeline.json`.
+
+Một fallback hẹp `preflight_partial_caption_association_v1` xử lý trường hợp OCR output chỉ đọc được một glyph confidence thấp thuộc dòng caption nguồn lớn hơn. Fallback chỉ chạy khi source OCR cùng frame có confidence cao, chứa phần lớn residual, target đang active là `caption_row` có translation đã duyệt, và OCR lại xác nhận geometry/text của dòng nguồn trên ít nhất 80% vòng đời target. Khi nhiều geometry cùng content hoạt động, selector phạt temporal slack để chọn span ngắn nhất khớp residual; `ui_chip` và track lân cận không phải caption bị loại. Proposal giữ nguyên Chinese/Vietnamese authority đã duyệt và chỉ đề xuất `EXPAND_EXISTING_PHASE2_GEOMETRY`, nên không biến glyph OCR sai thành một bản dịch độc lập.
+
+Artifact `phase2_residual_remediation_proposal.json` tự bind SHA-256 của toàn chuỗi Phase 1 → Phase 4 và source video; crop review nằm trong `qa/phase2_residual_remediation/`. Proposal chỉ là gợi ý: chưa tạo authority thay đổi, chưa ghi OCR approval và chưa tái sử dụng translation approval cũ. Operator phải duyệt proposal trước khi materialize remediation và chạy lại Phase 2 → Phase 4.
 
 Khi Phase 2 OCR lại crop đã mở rộng, guard chỉ cho phép một biến thể deletion-only rất hẹp: thiếu tối đa đúng một glyph, candidate còn ít nhất bốn ký tự và toàn bộ candidate phải là subsequence của signature đã nằm trong proposal được operator duyệt. Ký tự mới, substitution, đảo thứ tự hoặc thiếu nhiều hơn một glyph đều bị coi là candidate drift và dừng luồng.
 
@@ -157,6 +161,24 @@ Artifact mới:
 - `phase4_residual_visual_triage_index.json` và `PHASE4_RESIDUAL_VISUAL_TRIAGE_INDEX.md` ở batch root.
 
 ## Artifact
+
+### Timing integrity and legacy compatibility
+
+Phase 1 now repairs an impossible inclusive interval from its confirmed hit frames and
+best keyframe before coverage closes, then fails closed before publishing
+`master_timeline.json` if timing or geometry is still invalid. The repair decision is
+recorded under `finalize_audit.timing_integrity`.
+
+For an immutable run created before this guard existed, Phase 4 may derive a bounded
+compatibility interval from the hash-bound hit frames, best keyframe and coverage
+`presence_ranges`. It does not rewrite the old Phase 1 artifact; the generated Phase 4
+track records `timing_integrity_repair` with the prior span, repaired span and evidence.
+If no valid evidence exists, preflight remains terminal.
+
+An exception before normal preflight metadata is materialized writes
+`phase4_preflight_failure.json`. Contract/input errors use `PHASE4_INPUT_INVALID` and
+are not auto-retried; unexpected execution/environment errors remain eligible for the
+bounded pipeline retry policy.
 
 - `phase4_render_input_preview.json`: contract sau validation.
 - `phase4_render_input.json`: chỉ có khi typography preflight đạt.

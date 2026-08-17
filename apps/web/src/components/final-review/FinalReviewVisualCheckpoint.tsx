@@ -6,7 +6,8 @@ import type { FinalReviewPrepFocus } from "../../lib/finalReviewState";
 import {
   hasFinalReviewOcrRun,
   isFinalReviewDialogueTranslationApprovalPending,
-  isFinalReviewOcrReviewPending
+  isFinalReviewOcrReviewPending,
+  resolveFinalReviewOcrCheckpointMetrics
 } from "../../lib/finalReviewState";
 import type { OcrSummaryResponse } from "../../types/ocr";
 import { fetchLocalizationArtifactObjectUrl, fetchMediaAssetObjectUrl } from "../../lib/api";
@@ -118,6 +119,36 @@ function workflowStageLabel(stage: string | null | undefined, t: (key: string) =
   const key = WORKFLOW_STAGE_I18N[stage];
   if (key) return t(key);
   return stage.replace(/_/g, " ").toLowerCase();
+}
+
+const RESIDUAL_ACTION_I18N: Record<string, string> = {
+  EXPAND_EXISTING_PHASE2_GEOMETRY: "finalReviewVisual.residualActionExpandGeometry",
+  ADD_PHASE2_OCCURRENCE: "finalReviewVisual.residualActionAddOccurrence"
+};
+
+function residualActionLabel(action: string | null | undefined, t: (key: string) => string): string {
+  if (!action) return "";
+  const key = RESIDUAL_ACTION_I18N[action];
+  if (key) return t(key);
+  return action.replace(/_/g, " ").toLowerCase();
+}
+
+function pipelineFactsLine(summary: OcrSummaryResponse): string | null {
+  const parts: string[] = [];
+  if (summary.all_frame_proxy_size) {
+    const [width, height] = summary.all_frame_proxy_size;
+    const triggers =
+      summary.visual_trigger_count != null ? ` · ${summary.visual_trigger_count} visual triggers` : "";
+    parts.push(`Proxy ${width}×${height}${triggers}`);
+  }
+  if (summary.detector_frame_count) {
+    const elapsed =
+      summary.analysis_elapsed_s != null ? ` · ${summary.analysis_elapsed_s.toFixed(1)}s` : "";
+    parts.push(
+      `Detector ${summary.detector_frame_count} frame · ${summary.candidate_window_count || 0} event${elapsed}`
+    );
+  }
+  return parts.length ? parts.join(" · ") : null;
 }
 
 export function FinalReviewVisualCheckpoint({
@@ -339,8 +370,13 @@ export function FinalReviewVisualCheckpoint({
   const useCompactMeta = useShortPrepLabels;
   const hasOcrResult = hasFinalReviewOcrRun(summary);
   const ocrReviewPending = isFinalReviewOcrReviewPending(summary);
+  const ocrCheckpoint = resolveFinalReviewOcrCheckpointMetrics(summary);
+  const cleanPreviewEmptyLabel = ocrReviewPending
+    ? t("finalReviewVisual.cleanPreviewAfterOcrReviewShort")
+    : t("finalReviewVisual.noCleaned");
   const dialogueTranslationPending =
     isFinalReviewDialogueTranslationApprovalPending(summary);
+  const pipelineFacts = summary ? pipelineFactsLine(summary) : null;
   // Status strip owns Pause/Resume/Cancel — don't also show a spinning Analyze CTA.
   // Dialogue gate / Exact OCR list own their CTAs — hide the duplicate steps CTA.
   const hideAnalyzeCta =
@@ -415,6 +451,14 @@ export function FinalReviewVisualCheckpoint({
 
   const meta = summary ? (
     <div className={`final-visual-checkpoint__meta${isPrep || presentation === "rail" ? " final-visual-checkpoint__meta--quiet" : ""}`}>
+      {ocrReviewPending ? (
+        <span className={useCompactMeta ? "final-visual-checkpoint__stat is-warn" : "pill warn"}>
+          {t("finalReviewVisual.ocrReviewCountShort").replace(
+            "{count}",
+            String(ocrCheckpoint.manual)
+          )}
+        </span>
+      ) : (
       <span className={useCompactMeta ? "final-visual-checkpoint__stat" : "pill"}>
         {t(
           summary.workflow_version === "QUALITY_LOCALIZATION_V24_1"
@@ -433,6 +477,7 @@ export function FinalReviewVisualCheckpoint({
           )
         )}
       </span>
+      )}
       {dialogueTranslationPending && (summary.dialogue_translation_blocked_count || 0) > 0 ? (
         <span className={useCompactMeta ? "final-visual-checkpoint__stat is-warn" : "pill warn"}>
           {t(
@@ -454,15 +499,11 @@ export function FinalReviewVisualCheckpoint({
         <span className={useCompactMeta ? "final-visual-checkpoint__stat is-warn" : "pill warn"}>
           {t(useCompactMeta ? "finalReviewVisual.ocrDoneWaitingShort" : "finalReviewVisual.ocrDoneWaiting")}
         </span>
-      ) : ocrReviewPending ? (
-        <span className={useCompactMeta ? "final-visual-checkpoint__stat is-warn" : "pill warn"}>
-          {t(useCompactMeta ? "finalReviewVisual.waitingOcrReviewShort" : "finalReviewVisual.waitingOcrReview")}
-        </span>
-      ) : (
+      ) : !ocrReviewPending ? (
         <span className={useCompactMeta ? "final-visual-checkpoint__stat" : "pill"}>
           {t(useCompactMeta ? "finalReviewVisual.noCleanedShort" : "finalReviewVisual.noCleaned")}
         </span>
-      )}
+      ) : null}
       {unstableCount > 0 ? (
         <span className={useCompactMeta ? "final-visual-checkpoint__stat is-warn" : "pill warn"}>
           {t("finalReviewVisual.unstableCount").replace("{count}", String(unstableCount))}
@@ -520,6 +561,42 @@ export function FinalReviewVisualCheckpoint({
 
   const qualityReview = summary?.workflow_version === "QUALITY_LOCALIZATION_V24_1" ? (
     <div className="final-visual-checkpoint__quality-review">
+      {ocrReviewPending ? (
+        <section className="final-visual-checkpoint__gate is-ocr-review" role="status" aria-live="polite">
+          <div className="final-visual-checkpoint__gate-icon" aria-hidden="true">
+            <svg viewBox="0 0 20 20">
+              <path
+                d="M5 10.2 8.2 13.4 15 6.6"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.7"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+          </div>
+          <div className="final-visual-checkpoint__gate-body">
+            <h3 className="final-visual-checkpoint__gate-title">
+              {t("finalReviewVisual.ocrCheckpointComplete")}
+            </h3>
+            <p className="final-visual-checkpoint__gate-copy">
+              {t("finalReviewVisual.ocrCheckpointSummaryCompact")
+                .replace("{automatic}", String(ocrCheckpoint.automatic))
+                .replace("{manual}", String(ocrCheckpoint.manual))}
+            </p>
+          </div>
+          <button
+            className="final-visual-checkpoint__gate-review-cta"
+            type="button"
+            onClick={() => document.getElementById("final-review-ocr-review")?.scrollIntoView({ behavior: "smooth", block: "start" })}
+          >
+            {t("finalReviewVisual.ocrCheckpointReviewCta").replace(
+              "{count}",
+              String(ocrCheckpoint.manual)
+            )}
+          </button>
+        </section>
+      ) : null}
       {dialogueTranslationPending ? (
         <section className="final-visual-checkpoint__gate" role="status" aria-live="polite">
           <div className="final-visual-checkpoint__gate-icon" aria-hidden="true">
@@ -585,71 +662,71 @@ export function FinalReviewVisualCheckpoint({
             {workflowStageLabel(summary.workflow_stage, t)}
           </span>
         ) : null}
-        {summary.phase2_model_version ? <span className="muted">{summary.phase2_model_version}</span> : null}
-        {(summary.local_recovery_summary?.attempted_tracks || 0) > 0 ? (
+        {summary.phase2_model_version ? (
+          <span className="final-visual-checkpoint__pipeline-fingerprint">{summary.phase2_model_version}</span>
+        ) : null}
+        {(summary.local_recovery_summary?.attempted_tracks || 0) > 0 ||
+        (summary.local_recovery_summary?.geometry_tracks_derived || 0) > 0 ? (
+          <div className="final-visual-checkpoint__pipeline-band">
+            {(summary.local_recovery_summary?.attempted_tracks || 0) > 0 ? (
+              <span className="pill">
+                OCR recovery: {summary.local_recovery_summary?.editor_candidates_recovered || 0} editor ·{" "}
+                {summary.local_recovery_summary?.promoted_source_ui_tracks || 0} giữ source
+              </span>
+            ) : null}
+            {(summary.local_recovery_summary?.geometry_tracks_derived || 0) > 0 ? (
+              <span className="pill">
+                Geometry hardsub: {summary.local_recovery_summary?.geometry_tracks_derived || 0} derived /{" "}
+                {summary.local_recovery_summary?.geometry_tracks_fail_closed || 0} fail-closed
+              </span>
+            ) : null}
+          </div>
+        ) : null}
+        <div className="final-visual-checkpoint__pipeline-band">
           <span className="pill">
-            OCR recovery: {summary.local_recovery_summary?.editor_candidates_recovered || 0} editor ·{" "}
-            {summary.local_recovery_summary?.promoted_source_ui_tracks || 0} giữ source
+            Editor: {summary.provenance_counts?.EDITOR_OVERLAY || 0}
           </span>
-        ) : null}
-        {(summary.local_recovery_summary?.geometry_tracks_derived || 0) > 0 ? (
           <span className="pill">
-            Geometry hardsub: {summary.local_recovery_summary?.geometry_tracks_derived || 0} derived /{" "}
-            {summary.local_recovery_summary?.geometry_tracks_fail_closed || 0} fail-closed
+            {summary.analysis_engine === "audio_visual_temporal_v1"
+              ? "Local temporal"
+              : summary.analysis_engine || "Local OCR"}
           </span>
+          {summary.analysis_recipe_release ? (
+            <span
+              className="pill"
+              title={summary.analysis_recipe_sha256 || summary.analysis_recipe_release}
+            >
+              {summary.analysis_recipe_release}
+            </span>
+          ) : null}
+          {summary.pipeline_recipe_release ? (
+            <span
+              className="final-visual-checkpoint__pipeline-release"
+              title={summary.pipeline_recipe_sha256 || summary.pipeline_recipe_release}
+            >
+              Pipeline {summary.pipeline_recipe_release}
+            </span>
+          ) : null}
+          {summary.analysis_mode ? (
+            <span className="pill">
+              {summary.analysis_mode === "AUDIO_GUIDED_VISUAL"
+                ? `Audio-guided · ${summary.audio_window_count || 0} windows`
+                : "Visual-only"}
+            </span>
+          ) : null}
+          {summary.analysis_fallback_used ? <span className="pill warn">V58 fallback</span> : null}
+        </div>
+        {pipelineFacts ? (
+          <p className="final-visual-checkpoint__pipeline-facts">{pipelineFacts}</p>
         ) : null}
-        <span className="pill">
-          Editor: {summary.provenance_counts?.EDITOR_OVERLAY || 0}
-        </span>
-        <span className="pill">
-          {summary.analysis_engine === "audio_visual_temporal_v1"
-            ? "Local temporal"
-            : summary.analysis_engine || "Local OCR"}
-        </span>
-        {summary.analysis_recipe_release ? (
-          <span
-            className="pill"
-            title={summary.analysis_recipe_sha256 || summary.analysis_recipe_release}
-          >
-            {summary.analysis_recipe_release}
-          </span>
-        ) : null}
-        {summary.pipeline_recipe_release ? (
-          <span
-            className="muted"
-            title={summary.pipeline_recipe_sha256 || summary.pipeline_recipe_release}
-          >
-            Pipeline {summary.pipeline_recipe_release}
-          </span>
-        ) : null}
-        {summary.analysis_mode ? (
+        <div className="final-visual-checkpoint__pipeline-band">
           <span className="pill">
-            {summary.analysis_mode === "AUDIO_GUIDED_VISUAL"
-              ? `Audio-guided · ${summary.audio_window_count || 0} windows`
-              : "Visual-only"}
+            Giữ source: {summary.protected_source_tracks || summary.provenance_counts?.SOURCE_INTRINSIC || 0}
           </span>
-        ) : null}
-        {summary.all_frame_proxy_size ? (
-          <span className="muted">
-            Proxy {summary.all_frame_proxy_size[0]}×{summary.all_frame_proxy_size[1]}
-            {summary.visual_trigger_count != null
-              ? ` · ${summary.visual_trigger_count} visual triggers`
-              : ""}
-          </span>
-        ) : null}
-        {summary.detector_frame_count ? (
-          <span className="muted">
-            Detector {summary.detector_frame_count} frame · {summary.candidate_window_count || 0} event
-            {summary.analysis_elapsed_s != null ? ` · ${summary.analysis_elapsed_s.toFixed(1)}s` : ""}
-          </span>
-        ) : null}
-        {summary.analysis_fallback_used ? <span className="pill warn">V58 fallback</span> : null}
-        <span className="pill">
-          Giữ source: {summary.protected_source_tracks || summary.provenance_counts?.SOURCE_INTRINSIC || 0}
-        </span>
-        {(summary.provenance_counts?.UNCERTAIN || 0) > 0 ? (
-          <span className="pill warn">Cần phân loại: {summary.provenance_counts?.UNCERTAIN}</span>
-        ) : null}
+          {(summary.provenance_counts?.UNCERTAIN || 0) > 0 ? (
+            <span className="pill warn">Cần phân loại: {summary.provenance_counts?.UNCERTAIN}</span>
+          ) : null}
+        </div>
         </div>
       </details>
       {summary.workflow_stage === "WAITING_OCR_REVIEW" && (summary.review_objects || []).length > 0 ? (
@@ -660,6 +737,12 @@ export function FinalReviewVisualCheckpoint({
               {(summary.review_objects || []).length}
             </span>
           </div>
+          <p className="final-visual-checkpoint__review-instruction">
+            {t("finalReviewVisual.ocrReviewInstruction").replace(
+              "{count}",
+              String(ocrCheckpoint.manual)
+            )}
+          </p>
           {(summary.review_objects || []).map((row, index) => {
             const value = ocrReview[row.content_id] || defaultOcrReviewChoice(row);
             const provenance =
@@ -797,75 +880,111 @@ export function FinalReviewVisualCheckpoint({
       {(summary.workflow_stage === "WAITING_TRANSLATION_REVIEW" ||
         summary.workflow_stage === "READY_FOR_VISUAL_PREVIEW" ||
         canRegenerateQualityPreview) ? (
-        <div className="final-visual-checkpoint__review-list">
-          <h3>{t("finalReviewVisual.visualTranslationReview")}</h3>
-          {(summary.translation_objects || []).map((row) => (
-            <div className="final-visual-checkpoint__review-row" key={row.content_id}>
-              <div>
-                <strong>{row.zh_approved}</strong>
-                <span className="muted">{(row.roles || []).join(", ")}</span>
+        <div className="final-visual-checkpoint__review-list is-compact is-translation">
+          <div className="final-visual-checkpoint__review-head">
+            <h3>{t("finalReviewVisual.visualTranslationReview")}</h3>
+            <span className="final-visual-checkpoint__review-count">
+              {(summary.translation_objects || []).length}
+            </span>
+          </div>
+          {(summary.translation_objects || []).map((row, index) => {
+            const shortId = (() => {
+              const digits = row.content_id.match(/(\d+)$/)?.[1];
+              return digits ? `#${digits}` : `#${index + 1}`;
+            })();
+            const roles = row.roles || [];
+            const qualityFlags = row.quality_flags || [];
+            return (
+              <div className="final-visual-checkpoint__review-row is-translation" key={row.content_id}>
+                <div className="final-visual-checkpoint__review-meta">
+                  <strong title={row.content_id}>{shortId}</strong>
+                  <div className="final-visual-checkpoint__review-chips">
+                    {roles.map((role) => (
+                      <span className="final-visual-checkpoint__review-chip" key={`${row.content_id}-${role}`}>
+                        {role}
+                      </span>
+                    ))}
+                    {qualityFlags.map((flag) => (
+                      <span
+                        className="final-visual-checkpoint__review-chip is-warn"
+                        key={`${row.content_id}-flag-${flag}`}
+                      >
+                        {flag}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+                <p
+                  aria-label={`${t("finalReviewVisual.translationSource")} ${shortId}`}
+                  className="final-visual-checkpoint__review-source"
+                  title={row.zh_approved}
+                >
+                  {row.zh_approved}
+                </p>
+                <input
+                  aria-label={`${t("finalReviewVisual.translationTarget")} ${shortId}`}
+                  className="final-visual-checkpoint__review-input"
+                  value={translationReview[row.content_id] ?? row.vi_text_candidate ?? ""}
+                  onChange={(event) =>
+                    setTranslationReview((current) => ({
+                      ...current,
+                      [row.content_id]: event.target.value
+                    }))
+                  }
+                />
               </div>
-              <input
-                value={translationReview[row.content_id] ?? row.vi_text_candidate ?? ""}
-                onChange={(event) =>
-                  setTranslationReview((current) => ({
-                    ...current,
-                    [row.content_id]: event.target.value
+            );
+          })}
+          <div className="final-visual-checkpoint__review-actions">
+            <AsyncButton
+              className="final-visual-checkpoint__review-save"
+              leadingIcon={<WorkItemActionIcon className="fr-tool__icon" kind="approve" />}
+              pending={analyzeBusy}
+              pendingLabel={t("finalReviewVisual.analyzing")}
+              disabled={!onSubmitTranslationReview}
+              onClick={() =>
+                onSubmitTranslationReview?.(
+                  (summary.translation_objects || []).map((row) => ({
+                    content_id: row.content_id,
+                    vi_text: translationReview[row.content_id] ?? row.vi_text_candidate
                   }))
-                }
-              />
-            </div>
-          ))}
-          <AsyncButton
-            className="primary"
-            pending={analyzeBusy}
-            pendingLabel={t("finalReviewVisual.analyzing")}
-            disabled={!onSubmitTranslationReview}
-            onClick={() =>
-              onSubmitTranslationReview?.(
-                (summary.translation_objects || []).map((row) => ({
-                  content_id: row.content_id,
-                  vi_text: translationReview[row.content_id] ?? row.vi_text_candidate
-                }))
-              )
-            }
-          >
-            {canRegenerateQualityPreview
-              ? t("finalReviewVisual.retryPreview")
-              : t("finalReviewVisual.submitTranslationReview")}
-          </AsyncButton>
+                )
+              }
+            >
+              {canRegenerateQualityPreview
+                ? t("finalReviewVisual.retryPreview")
+                : t("finalReviewVisual.submitTranslationReview")}
+            </AsyncButton>
+          </div>
         </div>
       ) : null}
       {summary.workflow_stage === "WAITING_RESIDUAL_TRIAGE" ? (
-        <div className="final-visual-checkpoint__review-list" id="final-review-residual-triage">
-          <h3>{t("finalReviewVisual.residualTriage")}</h3>
-          <p className="muted">{t("finalReviewVisual.residualTriageHint")}</p>
-          <p className="muted" role="status">
+        <div className="final-visual-checkpoint__review-list is-compact is-triage" id="final-review-residual-triage">
+          <div className="final-visual-checkpoint__review-head">
+            <h3>{t("finalReviewVisual.residualTriage")}</h3>
+            <span className="final-visual-checkpoint__review-count">
+              {(summary.residual_review_objects || []).length}
+            </span>
+          </div>
+          <p className="final-visual-checkpoint__review-instruction">
+            {t("finalReviewVisual.residualTriageHint")}
+          </p>
+          <p className="final-visual-checkpoint__review-status" role="status">
             {residualTranslationBusy
               ? t("finalReviewVisual.residualTranslationRunning")
               : summary.residual_translation_status === "READY"
                 ? t("finalReviewVisual.residualTranslationReady")
                 : t("finalReviewVisual.residualTranslationUnavailable")}
           </p>
-          {summary.residual_translation_status !== "READY" && onRetryResidualTranslation ? (
-            <AsyncButton
-              className="secondary"
-              pending={residualTranslationBusy}
-              pendingLabel={t("finalReviewVisual.residualTranslationRunning")}
-              onClick={onRetryResidualTranslation}
-            >
-              {t("finalReviewVisual.retryResidualTranslation")}
-            </AsyncButton>
-          ) : null}
           {(summary.residual_review_objects || []).map((row) => {
             const value = residualReview[row.content_id] || {
               corrected: row.ocr_text_corrected_suggested || row.text || "",
               vi: row.vi_text_suggested || ""
             };
             return (
-              <div className="final-visual-checkpoint__review-row" key={row.content_id}>
-                <div>
-                  <strong>{row.text}</strong>
+              <div className="final-visual-checkpoint__review-row is-triage" key={row.content_id}>
+                <div className="final-visual-checkpoint__review-meta">
+                  <strong title={row.text}>{row.text}</strong>
                   <span className="muted">frame {row.frame_index ?? "—"}</span>
                   {reviewImageUrls[row.content_id] ? (
                     <img className="final-visual-checkpoint__review-evidence" src={reviewImageUrls[row.content_id]} alt={row.content_id} />
@@ -873,6 +992,8 @@ export function FinalReviewVisualCheckpoint({
                 </div>
                 <input
                   aria-label={t("finalReviewVisual.residualCorrectedText")}
+                  className="final-visual-checkpoint__review-input"
+                  placeholder={t("finalReviewVisual.residualCorrectedText")}
                   value={value.corrected}
                   onChange={(event) => setResidualReview((current) => ({
                     ...current,
@@ -881,6 +1002,7 @@ export function FinalReviewVisualCheckpoint({
                 />
                 <input
                   aria-label={t("finalReviewVisual.residualVietnameseText")}
+                  className="final-visual-checkpoint__review-input"
                   placeholder={t("finalReviewVisual.residualVietnameseText")}
                   value={value.vi}
                   onChange={(event) => setResidualReview((current) => ({
@@ -891,56 +1013,91 @@ export function FinalReviewVisualCheckpoint({
               </div>
             );
           })}
-          <AsyncButton
-            className="primary"
-            pending={analyzeBusy || residualTranslationBusy}
-            pendingLabel={
-              residualTranslationBusy
-                ? t("finalReviewVisual.residualTranslationRunning")
-                : t("finalReviewVisual.analyzing")
-            }
-            disabled={
-              residualTranslationBusy ||
-              !onSubmitResidualTriage ||
-              (summary.residual_review_objects || []).some((row) => {
-                const value = residualReview[row.content_id];
-                return !value?.corrected.trim() || !value?.vi.trim();
-              })
-            }
-            onClick={() => onSubmitResidualTriage?.(
-              (summary.residual_review_objects || []).map((row) => ({
-                content_id: row.content_id,
-                ocr_text: row.text || "",
-                ocr_text_corrected: residualReview[row.content_id]?.corrected || row.text || "",
-                vi_text_suggested: residualReview[row.content_id]?.vi || ""
-              }))
-            )}
-          >
-            {t("finalReviewVisual.buildResidualProposal")}
-          </AsyncButton>
+          <div className="final-visual-checkpoint__review-actions">
+            {summary.residual_translation_status !== "READY" && onRetryResidualTranslation ? (
+              <AsyncButton
+                className="secondary"
+                pending={residualTranslationBusy}
+                pendingLabel={t("finalReviewVisual.residualTranslationRunning")}
+                onClick={onRetryResidualTranslation}
+              >
+                {t("finalReviewVisual.retryResidualTranslation")}
+              </AsyncButton>
+            ) : null}
+            <AsyncButton
+              className="final-visual-checkpoint__review-save"
+              leadingIcon={<WorkItemActionIcon className="fr-tool__icon" kind="approve" />}
+              pending={analyzeBusy || residualTranslationBusy}
+              pendingLabel={
+                residualTranslationBusy
+                  ? t("finalReviewVisual.residualTranslationRunning")
+                  : t("finalReviewVisual.analyzing")
+              }
+              disabled={
+                residualTranslationBusy ||
+                !onSubmitResidualTriage ||
+                (summary.residual_review_objects || []).some((row) => {
+                  const value = residualReview[row.content_id];
+                  return !value?.corrected.trim() || !value?.vi.trim();
+                })
+              }
+              onClick={() => onSubmitResidualTriage?.(
+                (summary.residual_review_objects || []).map((row) => ({
+                  content_id: row.content_id,
+                  ocr_text: row.text || "",
+                  ocr_text_corrected: residualReview[row.content_id]?.corrected || row.text || "",
+                  vi_text_suggested: residualReview[row.content_id]?.vi || ""
+                }))
+              )}
+            >
+              {t("finalReviewVisual.buildResidualProposal")}
+            </AsyncButton>
+          </div>
         </div>
       ) : null}
       {summary.workflow_stage === "WAITING_RESIDUAL_REVIEW" ? (
-        <div className="final-visual-checkpoint__review-list" id="final-review-residual-review">
-          <h3>{t("finalReviewVisual.residualProposalReview")}</h3>
+        <div className="final-visual-checkpoint__review-list is-compact is-residual" id="final-review-residual-review">
+          <div className="final-visual-checkpoint__review-head">
+            <h3>{t("finalReviewVisual.residualProposalReview")}</h3>
+            <span className="final-visual-checkpoint__review-count">
+              {(summary.residual_proposal_objects || []).length}
+            </span>
+          </div>
           {(summary.residual_proposal_objects || []).map((row, index) => (
-            <div className="final-visual-checkpoint__review-row" key={row.remediation_id || index}>
-              <div>
-                <strong>{row.ocr_text_suggested}</strong>
-                <span className="muted">{row.proposed_action}</span>
+            <div className="final-visual-checkpoint__review-row is-residual" key={row.remediation_id || index}>
+              <div className="final-visual-checkpoint__review-meta">
+                {row.proposed_action ? (
+                  <span
+                    className="final-visual-checkpoint__review-chip"
+                    title={row.proposed_action}
+                  >
+                    {residualActionLabel(row.proposed_action, t)}
+                  </span>
+                ) : null}
               </div>
-              <span>{row.render_text_suggested}</span>
+              <p
+                className="final-visual-checkpoint__review-source"
+                title={row.ocr_text_suggested}
+              >
+                {row.ocr_text_suggested}
+              </p>
+              <span className="final-visual-checkpoint__review-target" title={row.render_text_suggested || undefined}>
+                {row.render_text_suggested}
+              </span>
             </div>
           ))}
-          <AsyncButton
-            className="primary"
-            pending={analyzeBusy}
-            pendingLabel={t("finalReviewVisual.analyzing")}
-            disabled={!onApproveResidual || !summary.residual_proposal_sha256}
-            onClick={() => summary.residual_proposal_sha256 && onApproveResidual?.(summary.residual_proposal_sha256)}
-          >
-            {t("finalReviewVisual.approveResidualProposal")}
-          </AsyncButton>
+          <div className="final-visual-checkpoint__review-actions">
+            <AsyncButton
+              className="final-visual-checkpoint__review-save"
+              leadingIcon={<WorkItemActionIcon className="fr-tool__icon" kind="approve" />}
+              pending={analyzeBusy}
+              pendingLabel={t("finalReviewVisual.analyzing")}
+              disabled={!onApproveResidual || !summary.residual_proposal_sha256}
+              onClick={() => summary.residual_proposal_sha256 && onApproveResidual?.(summary.residual_proposal_sha256)}
+            >
+              {t("finalReviewVisual.approveResidualProposal")}
+            </AsyncButton>
+          </div>
         </div>
       ) : null}
       {summary.workflow_stage === "WAITING_AUDIO_REVIEW" ? (
@@ -1020,7 +1177,9 @@ export function FinalReviewVisualCheckpoint({
                 style={previewFrame ? { aspectRatio: previewFrame.aspect } : undefined}
               />
             ) : (
-              <p className="final-visual-checkpoint__preview-empty">{t("finalReviewVisual.noCleaned")}</p>
+              <p className="final-visual-checkpoint__preview-empty">
+                {cleanPreviewEmptyLabel}
+              </p>
             )}
           </div>
           <div className="final-visual-checkpoint__copy">

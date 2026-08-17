@@ -51,3 +51,44 @@ def test_materializes_hash_bound_add_track_without_mutating_contract() -> None:
         assert len(effective["render_tracks"]) == 1
         assert effective["render_tracks"][0]["text_id"] == "residual_01"
         assert contract["render_tracks"] == []
+
+
+def test_materializes_single_frame_residual_at_frame_zero() -> None:
+    with TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        contract_path = root / "phase4_render_input.json"
+        contract = {
+            "status": "READY_FOR_PHASE4",
+            "video": {"fps": 30.0, "frame_count": 10},
+            "render_tracks": [],
+        }
+        contract_path.write_text(json.dumps(contract), encoding="utf-8")
+        decisions_path = root / "decisions.json"
+        decisions_path.write_text(
+            json.dumps(
+                [
+                    {
+                        "text_id": "residual_frame_zero",
+                        "start_frame": 0,
+                        "end_frame": 0,
+                        "geometry": {
+                            "x": 0.1,
+                            "y": 0.7,
+                            "width": 0.3,
+                            "height": 0.04,
+                        },
+                        "text_vi": "Nhãn đầu video",
+                    }
+                ],
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        materialize(root, decisions_path)
+        effective, _ref = apply_visual_remediation(
+            root, contract, contract_path=contract_path
+        )
+
+    assert effective["render_tracks"][0]["start_frame"] == 0
+    assert effective["render_tracks"][0]["end_frame"] == 0

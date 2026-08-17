@@ -11,6 +11,10 @@ import urllib.request
 from typing import Any
 
 from src.audio_pipeline.translation_provider_mode import resolve_translation_provider_mode
+from src.audio_pipeline.google_cloud_genai import (
+    GOOGLE_CLOUD_DEFAULT_REGION,
+    GOOGLE_CLOUD_FALLBACK_MODELS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +37,8 @@ def model_list_ready(provider: str, *, api_key: str, base_url: str) -> bool:
     base = (base_url or "").strip()
     if mode == "openai_compatible":
         return bool(key and base)
+    if mode == "google_cloud":
+        return bool(key)
     if mode == "gemini":
         return bool(key)
     if mode == "ollama":
@@ -53,6 +59,7 @@ def list_translation_ai_models(
     provider: str,
     api_key: str,
     base_url: str,
+    region: str = GOOGLE_CLOUD_DEFAULT_REGION,
     timeout_seconds: float = 30.0,
     opener: Any | None = None,
 ) -> tuple[bool, list[str], str]:
@@ -69,6 +76,13 @@ def list_translation_ai_models(
         return False, [], "Select a provider (Gemini, OpenAI Compatible, Ollama, …) to load models."
     if not model_list_ready(raw, api_key=key, base_url=base):
         return False, [], "Fill required credentials for this provider before loading models."
+
+    if mode == "google_cloud":
+        # Vertex Express Mode supports API-key generation, but the Vertex
+        # models.list catalog endpoint still requires OAuth2. Keep catalog
+        # discovery deterministic and let Test Connection verify the selected
+        # model through a real generateContent call.
+        return True, list(GOOGLE_CLOUD_FALLBACK_MODELS), ""
 
     timeout = list_models_timeout_seconds(timeout_seconds)
     open_fn = opener or urllib.request.urlopen

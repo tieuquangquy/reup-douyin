@@ -49,6 +49,7 @@ _PROVIDER_CONFIGURATION_FAILURE_MARKERS = (
     "api key expired",
     "api key đã hết hạn",
     "api_key_missing",
+    "google_cloud_region_unsupported",
 )
 
 
@@ -425,6 +426,17 @@ class DurationConstrainedTranslationProvider:
         selected_text: str | None = None
         selected_budget = None
         if original_budget.status == "too_long":
+            # The assessor deducts punctuation pauses after text is generated.
+            # Asking the LLM for the absolute cap lets an 18-unit rewrite with
+            # commas become a 17-unit physical slot and fail late. Reserve
+            # deterministic headroom so the candidate remains valid after its
+            # own punctuation is measured.
+            rewrite_headroom = max(1, int(math.ceil(original_budget.max_units * 0.10)))
+            rewrite_max_units = max(
+                3,
+                int(original_budget.max_units) - rewrite_headroom,
+            )
+            rewrite_min_units = min(int(original_budget.min_units), rewrite_max_units)
             for attempt in range(1, max(0, self.max_rewrite_rounds) + 1):
                 rewrite_count = attempt
                 try:
@@ -436,8 +448,8 @@ class DurationConstrainedTranslationProvider:
                             duration_budget_seconds,
                             user_prompt=self.user_prompt,
                             protected_tokens=protected_tokens,
-                            min_units=original_budget.min_units,
-                            max_units=original_budget.max_units,
+                            min_units=rewrite_min_units,
+                            max_units=rewrite_max_units,
                             attempt=attempt,
                         )
                     )
@@ -897,10 +909,16 @@ class DurationConstrainedTranslationProvider:
                 "translation_primary_failed",
                 extra={"provider": self.primary.provider_name, "error": str(primary_exc)},
             )
-            if _is_provider_configuration_failure(primary_exc):
-                raise
             if self.fallback is None:
                 raise
+            if _is_provider_configuration_failure(primary_exc):
+                logger.warning(
+                    "translation_primary_configuration_failed_using_explicit_fallback",
+                    extra={
+                        "provider": self.primary.provider_name,
+                        "fallback_provider": self.fallback.provider_name,
+                    },
+                )
             try:
                 return self.fallback, _clean_model_text(_complete_with_circuit(self.fallback, prompt))
             except Exception as fallback_exc:
@@ -1291,6 +1309,7 @@ def _build_shorten_prompt(
             f"{protected_rule}"
             f"{attempt_rule}"
             "Keep every fact and intent from the current Vietnamese line. Do not add new facts.\n"
+            "Use one compact sentence with minimal punctuation because pauses also consume the time budget.\n"
             "Return ONLY the revised Vietnamese text.\n\n"
             f"Chinese source:\n{source_text}\n\n"
             f"Current Vietnamese (too long):\n{previous_vi}"
@@ -1302,6 +1321,7 @@ def _build_shorten_prompt(
         f"{protected_rule}"
         f"{attempt_rule}"
         "Keep every fact and intent from the current Vietnamese line. Do not add new facts.\n"
+        "Use one compact sentence with minimal punctuation because pauses also consume the time budget.\n"
         "Output must be 100% Vietnamese with zero Chinese characters.\n"
         "Return ONLY the revised Vietnamese text.\n\n"
         f"Chinese source (meaning reference only):\n{source_text}\n\n"

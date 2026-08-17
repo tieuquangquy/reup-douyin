@@ -67,7 +67,10 @@ import {
   isNoDialogueAnalyzeResult,
   buildQueueInspectorEngagementStats,
   pipelineRecipeChipLabel,
-  pipelineSubphaseLabel
+  pipelineSubphaseLabel,
+  pipelineFailureDescriptor,
+  pipelineFailureRecoveryLink,
+  pipelineStepChipLabel
 } from "../lib/reupQueueStudioState";
 import type { ReupQueueItem } from "../types/reup-queue";
 
@@ -197,6 +200,49 @@ assert.equal(primaryQueueActionLabel(ready), "Start auto");
   assert.equal(formatJobChipLabel(failedDownload), null, "failed download must use one stage chip only");
   assert.match(downloadJobErrorLine(failedDownload) ?? "", /empty/i);
   assert.equal(hasActiveDownloadJob(failedDownload), false);
+}
+{
+  const failedTranslation = makeItem("translation-403", "FAILED_NEEDS_ATTENTION");
+  failedTranslation.media_ready_at = "2026-08-15T06:05:08Z";
+  failedTranslation.job_id = "translation-job";
+  failedTranslation.job_type = "BUILD_TRANSLATION_DRAFT";
+  failedTranslation.job_status = "FAILED";
+  failedTranslation.job_error_code = "translation_failed";
+  failedTranslation.job_error_message = "translation_provider_auth_failed:openai_compatible_http_403:error code: 1010";
+  failedTranslation.last_error_code = "translation_failed";
+  failedTranslation.last_error_message = failedTranslation.job_error_message;
+  failedTranslation.metadata_json = {
+    pipeline_mode: "auto_to_render",
+    pipeline_step: "needs_attention",
+    pipeline_failed_step: "translate",
+    pipeline_last_completed_step: "analyze_audio",
+    download_job_completed: true,
+    pipeline_error: {
+      error_domain: "translation_provider",
+      http_status: 403,
+      provider_error_code: "1010",
+      retryable: false,
+      recovery_action: "CHECK_TRANSLATION_AI_CONNECTION"
+    }
+  };
+  assert.equal(pipelineFailureDescriptor(failedTranslation)?.stage, "translate");
+  assert.equal(queueStageLabel(failedTranslation), "Translation failed");
+  assert.equal(worklistStageLabel(failedTranslation), "Translation failed");
+  assert.equal(pipelineStepChipLabel(failedTranslation), "Auto · Translate");
+  assert.equal(downloadJobErrorLine(failedTranslation), null);
+  assert.equal(pipelineFailureRecoveryLink(failedTranslation)?.href, "/ops/translation-ai");
+  assert.match(queueTileFailureAlert(failedTranslation)?.detail ?? "", /HTTP 403.*1010.*Test Connection/i);
+  const stages = buildPipelineStages(failedTranslation);
+  assert.equal(stages.find((stage) => stage.key === "download")?.state, "done");
+  assert.equal(stages.find((stage) => stage.key === "transcript")?.state, "done");
+  assert.equal(stages.find((stage) => stage.key === "translation_draft")?.state, "failed");
+  assert.equal(stages.find((stage) => stage.key === "synthesize_tts")?.state, "pending");
+  delete failedTranslation.metadata_json!.pipeline_error;
+  assert.match(
+    queueTileFailureAlert(failedTranslation)?.detail ?? "",
+    /HTTP 403.*1010/i,
+    "Legacy failed items must recover provider diagnostics from the persisted error string"
+  );
 }
 {
   const waitingDownload = makeItem("w1", "WAITING_FOR_MEDIA");
@@ -442,13 +488,14 @@ assert.equal(primaryQueueActionLabel(ready), "Start auto");
   needsAttention.metadata_json = {
     pipeline_mode: "auto_to_render",
     pipeline_step: "needs_attention",
+    pipeline_failed_step: "analyze_audio",
     pipeline_last_completed_step: "analyze_audio"
   };
   needsAttention.available_actions = [
     { action: "RETRY", label: "Retry", description: "Retry", requires_note: false },
     { action: "RESUME", label: "Resume", description: "Resume", requires_note: false }
   ];
-  assert.equal(queueTileFailureAlert(needsAttention)?.message, "Auto pipeline needs attention");
+  assert.equal(queueTileFailureAlert(needsAttention)?.message, "Analyze Audio failed");
   assert.match(queueTileFailureAlert(needsAttention)?.detail ?? "", /Analyze Audio/i);
   assert.equal(primaryQueueAction(needsAttention), "RESUME");
   assert.equal(primaryQueueActionLabel(needsAttention), "Retry Analyze Audio");

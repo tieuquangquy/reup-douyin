@@ -9,6 +9,7 @@ dependencies = [
   "cryptography>=42.0,<46.0",
   "fastapi>=0.115,<1.0",
   "google-auth>=2.35,<3.0",
+  "google-genai>=1.30,<2.0",
   "playwright>=1.45,<2.0",
   "pydantic-settings>=2.0,<3.0",
   "psycopg[binary]>=3.2,<4.0",

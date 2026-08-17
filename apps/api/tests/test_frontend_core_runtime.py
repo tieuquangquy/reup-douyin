@@ -58,7 +58,7 @@ class FrontendCoreRuntimeTests(unittest.TestCase):
         self.assertEqual(audio["recipe_version"], "audio-analysis-v5-selective-dialogue-validation1")
         self.assertEqual(
             translation["recipe_version"],
-            "translation-v3-contextual-semantic-utterance-ranking-5",
+            "translation-v3-contextual-semantic-utterance-ranking-6",
         )
         self.assertEqual(tts["stage_version"], "TTS_TEMPORAL_V6")
         self.assertEqual(
@@ -78,7 +78,7 @@ class FrontendCoreRuntimeTests(unittest.TestCase):
         self.assertEqual(audio["recipe_version"], "audio-analysis-v5-selective-dialogue-validation1")
         self.assertEqual(
             translation["recipe_version"],
-            "translation-v3-contextual-semantic-utterance-ranking-5",
+            "translation-v3-contextual-semantic-utterance-ranking-6",
         )
         self.assertEqual(tts["stage_version"], "TTS_TEMPORAL_V6")
         self.assertEqual(tts["recipe_version"], "context-aware-tts-director-v2")

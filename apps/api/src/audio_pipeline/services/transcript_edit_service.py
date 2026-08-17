@@ -65,16 +65,89 @@ class TranscriptEditService:
                 translation.text = edit.translated_text.strip()
                 translation.duration_budget_ms = edit.end_ms - edit.start_ms
                 translation.status = edit.status
-                translation.metadata_json = {
-                    **(translation.metadata_json or {}),
-                    "edited_in_transcript_editor": True,
-                }
+                self._revalidate_edited_translation(
+                    translation,
+                    text=translation.text,
+                    slot_ms=translation.duration_budget_ms,
+                )
             changed += 1
         if commit:
             self.db.commit()
         else:
             self.db.flush()
         return {"updated_segments": changed}
+
+    @staticmethod
+    def _revalidate_edited_translation(
+        translation: TranslationSegment,
+        *,
+        text: str,
+        slot_ms: int,
+    ) -> None:
+        metadata = dict(translation.metadata_json or {})
+        v3_metadata = dict(metadata.get("translation_v3") or {})
+        speech_policy = dict(v3_metadata.get("speech_policy") or {})
+        try:
+            units_per_second = float(
+                speech_policy.get("units_per_second")
+                or DEFAULT_TRANSLATION_V3_POLICY.units_per_second
+            )
+            fit_tolerance = float(
+                speech_policy.get("acceptable_tolerance")
+                or DEFAULT_TRANSLATION_V3_POLICY.acceptable_tolerance
+            )
+        except (TypeError, ValueError):
+            units_per_second = DEFAULT_TRANSLATION_V3_POLICY.units_per_second
+            fit_tolerance = DEFAULT_TRANSLATION_V3_POLICY.acceptable_tolerance
+        assessment = assess_speech_budget(
+            text,
+            slot_seconds=max(0.0, slot_ms / 1000.0),
+            units_per_second=units_per_second,
+            fit_tolerance=fit_tolerance,
+        )
+        stale_timing_flags = {
+            "duration_adaptation_required",
+            "duration_rewrite_no_safe_candidate",
+            "translation_too_long_for_slot",
+            "translation_v3_candidate_review",
+        }
+        flags = [
+            str(flag)
+            for flag in list((translation.quality_flags_json or {}).get("flags") or [])
+            if str(flag) not in stale_timing_flags
+        ]
+        if assessment.status == "too_long":
+            flags.extend(
+                [
+                    "duration_adaptation_required",
+                    "translation_too_long_for_slot",
+                    "needs_operator_review",
+                ]
+            )
+        else:
+            flags.append("operator_edit_timing_revalidated")
+        translation.quality_flags_json = {"flags": list(dict.fromkeys(flags))}
+        translation.estimated_tts_duration_ms = round(
+            float(assessment.estimated_duration_seconds) * 1000
+        )
+        translation.metadata_json = {
+            **metadata,
+            "edited_in_transcript_editor": True,
+            "speech_budget": assessment.to_dict(),
+            "duration_adaptation": {
+                "schema_version": "duration_adaptation_v1",
+                "decision": "operator_edit_revalidated",
+                "budget": assessment.to_dict(),
+            },
+            "translation_v3": {
+                **v3_metadata,
+                "status": "operator_edited",
+                "selected_evaluation": None,
+                "requires_rewrite": assessment.status == "too_long",
+                "requires_review": True,
+                "operator_edit_speech_budget": assessment.to_dict(),
+            },
+        }
 
     def merge_segments(self, source_video_id: UUID, left_transcript_id: UUID, right_transcript_id: UUID) -> dict:
         left = self._current_transcript(source_video_id, left_transcript_id)
@@ -304,6 +377,13 @@ class TranscriptEditService:
         ).hexdigest()
         for row in rows:
             row.status = TranscriptSegmentStatus.APPROVED
+            row.quality_flags_json = {
+                "flags": [
+                    str(flag)
+                    for flag in list((row.quality_flags_json or {}).get("flags") or [])
+                    if str(flag) != "needs_operator_review"
+                ]
+            }
             row.metadata_json = {
                 **dict(row.metadata_json or {}),
                 "translation_operator_approval": {
@@ -325,7 +405,9 @@ class TranscriptEditService:
             }
             quality_contract = dict(metadata.get("translation_quality_contract") or {})
             if quality_contract:
+                quality_contract["blocked_count"] = 0
                 quality_contract["review_required_count"] = 0
+                quality_contract["complete"] = True
                 quality_contract["tts_ready"] = True
                 quality_contract["operator_approved"] = True
                 metadata["translation_quality_contract"] = quality_contract

@@ -484,6 +484,19 @@ class CoverLayoutAlignmentTests(unittest.TestCase):
         )
         self.assertEqual(verdict["status"], "PASS")
 
+    def test_edge_clamped_safe_area_passes_when_it_contains_cover(self) -> None:
+        verdict = evaluate_cover_layout_alignment(
+            self._contract(
+                "cover_aligned",
+                {"x": 0.0, "y": 0.89, "width": 0.82, "height": 0.10},
+            )
+        )
+
+        self.assertEqual(verdict["status"], "PASS")
+        self.assertTrue(
+            verdict["tracks"][0]["cover_contained_by_layout"]
+        )
+
 
 class EditorCaptionOcrFalsePositiveTests(unittest.TestCase):
     def test_low_confidence_unchanged_texture_inside_caption_is_excluded(self) -> None:
@@ -793,6 +806,29 @@ class SourceIntrinsicCjkClassificationTests(unittest.TestCase):
         )
         self.assertEqual(blocking, [])
         self.assertEqual(excluded[0]["classification"], "SOURCE_INTRINSIC_EDGE_PRINT")
+
+    def test_bounded_unchanged_product_print_is_non_blocking(self) -> None:
+        row = {
+            "frame_index": 20,
+            "text": "染北",
+            "confidence": 0.69,
+            "geometry": {"x": 0.05, "y": 0.82, "width": 0.07, "height": 0.03},
+        }
+        source = np.full((720, 1280, 3), 90, dtype=np.uint8)
+        rendered = np.full((720, 1280, 3), 93, dtype=np.uint8)
+
+        blocking, excluded = classify_source_intrinsic_edge_cjk(
+            [row],
+            [],
+            contract={"render_tracks": []},
+            source_frames={20: source},
+            rendered_frames={20: rendered},
+        )
+
+        self.assertEqual(blocking, [])
+        self.assertEqual(
+            excluded[0]["policy_branch"], "bounded_unchanged_source_print"
+        )
 
     def test_central_or_authorized_text_remains_blocking(self) -> None:
         central = self._row(0.10, "170克")

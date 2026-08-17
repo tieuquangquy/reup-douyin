@@ -18,6 +18,8 @@ from src.media_pipeline.frame_sampling.master_phase1_extractor import (
     _DiskBackedFrameCache,
     _ffmpeg_proxy_decode_command,
     phase1_event_proxy_size,
+    repair_invalid_track_intervals,
+    assert_track_integrity,
     DetectionHit,
     MergedTrack,
     apply_temporal_pad,
@@ -4059,6 +4061,42 @@ class TimelinePayloadTests(unittest.TestCase):
         )
         box = payload["frames"][0]["boxes"][0]
         self.assertTrue(box.get("cover_only"))
+
+
+class TrackTimingIntegrityTests(unittest.TestCase):
+    def test_inverted_span_is_rebuilt_from_all_confirmed_evidence(self) -> None:
+        track = MergedTrack(
+            start_frame=567,
+            end_frame=563,
+            box_coords=[100.0, 900.0, 600.0, 970.0],
+            best_frame_index=571,
+            best_sharpness=1.0,
+            centroid=(350.0, 935.0),
+            hit_count=2,
+            hit_frames=[563, 571],
+        )
+
+        audit = repair_invalid_track_intervals([track], frame_count=1000)
+
+        self.assertEqual((track.start_frame, track.end_frame), (563, 571))
+        self.assertEqual(audit[0]["prior_span"], [567, 563])
+        self.assertEqual(audit[0]["evidence_frames"], [563, 567, 571])
+        assert_track_integrity([track], frame_count=1000)
+
+    def test_unrecoverable_span_fails_closed(self) -> None:
+        track = MergedTrack(
+            start_frame=-5,
+            end_frame=1005,
+            box_coords=[100.0, 900.0, 600.0, 970.0],
+            best_frame_index=1001,
+            best_sharpness=1.0,
+            centroid=(350.0, 935.0),
+            hit_count=0,
+            hit_frames=[],
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "no valid temporal evidence"):
+            repair_invalid_track_intervals([track], frame_count=1000)
 
 
 if __name__ == "__main__":

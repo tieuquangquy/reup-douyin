@@ -336,6 +336,33 @@ class TranslationV3Tests(unittest.TestCase):
         self.assertEqual(selection.selected.style, "compact")
         self.assertFalse(selection.requires_review)
 
+    def test_candidate_ranker_starts_rewrite_from_shortest_overlong_candidate(self) -> None:
+        selection = select_translation_candidate(
+            "夜猫礼包有两个赠品",
+            [
+                TranslationCandidate(
+                    "Hộp quà cú đêm có hai món quà tặng là quạt mini với máy thổi bong bóng, mở ra xem nào.",
+                    style="natural",
+                ),
+                TranslationCandidate(
+                    "Hộp cú đêm có hai quà tặng kèm là quạt nhỏ và máy bong bóng, cùng mở ra xem nhé.",
+                    style="compact",
+                ),
+            ],
+            slot_seconds=4.18,
+        )
+
+        self.assertIsNotNone(selection.selected)
+        self.assertEqual(selection.selected.style, "compact")
+        self.assertTrue(selection.requires_rewrite)
+        self.assertTrue(all(not row["tts_eligible"] for row in selection.evaluations))
+        self.assertTrue(
+            all(
+                "speech_budget_too_long" in row["tts_eligibility_reasons"]
+                for row in selection.evaluations
+            )
+        )
+
     def test_context_provider_generates_and_ranks_candidates_in_one_call(self) -> None:
         client = FixedLlmClient(
             responses=[

@@ -572,6 +572,100 @@ def _copy_track_with_span(
     )
 
 
+def repair_invalid_track_intervals(
+    tracks: Sequence[MergedTrack],
+    *,
+    frame_count: int,
+) -> list[dict[str, Any]]:
+    """Repair impossible inclusive spans from immutable temporal evidence.
+
+    Several independent boundary refiners operate on the same track. A sparse
+    track can therefore end up with a left boundary from one authority and a
+    right boundary from another (for example ``567..563``). Swapping those two
+    values is unsafe because it can discard a confirmed hit outside that range.
+    Rebuild only invalid spans from the confirmed hit frames and best keyframe,
+    while retaining any individually valid boundary as supporting evidence.
+    """
+
+    last_frame = int(frame_count) - 1
+    if last_frame < 0:
+        raise RuntimeError("Phase 1 timing integrity requires a positive frame count")
+    repairs: list[dict[str, Any]] = []
+    for index, track in enumerate(tracks):
+        start = int(track.start_frame)
+        end = int(track.end_frame)
+        best = int(track.best_frame_index)
+        interval_valid = 0 <= start <= end <= last_frame
+        best_valid = 0 <= best <= last_frame and start <= best <= end
+        if interval_valid and best_valid:
+            continue
+
+        evidence = {
+            int(value)
+            for value in list(track.hit_frames)
+            if 0 <= int(value) <= last_frame
+        }
+        if 0 <= start <= last_frame:
+            evidence.add(start)
+        if 0 <= end <= last_frame:
+            evidence.add(end)
+        if 0 <= best <= last_frame:
+            evidence.add(best)
+        if not evidence:
+            raise RuntimeError(
+                "Phase 1 track has no valid temporal evidence "
+                f"(index={index}, start={start}, end={end}, best={best})"
+            )
+
+        repaired_start = min(evidence)
+        repaired_end = max(evidence)
+        track.start_frame = repaired_start
+        track.end_frame = repaired_end
+        if not repaired_start <= int(track.best_frame_index) <= repaired_end:
+            track.best_frame_index = min(
+                evidence,
+                key=lambda value: abs(value - ((repaired_start + repaired_end) // 2)),
+            )
+        repairs.append(
+            {
+                "track_index": index,
+                "prior_span": [start, end],
+                "prior_best_frame_index": best,
+                "repaired_span": [repaired_start, repaired_end],
+                "repaired_best_frame_index": int(track.best_frame_index),
+                "evidence_frames": sorted(evidence),
+                "reason": "invalid_or_unbound_temporal_interval",
+            }
+        )
+    return repairs
+
+
+def assert_track_integrity(
+    tracks: Sequence[MergedTrack],
+    *,
+    frame_count: int,
+) -> None:
+    """Fail closed before Phase 1 publishes a corrupt timeline authority."""
+
+    last_frame = int(frame_count) - 1
+    for index, track in enumerate(tracks):
+        start = int(track.start_frame)
+        end = int(track.end_frame)
+        best = int(track.best_frame_index)
+        box = [float(value) for value in list(track.box_coords)]
+        if not (0 <= start <= end <= last_frame and start <= best <= end):
+            raise RuntimeError(
+                "Phase 1 track timing invariant failed "
+                f"(index={index}, start={start}, end={end}, best={best}, "
+                f"frame_count={frame_count})"
+            )
+        if len(box) != 4 or not (box[0] < box[2] and box[1] < box[3]):
+            raise RuntimeError(
+                "Phase 1 track geometry invariant failed "
+                f"(index={index}, box={box})"
+            )
+
+
 def _boundary_frame(
     frame_index: int,
     *,
@@ -12395,6 +12489,16 @@ class MasterPhase1Extractor:
                         )
             finalize_audit["endpoint_dbnet_closure"] = dict(boundary_dbnet_audit)
 
+        timing_integrity_repairs = repair_invalid_track_intervals(
+            tracks,
+            frame_count=frame_count,
+        )
+        assert_track_integrity(tracks, frame_count=frame_count)
+        finalize_audit["timing_integrity"] = {
+            "policy_version": "phase1_temporal_interval_integrity_v1",
+            "repair_count": len(timing_integrity_repairs),
+            "repairs": timing_integrity_repairs,
+        }
         coverage_rows = _coverage_rows(tracks)
         completeness_residual_audit: dict[str, Any] = {
             "policy_version": "phase1_unassigned_text_discovery_v1",
@@ -12706,6 +12810,18 @@ class MasterPhase1Extractor:
                         float(row.box_coords[0]),
                     )
                 )
+                residual_timing_repairs = repair_invalid_track_intervals(
+                    tracks,
+                    frame_count=frame_count,
+                )
+                assert_track_integrity(tracks, frame_count=frame_count)
+                if residual_timing_repairs:
+                    timing_integrity_repairs.extend(residual_timing_repairs)
+                    finalize_audit["timing_integrity"] = {
+                        "policy_version": "phase1_temporal_interval_integrity_v1",
+                        "repair_count": len(timing_integrity_repairs),
+                        "repairs": timing_integrity_repairs,
+                    }
                 coverage_rows = _coverage_rows(tracks)
                 coverage_payload = _close_coverage(
                     coverage_rows,
@@ -12792,6 +12908,9 @@ class MasterPhase1Extractor:
         crops_dir = dest / "crops"
         crops_dir.mkdir(parents=True, exist_ok=True)
 
+        # This is the final authority boundary. No malformed timing/geometry
+        # may be serialized as a completed Analyze OCR product.
+        assert_track_integrity(tracks, frame_count=frame_count)
         timeline: list[dict[str, Any]] = []
         provenance_by_track_id = classify_visual_text_provenance(
             tracks,
