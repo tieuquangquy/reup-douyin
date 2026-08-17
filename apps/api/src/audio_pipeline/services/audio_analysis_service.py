@@ -21,13 +21,20 @@ from src.audio_pipeline.caption_asr_consensus import (
 )
 from src.audio_pipeline.audio_mix_quality import analyze_pcm_wav_mix
 from src.audio_pipeline.analysis_audio import materialize_analysis_audio
+from src.audio_pipeline.adaptive_separation import (
+    ADAPTIVE_SEPARATION_MIN_GAIN,
+    ADAPTIVE_SEPARATION_RECIPE_VERSION,
+    ADAPTIVE_SEPARATION_SCHEMA_VERSION,
+    ADAPTIVE_SEPARATION_SPARSE_SPEECH_RATIO,
+    decide_adaptive_separation,
+    evaluate_adaptive_separation_outcome,
+)
 from src.audio_pipeline.asr_evidence import (
     ASR_EVIDENCE_RECIPE_VERSION,
     ASR_EVIDENCE_SCHEMA_VERSION,
     ASR_RECOVERY_SCORE_THRESHOLD,
     compare_asr_stability,
     evaluate_asr_evidence,
-    evidence_prefers_candidate,
 )
 from src.audio_pipeline.canonical_audio import ensure_canonical_audio
 from src.audio_pipeline.dialogue_validation import (
@@ -633,6 +640,14 @@ class AudioAnalysisService:
             "selected_source": "none",
             "verification_stability": None,
         }
+        adaptive_separation_contract: dict[str, Any] = {
+            "schema_version": ADAPTIVE_SEPARATION_SCHEMA_VERSION,
+            "recipe_version": ADAPTIVE_SEPARATION_RECIPE_VERSION,
+            "decision": None,
+            "outcome": None,
+            "attempted": False,
+            "selected_source": "none",
+        }
         dialogue_quality_contract: dict[str, Any] = {
             "schema_version": "dialogue_quality_contract_v1",
             "recipe_version": DIALOGUE_VALIDATION_RECIPE_VERSION,
@@ -754,7 +769,8 @@ class AudioAnalysisService:
                     difficulty_flags=list(raw_separation.difficulty_flags),
                     metadata={
                         **dict(raw_separation.metadata or {}),
-                        "adaptive_retry": True,
+                        "adaptive_retry": False,
+                        "target_speech_required_separation": True,
                         "target_speech_selective": True,
                         "demucs_background_storage_key": background_key or None,
                         "background_storage_key": background_key or None,
@@ -791,17 +807,46 @@ class AudioAnalysisService:
                     "source": primary_source,
                     **primary_evidence.to_dict(),
                 }
-                # Adaptive fallback: clear target-speech intervals normally use
-                # the original mix.  If the measured ASR evidence is weak or
-                # the inexpensive mix probe recommends separation, pay the
-                # Demucs cost once and retry only the candidate intervals.
-                if raw_separation is None and self._needs_separation_retry(
-                    primary_units,
-                    evidence=primary_evidence,
-                    mix_quality=mix_quality,
-                    vad_speech_ratio=vad.speech_ratio,
+                adaptive_decision = None
+                if raw_separation is None:
+                    adaptive_decision = decide_adaptive_separation(
+                        primary_evidence,
+                        mix_quality=mix_quality,
+                        vad_speech_ratio=vad.speech_ratio,
+                    )
+                    adaptive_separation_contract["decision"] = adaptive_decision.to_dict()
+                    adaptive_separation_contract["outcome"] = (
+                        evaluate_adaptive_separation_outcome(
+                            primary_evidence,
+                            None,
+                            attempted=False,
+                        ).to_dict()
+                    )
+                    logger.info(
+                        "audio_adaptive_separation_decision",
+                        extra={
+                            "source_video_id": str(source_video.id),
+                            "should_retry": adaptive_decision.should_retry,
+                            "primary_reason": (
+                                adaptive_decision.primary_reason.value
+                                if adaptive_decision.primary_reason is not None
+                                else None
+                            ),
+                            "reasons": list(adaptive_decision.reasons),
+                            "primary_score": primary_evidence.overall_score,
+                        },
+                    )
+                # Adaptive fallback is evidence-routed. Boundary-only failures stay
+                # on the temporal recovery path instead of paying the Demucs cost.
+                if (
+                    raw_separation is None
+                    and adaptive_decision is not None
+                    and adaptive_decision.should_retry
                 ):
                     phase("adaptive_separation_retry_started", 51)
+                    adaptive_separation_contract["attempted"] = True
+                    pre_retry_target_speech = target_speech
+                    pre_retry_asr_authority = asr_authority
                     retry_started_at = time.perf_counter()
                     retry_result = self.separation_provider.separate(
                         resolved_input.storage_key
@@ -811,62 +856,59 @@ class AudioAnalysisService:
                     )
                     raw_separation = retry_result
                     if not retry_result.fallback_used:
-                        separated_vocal_key = retry_result.transcription_storage_key
+                        candidate_vocal_key = retry_result.transcription_storage_key
                         retry_metadata = dict(retry_result.metadata or {})
-                        separation = SourceSeparationResult(
-                            vocal_asset_id=retry_result.vocal_asset_id,
-                            background_asset_id=retry_result.background_asset_id,
-                            transcription_storage_key=retry_result.transcription_storage_key,
-                            fallback_used=False,
-                            difficulty_flags=list(retry_result.difficulty_flags),
-                            metadata={
-                                **retry_metadata,
-                                "adaptive_retry": True,
-                                "target_speech_selective": True,
-                                "background_storage_key": retry_metadata.get("background_storage_key"),
-                                "demucs_background_storage_key": retry_metadata.get("background_storage_key"),
-                                "background_policy": "demucs_no_vocals_pending_dialogue_validation",
-                                "mix_quality": mix_quality,
-                            },
-                        )
                         vocal_vad = self.vad_provider.detect(
-                            separated_vocal_key,
+                            candidate_vocal_key,
                             duration_seconds=duration_seconds,
                             source_caption=None,
                         )
                         vocal_authority = self._analyze_target_speech(
-                            audio_storage_key=separated_vocal_key,
+                            audio_storage_key=candidate_vocal_key,
                             vad=vocal_vad,
                             duration_seconds=duration_seconds,
                         )
-                        target_speech = resolve_after_separation(
-                            target_speech,
+                        candidate_target_speech = resolve_after_separation(
+                            pre_retry_target_speech,
                             vocal_authority,
                         )
-                        asr_authority = high_recall_candidate_authority(
-                            target_speech,
+                        candidate_asr_authority = high_recall_candidate_authority(
+                            candidate_target_speech,
                             vad=vad,
                         )
                         retry_units, retry_audio = self._transcribe_target_intervals(
-                            audio_storage_key=separated_vocal_key,
+                            audio_storage_key=candidate_vocal_key,
                             source_caption=None,
                             source_duration_seconds=duration_seconds,
-                            authority=asr_authority,
+                            authority=candidate_asr_authority,
                         )
                         retry_evidence = evaluate_asr_evidence(retry_units)
+                        adaptive_outcome = evaluate_adaptive_separation_outcome(
+                            primary_evidence,
+                            retry_evidence,
+                            attempted=True,
+                        )
                         asr_evidence_contract["retry"] = {
                             "source": "separated_vocal_adaptive",
-                            "gain_vs_primary": round(
-                                retry_evidence.overall_score
-                                - primary_evidence.overall_score,
-                                4,
-                            ),
+                            "gain_vs_primary": adaptive_outcome.gain,
                             **retry_evidence.to_dict(),
                         }
-                        if evidence_prefers_candidate(
-                            retry_evidence,
-                            primary_evidence,
-                        ):
+                        adaptive_separation_contract.update(
+                            {
+                                "outcome": adaptive_outcome.to_dict(),
+                                "candidate": {
+                                    "provider": retry_metadata.get("provider")
+                                    or self.separation_provider.provider_name,
+                                    "cache_hit": bool(retry_metadata.get("cache_hit")),
+                                    "vocal_storage_key": retry_metadata.get("vocal_storage_key"),
+                                    "background_storage_key": retry_metadata.get("background_storage_key"),
+                                },
+                            }
+                        )
+                        if adaptive_outcome.accepted:
+                            separated_vocal_key = candidate_vocal_key
+                            target_speech = candidate_target_speech
+                            asr_authority = candidate_asr_authority
                             primary_units = retry_units
                             primary_source = "separated_vocal_adaptive"
                             primary_evidence = retry_evidence
@@ -875,8 +917,112 @@ class AudioAnalysisService:
                                 "fallback_from": "target_mix",
                                 **retry_audio,
                             }
+                            background_key = str(
+                                retry_metadata.get("background_storage_key") or ""
+                            )
+                            separation = SourceSeparationResult(
+                                vocal_asset_id=retry_result.vocal_asset_id,
+                                background_asset_id=retry_result.background_asset_id,
+                                transcription_storage_key=retry_result.transcription_storage_key,
+                                fallback_used=False,
+                                difficulty_flags=list(retry_result.difficulty_flags),
+                                metadata={
+                                    **retry_metadata,
+                                    "adaptive_retry": True,
+                                    "adaptive_retry_accepted": True,
+                                    "adaptive_retry_reason": (
+                                        adaptive_decision.primary_reason.value
+                                        if adaptive_decision.primary_reason is not None
+                                        else None
+                                    ),
+                                    "adaptive_retry_reasons": list(adaptive_decision.reasons),
+                                    "adaptive_separation_gain": adaptive_outcome.gain,
+                                    "target_speech_selective": True,
+                                    "background_storage_key": background_key or None,
+                                    "demucs_background_storage_key": background_key or None,
+                                    "background_policy": "demucs_no_vocals_pending_dialogue_validation",
+                                    "mix_quality": mix_quality,
+                                },
+                            )
+                        else:
+                            # Generated stems remain provider cache only. They are
+                            # deliberately not registered as current background/vocal
+                            # authority when evidence gain is below policy threshold.
+                            separated_vocal_key = None
+                            target_speech = pre_retry_target_speech
+                            asr_authority = pre_retry_asr_authority
+                            separation = SourceSeparationResult(
+                                vocal_asset_id=separation.vocal_asset_id,
+                                background_asset_id=separation.background_asset_id,
+                                transcription_storage_key=resolved_input.storage_key,
+                                fallback_used=True,
+                                difficulty_flags=list(separation.difficulty_flags),
+                                metadata={
+                                    **dict(separation.metadata or {}),
+                                    "adaptive_retry": True,
+                                    "adaptive_retry_accepted": False,
+                                    "adaptive_retry_reason": (
+                                        adaptive_decision.primary_reason.value
+                                        if adaptive_decision.primary_reason is not None
+                                        else None
+                                    ),
+                                    "adaptive_retry_reasons": list(adaptive_decision.reasons),
+                                     "adaptive_separation_gain": adaptive_outcome.gain,
+                                    "candidate_vocal_storage_key": retry_metadata.get("vocal_storage_key"),
+                                    "candidate_background_storage_key": retry_metadata.get("background_storage_key"),
+                                    "background_policy": "original_mix_adaptive_candidate_rejected",
+                                    "mix_quality": mix_quality,
+                                },
+                            )
+                        adaptive_separation_contract["selected_source"] = primary_source
+                        logger.info(
+                            "audio_adaptive_separation_outcome",
+                            extra={
+                                "source_video_id": str(source_video.id),
+                                "accepted": adaptive_outcome.accepted,
+                                "gain": adaptive_outcome.gain,
+                                "min_gain": adaptive_outcome.min_gain,
+                                "reason": adaptive_outcome.reason,
+                                "selected_source": primary_source,
+                            },
+                        )
                         phase("adaptive_separation_retry_done", 54)
                     else:
+                        adaptive_outcome = evaluate_adaptive_separation_outcome(
+                            primary_evidence,
+                            None,
+                            attempted=True,
+                            fallback_used=True,
+                        )
+                        adaptive_separation_contract.update(
+                            {
+                                "outcome": adaptive_outcome.to_dict(),
+                                "selected_source": primary_source,
+                                "provider_fallback": dict(retry_result.metadata or {}),
+                            }
+                        )
+                        separation = SourceSeparationResult(
+                            vocal_asset_id=separation.vocal_asset_id,
+                            background_asset_id=separation.background_asset_id,
+                            transcription_storage_key=resolved_input.storage_key,
+                            fallback_used=True,
+                            difficulty_flags=list(separation.difficulty_flags),
+                            metadata={
+                                **dict(separation.metadata or {}),
+                                "adaptive_retry": True,
+                                "adaptive_retry_accepted": False,
+                                "adaptive_retry_reason": (
+                                    adaptive_decision.primary_reason.value
+                                    if adaptive_decision.primary_reason is not None
+                                    else None
+                                ),
+                                "adaptive_retry_reasons": list(adaptive_decision.reasons),
+                                "adaptive_separation_gain": None,
+                                "adaptive_retry_provider_fallback": True,
+                                "background_policy": "original_mix_adaptive_provider_fallback",
+                                "mix_quality": mix_quality,
+                            },
+                        )
                         phase("adaptive_separation_retry_fallback", 54)
                 preliminary = validate_dialogue_units(
                     primary_units,
@@ -1380,6 +1526,7 @@ class AudioAnalysisService:
             meta["target_speech_authority"] = target_speech_summary
             meta["target_speech_asr_consensus"] = asr_consensus
             meta["asr_evidence"] = asr_evidence_contract
+            meta["adaptive_separation"] = adaptive_separation_contract
             meta["dialogue_quality_contract"] = dialogue_quality_contract
             meta["semantic_dialogue_segmentation"] = semantic_dialogue
             meta["audio_analysis_authority"] = authority_manifest_payload
@@ -1425,6 +1572,7 @@ class AudioAnalysisService:
                         "target_speech_audio": target_speech_audio,
                         "target_speech_asr_consensus": asr_consensus,
                         "asr_evidence": asr_evidence_contract,
+                        "adaptive_separation": adaptive_separation_contract,
                         "dialogue_quality_contract": dialogue_quality_contract,
                         "semantic_dialogue_segmentation": semantic_dialogue,
                         "audio_analysis_authority": authority_manifest_payload,
@@ -1485,10 +1633,21 @@ class AudioAnalysisService:
             selected_asr_evidence = dict(
                 asr_evidence_contract.get("selected") or {}
             )
+            adaptive_decision_payload = dict(
+                adaptive_separation_contract.get("decision") or {}
+            )
+            adaptive_outcome_payload = dict(
+                adaptive_separation_contract.get("outcome") or {}
+            )
             metrics_payload = {
                 **timings_ms,
                 "cache_hit": False,
-                "adaptive_separation_used": bool((separation.metadata or {}).get("adaptive_retry")),
+                "adaptive_separation_used": bool(adaptive_outcome_payload.get("accepted")),
+                "adaptive_separation_attempted": bool(adaptive_outcome_payload.get("attempted")),
+                "adaptive_separation_accepted": bool(adaptive_outcome_payload.get("accepted")),
+                "adaptive_separation_trigger_reason": adaptive_decision_payload.get("primary_reason"),
+                "adaptive_separation_gain": adaptive_outcome_payload.get("gain"),
+                "adaptive_separation_recipe_version": ADAPTIVE_SEPARATION_RECIPE_VERSION,
                 "separation_cache_hit": bool((separation.metadata or {}).get("cache_hit")),
                 "target_speech_status": target_speech.status.value,
                 "target_speech_seconds": dict(target_speech.diagnostics).get(
@@ -2443,6 +2602,11 @@ class AudioAnalysisService:
                 "recipe_version": ASR_EVIDENCE_RECIPE_VERSION,
                 "recovery_score_threshold": ASR_RECOVERY_SCORE_THRESHOLD,
             },
+            "adaptive_separation": {
+                "recipe_version": ADAPTIVE_SEPARATION_RECIPE_VERSION,
+                "min_gain": ADAPTIVE_SEPARATION_MIN_GAIN,
+                "sparse_speech_ratio": ADAPTIVE_SEPARATION_SPARSE_SPEECH_RATIO,
+            },
             "semantic_dialogue": {
                 "recipe_version": SEMANTIC_DIALOGUE_RECIPE_VERSION,
                 "policy": DEFAULT_SEMANTIC_SEGMENTATION_POLICY.to_dict(),
@@ -2560,16 +2724,14 @@ class AudioAnalysisService:
         mix_quality: dict | None = None,
         vad_speech_ratio: float | None = None,
     ) -> bool:
+        # Compatibility shim. Production decisions persist the full typed policy
+        # result so trigger reason and acceptance outcome remain observable.
         evidence = evidence or evaluate_asr_evidence(units)
-        if evidence.recovery_recommended:
-            return True
-        if bool((mix_quality or {}).get("separation_recommended")):
-            return True
-        # Very sparse measured speech over a busy mix is a common music/SFX
-        # case where ASR confidence alone can be over-optimistic.
-        if vad_speech_ratio is not None and 0.0 < float(vad_speech_ratio) < 0.08:
-            return True
-        return False
+        return decide_adaptive_separation(
+            evidence,
+            mix_quality=mix_quality,
+            vad_speech_ratio=vad_speech_ratio,
+        ).should_retry
 
     def _cached_result(self, source_video: SourceVideo, fingerprint: str) -> AudioAnalysisResult | None:
         cache = dict((source_video.metadata_json or {}).get("audio_analysis_cache") or {})
